@@ -2473,7 +2473,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tempfile",
- "url",
+ "tokio",
 ]
 
 [[package]]

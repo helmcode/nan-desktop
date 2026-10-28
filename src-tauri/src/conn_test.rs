@@ -1,10 +1,11 @@
-//! Connection test (T3): prove a profile can reach its inference API.
+//! Connection test (T3, kept as a diagnostic after T13): prove a profile's
+//! stored credential can reach its inference API.
 //!
-//! `GET {base_url}/models` with `Authorization: Bearer <key>` — HTTP always
-//! happens in the Rust core (S4): the key is read from the OS keychain (or
-//! supplied once by the onboarding form before saving) and is never
-//! rendered, logged or echoed back. The result carries only counts and a
-//! short error string — never the key, never the response body.
+//! `GET {inference_base}/models` with `Authorization: Bearer <key>` — HTTP
+//! always happens in the Rust core (S4): the key is read from the OS keychain
+//! (written there by the device-flow login) and is never rendered, logged or
+//! echoed back. The result carries only counts and a short error string —
+//! never the key, never the response body.
 //!
 //! Classification is pure and unit-tested: `ok` (2xx with an OpenAI-style
 //! model list) / `http_error` (non-2xx, or a 2xx body that is not a model
@@ -13,7 +14,6 @@
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
 
 use crate::profile::{self, KEYRING_SERVICE};
 
@@ -123,38 +123,27 @@ fn short_error(message: &str) -> String {
     format!("{truncated}…")
 }
 
-/// Run the connection test for `profile_id`.
-///
-/// `key`: the API key to test with. `Some` is used for the pre-save test of
-/// what the onboarding form typed; `None` (or blank) reads the stored key
-/// from the OS keychain instead. The key is used for the request only — it
-/// never appears in the returned result or any log (S4, S8: the only host
-/// contacted is the profile's own base URL).
+/// Run the connection test for `profile_id`, reading the stored key from the
+/// OS keychain. Since T13 the renderer can no longer pass a key: credentials
+/// are created only by the device-flow login (S4). The key is used for this
+/// request only and never leaves this function (S4, S8: the only host
+/// contacted is the profile's own inference base).
 #[tauri::command]
-pub async fn connection_test(
-    app: AppHandle,
-    profile_id: String,
-    key: Option<String>,
-) -> Result<ConnectionTestResult, String> {
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
-    let store = profile::load_or_seed(&dir)?;
-    let base_url = store
-        .get(&profile_id)
-        .map(|p| p.base_url.clone())
-        .ok_or_else(|| format!("unknown profile id: {profile_id:?}"))?;
+pub async fn connection_test(profile_id: String) -> Result<ConnectionTestResult, String> {
+    // The inference base is a compiled-in constant; unknown ids are refused
+    // (S2/S12: nothing outside the two tenants is reachable).
+    let Some(base_url) = profile::inference_base_for(&profile_id).map(str::to_string) else {
+        return Err(format!("unknown profile id: {profile_id:?}"));
+    };
 
-    // Resolve the key: an explicitly supplied key (pre-save test of what the
-    // onboarding form typed) or the stored keychain value. The key is used
-    // for this request only and never leaves this function (S4).
-    let key = match key.filter(|key| !key.trim().is_empty()) {
-        Some(key) => key,
-        None => match keyring::Entry::new(KEYRING_SERVICE, &profile_id)
-            .and_then(|entry| entry.get_password())
-        {
-            Ok(stored) => stored,
-            Err(keyring::Error::NoEntry) => return Ok(missing_key_result()),
-            Err(err) => return Err(err.to_string()),
-        },
+    // Resolve the stored keychain value. The key is used for this request
+    // only and never leaves this function (S4).
+    let key = match keyring::Entry::new(KEYRING_SERVICE, &profile_id)
+        .and_then(|entry| entry.get_password())
+    {
+        Ok(stored) => stored,
+        Err(keyring::Error::NoEntry) => return Ok(missing_key_result()),
+        Err(err) => return Err(err.to_string()),
     };
 
     let client = reqwest::Client::builder()

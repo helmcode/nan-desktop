@@ -7,9 +7,11 @@
 //    web renderer process.
 // 3. SQLite local history foundation via `rusqlite` (bundled).
 //
-// Zero telemetry (S8): the app only talks to URLs the user provides.
+// Zero telemetry (S8): the app only talks to the two locked tenants' own
+// URLs (plus the debug-only mock override documented in `device_flow`).
 
 mod conn_test;
+mod device_flow;
 mod profile;
 mod spike_db;
 mod sse;
@@ -96,9 +98,10 @@ async fn stream_sse(response: reqwest::Response, window: &Window) {
 }
 
 /// Store `value` in the OS keychain (macOS Keychain / Windows Credential
-/// Manager / Linux Secret Service). Deliberately not covered by an automated
-/// test: macOS may pop a Keychain permission prompt in headless runs (see
-/// README "T1 spike" section).
+/// Manager / Linux Secret Service). Used by the T1 spike panel; real login
+/// credentials are stored by the Rust core in `device_flow.rs`.
+/// Deliberately not covered by an automated test: macOS may pop a Keychain
+/// permission prompt in headless runs (see README "T1 spike" section).
 #[tauri::command]
 fn keyring_set(service: String, account: String, value: String) -> Result<(), String> {
     keyring::Entry::new(&service, &account)
@@ -136,18 +139,18 @@ fn db_demo(app: AppHandle) -> Result<Vec<spike_db::Message>, String> {
         .map_err(|err| err.to_string())
 }
 
-// ---------------------------------------------------------------- T3 ----
-// Profile onboarding glue: resolves the app data dir and OS keychain, then
-// delegates to the pure logic in `profile.rs` / `conn_test.rs`.
+// ------------------------------------------------------- T3b / T13 ----
+// Profile lockdown + device-flow login glue. Profile URLs are compiled-in
+// constants (S2/S12) and never cross this boundary: the renderer sees only
+// ids, names and masked key state. Secrets are written by the Rust core
+// (`device_flow.rs`), never by the renderer.
 
-/// A profile as seen by the UI: the stored fields plus keychain status.
-/// The key value itself never crosses this boundary (S4) — only whether a
-/// key exists and its 4-character mask.
+/// A profile as seen by the UI: id, display name and keychain state. No
+/// base URL — the renderer never receives one (S4/S12).
 #[derive(Clone, Serialize)]
 struct ProfileView {
     id: String,
     name: String,
-    base_url: String,
     has_key: bool,
     key_mask: Option<String>,
 }
@@ -164,7 +167,7 @@ fn profiles_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 
 /// Probe the keychain for a profile's stored key without exposing it.
 fn key_status(profile_id: &str) -> Result<(bool, Option<String>), String> {
-    match keyring::Entry::new(profile::KEYRING_SERVICE, profile_id)
+    match keyring::Entry::new(profile::KEYRING_SERVICE, &profile::key_account(profile_id))
         .and_then(|entry| entry.get_password())
     {
         Ok(value) => Ok((true, Some(profile::mask_key(&value)))),
@@ -180,7 +183,6 @@ fn store_overview(store: &ProfileStore) -> Result<ProfileOverview, String> {
         profiles.push(ProfileView {
             id: p.id.clone(),
             name: p.name.clone(),
-            base_url: p.base_url.clone(),
             has_key,
             key_mask,
         });
@@ -191,7 +193,8 @@ fn store_overview(store: &ProfileStore) -> Result<ProfileOverview, String> {
     })
 }
 
-/// List all profiles with their keychain status (no key material).
+/// List the two locked profiles with their keychain state (no key material,
+/// no URLs).
 #[tauri::command]
 fn profiles_load(app: AppHandle) -> Result<ProfileOverview, String> {
     let dir = profiles_dir(&app)?;
@@ -199,54 +202,22 @@ fn profiles_load(app: AppHandle) -> Result<ProfileOverview, String> {
     store_overview(&store)
 }
 
-/// Add a custom profile (validated in the Rust core) and persist it.
-#[tauri::command]
-fn profile_add(app: AppHandle, name: String, base_url: String) -> Result<ProfileOverview, String> {
-    let dir = profiles_dir(&app)?;
-    let mut store = profile::load_or_seed(&dir)?;
-    store.add_profile(&name, &base_url)?;
-    profile::save(&dir, &store)?;
-    store_overview(&store)
-}
-
-/// Mark a profile active and persist the choice.
-#[tauri::command]
-fn profile_set_active(app: AppHandle, profile_id: String) -> Result<ProfileOverview, String> {
-    let dir = profiles_dir(&app)?;
-    let mut store = profile::load_or_seed(&dir)?;
-    store.set_active_profile(&profile_id)?;
-    profile::save(&dir, &store)?;
-    store_overview(&store)
-}
-
-/// Delete the stored API key of a profile from the OS keychain. Idempotent:
-/// deleting a missing entry is a no-op.
-#[tauri::command]
-fn key_delete(profile_id: String) -> Result<(), String> {
-    match keyring::Entry::new(profile::KEYRING_SERVICE, &profile_id)
-        .and_then(|entry| entry.delete_credential())
-    {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(err) => Err(err.to_string()),
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(SseState::default())
+        .manage(device_flow::DeviceLoginState::default())
         .invoke_handler(tauri::generate_handler![
             sse_demo_start,
             keyring_set,
             keyring_get,
             db_demo,
             profiles_load,
-            profile_add,
-            profile_set_active,
-            key_delete,
-            conn_test::connection_test
+            conn_test::connection_test,
+            device_flow::device_login_start,
+            device_flow::device_login_cancel,
+            device_flow::device_logout
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -22,10 +22,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.13.5", features = ["stream"] }
+reqwest = { version = "0.13.5", features = ["json", "stream"] }
+tokio = { version = "1", features = ["time"] }
 futures-util = "0.3.34"
 keyring = { version = "4.2.0", features = ["apple-native-keyring-store"] }
-url = "2"
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 
 
