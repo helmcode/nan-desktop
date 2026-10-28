@@ -4,6 +4,110 @@ Native desktop app for the NaN/Helmcode inference APIs. Tauri v2 + React 19 +
 Vite (S9). No Docker, no external runtime dependencies (S1). Zero telemetry:
 the app only talks to the two locked tenants' own URLs (S8).
 
+## T4 chat MVP (S3)
+
+After sign-in the app is a full chat client: streaming SSE replies, markdown
++ syntax-highlighted code blocks, local SQLite conversation history and a
+model picker fed by `GET /v1/models`.
+
+### Architecture: Rust streaming → events → React
+
+Everything secret and every HTTP byte lives in the Rust core (S4); the
+renderer only ever sees delta text, conversation metadata and classified
+error kinds:
+
+```
+composer (Enter sends)                       ┌─ chat://delta {conversation_id, delta}
+   │ invoke("chat_send")                     │      …per SSE data chunk
+   ▼                                        │
+┌────────────────────── src-tauri/src/chat.rs ───────────────────────────┐
+│ 1. keychain read (account <profile-id>) → 401-classifiable Bearer     │
+│ 2. persist user message BEFORE streaming (chat_store, chat.db)        │
+│    + auto-title: first user message, 48 chars, no extra model call    │
+│ 3. POST {inference_base}/chat/completions  {model, messages, stream}  │
+│ 4. incremental UTF-8 decode → sse.rs parser → extract_delta           │
+│ 5. persist assistant message AFTER done (final accumulated text;      │
+│    on error the partial text is dropped, only chat://error is sent)   │
+└────────────────────────────────────────────────────────────────────────┘
+   │                                        └─ chat://done {conversation_id}
+   ▼                                        └─ chat://error {conversation_id, kind}
+React state (drafts per conversation) → react-markdown + highlight + sanitize
+```
+
+- **One active stream per conversation.** `chat_send` again into the same
+  conversation aborts the previous stream task (cancel-safe registry in
+  `ChatState`: conversation → generation counter + `JoinHandle`; a finishing
+  task only removes its own entry). Different conversations may stream in
+  parallel.
+- **Error kinds** (`chat://error`): `missing_key`, `unauthorized` (401 → the
+  UI shows the "Session expired — sign in again" banner with a Sign out
+  action), `rate_limited` (429), `server` (other non-2xx), `network`
+  (transport), `protocol` (local failures). Errors render inline in the
+  message area — never `alert()`.
+- **Persistence** (`src-tauri/src/chat_store.rs`, SQLite file `chat.db` in
+  the app data dir, separate from the spike's `spike.db`): tables
+  `conversations(id, title, profile_id, created_at, updated_at)` and
+  `messages(id, conversation_id, role, content, model, created_at)`. The
+  user message is stored before streaming starts; the assistant message
+  after a clean finish. Commands: `conversation_list(profile_id)` (most
+  recent first, last-message preview), `conversation_create(profile_id,
+  title?)`, `conversation_delete(id)`, `messages_list(conversation_id)`.
+- **Model picker**: `models_list()` → `GET {inference_base}/models` with the
+  keychain Bearer (active profile), parsed, then filtered by the pure
+  `filter_chat_models` (excludes `kokoro`, `whisper`, `qwen3-embedding`,
+  `rerank`, `qwen-image-2.1`, `flux-2-klein` and any id containing
+  `embedding` / `rerank` / `whisper` / `kokoro` / `image` / `flux`, case-
+  insensitive) and sorted with `deepseek-v4-flash` first — the default
+  selection. 401 maps to the `unauthorized` kind.
+- **Markdown**: react-markdown + remark-gfm; highlighting via
+  **rehype-highlight** (sync highlight.js pipeline — shiki's async
+  highlighting would complicate/ stall streaming re-renders and its grammar
+  bundle dwarfs highlight.js; bundle size is irrelevant since Tauri ships
+  assets on disk) and **rehype-sanitize** as the LAST pass — raw HTML is
+  never rendered, the schema keeps only the highlighter's `hljs-*` classes.
+  Code blocks get a dark theme, a language label and a copy button.
+
+### Testing with the mocks
+
+Both mocks are dependency-free Node servers:
+
+```sh
+node test/mock-device.mjs      # mock login platform   on http://127.0.0.1:14322
+node test/mock-chat.mjs        # mock inference API    on http://127.0.0.1:14323
+```
+
+Run them together, then the app against both (debug builds only — release
+builds ignore the env vars entirely, S12):
+
+```sh
+NAN_DESKTOP_MOCK_PLATFORM=http://127.0.0.1:14322 \
+NAN_DESKTOP_MOCK_INFERENCE=http://127.0.0.1:14323 pnpm tauri dev
+```
+
+`test/mock-chat.mjs` serves `GET /v1/models` (the 12-model fixture: 6 chat +
+6 non-chat) and `POST /v1/chat/completions` (Bearer `sk-test-1234567890abcdef`
+— the same key the device mock issues — streams a role-only preamble, 8
+content deltas of a markdown reply with a fenced code block and a multi-byte
+char split across two TCP writes, then `[DONE]`; `trigger-429` / `trigger-500`
+models answer 429/500 for classification tests).
+
+Integration check (mock wire contract + full Rust suite):
+
+```sh
+node test/t4-check.mjs
+```
+
+### What is NOT in the MVP
+
+- Tool use / computer use (T8), vision upload + image generation/editing
+  (T5), TTS kokoro + dictation whisper (T6) — the model picker deliberately
+  filters those models out for now.
+- Conversation rename, message editing/regeneration, persisted model choice
+  (in-memory per session, default `deepseek-v4-flash`), streaming cancellation
+  button (re-sending into the conversation already aborts the stream).
+- On error the partial assistant text is dropped by design (only the user
+  message stays persisted); no partial-message marker in this MVP.
+
 ## T13 device-flow login (with T3b profile lockdown)
 
 Signing in is a browser-based device flow (RFC 8628-style, S11/S4): the user
@@ -155,12 +259,8 @@ node test/spike-check.mjs
 
 ### What is NOT yet implemented
 
-- **Real chat (T4)**: SSE chat streaming, model picker UI, markdown + code
-  highlighting, SQLite conversation history. The post-login screen is a
-  placeholder; the T1 spike panel (collapsed below it) still proves the
-  SSE/keychain/SQLite foundations.
 - Updater and code signing (T2/T7) and the Linux CI build, as deferred from
-  T1.
+  T1. (The real chat landed in T4 — see the T4 section at the top.)
 
 ### What remains untested (deferred per spec T1)
 
@@ -180,5 +280,5 @@ Rust-side verification:
 cd src-tauri
 cargo fmt --check
 cargo clippy -- -D warnings
-cargo test                      # 9 SSE + 2 SQLite + 11 profile + 18 device-flow + 9 conn-test
+cargo test                      # 9 SSE + 2 SQLite + 11 profile + 18 device-flow + 9 conn-test + 23 chat + 7 chat_store
 ```

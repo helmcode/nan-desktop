@@ -10,6 +10,8 @@
 // Zero telemetry (S8): the app only talks to the two locked tenants' own
 // URLs (plus the debug-only mock override documented in `device_flow`).
 
+mod chat;
+mod chat_store;
 mod conn_test;
 mod device_flow;
 mod profile;
@@ -208,6 +210,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(SseState::default())
         .manage(device_flow::DeviceLoginState::default())
+        .manage(chat::ChatState::default())
         .invoke_handler(tauri::generate_handler![
             sse_demo_start,
             keyring_set,
@@ -217,7 +220,13 @@ pub fn run() {
             conn_test::connection_test,
             device_flow::device_login_start,
             device_flow::device_login_cancel,
-            device_flow::device_logout
+            device_flow::device_logout,
+            chat::chat_send,
+            chat::models_list,
+            chat::conversation_list,
+            chat::conversation_create,
+            chat::conversation_delete,
+            chat::messages_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
