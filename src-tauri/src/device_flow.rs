@@ -415,7 +415,17 @@ async fn run_device_login(app: AppHandle, window: Window, profile_id: String) {
     };
 
     // Open the system browser from the Rust core; the verification URL is
-    // never sent to the renderer.
+    // never sent to the renderer. Security review R3: only open URLs on the
+    // platform origin itself — a compromised or malicious server must not be
+    // able to point the approval browser elsewhere (phishing hand-off).
+    let expected_prefix = format!(
+        "{}/api/auth/device",
+        profile::platform_base_for(&profile_id).unwrap_or_default()
+    );
+    if !start.verification_url.starts_with(&expected_prefix) {
+        emit_error(ErrorKind::Protocol);
+        return;
+    }
     if let Err(_err) = app
         .opener()
         .open_url(start.verification_url.clone(), None::<String>)

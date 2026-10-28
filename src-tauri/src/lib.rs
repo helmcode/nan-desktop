@@ -15,6 +15,10 @@ mod chat_store;
 mod conn_test;
 mod device_flow;
 mod profile;
+// Spike-only module: the demo DB commands it serves are not registered in
+// release builds (security review B1/B6 — no keychain or arbitrary-IO surface
+// in the production IPC).
+#[cfg(debug_assertions)]
 mod spike_db;
 mod sse;
 
@@ -41,6 +45,9 @@ struct SseChunk {
 
 /// Start streaming SSE from `url`, emitting `sse://chunk`, `sse://done` and
 /// `sse://error` events to the window. A previous stream, if any, is aborted.
+/// Debug-builds only (security review B2: arbitrary-URL fetch from the
+/// renderer is an SSRF primitive and must not exist in release IPC).
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn sse_demo_start(url: String, window: Window, state: State<'_, SseState>) -> Result<(), String> {
     let mut guard = state
@@ -104,6 +111,9 @@ async fn stream_sse(response: reqwest::Response, window: &Window) {
 /// credentials are stored by the Rust core in `device_flow.rs`.
 /// Deliberately not covered by an automated test: macOS may pop a Keychain
 /// permission prompt in headless runs (see README "T1 spike" section).
+/// Debug-builds only (security review B1: renderer-controlled service/account
+/// would expose the whole keychain over IPC).
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn keyring_set(service: String, account: String, value: String) -> Result<(), String> {
     keyring::Entry::new(&service, &account)
@@ -113,6 +123,8 @@ fn keyring_set(service: String, account: String, value: String) -> Result<(), St
 
 /// Read a value back from the OS keychain. Returns `Ok(None)` when the entry
 /// does not exist, so the UI can distinguish "missing" from a real error.
+/// Debug-builds only (security review B1).
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn keyring_get(service: String, account: String) -> Result<Option<String>, String> {
     match keyring::Entry::new(&service, &account).and_then(|entry| entry.get_password()) {
@@ -124,6 +136,8 @@ fn keyring_get(service: String, account: String) -> Result<Option<String>, Strin
 
 /// SQLite demo: creates `messages` under the app data dir if missing,
 /// inserts one demo row per call and returns the last 10 rows by id.
+/// Debug-builds only (security review B6).
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn db_demo(app: AppHandle) -> Result<Vec<spike_db::Message>, String> {
     let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
@@ -206,28 +220,46 @@ fn profiles_load(app: AppHandle) -> Result<ProfileOverview, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // Security review B1/B2/B6: the spike commands exist only in debug
+    // builds. Release IPC exposes exactly the product surface.
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(SseState::default())
         .manage(device_flow::DeviceLoginState::default())
-        .manage(chat::ChatState::default())
-        .invoke_handler(tauri::generate_handler![
-            sse_demo_start,
-            keyring_set,
-            keyring_get,
-            db_demo,
-            profiles_load,
-            conn_test::connection_test,
-            device_flow::device_login_start,
-            device_flow::device_login_cancel,
-            device_flow::device_logout,
-            chat::chat_send,
-            chat::models_list,
-            chat::conversation_list,
-            chat::conversation_create,
-            chat::conversation_delete,
-            chat::messages_list
-        ])
+        .manage(chat::ChatState::default());
+    #[cfg(debug_assertions)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        sse_demo_start,
+        keyring_set,
+        keyring_get,
+        db_demo,
+        profiles_load,
+        conn_test::connection_test,
+        device_flow::device_login_start,
+        device_flow::device_login_cancel,
+        device_flow::device_logout,
+        chat::chat_send,
+        chat::models_list,
+        chat::conversation_list,
+        chat::conversation_create,
+        chat::conversation_delete,
+        chat::messages_list
+    ]);
+    #[cfg(not(debug_assertions))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        profiles_load,
+        conn_test::connection_test,
+        device_flow::device_login_start,
+        device_flow::device_login_cancel,
+        device_flow::device_logout,
+        chat::chat_send,
+        chat::models_list,
+        chat::conversation_list,
+        chat::conversation_create,
+        chat::conversation_delete,
+        chat::messages_list
+    ]);
+    builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

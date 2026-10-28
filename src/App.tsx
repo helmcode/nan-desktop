@@ -156,6 +156,13 @@ function hastText(node: HastNode | undefined): string {
 // HTML, is stripped. See the rehype-highlight README recipe.
 const sanitizeSchema = {
   ...defaultSchema,
+  // Security review R1 (defense in depth with the app CSP): markdown from the
+  // model may not load remote images — an <img> to an attacker host would be a
+  // conversation-content exfiltration channel. Images are dropped entirely for
+  // the MVP; the model still communicates through text.
+  tagNames: (defaultSchema.tagNames ?? []).filter(
+    (t) => t !== "img" && t !== "picture" && t !== "source",
+  ),
   attributes: {
     ...defaultSchema.attributes,
     code: [
@@ -935,8 +942,10 @@ function App() {
   }
 
   // The T1 spike panel JSX (rendered inside the sidebar's <details> on the
-  // chat screen; it needs no props — all state lives here).
-  const spikePanel = (
+  // chat screen; it needs no props — all state lives here). Dev-only:
+  // the spike IPC commands do not exist in release builds (security review
+  // B1/B2/B6), so the panel must not render there either.
+  const spikePanel = import.meta.env.DEV ? (
     <>
       <summary>T1 spike diagnostics (SSE / keychain / SQLite)</summary>
 
@@ -1015,7 +1024,7 @@ function App() {
         </ul>
       </section>
     </>
-  );
+  ) : null;
 
   if (screen === "loading") {
     return (
