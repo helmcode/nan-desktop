@@ -9,6 +9,8 @@
 //
 // Zero telemetry (S8): the app only talks to URLs the user provides.
 
+mod conn_test;
+mod profile;
 mod spike_db;
 mod sse;
 
@@ -18,6 +20,7 @@ use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
+use profile::ProfileStore;
 use sse::{flush_sse_buffer, parse_sse_buffer};
 
 /// Handle of the running SSE demo task. Starting a new stream aborts the
@@ -133,6 +136,102 @@ fn db_demo(app: AppHandle) -> Result<Vec<spike_db::Message>, String> {
         .map_err(|err| err.to_string())
 }
 
+// ---------------------------------------------------------------- T3 ----
+// Profile onboarding glue: resolves the app data dir and OS keychain, then
+// delegates to the pure logic in `profile.rs` / `conn_test.rs`.
+
+/// A profile as seen by the UI: the stored fields plus keychain status.
+/// The key value itself never crosses this boundary (S4) — only whether a
+/// key exists and its 4-character mask.
+#[derive(Clone, Serialize)]
+struct ProfileView {
+    id: String,
+    name: String,
+    base_url: String,
+    has_key: bool,
+    key_mask: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct ProfileOverview {
+    profiles: Vec<ProfileView>,
+    active_profile: Option<String>,
+}
+
+fn profiles_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path().app_data_dir().map_err(|err| err.to_string())
+}
+
+/// Probe the keychain for a profile's stored key without exposing it.
+fn key_status(profile_id: &str) -> Result<(bool, Option<String>), String> {
+    match keyring::Entry::new(profile::KEYRING_SERVICE, profile_id)
+        .and_then(|entry| entry.get_password())
+    {
+        Ok(value) => Ok((true, Some(profile::mask_key(&value)))),
+        Err(keyring::Error::NoEntry) => Ok((false, None)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn store_overview(store: &ProfileStore) -> Result<ProfileOverview, String> {
+    let mut profiles = Vec::with_capacity(store.profiles.len());
+    for p in &store.profiles {
+        let (has_key, key_mask) = key_status(&p.id)?;
+        profiles.push(ProfileView {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            base_url: p.base_url.clone(),
+            has_key,
+            key_mask,
+        });
+    }
+    Ok(ProfileOverview {
+        profiles,
+        active_profile: store.active_profile.clone(),
+    })
+}
+
+/// List all profiles with their keychain status (no key material).
+#[tauri::command]
+fn profiles_load(app: AppHandle) -> Result<ProfileOverview, String> {
+    let dir = profiles_dir(&app)?;
+    let store = profile::load_or_seed(&dir)?;
+    store_overview(&store)
+}
+
+/// Add a custom profile (validated in the Rust core) and persist it.
+#[tauri::command]
+fn profile_add(app: AppHandle, name: String, base_url: String) -> Result<ProfileOverview, String> {
+    let dir = profiles_dir(&app)?;
+    let mut store = profile::load_or_seed(&dir)?;
+    store.add_profile(&name, &base_url)?;
+    profile::save(&dir, &store)?;
+    store_overview(&store)
+}
+
+/// Mark a profile active and persist the choice.
+#[tauri::command]
+fn profile_set_active(app: AppHandle, profile_id: String) -> Result<ProfileOverview, String> {
+    let dir = profiles_dir(&app)?;
+    let mut store = profile::load_or_seed(&dir)?;
+    store.set_active_profile(&profile_id)?;
+    profile::save(&dir, &store)?;
+    store_overview(&store)
+}
+
+/// Delete the stored API key of a profile from the OS keychain. Idempotent:
+/// deleting a missing entry is a no-op.
+#[tauri::command]
+fn key_delete(profile_id: String) -> Result<(), String> {
+    match keyring::Entry::new(profile::KEYRING_SERVICE, &profile_id)
+        .and_then(|entry| entry.delete_credential())
+    {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -142,7 +241,12 @@ pub fn run() {
             sse_demo_start,
             keyring_set,
             keyring_get,
-            db_demo
+            db_demo,
+            profiles_load,
+            profile_add,
+            profile_set_active,
+            key_delete,
+            conn_test::connection_test
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
