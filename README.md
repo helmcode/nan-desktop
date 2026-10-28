@@ -1,8 +1,19 @@
 # nan-desktop
 
+[![CI](https://github.com/helmcode/nan-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/helmcode/nan-desktop/actions/workflows/ci.yml)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
+![License](https://img.shields.io/badge/license-proprietary%20(source--available)-red)
+![Telemetry](https://img.shields.io/badge/telemetry-none-success)
+
 Native desktop app for the NaN/Helmcode inference APIs. Tauri v2 + React 19 +
 Vite (S9). No Docker, no external runtime dependencies (S1). Zero telemetry:
 the app only talks to the two locked tenants' own URLs (S8).
+
+**A community-built product:** the source is public for review and
+contribution, and the product is Helmcode S.L. proprietary — the app only
+connects to `api.nan.builders` and `api.helmcode.com`. See
+[CONTRIBUTING.md](CONTRIBUTING.md) to get started and
+[SECURITY.md](SECURITY.md) to report anything sensitive privately.
 
 ## T4 chat MVP (S3)
 

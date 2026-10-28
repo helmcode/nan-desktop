@@ -1,0 +1,44 @@
+nan-desktop — Proprietary Source License
+
+Copyright (c) 2026 Helmcode S.L. All rights reserved.
+
+1. Source availability. This repository makes the source code of nan-desktop
+   publicly visible so that the NaN community and Helmcode customers can review
+   it, audit it, and contribute improvements back to it.
+
+2. No open-source license. This is NOT an OSI-approved open-source license.
+   You may NOT copy, modify, merge, publish, distribute, sublicense, or sell
+   copies of this software or its source, in whole or in part, except as
+   expressly permitted below, without prior written permission from Helmcode S.L.
+
+3. What you MAY do without asking:
+   a. Read, build and run unmodified versions of the software for personal use,
+      connected to the NaN community service (api.nan.builders) or the Helmcode
+      enterprise service (api.helmcode.com) with a valid account.
+   b. Submit contributions (pull requests) to this repository. By submitting a
+      contribution you grant Helmcode S.L. a perpetual, worldwide,
+      irrevocable, royalty-free license to use, modify, relicense and
+      commercialize that contribution as part of the product, and you confirm
+      you have the right to grant it.
+   c. Quote short excerpts of the source for review, audit or interoperability
+      discussion, with attribution.
+
+4. What you may NOT do: redistribute binaries or source outside the GitHub
+   repository and its official releases; remove or alter branding, license
+   notices or telemetry-free guarantees; point modified builds at third-party
+   inference endpoints (the product intentionally supports only the two owned
+   services); or use the source to build a competing product.
+
+5. Trademarks. "NaN", "Helmcode" and their logos are trademarks of Helmcode
+   S.L.; nothing in this license grants any right to use them.
+
+6. No warranty. The software is provided "as is", without warranty of any
+   kind. In no event shall Helmcode S.L. be liable for any claim, damages or
+   other liability arising from the software.
+
+7. Final release transition. If Helmcode S.L. ever discontinues the product,
+   the final published version may be relicensed under an OSI-approved license
+   at the company's sole discretion.
+
+For licensing questions: open a discussion in this repository or contact the
+maintainers through the GitHub organization.

@@ -1,0 +1,92 @@
+name: Release
+
+# Builds installers for the 3 desktop OSes on a vX.Y.Z tag and opens a DRAFT
+# GitHub release with the artifacts (publishing stays a human decision).
+#
+#   macOS arm64  -> dmg + .app     (aarch64-apple-darwin)
+#   macOS x64    -> dmg + .app     (x86_64-apple-darwin, cross-compiled)
+#   Windows      -> msi + nsis exe
+#   Linux        -> AppImage + deb
+#
+# Installers are NOT code-signed yet (macOS notarization + Windows
+# Authenticode are pending); the release body says so explicitly.
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --target aarch64-apple-darwin
+            rust-target: aarch64-apple-darwin
+          - os: macos-latest
+            args: --target x86_64-apple-darwin
+            rust-target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            args: ''
+            rust-target: ''
+          - os: windows-latest
+            args: ''
+            rust-target: ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2.9.3
+        with:
+          workspaces: src-tauri
+
+      - name: Add Rust target (macOS cross-compile)
+        if: matrix.rust-target != ''
+        shell: bash
+        run: rustup target add ${{ matrix.rust-target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Build and draft release
+        uses: tauri-apps/tauri-action@a6e90ddc4ba4721f294e52b856d3d50e645edc07
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: nan-desktop-v__VERSION
+          releaseName: 'nan-desktop v__VERSION'
+          releaseBody: |
+            Installers for Windows (msi / setup exe), macOS (dmg, arm64 and x64) and Linux (AppImage / deb).
+
+            **Note:** these builds are not code-signed yet (macOS notarization and Windows Authenticode pending). Compare the SHA-256 of your download against the values in the release assets before installing. See SECURITY.md.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

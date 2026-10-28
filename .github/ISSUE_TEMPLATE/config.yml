@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: NaN community
+    url: https://nan.builders
+    about: Questions about the community and memberships.
+  - name: Helmcode enterprise console
+    url: https://console.helmcode.com
+    about: Enterprise accounts, orgs and API keys.

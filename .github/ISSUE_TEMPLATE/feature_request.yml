@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an improvement for the desktop app
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What are you trying to do that the app doesn't let you?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints acknowledgment
+      description: The app supports only NaN community and Helmcode enterprise endpoints, with zero telemetry.
+      options:
+        - label: My proposal respects the locked endpoints and zero-telemetry policy
+          required: true
