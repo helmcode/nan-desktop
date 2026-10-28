@@ -148,7 +148,7 @@ const NON_CHAT_EXACT: [&str; 6] = [
 /// Any model id containing one of these substrings is not chat-capable
 /// (matched case-insensitively).
 const NON_CHAT_SUBSTRINGS: [&str; 7] =
-    ["embedding", "rerank", "whisper", "kokoro", "image", "flux"];
+    ["embedding", "rerank", "whisper", "kokoro", "image", "flux", "audio"];
 
 /// Sort headliner: always first in the picker.
 const CHAT_MODEL_HEADLINER: &str = "deepseek-v4-flash";
