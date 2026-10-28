@@ -1,49 +1,192 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+interface SseChunkPayload {
+  seq: number;
+  text: string;
+}
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+interface Message {
+  id: number;
+  role: string;
+  content: string;
+  created_at: string;
+}
+
+const DEFAULT_SSE_URL = "http://127.0.0.1:14321/events";
+
+// Security posture spike: a retrieved keychain value is never rendered in
+// full — at most its last 4 characters, masked.
+function maskValue(value: string): string {
+  return `••••${value.slice(-4)}`;
+}
+
+function App() {
+  // (a) SSE demo
+  const [sseUrl, setSseUrl] = useState(DEFAULT_SSE_URL);
+  const [chunks, setChunks] = useState<string[]>([]);
+  const [sseStatus, setSseStatus] = useState<
+    "idle" | "streaming" | "done" | "error"
+  >("idle");
+  const [sseError, setSseError] = useState("");
+
+  // (b) Keychain
+  const [krService, setKrService] = useState("nan-desktop-spike");
+  const [krAccount, setKrAccount] = useState("demo-api-key");
+  const [krValue, setKrValue] = useState("");
+  const [krStatus, setKrStatus] = useState("");
+
+  // (c) SQLite
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [dbStatus, setDbStatus] = useState("");
+
+  // Rust → frontend event transport (S4). Registered once; cleanup on unmount.
+  useEffect(() => {
+    const unlistens: Promise<UnlistenFn>[] = [
+      listen<SseChunkPayload>("sse://chunk", (event) => {
+        setChunks((prev) => [...prev, event.payload.text]);
+        setSseStatus("streaming");
+      }),
+      listen<number>("sse://done", () => setSseStatus("done")),
+      listen<string>("sse://error", (event) => {
+        setSseError(event.payload);
+        setSseStatus("error");
+      }),
+    ];
+    return () => {
+      unlistens.forEach((promise) => {
+        promise.then((unlisten) => unlisten());
+      });
+    };
+  }, []);
+
+  async function startSse(): Promise<void> {
+    setChunks([]);
+    setSseError("");
+    setSseStatus("streaming");
+    try {
+      await invoke("sse_demo_start", { url: sseUrl });
+    } catch (err) {
+      setSseError(String(err));
+      setSseStatus("error");
+    }
+  }
+
+  async function keyringSet(): Promise<void> {
+    try {
+      await invoke("keyring_set", {
+        service: krService,
+        account: krAccount,
+        value: krValue,
+      });
+      setKrStatus("stored in the OS keychain");
+      setKrValue(""); // do not keep the secret in the DOM
+    } catch (err) {
+      setKrStatus(`error: ${String(err)}`);
+    }
+  }
+
+  async function keyringGet(): Promise<void> {
+    try {
+      const value = await invoke<string | null>("keyring_get", {
+        service: krService,
+        account: krAccount,
+      });
+      setKrStatus(value === null ? "no entry found" : `retrieved: ${maskValue(value)}`);
+    } catch (err) {
+      setKrStatus(`error: ${String(err)}`);
+    }
+  }
+
+  async function runDbDemo(): Promise<void> {
+    try {
+      const rows = await invoke<Message[]>("db_demo");
+      setMessages(rows);
+      setDbStatus(`${rows.length} row(s) returned (last 10 by id)`);
+    } catch (err) {
+      setDbStatus(`error: ${String(err)}`);
+    }
   }
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+      <h1>nan-desktop · T1 spike</h1>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+      <section className="panel">
+        <h2>SSE demo (Rust → UI)</h2>
+        <p className="hint">
+          Requires the mock server: <code>node test/mock-sse.mjs</code>
+        </p>
+        <div className="row-h">
+          <input
+            value={sseUrl}
+            onChange={(e) => setSseUrl(e.currentTarget.value)}
+            placeholder="SSE URL"
+          />
+          <button type="button" onClick={startSse}>
+            Start
+          </button>
+        </div>
+        <p className="status">
+          status: {sseStatus}
+          {sseError ? ` — ${sseError}` : ""}
+        </p>
+        <ul className="chunk-list">
+          {chunks.map((text, i) => (
+            <li key={i}>{text}</li>
+          ))}
+        </ul>
+      </section>
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+      <section className="panel">
+        <h2>Keychain (OS credential store)</h2>
+        <div className="row-h">
+          <input
+            value={krService}
+            onChange={(e) => setKrService(e.currentTarget.value)}
+            placeholder="service"
+          />
+          <input
+            value={krAccount}
+            onChange={(e) => setKrAccount(e.currentTarget.value)}
+            placeholder="account"
+          />
+        </div>
+        <div className="row-h">
+          <input
+            type="password"
+            value={krValue}
+            onChange={(e) => setKrValue(e.currentTarget.value)}
+            placeholder="value to store"
+          />
+          <button type="button" onClick={keyringSet}>
+            Set
+          </button>
+          <button type="button" onClick={keyringGet}>
+            Get
+          </button>
+        </div>
+        <p className="status">{krStatus}</p>
+      </section>
+
+      <section className="panel">
+        <h2>SQLite (local history foundation)</h2>
+        <div className="row-h">
+          <button type="button" onClick={runDbDemo}>
+            Insert demo row + list last 10
+          </button>
+        </div>
+        <p className="status">{dbStatus}</p>
+        <ul className="chunk-list">
+          {messages.map((m) => (
+            <li key={m.id}>
+              #{m.id} [{m.role}] {m.content} — {m.created_at}
+            </li>
+          ))}
+        </ul>
+      </section>
     </main>
   );
 }

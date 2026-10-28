@@ -1,14 +1,149 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+// T1 spike validation for the nan-desktop Tauri v2 app.
+//
+// Proves three Rust-core capabilities end to end:
+// 1. SSE streaming: HTTP lives in Rust (reqwest), parsed events are emitted
+//    to the UI as Tauri events (S4 transport).
+// 2. Keychain storage via the `keyring` crate (S4): API keys never enter the
+//    web renderer process.
+// 3. SQLite local history foundation via `rusqlite` (bundled).
+//
+// Zero telemetry (S8): the app only talks to URLs the user provides.
+
+mod spike_db;
+mod sse;
+
+use std::sync::Mutex;
+
+use serde::Serialize;
+use tauri::async_runtime::JoinHandle;
+use tauri::{AppHandle, Emitter, Manager, State, Window};
+
+use sse::{flush_sse_buffer, parse_sse_buffer};
+
+/// Handle of the running SSE demo task. Starting a new stream aborts the
+/// previous one, so `sse_demo_start` stays cancel-safe.
+#[derive(Default)]
+struct SseState(Mutex<Option<JoinHandle<()>>>);
+
+/// One parsed SSE event, forwarded to the frontend as `sse://chunk`.
+#[derive(Clone, Serialize)]
+struct SseChunk {
+    seq: usize,
+    text: String,
+}
+
+/// Start streaming SSE from `url`, emitting `sse://chunk`, `sse://done` and
+/// `sse://error` events to the window. A previous stream, if any, is aborted.
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+fn sse_demo_start(url: String, window: Window, state: State<'_, SseState>) -> Result<(), String> {
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "SSE state mutex poisoned".to_string())?;
+    if let Some(previous) = guard.take() {
+        previous.abort();
+    }
+    *guard = Some(tauri::async_runtime::spawn(run_sse_demo(url, window)));
+    Ok(())
+}
+
+async fn run_sse_demo(url: String, window: Window) {
+    match reqwest::get(&url).await {
+        Ok(response) if !response.status().is_success() => {
+            let _ = window.emit("sse://error", format!("HTTP {}", response.status()));
+        }
+        Ok(response) => stream_sse(response, &window).await,
+        Err(err) => {
+            let _ = window.emit("sse://error", err.to_string());
+        }
+    }
+}
+
+async fn stream_sse(response: reqwest::Response, window: &Window) {
+    use futures_util::StreamExt;
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut seq: usize = 0;
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(bytes) => {
+                // Spike simplification: lossy UTF-8 decoding. A multi-byte
+                // character split across chunk boundaries may be replaced;
+                // the chat MVP (T4) will use incremental decoding.
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                for text in parse_sse_buffer(&mut buffer) {
+                    seq += 1;
+                    let _ = window.emit("sse://chunk", SseChunk { seq, text });
+                }
+            }
+            Err(err) => {
+                let _ = window.emit("sse://error", err.to_string());
+                return;
+            }
+        }
+    }
+
+    for text in flush_sse_buffer(&mut buffer) {
+        seq += 1;
+        let _ = window.emit("sse://chunk", SseChunk { seq, text });
+    }
+    let _ = window.emit("sse://done", seq);
+}
+
+/// Store `value` in the OS keychain (macOS Keychain / Windows Credential
+/// Manager / Linux Secret Service). Deliberately not covered by an automated
+/// test: macOS may pop a Keychain permission prompt in headless runs (see
+/// README "T1 spike" section).
+#[tauri::command]
+fn keyring_set(service: String, account: String, value: String) -> Result<(), String> {
+    keyring::Entry::new(&service, &account)
+        .and_then(|entry| entry.set_password(&value))
+        .map_err(|err| err.to_string())
+}
+
+/// Read a value back from the OS keychain. Returns `Ok(None)` when the entry
+/// does not exist, so the UI can distinguish "missing" from a real error.
+#[tauri::command]
+fn keyring_get(service: String, account: String) -> Result<Option<String>, String> {
+    match keyring::Entry::new(&service, &account).and_then(|entry| entry.get_password()) {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// SQLite demo: creates `messages` under the app data dir if missing,
+/// inserts one demo row per call and returns the last 10 rows by id.
+#[tauri::command]
+fn db_demo(app: AppHandle) -> Result<Vec<spike_db::Message>, String> {
+    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let mut conn =
+        rusqlite::Connection::open(dir.join("spike.db")).map_err(|err| err.to_string())?;
+
+    let unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let content = format!("Spike demo row at {unix_secs}");
+
+    spike_db::insert_and_recent_messages(&mut conn, "assistant", &content)
+        .map_err(|err| err.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .manage(SseState::default())
+        .invoke_handler(tauri::generate_handler![
+            sse_demo_start,
+            keyring_set,
+            keyring_get,
+            db_demo
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
