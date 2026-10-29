@@ -54,6 +54,11 @@ interface ChatError {
   conversation_id: number;
   kind: string;
 }
+// T4b: a deliberate stop — same payload shape as done. Whatever text
+// arrived stays persisted as a complete message.
+interface ChatStopped {
+  conversation_id: number;
+}
 // TTS payloads (T6): only the classified error kind crosses the IPC
 // boundary — never the audio bytes, the key or any URL.
 interface TtsError {
@@ -72,6 +77,8 @@ interface ChatMessageRow {
   content: string;
   model: string | null;
   created_at: string;
+  // T4b: crash leftovers of a mid-stream kill — the reply never finished.
+  partial: boolean;
 }
 
 // One-line description per locked profile (S2: exactly two, no URLs).
@@ -524,6 +531,17 @@ function ChatShell({
         }
         void refreshConversations();
       }),
+      // T4b: the user pressed Stop. The text that arrived stays persisted;
+      // reload to render it as a normal (complete) message.
+      listen<ChatStopped>("chat://stopped", (event) => {
+        const conversationId = event.payload.conversation_id;
+        markStreaming(conversationId, false);
+        clearDraft(conversationId);
+        if (activeConvRef.current === conversationId) {
+          void loadMessages(conversationId);
+        }
+        void refreshConversations();
+      }),
       listen<ChatError>("chat://error", (event) => {
         const { conversation_id, kind } = event.payload;
         markStreaming(conversation_id, false);
@@ -712,6 +730,19 @@ function ChatShell({
   const streamingActive = activeConvId !== null && streamingIds.has(activeConvId);
   const activeDraft = activeConvId !== null ? drafts.get(activeConvId) : undefined;
 
+  // Stop button (T4b): abort the active stream; the text that already
+  // arrived stays persisted. The chat://stopped handler clears the draft
+  // and reloads the persisted transcript.
+  const stopGenerating = useCallback(async (): Promise<void> => {
+    const conversationId = activeConvRef.current;
+    if (conversationId === null) return;
+    try {
+      await invoke("chat_stop", { conversationId });
+    } catch (err) {
+      setInlineError(commandErrorLabel(err));
+    }
+  }, []);
+
   const send = useCallback(async (): Promise<void> => {
     const text = composer.trim();
     if (!text || streamingActive) return;
@@ -738,6 +769,7 @@ function ChatShell({
           content: text,
           model: null,
           created_at: "",
+          partial: false,
         },
       ]);
       setComposer("");
@@ -884,6 +916,11 @@ function ChatShell({
                 className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}
               >
                 <Markdown text={m.content} />
+                {m.partial && (
+                  <span className="partial-note" role="note">
+                    message interrupted
+                  </span>
+                )}
                 {m.content.trim().length > 0 && (
                   <button
                     type="button"
@@ -955,14 +992,26 @@ function ChatShell({
             >
               {recording ? "■" : "●"}
             </button>
-            <button
-              type="button"
-              className="btn btn-primary send-btn"
-              onClick={() => void send()}
-              disabled={streamingActive || composer.trim().length === 0}
-            >
-              Send
-            </button>
+            {streamingActive ? (
+              // T4b: while streaming, Send is replaced by Stop — the reply
+              // is being persisted as it arrives, so stopping keeps it.
+              <button
+                type="button"
+                className="btn stop-btn"
+                onClick={() => void stopGenerating()}
+              >
+                Stop generating
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary send-btn"
+                onClick={() => void send()}
+                disabled={composer.trim().length === 0}
+              >
+                Send
+              </button>
+            )}
           </div>
         </footer>
       </section>

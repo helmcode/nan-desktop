@@ -14,9 +14,21 @@
 //!
 //! Secrets (S4): this store holds conversation text only — never API keys,
 //! never the session JWT.
+//!
+//! T4b streaming resilience: assistant rows carry a `status` column
+//! (`complete` default, `in_progress` while the reply is streaming).
+//! `in_progress` rows are flagged `partial: true` by the list functions and
+//! their content is overwritten per network chunk, so a crash mid-stream
+//! leaves the partial reply queryable.
 
 use rusqlite::Connection;
 use serde::Serialize;
+
+/// Message status: the row is finalized (a normal historical message).
+pub const STATUS_COMPLETE: &str = "complete";
+/// Message status: the assistant reply is still streaming (or the process
+/// died mid-stream — a crash leftover flagged `partial` by `messages_list`).
+pub const STATUS_IN_PROGRESS: &str = "in_progress";
 
 /// SQLite file name inside the app data dir.
 pub const DB_FILE: &str = "chat.db";
@@ -57,6 +69,9 @@ pub struct ChatMessageRow {
     pub content: String,
     pub model: Option<String>,
     pub created_at: String,
+    /// T4b: `true` only for `status='in_progress'` crash leftovers — the
+    /// reply never finished, so the UI renders an interrupted notice.
+    pub partial: bool,
 }
 
 /// Create both tables if missing and enable foreign keys for this
@@ -77,11 +92,30 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
              role TEXT NOT NULL,
              content TEXT NOT NULL,
              model TEXT,
-             created_at TEXT NOT NULL
+             created_at TEXT NOT NULL,
+             status TEXT NOT NULL DEFAULT 'complete'
          );
          CREATE INDEX IF NOT EXISTS idx_messages_conversation
              ON messages(conversation_id, id);",
-    )
+    )?;
+    ensure_status_column(conn)
+}
+
+/// Pre-T4b databases have a `messages` table without the `status` column
+/// (`CREATE TABLE IF NOT EXISTS` is a no-op there). Add it in place with the
+/// `complete` default so existing history keeps rendering as finalized.
+fn ensure_status_column(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let has_status: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'status'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_status == 0 {
+        conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'complete';",
+        )?;
+    }
+    Ok(())
 }
 
 /// Open (or create) the chat database under `dir` and make sure the schema
@@ -173,6 +207,72 @@ pub fn insert_message(
     Ok(conn.last_insert_rowid())
 }
 
+/// Create the in-progress assistant row for a stream (T4b): `status=
+/// 'in_progress'`, empty content, the generating model. Deltas overwrite
+/// this row as they arrive; a clean finish or a stop finalizes it, an
+/// error deletes it.
+pub fn insert_in_progress_assistant(
+    conn: &Connection,
+    conversation_id: i64,
+    model: Option<&str>,
+) -> Result<i64, rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO messages (conversation_id, role, content, model, created_at, status)
+         VALUES (?1, 'assistant', '', ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?3)",
+        rusqlite::params![conversation_id, model, STATUS_IN_PROGRESS],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Overwrite a message's content — the stream task's per-chunk delta flush
+/// (T4b): each flush carries everything received so far, so the write is
+/// idempotent and a crash mid-stream leaves the last flush in place.
+pub fn update_message_content(
+    conn: &Connection,
+    message_id: i64,
+    content: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE messages SET content = ?1 WHERE id = ?2",
+        rusqlite::params![content, message_id],
+    )?;
+    Ok(())
+}
+
+/// Finalize a message in place: final content + `status='complete'` (the
+/// clean-done path of the stream task).
+pub fn finalize_message(
+    conn: &Connection,
+    message_id: i64,
+    content: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE messages SET content = ?1, status = ?2 WHERE id = ?3",
+        rusqlite::params![content, STATUS_COMPLETE, message_id],
+    )?;
+    Ok(())
+}
+
+/// Complete every in-progress row of a conversation — the stop path (T4b):
+/// whatever text arrived stays, with no failed marker. Returns the number
+/// of rows completed (0 when there was nothing in progress).
+pub fn finalize_in_progress(
+    conn: &Connection,
+    conversation_id: i64,
+) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "UPDATE messages SET status = ?1 WHERE conversation_id = ?2 AND status = ?3",
+        rusqlite::params![STATUS_COMPLETE, conversation_id, STATUS_IN_PROGRESS],
+    )
+}
+
+/// Remove one message row — the stream error path (T4b): the partial text
+/// is dropped by design, exactly as before T4b.
+pub fn delete_message(conn: &Connection, message_id: i64) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM messages WHERE id = ?1", [message_id])?;
+    Ok(())
+}
+
 /// List a profile's conversations, most recently updated first. The title is
 /// the stored one, or the untitled fallback when still empty; `last_message`
 /// is the newest message's content, truncated to [`PREVIEW_MAX_CHARS`].
@@ -214,7 +314,7 @@ fn last_message(
     conversation_id: i64,
 ) -> Result<Option<ChatMessageRow>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, conversation_id, role, content, model, created_at
+        "SELECT id, conversation_id, role, content, model, created_at, status
          FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1",
     )?;
     let mut rows = stmt.query_map([conversation_id], |row| {
@@ -225,6 +325,10 @@ fn last_message(
             content: row.get(3)?,
             model: row.get(4)?,
             created_at: row.get(5)?,
+            partial: {
+                let status: String = row.get(6)?;
+                status == STATUS_IN_PROGRESS
+            },
         })
     })?;
     match rows.next() {
@@ -240,7 +344,7 @@ pub fn list_messages(
     conversation_id: i64,
 ) -> Result<Vec<ChatMessageRow>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, conversation_id, role, content, model, created_at
+        "SELECT id, conversation_id, role, content, model, created_at, status
          FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
     )?;
     let rows = stmt.query_map([conversation_id], |row| {
@@ -251,6 +355,10 @@ pub fn list_messages(
             content: row.get(3)?,
             model: row.get(4)?,
             created_at: row.get(5)?,
+            partial: {
+                let status: String = row.get(6)?;
+                status == STATUS_IN_PROGRESS
+            },
         })
     })?;
     let mut messages: Vec<ChatMessageRow> = Vec::new();
@@ -375,6 +483,9 @@ mod tests {
         assert_eq!(messages[1].role, "assistant");
         assert_eq!(messages[1].model.as_deref(), Some("deepseek-v4-flash"));
         assert!(!messages[1].created_at.is_empty());
+        // T4b preserve: normal (non-streaming-written) rows stay complete —
+        // never flagged as interrupted.
+        assert!(!messages[1].partial, "completed rows are not partial");
     }
 
     #[test]
@@ -419,6 +530,139 @@ mod tests {
         assert!(list_conversations(&conn, "nan").expect("list").is_empty());
         // Deleting an unknown id is a no-op, not an error.
         delete_conversation(&conn, 424242).expect("delete unknown id");
+    }
+
+    // ---- T4b: delta persistence, stop finalize, partial flag ---------------
+
+    /// Simulates the streaming loop: create the in-progress assistant row and
+    /// flush received deltas into it.
+    fn stream_partial_text(conn: &Connection, conv: i64, flushes: &[&str]) -> i64 {
+        let row =
+            insert_in_progress_assistant(conn, conv, Some("deepseek-v4-flash")).expect("insert");
+        for flush in flushes {
+            update_message_content(conn, row, flush).expect("update");
+        }
+        row
+    }
+
+    #[test]
+    fn kill_mid_stream_partial_text_survives_without_done() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        insert_message(&conn, conv, "user", "hello", None).expect("insert");
+
+        // The stream task flushes deltas as they arrive…
+        stream_partial_text(&conn, conv, &["partial ", "partial text"]);
+        // …and the process is killed before any finalize/done runs.
+
+        // The partial reply is still in the DB, flagged as interrupted.
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 2);
+        let last = &messages[1];
+        assert_eq!(last.role, "assistant");
+        assert_eq!(last.content, "partial text");
+        assert_eq!(last.model.as_deref(), Some("deepseek-v4-flash"));
+        assert!(last.partial, "an unfinished assistant row is partial");
+    }
+
+    #[test]
+    fn finalize_message_completes_in_place_with_final_content() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        insert_message(&conn, conv, "user", "hello", None).expect("insert");
+        let row = stream_partial_text(&conn, conv, &["partial"]);
+
+        finalize_message(&conn, row, "the complete reply").expect("finalize");
+
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 2, "finalized in place — no duplicate row");
+        assert_eq!(messages[1].id, row);
+        assert_eq!(messages[1].content, "the complete reply");
+        assert_eq!(messages[1].model.as_deref(), Some("deepseek-v4-flash"));
+        assert!(!messages[1].partial, "finalize clears the partial flag");
+    }
+
+    #[test]
+    fn finalize_in_progress_keeps_text_and_is_idempotent() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let row = stream_partial_text(&conn, conv, &["kept text"]);
+
+        let finalized = finalize_in_progress(&conn, conv).expect("finalize");
+        assert_eq!(finalized, 1, "exactly the one in-progress row completed");
+
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages[0].id, row);
+        assert_eq!(messages[0].content, "kept text", "stop keeps what arrived");
+        assert!(!messages[0].partial, "a deliberate stop is not a failure");
+
+        // Stopping again (idle conversation) changes nothing.
+        let again = finalize_in_progress(&conn, conv).expect("finalize again");
+        assert_eq!(again, 0);
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages[0].content, "kept text");
+        assert!(!messages[0].partial);
+    }
+
+    #[test]
+    fn delete_message_drops_the_partial_row_on_error() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        insert_message(&conn, conv, "user", "hello", None).expect("insert");
+        let row = stream_partial_text(&conn, conv, &["doomed partial"]);
+
+        delete_message(&conn, row).expect("delete");
+
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 1, "only the user message remains");
+        assert_eq!(messages[0].role, "user");
+    }
+
+    #[test]
+    fn legacy_schema_without_status_column_is_migrated() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = Connection::open(dir.path().join("legacy.db")).expect("open");
+        // The exact pre-T4b schema: `messages` without a `status` column.
+        conn.execute_batch(
+            "CREATE TABLE conversations (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 title TEXT NOT NULL DEFAULT '',
+                 profile_id TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                 role TEXT NOT NULL,
+                 content TEXT NOT NULL,
+                 model TEXT,
+                 created_at TEXT NOT NULL
+             );",
+        )
+        .expect("legacy schema");
+        let conv = insert_conversation(&conn, "nan", "legacy").expect("insert");
+        insert_message(&conn, conv, "user", "old message", None).expect("insert");
+
+        // Opening the store with the current schema migrates in place.
+        ensure_schema(&conn).expect("migrate");
+
+        // Old rows survive, rendered as complete; new T4b writes work.
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 1);
+        assert!(
+            !messages[0].partial,
+            "legacy rows are complete, not partial"
+        );
+        let row = insert_in_progress_assistant(&conn, conv, Some("m")).expect("insert");
+        update_message_content(&conn, row, "streamed").expect("update");
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1].partial);
     }
 
     #[test]

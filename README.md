@@ -37,11 +37,12 @@ composer (Enter sends)                       ┌─ chat://delta {conversation_i
 │    + auto-title: first user message, 48 chars, no extra model call    │
 │ 3. POST {inference_base}/chat/completions  {model, messages, stream}  │
 │ 4. incremental UTF-8 decode → sse.rs parser → extract_delta           │
-│ 5. persist assistant message AFTER done (final accumulated text;      │
-│    on error the partial text is dropped, only chat://error is sent)   │
-└────────────────────────────────────────────────────────────────────────┘
+│ 5. persist assistant reply as it streams (T4b): in_progress row +
+│    per-chunk delta flush; finalized on done/stop, deleted on error
+└────────────────────────────────────────────────────────────────────┘
    │                                        └─ chat://done {conversation_id}
-   ▼                                        └─ chat://error {conversation_id, kind}
+   ▼                                        └─ chat://stopped {conversation_id} (T4b)
+                                            └─ chat://error {conversation_id, kind}
 React state (drafts per conversation) → react-markdown + highlight + sanitize
 ```
 
@@ -58,11 +59,15 @@ React state (drafts per conversation) → react-markdown + highlight + sanitize
 - **Persistence** (`src-tauri/src/chat_store.rs`, SQLite file `chat.db` in
   the app data dir, separate from the spike's `spike.db`): tables
   `conversations(id, title, profile_id, created_at, updated_at)` and
-  `messages(id, conversation_id, role, content, model, created_at)`. The
-  user message is stored before streaming starts; the assistant message
-  after a clean finish. Commands: `conversation_list(profile_id)` (most
-  recent first, last-message preview), `conversation_create(profile_id,
-  title?)`, `conversation_delete(id)`, `messages_list(conversation_id)`.
+  `messages(id, conversation_id, role, content, model, created_at, status)`
+  (`status`: `complete` default, `in_progress` while streaming — T4b). The
+  user message is stored before streaming starts; the assistant reply is
+  stored as an in-progress row whose content is overwritten per network
+  chunk and finalized on done/stop (see T4b below). Commands:
+  `conversation_list(profile_id)` (most recent first, last-message
+  preview), `conversation_create(profile_id, title?)`,
+  `conversation_delete(id)`, `messages_list(conversation_id)`,
+  `chat_stop(conversation_id)` (T4b).
 - **Model picker**: `models_list()` → `GET {inference_base}/models` with the
   keychain Bearer (active profile), parsed, then filtered by the pure
   `filter_chat_models` (excludes `kokoro`, `whisper`, `qwen3-embedding`,
@@ -99,8 +104,11 @@ NAN_DESKTOP_MOCK_INFERENCE=http://127.0.0.1:14323 pnpm tauri dev
 6 non-chat) and `POST /v1/chat/completions` (Bearer `sk-test-1234567890abcdef`
 — the same key the device mock issues — streams a role-only preamble, 8
 content deltas of a markdown reply with a fenced code block and a multi-byte
-char split across two TCP writes, then `[DONE]`; `trigger-429` / `trigger-500`
-models answer 429/500 for classification tests).
+char split across two TCP writes, then `[DONE]`; `trigger-429` /
+`trigger-500` models answer 429/500 for classification tests;
+`trigger-slow-stream` streams a delta every 200 ms and never ends, for the
+T4b stop check, which reads the recorded counters via `GET /__stats__` and
+clears them via `GET /reset`).
 
 Integration check (mock wire contract + full Rust suite):
 
@@ -113,10 +121,73 @@ node test/t4-check.mjs
 - Tool use / computer use (T8), vision upload + image generation/editing
   (T5) — the model picker deliberately filters those models out for now.
 - Conversation rename, message editing/regeneration, persisted model choice
-  (in-memory per session, default `deepseek-v4-flash`), streaming cancellation
-  button (re-sending into the conversation already aborts the stream).
-- On error the partial assistant text is dropped by design (only the user
-  message stays persisted); no partial-message marker in this MVP.
+  (in-memory per session, default `deepseek-v4-flash`).
+- On a classified error the partial assistant text is dropped by design
+  (only the user message stays persisted) — crash partials ARE persisted
+  since T4b, see below.
+
+## T4b streaming resilience (S3)
+
+The product review's killer differentiator — streaming that survives app
+focus loss, sleep and crashes — is cheap here because the stream task lives
+in the Rust core next to the SQLite store: deltas are persisted as they
+arrive, not at the end.
+
+### Delta persistence (crash safety)
+
+- Once the API answers 2xx, the stream task creates the assistant row with
+  `status='in_progress'` and empty content (a rejected request persists
+  nothing assistant-side, as before).
+- Every received network chunk's deltas are flushed into that row BEFORE the
+  task waits for the next chunk — the same granularity as delta emission,
+  no timer batching. A crash/kill mid-stream leaves everything received so
+  far in `chat.db`; at most one chunk's worth of text can be lost.
+- A clean finish finalizes the row in place (`status='complete'`, final
+  content) — the transcript looks exactly like pre-T4b messages.
+- A classified error deletes the in-progress row: the partial text is
+  dropped by design (unchanged from T4).
+- The row is created AFTER the request history is read, so interrupted
+  leftovers of previous streams stay part of the history as-is while the
+  reply now being generated is not (it has no content yet anyway).
+
+### Stop button
+
+`chat_stop(conversation_id)` aborts the stream task (same generation-counter
+registry as `chat_send`; an entry without a spawned task yet counts as
+active) and completes every `in_progress` row of the conversation — a
+deliberate stop is not a failure: the text that arrived stays persisted,
+with no error event and no interrupted marker. The core emits
+`chat://stopped {conversation_id}` when a stream was actually stopped
+(stopping an idle conversation is a no-op). The composer swaps Send for
+"Stop generating" while streaming; the stopped transcript reloads exactly
+like a finished one.
+
+### Interrupted marker (crash leftovers)
+
+`messages_list` flags every `status='in_progress'` row (at most one per
+conversation: a crash leftover) with `partial: true`. The UI renders a
+subtle "message interrupted" notice instead of a clean bubble. Interrupted
+rows are never resumed network-wise: the next `chat_send` continues the
+conversation history including the partial text as-is.
+
+Schema note: `messages` gains a `status` column (`complete` default).
+Existing databases are migrated in place on open (`ALTER TABLE` when the
+column is missing); legacy rows render as complete.
+
+### Testing
+
+```sh
+node test/t4b-check.mjs
+```
+
+Proves the stop path's transport contract against the mock (model
+`trigger-slow-stream`: one delta every 200 ms, never ends — a client abort
+must be seen as exactly one server-side disconnect after several deltas),
+then runs the full Rust suite. The Rust unit tests pin the store-level
+guarantees: the kill simulation (partial text persisted without done), the
+stop finalize (text kept, no failed marker, idempotent), the `partial` flag
+in `messages_list`, the legacy-schema migration, and the stop registry
+(`abort_stream` aborts the attached task and reports presence).
 
 ## T6 voice: TTS kokoro + dictation whisper (S5, S10)
 

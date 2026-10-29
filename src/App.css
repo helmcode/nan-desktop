@@ -845,6 +845,22 @@ input::placeholder {
   align-self: flex-end;
 }
 
+/* Stop generating (T4b): replaces Send while a stream is active; stopping
+   keeps the text that already arrived. */
+.stop-btn {
+  align-self: flex-end;
+}
+
+/* Interrupted reply (T4b): a crash leftover renders with a subtle marker
+   instead of a clean bubble. */
+.partial-note {
+  display: block;
+  margin-top: 0.5rem;
+  color: var(--faint);
+  font-size: 0.72rem;
+  font-style: italic;
+}
+
 /* ---- voice (T6): dictation + read-aloud ---------------------------------- */
 
 .composer-row {

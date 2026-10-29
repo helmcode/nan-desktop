@@ -11,6 +11,7 @@
 //! - `chat://delta` `{conversation_id, delta}` — one assistant text delta
 //! - `chat://done`  `{conversation_id}` — stream finished cleanly
 //! - `chat://error` `{conversation_id, kind}` — classified failure
+//! - `chat://stopped` `{conversation_id}` — the user stopped the stream (T4b)
 //!
 //! Error kinds: `missing_key` / `unauthorized` (401 → the session must
 //! re-login) / `rate_limited` (429) / `server` (other non-2xx) / `network`
@@ -18,10 +19,14 @@
 //! payloads) / `decode` (audio-only: the TTS reply could not be decoded —
 //! chat never produces this kind).
 //!
-//! Persistence: the user message is stored BEFORE streaming starts; the
-//! assistant message is stored after the stream finishes with the final
-//! accumulated text. On error nothing assistant-side is persisted (the
-//! partial text is dropped by design).
+//! Persistence (T4b): the user message is stored BEFORE streaming starts;
+//! the assistant reply is stored as an `in_progress` row once the API
+//! answers 2xx and every received network chunk's deltas are flushed into
+//! that row before the task waits for the next one — a crash/kill mid-stream
+//! leaves the partial reply in the DB (flagged `partial` by `messages_list`).
+//! A clean finish finalizes the row in place; a deliberate stop finalizes it
+//! too (the text that arrived stays, no failed marker); a classified error
+//! deletes it (the partial text is dropped by design, unchanged from T4).
 //!
 //! Cancel safety: one active stream per conversation. Sending again into the
 //! same conversation aborts the previous stream task (a `Mutex` over a map of
@@ -357,6 +362,27 @@ fn release_stream(state: &ChatState, conversation_id: i64, generation: u64) {
     }
 }
 
+/// Abort and remove the active stream entry for a conversation — the stop
+/// button path (distinct from `reserve_stream`, which replaces the entry
+/// when a new send supersedes the old stream). Returns whether an active
+/// entry existed. An entry without an attached handle yet (a send that has
+/// not spawned its task) counts as active: `attach_stream` will abort that
+/// task the moment it registers.
+fn abort_stream(state: &ChatState, conversation_id: i64) -> Result<bool, String> {
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "chat state mutex poisoned".to_string())?;
+    match guard.remove(&conversation_id.to_string()) {
+        Some((_, Some(handle))) => {
+            handle.abort();
+            Ok(true)
+        }
+        Some((_, None)) => Ok(true),
+        None => Ok(false),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -379,9 +405,11 @@ pub(crate) fn read_profile_key(profile_id: &str) -> Result<String, ErrorKind> {
 ///
 /// Persisting happens here in the command (BEFORE the stream task starts):
 /// the auto-title from the first user message and the user message row. The
-/// assistant message is persisted by the stream task after a clean finish.
-/// Returns immediately; progress arrives via `chat://delta`, `chat://done`
-/// and `chat://error` events.
+/// assistant reply is persisted by the stream task as an `in_progress` row
+/// that deltas overwrite as they arrive (T4b), finalized on a clean finish
+/// or a deliberate stop and deleted on a classified error. Returns
+/// immediately; progress arrives via `chat://delta`, `chat://done`,
+/// `chat://error` and `chat://stopped` events.
 #[tauri::command]
 pub fn chat_send(
     app: AppHandle,
@@ -432,6 +460,25 @@ pub fn chat_send(
         generation,
     ));
     attach_stream(&state, conversation_id, generation, handle)?;
+    Ok(())
+}
+
+/// Stop the active stream for a conversation (T4b stop button): abort the
+/// stream task and finalize whatever text already arrived as a complete
+/// message — a deliberate stop is not a failure, so no `chat://error` and
+/// no interrupted marker. Emits `chat://stopped` when a stream was actually
+/// stopped; stopping an idle conversation is a no-op.
+#[tauri::command]
+pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result<(), String> {
+    let state = app.state::<ChatState>();
+    if !abort_stream(&state, conversation_id)? {
+        return Ok(());
+    }
+    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let conn = chat_store::open_db(&dir)?;
+    chat_store::finalize_in_progress(&conn, conversation_id).map_err(|err| err.to_string())?;
+    chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
+    let _ = window.emit("chat://stopped", DonePayload { conversation_id });
     Ok(())
 }
 
@@ -540,6 +587,23 @@ async fn run_chat_stream(
         return;
     }
 
+    // ---- in-progress assistant row (T4b delta persistence) ----------------
+    // Created only after a 2xx (a rejected request persists nothing
+    // assistant-side). Every received chunk's deltas overwrite this row, so
+    // a kill mid-stream leaves the partial reply in the DB. It is created
+    // AFTER the history read above: interrupted leftovers stay part of the
+    // request history as-is, while this row (the reply now being generated)
+    // must not be.
+    let row_id =
+        match chat_store::insert_in_progress_assistant(&conn, conversation_id, Some(&model)) {
+            Ok(id) => id,
+            Err(_) => {
+                emit_error(ErrorKind::Protocol);
+                release_stream(&state, conversation_id, generation);
+                return;
+            }
+        };
+
     // ---- stream the SSE reply --------------------------------------------
     use futures_util::StreamExt;
 
@@ -555,6 +619,7 @@ async fn run_chat_stream(
             Ok(bytes) => {
                 byte_buffer.extend_from_slice(&bytes);
                 sse_buffer.push_str(&decode_incremental(&mut byte_buffer));
+                let mut pending_flush = false;
                 for data in parse_sse_buffer(&mut sse_buffer) {
                     if is_done_sentinel(&data) {
                         finished = true;
@@ -562,6 +627,7 @@ async fn run_chat_stream(
                     }
                     if let DeltaOutcome::Delta(text) = extract_delta(&data) {
                         accumulated.push_str(&text);
+                        pending_flush = true;
                         let _ = window.emit(
                             "chat://delta",
                             DeltaPayload {
@@ -573,6 +639,15 @@ async fn run_chat_stream(
                 }
                 if finished {
                     break;
+                }
+                if pending_flush {
+                    // T4b: flush everything received so far BEFORE waiting
+                    // for the next chunk — a kill from here on keeps every
+                    // byte that reached the app.
+                    if chat_store::update_message_content(&conn, row_id, &accumulated).is_err() {
+                        failed = Some(ErrorKind::Protocol);
+                        break;
+                    }
                 }
             }
             Err(err) => {
@@ -600,16 +675,17 @@ async fn run_chat_stream(
 
     // ---- persist + notify --------------------------------------------------
     match failed {
-        Some(kind) => emit_error(kind), // partial text is dropped by design
+        Some(kind) => {
+            // A failed stream drops the partial text by design (unchanged
+            // from T4): remove the in-progress row, then report the error.
+            let _ = chat_store::delete_message(&conn, row_id);
+            emit_error(kind);
+        }
         None => {
-            let persisted = chat_store::insert_message(
-                &conn,
-                conversation_id,
-                "assistant",
-                &accumulated,
-                Some(&model),
-            )
-            .and_then(|_| chat_store::touch_conversation(&conn, conversation_id));
+            // Clean finish OR deliberate stop: finalize the in-progress row
+            // in place with the final accumulated text.
+            let persisted = chat_store::finalize_message(&conn, row_id, &accumulated)
+                .and_then(|_| chat_store::touch_conversation(&conn, conversation_id));
             match persisted {
                 Ok(()) => {
                     let _ = window.emit("chat://done", DonePayload { conversation_id });
@@ -749,6 +825,92 @@ mod tests {
         // Only the first choice is consumed (n=1 in this app).
         let multi = r#"{"choices":[{"delta":{"content":"a"}},{"delta":{"content":"b"}}]}"#;
         assert_eq!(extract_delta(multi), DeltaOutcome::Delta("a".to_string()));
+    }
+
+    // ---- abort_stream (T4b stop button) ------------------------------------
+
+    /// A stream task that never completes on its own: only an abort ends it.
+    fn spawn_pending_task() -> tauri::async_runtime::JoinHandle<()> {
+        tauri::async_runtime::spawn(async { std::future::pending::<()>().await })
+    }
+
+    #[test]
+    fn abort_stream_aborts_the_attached_task_and_reports_presence() {
+        let state = ChatState::default();
+        let generation = reserve_stream(&state, 7).expect("reserve");
+        let handle = spawn_pending_task();
+        attach_stream(&state, 7, generation, handle).expect("attach");
+
+        assert!(
+            abort_stream(&state, 7).expect("abort"),
+            "an active stream entry existed"
+        );
+        // The registry entry is gone: a second stop is a no-op `false`, and
+        // the slot is fresh again for a new send (generations only need to
+        // exceed the entry currently in the map — at most one per
+        // conversation exists at any time).
+        assert!(!abort_stream(&state, 7).expect("second abort"));
+        assert_eq!(reserve_stream(&state, 7).expect("reserve again"), 1);
+    }
+
+    #[test]
+    fn abort_stream_reports_absence_without_an_entry() {
+        let state = ChatState::default();
+        assert!(!abort_stream(&state, 4242).expect("abort"));
+    }
+
+    #[test]
+    fn aborted_task_stops_at_its_next_await_point() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// Sets a flag when dropped — a tokio abort drops the task's future,
+        /// so the flag proves the task really stopped.
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let state = ChatState::default();
+        let generation = reserve_stream(&state, 9).expect("reserve");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
+        let dropped_in_task = dropped.clone();
+        let started_in_task = started.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            started_in_task.store(true, Ordering::SeqCst);
+            let _guard = DropFlag(dropped_in_task);
+            // Blocked forever unless aborted.
+            std::future::pending::<()>().await;
+        });
+        attach_stream(&state, 9, generation, handle).expect("attach");
+
+        // Wait until the task actually started polling: aborting before the
+        // first poll would cancel it correctly, but the guard (created inside
+        // the body) would never have existed to drop.
+        let started_by = std::time::Instant::now() + Duration::from_secs(5);
+        while !started.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < started_by,
+                "the spawned task never started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(abort_stream(&state, 9).expect("abort"));
+
+        // The aborted task's future is dropped promptly by the runtime; if
+        // the abort had no effect the flag would never set.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !dropped.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "aborted task's future was never dropped — abort had no effect"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     // ---- classify_chat_status ----------------------------------------------

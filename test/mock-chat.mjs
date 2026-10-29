@@ -14,9 +14,15 @@
 //                                 deliberately split across two TCP writes),
 //                                 then `data: [DONE]`.
 //                                 model "trigger-429" → 429, "trigger-500" → 500.
+//                                 model "trigger-slow-stream" (T4b) → one small
+//                                 content delta every 200 ms, forever — no
+//                                 [DONE], no end: the client must disconnect
+//                                 to stop it (the transport contract the stop
+//                                 button relies on).
 //                                 stream:false → a plain (non-streaming) reply.
-//   GET  /reset                 → clears recorded state (symmetry with the
-//                                 device mock; this mock is stateless).
+//   GET  /__stats__             → { deltasSent, clientDisconnects } recorded
+//                                 since the last /reset (T4b check).
+//   GET  /reset                 → clears the recorded stats.
 //   GET  /__probe__             → 200, readiness probe for the checks.
 //
 // Usage: node test/mock-chat.mjs
@@ -91,6 +97,26 @@ const EMOJI_CHUNK_INDEX = CONTENT_CHUNKS.findIndex((chunk) => chunk.includes(EMO
 
 const STREAM_EVENT_DELAY_MS = 15;
 
+// T4b slow-stream trigger: one delta every 200 ms, never ending.
+const SLOW_EVENT_DELAY_MS = 200;
+
+// Recorded since the last /reset: how many content deltas were written and
+// how many clients disconnected mid-stream (closed before the response
+// finished) — the T4b check asserts both.
+const stats = { deltasSent: 0, clientDisconnects: 0 };
+
+// Track premature client disconnects: `close` fires on normal completion
+// too, so only count it when the response never finished.
+function trackDisconnect(res) {
+  let finished = false;
+  res.on("finish", () => {
+    finished = true;
+  });
+  res.on("close", () => {
+    if (!finished) stats.clientDisconnects += 1;
+  });
+}
+
 function readBody(req) {
   return new Promise((resolve) => {
     let data = "";
@@ -127,6 +153,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Stream the SSE reply: role-only delta → 8 content deltas → [DONE].
 async function streamReply(res, requestedModel) {
+  trackDisconnect(res);
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-store",
@@ -138,6 +165,7 @@ async function streamReply(res, requestedModel) {
 
   for (let i = 0; i < CONTENT_CHUNKS.length; i += 1) {
     const line = Buffer.from(chunkEvent({ content: CONTENT_CHUNKS[i] }));
+    stats.deltasSent += 1;
     if (i === EMOJI_CHUNK_INDEX) {
       // Split the bytes mid-emoji across two writes.
       const before = Buffer.byteLength(
@@ -161,6 +189,30 @@ async function streamReply(res, requestedModel) {
   res.end();
 }
 
+// T4b slow-stream trigger: one small content delta every SLOW_EVENT_DELAY_MS
+// forever — no [DONE], no end. Only the client going away stops it, which is
+// exactly what the stop button does to a live stream (abort the read). The
+// writes are guarded: once the client is gone, res.write can throw.
+function streamSlowReply(res) {
+  trackDisconnect(res);
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-store",
+    connection: "keep-alive",
+  });
+  let index = 0;
+  const timer = setInterval(() => {
+    index += 1;
+    stats.deltasSent += 1;
+    try {
+      res.write(chunkEvent({ content: `chunk ${index} ` }));
+    } catch {
+      // Client gone — the close handler below stops this interval.
+    }
+  }, SLOW_EVENT_DELAY_MS);
+  res.on("close", () => clearInterval(timer));
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, BASE);
 
@@ -170,7 +222,14 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/reset") {
-    sendJson(res, 200, { ok: true, note: "stateless mock" });
+    stats.deltasSent = 0;
+    stats.clientDisconnects = 0;
+    sendJson(res, 200, { ok: true, note: "recorded stats cleared" });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/__stats__") {
+    sendJson(res, 200, { ...stats });
     return;
   }
 
@@ -209,6 +268,10 @@ const server = createServer(async (req, res) => {
     }
     if (body.model === "trigger-500") {
       sendJson(res, 500, { error: { message: "internal error" } });
+      return;
+    }
+    if (body.model === "trigger-slow-stream") {
+      streamSlowReply(res);
       return;
     }
     if (body.stream === true) {
