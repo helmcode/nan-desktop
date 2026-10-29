@@ -16,7 +16,7 @@
 //! - `tools_allow_run_command` defaults to FALSE and lives in the same
 //!   store so the Rust core, not the renderer, owns the switch.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -265,6 +265,15 @@ fn reject_symlink_components(canonical: &Path) -> Result<(), Rejection> {
     let mut prefix: PathBuf = PathBuf::new();
     for component in canonical.components() {
         prefix.push(component);
+        // Prefix (e.g. \\?\C:) and root separators are not stat-able objects:
+        // Windows rejects `symlink_metadata("\\\\?\\C:")` with "Incorrect
+        // function" (os error 1). Only named components can be symlinks.
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {
+                continue;
+            }
+            _ => {}
+        }
         match std::fs::symlink_metadata(&prefix) {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
