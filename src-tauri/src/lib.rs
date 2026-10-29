@@ -14,6 +14,7 @@ mod chat;
 mod chat_store;
 mod conn_test;
 mod device_flow;
+mod images;
 mod profile;
 // Spike-only module: the demo DB commands it serves are not registered in
 // release builds (security review B1/B6 — no keychain or arbitrary-IO surface
@@ -239,7 +240,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(device_flow::DeviceLoginState::default())
         .manage(chat::ChatState::default())
-        .manage(tts::TtsState::default());
+        .manage(tts::TtsState::default())
+        .manage(images::ImagesState::default());
     #[cfg(debug_assertions)]
     let builder = builder
         .manage(SseState::default())
@@ -262,7 +264,9 @@ pub fn run() {
             chat::messages_list,
             tts::tts_speak,
             tts::tts_stop,
-            stt::stt_transcribe
+            stt::stt_transcribe,
+            images::image_generate,
+            images::image_cancel
         ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -280,7 +284,9 @@ pub fn run() {
         chat::messages_list,
         tts::tts_speak,
         tts::tts_stop,
-        stt::stt_transcribe
+        stt::stt_transcribe,
+        images::image_generate,
+        images::image_cancel
     ]);
     builder
         .run(tauri::generate_context!())

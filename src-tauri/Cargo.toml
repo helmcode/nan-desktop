@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -31,6 +31,11 @@ rodio = { version = "0.23.0", default-features = false, features = ["playback", 
 futures-util = "0.3.34"
 keyring = { version = "4.2.0", features = ["apple-native-keyring-store"] }
 rusqlite = { version = "0.41.0", features = ["bundled"] }
+# Inline image generation (T5, S5): uuid v4 file names for the saved PNGs and
+# base64 decoding of the OpenAI images `b64_json` reply. Both are already in
+# the dependency tree transitively (tauri uses uuid; reqwest/tauri use base64).
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.23"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

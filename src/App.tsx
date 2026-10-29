@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -64,6 +64,23 @@ interface ChatStopped {
 interface TtsError {
   kind: string;
 }
+// Image payloads (T5): status events plus the saved file's path only — the
+// image bytes never cross the IPC boundary; the renderer loads the file
+// through the Tauri asset protocol (scope: app data images dir).
+interface ImagesStarted {
+  conversation_id: number;
+}
+interface ImagesDone {
+  conversation_id: number;
+  media_path: string;
+}
+interface ImagesError {
+  conversation_id: number;
+  kind: string;
+}
+interface ImagesStopped {
+  conversation_id: number;
+}
 interface ConversationView {
   id: number;
   title: string;
@@ -79,6 +96,8 @@ interface ChatMessageRow {
   created_at: string;
   // T4b: crash leftovers of a mid-stream kill — the reply never finished.
   partial: boolean;
+  // T5: absolute path of the generated image (assistant image rows only).
+  media_path: string | null;
 }
 
 // One-line description per locked profile (S2: exactly two, no URLs).
@@ -105,6 +124,19 @@ const CHAT_ERROR_LABELS: Record<string, string> = {
   protocol: "Something went wrong on this device. Try again.",
   decode: "The audio reply could not be decoded. Try again.",
 };
+
+// Image error kinds (src-tauri/src/images.rs) → inline user copy. On this
+// surface 429 means the tenant's monthly image quota is exhausted (the
+// shared 100-images/month pool), so it gets a dedicated quota message.
+const IMAGE_ERROR_LABELS: Record<string, string> = {
+  ...CHAT_ERROR_LABELS,
+  rate_limited: "Monthly image quota reached. Your allowance resets next month.",
+  decode: "The image reply could not be decoded. Try again.",
+};
+
+function imageErrorLabel(kind: string): string {
+  return IMAGE_ERROR_LABELS[kind] ?? "Something went wrong. Try again.";
+}
 
 // Must match src-tauri/src/chat.rs DEFAULT_MODEL (the renderer cannot import
 // Rust constants; the Rust side falls back to the same value).
@@ -137,6 +169,20 @@ const TTS_ERROR_KINDS = new Set([
   "protocol",
   "decode",
 ]);
+
+// Must match src-tauri/src/images.rs bounds (512..1280, multiples of 16; the
+// Rust side rejects anything else with a `protocol` command error before any
+// request is made). 1024x1024 is the 1k-tier default.
+const IMAGE_SIZES = [
+  "1024x1024",
+  "512x512",
+  "768x512",
+  "512x768",
+  "1280x768",
+  "768x1280",
+  "1152x896",
+];
+const DEFAULT_IMAGE_SIZE = "1024x1024";
 
 // Command errors arrive either as a classified ErrorKind string (stt/tts)
 // or as a free-form message; render known kinds with the shared copy.
@@ -422,6 +468,14 @@ function ChatShell({
   const [sessionExpired, setSessionExpired] = useState(false);
   const [inlineError, setInlineError] = useState<string>("");
 
+  // Image mode (T5): the composer switches into image generation — the
+  // prompt is sent to `image_generate` and the reply renders inline.
+  const [imageMode, setImageMode] = useState(false);
+  const [imageSize, setImageSize] = useState(DEFAULT_IMAGE_SIZE);
+  const [imageGeneratingIds, setImageGeneratingIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+
   // Voice (T6): TTS playback + dictation. The chosen voice persists across
   // sessions; only the three app-locked kokoro voices are offered.
   const [voice, setVoice] = useState<string>(() => {
@@ -552,6 +606,50 @@ function ChatShell({
           setInlineError(chatErrorLabel(kind));
         }
         void refreshConversations();
+      }),
+    ];
+    return () => {
+      unlistens.forEach((promise) => {
+        promise.then((unlisten) => unlisten());
+      });
+    };
+  }, [loadMessages, refreshConversations]);
+
+  // Image event transport (T5): the Rust core persists the message row
+  // before `done` fires, so reloading the transcript renders the image.
+  useEffect(() => {
+    const markGenerating = (conversationId: number, generating: boolean): void => {
+      setImageGeneratingIds((prev) => {
+        const next = new Set(prev);
+        if (generating) next.add(conversationId);
+        else next.delete(conversationId);
+        return next;
+      });
+    };
+    const unlistens: Promise<UnlistenFn>[] = [
+      listen<ImagesStarted>("images://started", (event) => {
+        markGenerating(event.payload.conversation_id, true);
+      }),
+      listen<ImagesDone>("images://done", (event) => {
+        const conversationId = event.payload.conversation_id;
+        markGenerating(conversationId, false);
+        if (activeConvRef.current === conversationId) {
+          void loadMessages(conversationId);
+        }
+        void refreshConversations();
+      }),
+      listen<ImagesError>("images://error", (event) => {
+        const { conversation_id, kind } = event.payload;
+        markGenerating(conversation_id, false);
+        if (kind === "unauthorized") {
+          setSessionExpired(true);
+        } else if (activeConvRef.current === conversation_id) {
+          setInlineError(imageErrorLabel(kind));
+        }
+        void refreshConversations();
+      }),
+      listen<ImagesStopped>("images://stopped", (event) => {
+        markGenerating(event.payload.conversation_id, false);
       }),
     ];
     return () => {
@@ -729,6 +827,9 @@ function ChatShell({
 
   const streamingActive = activeConvId !== null && streamingIds.has(activeConvId);
   const activeDraft = activeConvId !== null ? drafts.get(activeConvId) : undefined;
+  const imageGeneratingActive =
+    activeConvId !== null && imageGeneratingIds.has(activeConvId);
+  const composerBusy = streamingActive || imageGeneratingActive;
 
   // Stop button (T4b): abort the active stream; the text that already
   // arrived stays persisted. The chat://stopped handler clears the draft
@@ -741,6 +842,25 @@ function ChatShell({
     } catch (err) {
       setInlineError(commandErrorLabel(err));
     }
+  }, []);
+
+  // Cancel button (T5): abort the active image generation (~1 min — worth
+  // an escape hatch). image_cancel emits images://stopped; the local clear
+  // makes the UI reset instant even if the event races.
+  const cancelImage = useCallback(async (): Promise<void> => {
+    const conversationId = activeConvRef.current;
+    if (conversationId === null) return;
+    try {
+      await invoke("image_cancel", { conversationId });
+    } catch (err) {
+      setInlineError(commandErrorLabel(err));
+      return;
+    }
+    setImageGeneratingIds((prev) => {
+      const next = new Set(prev);
+      next.delete(conversationId);
+      return next;
+    });
   }, []);
 
   const send = useCallback(async (): Promise<void> => {
@@ -770,6 +890,7 @@ function ChatShell({
           model: null,
           created_at: "",
           partial: false,
+          media_path: null,
         },
       ]);
       setComposer("");
@@ -796,11 +917,47 @@ function ChatShell({
     }
   }, [composer, streamingActive, activeConvId, model, refreshConversations]);
 
+  // Image send (T5): nothing is stored client-side — the Rust core saves
+  // the PNG, appends the assistant row (media_path) and only then emits
+  // done, which reloads the transcript.
+  const sendImage = useCallback(async (): Promise<void> => {
+    const prompt = composer.trim();
+    if (!prompt || imageGeneratingActive) return;
+    setSessionExpired(false);
+    setInlineError("");
+    const profileId = activeProfileRef.current;
+    if (!profileId) return;
+
+    let conversationId = activeConvId;
+    try {
+      if (conversationId === null) {
+        conversationId = await invoke<number>("conversation_create", { profileId });
+        activeConvRef.current = conversationId;
+        setActiveConvId(conversationId);
+      }
+      setImageGeneratingIds((prev) => new Set(prev).add(conversationId as number));
+      setComposer("");
+      await invoke("image_generate", {
+        conversationId,
+        prompt,
+        size: imageSize,
+      });
+    } catch (err) {
+      setImageGeneratingIds((prev) => {
+        const next = new Set(prev);
+        if (conversationId !== null) next.delete(conversationId);
+        return next;
+      });
+      setInlineError(commandErrorLabel(err));
+      void refreshConversations();
+    }
+  }, [composer, imageGeneratingActive, activeConvId, imageSize, refreshConversations]);
+
   // Auto-scroll to the newest content.
   useEffect(() => {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, activeDraft, streamingActive]);
+  }, [messages, activeDraft, streamingActive, imageGeneratingActive]);
 
   return (
     <main className="chat-shell">
@@ -898,6 +1055,26 @@ function ChatShell({
               </option>
             ))}
           </select>
+          {imageMode && (
+            <>
+              <label className="model-label voice-label" htmlFor="image-size-select">
+                Size
+              </label>
+              <select
+                id="image-size-select"
+                className="model-select"
+                value={imageSize}
+                onChange={(e) => setImageSize(e.currentTarget.value)}
+                aria-label="Image size"
+              >
+                {IMAGE_SIZES.map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
         </header>
 
         <div className="messages" ref={messagesRef}>
@@ -911,30 +1088,44 @@ function ChatShell({
           )}
           {messages.map((m) =>
             m.role === "assistant" ? (
-              <article
-                key={m.id}
-                className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}
-              >
-                <Markdown text={m.content} />
-                {m.partial && (
-                  <span className="partial-note" role="note">
-                    message interrupted
-                  </span>
-                )}
-                {m.content.trim().length > 0 && (
-                  <button
-                    type="button"
-                    className="speak-btn"
-                    aria-label={
-                      speakingMsgId === m.id ? "Stop reading aloud" : "Read message aloud"
-                    }
-                    title={speakingMsgId === m.id ? "Stop" : "Read aloud"}
-                    onClick={() => void toggleSpeak(m)}
-                  >
-                    {speakingMsgId === m.id ? "■" : "▶"}
-                  </button>
-                )}
-              </article>
+              m.media_path ? (
+                // T5: inline generated image. The renderer loads the saved
+                // file through the Tauri asset protocol (scope: the app
+                // data images dir) — the bytes never crossed IPC.
+                <article key={m.id} className="msg msg-assistant msg-image-row">
+                  <img
+                    className="msg-image"
+                    src={convertFileSrc(m.media_path)}
+                    alt={m.content}
+                  />
+                  <p className="image-caption">{m.content}</p>
+                </article>
+              ) : (
+                <article
+                  key={m.id}
+                  className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}
+                >
+                  <Markdown text={m.content} />
+                  {m.partial && (
+                    <span className="partial-note" role="note">
+                      message interrupted
+                    </span>
+                  )}
+                  {m.content.trim().length > 0 && (
+                    <button
+                      type="button"
+                      className="speak-btn"
+                      aria-label={
+                        speakingMsgId === m.id ? "Stop reading aloud" : "Read message aloud"
+                      }
+                      title={speakingMsgId === m.id ? "Stop" : "Read aloud"}
+                      onClick={() => void toggleSpeak(m)}
+                    >
+                      {speakingMsgId === m.id ? "■" : "▶"}
+                    </button>
+                  )}
+                </article>
+              )
             ) : (
               <article key={m.id} className="msg msg-user">
                 <p className="msg-user-text">{m.content}</p>
@@ -945,6 +1136,12 @@ function ChatShell({
             <article className="msg msg-assistant streaming">
               <Markdown text={activeDraft} />
               <span className="caret" aria-hidden="true" />
+            </article>
+          )}
+          {imageGeneratingActive && (
+            <article className="msg msg-assistant image-pending" role="status">
+              <span className="pulse-dot" aria-hidden="true" />
+              Generating image (~1 min)
             </article>
           )}
           {ttsHint && (
@@ -966,6 +1163,17 @@ function ChatShell({
             </p>
           )}
           <div className="composer-row">
+            <button
+              type="button"
+              className={`btn icon-btn image-btn${imageMode ? " active" : ""}`}
+              aria-pressed={imageMode}
+              aria-label={imageMode ? "Switch to text chat" : "Image mode"}
+              title={imageMode ? "Switch to text chat" : "Generate an image"}
+              onClick={() => setImageMode((value) => !value)}
+              disabled={composerBusy}
+            >
+              img
+            </button>
             <textarea
               className="composer-input"
               value={composer}
@@ -973,14 +1181,22 @@ function ChatShell({
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
-                  void send();
+                  void (imageMode ? sendImage() : send());
                 }
               }}
               placeholder={
-                sttBusy ? "Transcribing…" : streamingActive ? "Waiting for the reply…" : "Message…"
+                sttBusy
+                  ? "Transcribing…"
+                  : imageGeneratingActive
+                    ? "Generating image…"
+                    : streamingActive
+                      ? "Waiting for the reply…"
+                      : imageMode
+                        ? "Describe the image"
+                        : "Message…"
               }
               rows={3}
-              disabled={streamingActive}
+              disabled={composerBusy}
             />
             <button
               type="button"
@@ -988,11 +1204,21 @@ function ChatShell({
               aria-label={recording ? "Stop recording" : "Dictate"}
               title={recording ? "Stop recording" : "Dictate"}
               onClick={() => void toggleRecording()}
-              disabled={sttBusy || streamingActive}
+              disabled={sttBusy || composerBusy}
             >
               {recording ? "■" : "●"}
             </button>
-            {streamingActive ? (
+            {imageGeneratingActive ? (
+              // T5: while an image is generating (~1 min), Send is replaced
+              // by a cancel button — the task aborts, nothing is persisted.
+              <button
+                type="button"
+                className="btn stop-btn"
+                onClick={() => void cancelImage()}
+              >
+                Cancel image
+              </button>
+            ) : streamingActive ? (
               // T4b: while streaming, Send is replaced by Stop — the reply
               // is being persisted as it arrives, so stopping keeps it.
               <button
@@ -1006,10 +1232,10 @@ function ChatShell({
               <button
                 type="button"
                 className="btn btn-primary send-btn"
-                onClick={() => void send()}
+                onClick={() => void (imageMode ? sendImage() : send())}
                 disabled={composer.trim().length === 0}
               >
-                Send
+                {imageMode ? "Generate" : "Send"}
               </button>
             )}
           </div>

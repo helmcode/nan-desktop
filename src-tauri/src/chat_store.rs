@@ -72,6 +72,10 @@ pub struct ChatMessageRow {
     /// T4b: `true` only for `status='in_progress'` crash leftovers — the
     /// reply never finished, so the UI renders an interrupted notice.
     pub partial: bool,
+    /// T5: absolute path of the generated image file for assistant image
+    /// messages (`qwen-image-2.1`). `None` for every text row; the renderer
+    /// loads the file through the asset protocol (never the raw bytes).
+    pub media_path: Option<String>,
 }
 
 /// Create both tables if missing and enable foreign keys for this
@@ -92,13 +96,15 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
              role TEXT NOT NULL,
              content TEXT NOT NULL,
              model TEXT,
+             media_path TEXT,
              created_at TEXT NOT NULL,
              status TEXT NOT NULL DEFAULT 'complete'
          );
          CREATE INDEX IF NOT EXISTS idx_messages_conversation
              ON messages(conversation_id, id);",
     )?;
-    ensure_status_column(conn)
+    ensure_status_column(conn)?;
+    ensure_media_path_column(conn)
 }
 
 /// Pre-T4b databases have a `messages` table without the `status` column
@@ -114,6 +120,21 @@ fn ensure_status_column(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(
             "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'complete';",
         )?;
+    }
+    Ok(())
+}
+
+/// Pre-T5 databases have a `messages` table without the `media_path` column
+/// (`CREATE TABLE IF NOT EXISTS` is a no-op there). Add it in place — NULL
+/// for every pre-existing row, so old messages render as text-only.
+fn ensure_media_path_column(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let has_media_path: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'media_path'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_media_path == 0 {
+        conn.execute_batch("ALTER TABLE messages ADD COLUMN media_path TEXT;")?;
     }
     Ok(())
 }
@@ -203,6 +224,30 @@ pub fn insert_message(
         "INSERT INTO messages (conversation_id, role, content, model, created_at)
          VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
         rusqlite::params![conversation_id, role, content, model],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Insert an assistant image message (T5): `content` is the generation
+/// prompt, `model` the image model, `media_path` the saved file's absolute
+/// path. Written directly as `status='complete'` (no streaming lifecycle).
+pub fn insert_image_message(
+    conn: &Connection,
+    conversation_id: i64,
+    content: &str,
+    model: &str,
+    media_path: &str,
+) -> Result<i64, rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO messages (conversation_id, role, content, model, media_path, created_at, status)
+         VALUES (?1, 'assistant', ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?5)",
+        rusqlite::params![
+            conversation_id,
+            content,
+            model,
+            media_path,
+            STATUS_COMPLETE
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -314,7 +359,7 @@ fn last_message(
     conversation_id: i64,
 ) -> Result<Option<ChatMessageRow>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, conversation_id, role, content, model, created_at, status
+        "SELECT id, conversation_id, role, content, model, media_path, created_at, status
          FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1",
     )?;
     let mut rows = stmt.query_map([conversation_id], |row| {
@@ -324,9 +369,10 @@ fn last_message(
             role: row.get(2)?,
             content: row.get(3)?,
             model: row.get(4)?,
-            created_at: row.get(5)?,
+            media_path: row.get(5)?,
+            created_at: row.get(6)?,
             partial: {
-                let status: String = row.get(6)?;
+                let status: String = row.get(7)?;
                 status == STATUS_IN_PROGRESS
             },
         })
@@ -344,7 +390,7 @@ pub fn list_messages(
     conversation_id: i64,
 ) -> Result<Vec<ChatMessageRow>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, conversation_id, role, content, model, created_at, status
+        "SELECT id, conversation_id, role, content, model, media_path, created_at, status
          FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
     )?;
     let rows = stmt.query_map([conversation_id], |row| {
@@ -354,9 +400,10 @@ pub fn list_messages(
             role: row.get(2)?,
             content: row.get(3)?,
             model: row.get(4)?,
-            created_at: row.get(5)?,
+            media_path: row.get(5)?,
+            created_at: row.get(6)?,
             partial: {
-                let status: String = row.get(6)?;
+                let status: String = row.get(7)?;
                 status == STATUS_IN_PROGRESS
             },
         })
@@ -663,6 +710,92 @@ mod tests {
         let messages = list_messages(&conn, conv).expect("list");
         assert_eq!(messages.len(), 2);
         assert!(messages[1].partial);
+    }
+
+    // ---- T5: media_path (inline image messages) -------------------------------
+
+    #[test]
+    fn image_message_roundtrips_with_media_path() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+
+        let row = insert_image_message(
+            &conn,
+            conv,
+            "a cat on a roof at dusk",
+            "qwen-image-2.1",
+            "/data/images/abc.png",
+        )
+        .expect("insert image message");
+
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, row);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].content, "a cat on a roof at dusk");
+        assert_eq!(messages[0].model.as_deref(), Some("qwen-image-2.1"));
+        assert_eq!(
+            messages[0].media_path.as_deref(),
+            Some("/data/images/abc.png")
+        );
+        assert!(!messages[0].partial, "image rows are written complete");
+    }
+
+    #[test]
+    fn plain_messages_list_with_no_media_path() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        insert_message(&conn, conv, "user", "hello", None).expect("insert");
+        insert_message(&conn, conv, "assistant", "hi", Some("m")).expect("insert");
+
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].media_path.is_none(), "user rows carry no media");
+        assert!(messages[1].media_path.is_none(), "text rows carry no media");
+    }
+
+    #[test]
+    fn legacy_schema_without_media_path_column_is_migrated() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = Connection::open(dir.path().join("legacy-t5.db")).expect("open");
+        // The exact pre-T5 (post-T4b) schema: `status` exists, `media_path`
+        // does not.
+        conn.execute_batch(
+            "CREATE TABLE conversations (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 title TEXT NOT NULL DEFAULT '',
+                 profile_id TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                 role TEXT NOT NULL,
+                 content TEXT NOT NULL,
+                 model TEXT,
+                 created_at TEXT NOT NULL,
+                 status TEXT NOT NULL DEFAULT 'complete'
+             );",
+        )
+        .expect("legacy schema");
+        let conv = insert_conversation(&conn, "nan", "legacy").expect("insert");
+        insert_message(&conn, conv, "user", "old message", None).expect("insert");
+
+        // Opening the store with the current schema migrates in place.
+        ensure_schema(&conn).expect("migrate");
+
+        // Old rows survive with no media; new image rows work.
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].media_path.is_none());
+        insert_image_message(&conn, conv, "a castle", "qwen-image-2.1", "/data/x.png")
+            .expect("insert image after migration");
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].media_path.as_deref(), Some("/data/x.png"));
     }
 
     #[test]

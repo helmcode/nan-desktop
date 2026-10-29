@@ -900,6 +900,42 @@ input::placeholder {
   animation: pulse 1.6s ease-in-out infinite;
 }
 
+/* ---- image mode (T5): inline generated images ----------------------------- */
+
+.image-btn {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
+.image-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.msg-image-row .msg-image {
+  display: block;
+  max-width: min(100%, 420px);
+  max-height: 420px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg);
+}
+
+.msg-image-row .image-caption {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.image-pending {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 /* ---- panels (T1 spike, inside the sidebar) ------------------------------- */
 
 .panel {

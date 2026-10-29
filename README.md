@@ -90,6 +90,8 @@ Both mocks are dependency-free Node servers:
 ```sh
 node test/mock-device.mjs      # mock login platform   on http://127.0.0.1:14322
 node test/mock-chat.mjs        # mock inference API    on http://127.0.0.1:14323
+node test/mock-voice.mjs       # mock voice inference  on http://127.0.0.1:14324
+node test/mock-images.mjs      # mock image inference  on http://127.0.0.1:14325
 ```
 
 Run them together, then the app against both (debug builds only — release
@@ -118,8 +120,9 @@ node test/t4-check.mjs
 
 ### What is NOT in the MVP
 
-- Tool use / computer use (T8), vision upload + image generation/editing
-  (T5) — the model picker deliberately filters those models out for now.
+- Tool use / computer use (T8), vision upload and image EDITING (the image
+  GENERATION half of T5 shipped — see below; editing stays out of v1 per the
+  product review) — the model picker still filters those models out.
 - Conversation rename, message editing/regeneration, persisted model choice
   (in-memory per session, default `deepseek-v4-flash`).
 - On a classified error the partial assistant text is dropped by design
@@ -259,6 +262,109 @@ node test/t6-check.mjs
 - macOS microphone permission metadata (Info.plist) is not yet wired — on a
   clean macOS install the browser layer may deny `getUserMedia`; the UI
   surfaces it as an inline hint (T7 packaging will add the plist entry).
+
+## T5 inline image generation (S5)
+
+The composer's small `img` toggle switches it into image mode: the prompt
+placeholder becomes "Describe the image", a Size dropdown appears in the
+header (default `1024x1024`), and sending runs `image_generate` in the
+active conversation. The generated image renders INLINE in the transcript
+under the assistant bubble, with the prompt as its caption.
+
+**v1 scope (L13 product review): generation ONLY — there is no image
+editing UI** (`flux-2-klein` / `/v1/images/edits` stay out; the model picker
+keeps filtering those ids).
+
+### Architecture: bytes stay in the Rust core (S4)
+
+`src-tauri/src/images.rs` mirrors the chat/TTS surfaces: the keychain key is
+read by the core, `POST {inference_base}/images/generations` is sent with
+`{model: "qwen-image-2.1", prompt, size}`, and the reply is decoded and
+saved by the core. The renderer only ever receives status events plus the
+saved file's path:
+
+- `images://started` `{conversation_id}` — the task began
+- `images://done` `{conversation_id, media_path}` — image saved AND persisted
+- `images://error` `{conversation_id, kind}` — classified failure
+- `images://stopped` `{conversation_id}` — cancelled or superseded
+
+**The image bytes never cross the IPC boundary** — no base64 payloads in any
+event; the transcript's `<img>` loads the saved file through the Tauri
+asset protocol (`convertFileSrc`).
+
+- **Reply shape**: only `b64_json` is accepted. A `url` reply is rejected
+  with kind `protocol` (S12: a url would point at an arbitrary remote host,
+  and the binary refuses any endpoint outside the two owned tenants — it
+  fails closed instead of fetching).
+- **Sizes**: `WIDTHxHEIGHT`, each dimension in `512..1280` and a multiple of
+  16 (bridge-side limits). Invalid sizes are rejected locally (kind
+  `protocol`) before any request; presets: `1024x1024` (default),
+  `512x512`, `768x512`, `512x768`, `1280x768`, `768x1280`, `1152x896`.
+- **Error kinds** (`images://error`): chat's `ErrorKind`. `rate_limited`
+  (429) means the tenant's monthly image quota was exhausted — the shared
+  100-images/month pool — and renders "Monthly image quota reached";
+  `unauthorized` triggers the session-expired banner; `decode` covers an
+  undecodable `b64_json` payload.
+- **Persistence**: on success the core appends ONE assistant row (`content`
+  = the prompt, `model` = `qwen-image-2.1`, `media_path` = the file path).
+  The `messages` table gained a `media_path TEXT` column, migrated in place
+  on open (same pattern as the `status` column); pre-existing rows read as
+  NULL. If the DB insert fails after the file was written, the file is
+  deleted — no orphan files.
+- **Cancel safety**: the same managed-task registry as the chat streams —
+  one active generation per conversation (different conversations generate
+  in parallel), a new send aborts the previous one, and while the ~1-minute
+  generation runs the composer shows "Generating image (~1 min)" with a
+  `Cancel image` button (`image_cancel`).
+
+### Asset protocol scope (renderer file access)
+
+Loading local images from the webview needs Tauri's asset protocol, which
+is a renderer-reachable file-read primitive — so it is scoped as tightly as
+possible in `tauri.conf.json`:
+
+```json
+"assetProtocol": { "enable": true, "scope": ["$APPDATA/images/**"] }
+```
+
+Only the generated-images directory is exposed — NOT the whole app data
+dir (`chat.db`, `profiles.json` and the keychain-backed state stay
+unreadable from the renderer). The CSP gained the matching `img-src
+asset: http://asset.localhost` sources (production and dev), and the `tauri`
+crate gained the `protocol-asset` feature (required by the build script
+once `enable` is set).
+
+### Testing with the image mock
+
+`test/mock-images.mjs` (port 14325) answers `POST /v1/images/generations`
+with a tiny valid 1x1 PNG as `b64_json`, enforces the same size rules as
+the Rust core, and triggers 429 via model `trigger-429` or the
+`x-nan-test-429: 1` header:
+
+```sh
+node test/t5-check.mjs
+```
+
+Proves the wire contract (b64 → PNG signature, size guard, 401/429/500
+classification, no `url` replies, key never recorded) and then runs the
+full Rust suite. The Rust unit tests pin the pure surface: size validation
+(bounds, multiples of 16, malformed strings), response parsing (`b64_json`
+accepted, `url` rejected as protocol, undecidable payloads as `decode`),
+path handling (uuid `.png` names under the images dir), the
+per-conversation cancel-safe registry, and the store round-trip with
+`media_path` plus the legacy-schema migration.
+
+### What is NOT in the image MVP
+
+- No image editing (`flux-2-klein` / `/v1/images/edits`) — v1 scope
+  decision (L13).
+- No vision upload (attaching images to chat prompts) — still T5 future
+  work.
+- No quota counter UI: the app learns about quota exhaustion only from the
+  429 reply.
+- Generated files live until the conversation is deleted with the app
+  running — deleting a conversation does not yet delete its image files
+  (they stay orphaned on disk, unreferenced by the transcript).
 
 ## T13 device-flow login (with T3b profile lockdown)
 
