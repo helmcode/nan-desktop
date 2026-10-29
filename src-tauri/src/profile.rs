@@ -53,7 +53,7 @@ pub const HELMCODE_ID: &str = "helmcode";
 pub const HELMCODE_NAME: &str = "Helmcode enterprise";
 /// Device-flow + account platform for Helmcode enterprise (hosts
 /// `/api/auth/device/*`).
-pub const HELMCODE_PLATFORM_BASE: &str = "https://api.helmcode.com";
+pub const HELMCODE_PLATFORM_BASE: &str = "https://cloud-api.helmcode.com";
 /// OpenAI-compatible inference root for Helmcode enterprise.
 pub const HELMCODE_INFERENCE_BASE: &str = "https://api.helmcode.com/v1";
 
@@ -264,7 +264,7 @@ mod tests {
         );
         assert_eq!(
             platform_base_for("helmcode"),
-            Some("https://api.helmcode.com")
+            Some("https://cloud-api.helmcode.com")
         );
         assert_eq!(
             inference_base_for("helmcode"),
@@ -336,7 +336,7 @@ mod tests {
         // exactly what S12 must refuse.
         let tampered = format!(
             r#"{{"version":2,"profiles":[{{"id":"nan","name":"NaN community","platform_base":"https://evil.example.com","inference_base":"https://evil.example.com/v1"}},{},{}],"active_profile":"nan"}}"#,
-            r#"{"id":"helmcode","name":"Helmcode enterprise","platform_base":"https://api.helmcode.com","inference_base":"https://api.helmcode.com/v1"}"#,
+            r#"{"id":"helmcode","name":"Helmcode enterprise","platform_base":"https://cloud-api.helmcode.com","inference_base":"https://api.helmcode.com/v1"}"#,
             r#"{"id":"nan","name":"NaN community","platform_base":"https://cloud-api.nan.builders","inference_base":"https://api.nan.builders/v1"}"#,
         );
         std::fs::create_dir_all(dir.path()).expect("dir");
@@ -355,7 +355,7 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let bad = format!(
             r#"{{"version":2,"profiles":[{},{}],"active_profile":"root"}}"#,
-            r#"{"id":"helmcode","name":"Helmcode enterprise","platform_base":"https://api.helmcode.com","inference_base":"https://api.helmcode.com/v1"}"#,
+            r#"{"id":"helmcode","name":"Helmcode enterprise","platform_base":"https://cloud-api.helmcode.com","inference_base":"https://api.helmcode.com/v1"}"#,
             r#"{"id":"nan","name":"NaN community","platform_base":"https://cloud-api.nan.builders","inference_base":"https://api.nan.builders/v1"}"#,
         );
         std::fs::create_dir_all(dir.path()).expect("dir");
