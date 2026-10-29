@@ -424,6 +424,148 @@ input::placeholder {
   font-size: 0.9rem;
 }
 
+/* ---- T8 tools (grants, run_command, audit, proposal demo) ---------------- */
+
+.tools-details {
+  font-size: 0.8rem;
+}
+
+.tools-details > summary {
+  cursor: pointer;
+  color: var(--faint);
+  margin-bottom: 0.4rem;
+}
+
+.tools-details .panel {
+  margin-bottom: 0.75rem;
+}
+
+.tools-details h2 {
+  font-size: 0.9rem;
+}
+
+.tools-grant-list {
+  list-style: none;
+  margin: 0.25rem 0 0.6rem;
+  padding: 0;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.tools-grant-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.tools-grant-list code {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.tools-grant-revoke {
+  flex: none;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.72rem;
+}
+
+.tools-runcommand-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.5rem 0 0.25rem;
+}
+
+.tools-warning {
+  color: var(--error);
+  font-size: 0.76rem;
+  margin: 0.25rem 0 0.6rem;
+}
+
+.tools-audit > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.tools-audit-list {
+  list-style: none;
+  margin: 0.35rem 0 0.5rem;
+  padding: 0;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.tools-audit-list li {
+  padding: 0.15rem 0;
+  border-bottom: 1px dashed var(--border);
+  word-break: break-word;
+}
+
+.tools-demo {
+  margin-bottom: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.tools-demo > summary {
+  cursor: pointer;
+  color: var(--faint);
+  margin-bottom: 0.4rem;
+}
+
+.tools-json {
+  width: 100%;
+  min-height: 4.5rem;
+  padding: 0.5rem;
+  background-color: var(--panel-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  resize: vertical;
+}
+
+.tools-diff {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0.35rem 0;
+  padding: 0.5rem;
+  background-color: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.74rem;
+  white-space: pre;
+}
+
+.tools-entries {
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0.35rem 0;
+  padding-left: 1.1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.tools-stderr {
+  color: var(--error);
+}
+
+.tools-proposal,
+.tools-outcome {
+  margin-top: 0.5rem;
+}
+
 /* ---- chat main pane ------------------------------------------------------ */
 
 .chat-main {

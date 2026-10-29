@@ -16,6 +16,9 @@ mod conn_test;
 mod device_flow;
 mod images;
 mod profile;
+// T8 tools subsystem: folder grants + propose/approve/execute tool actions.
+// Production IPC surface (registered in BOTH debug and release handlers).
+mod tools;
 // Spike-only module: the demo DB commands it serves are not registered in
 // release builds (security review B1/B6 — no keychain or arbitrary-IO surface
 // in the production IPC).
@@ -241,7 +244,11 @@ pub fn run() {
         .manage(device_flow::DeviceLoginState::default())
         .manage(chat::ChatState::default())
         .manage(tts::TtsState::default())
-        .manage(images::ImagesState::default());
+        .manage(images::ImagesState::default())
+        .manage(tools::ToolsState::default())
+        // T8: native folder picker for tools grants (S7). Registered in
+        // lib.rs so the capability is dialog:default only.
+        .plugin(tauri_plugin_dialog::init());
     #[cfg(debug_assertions)]
     let builder = builder
         .manage(SseState::default())
@@ -266,7 +273,16 @@ pub fn run() {
             tts::tts_stop,
             stt::stt_transcribe,
             images::image_generate,
-            images::image_cancel
+            images::image_cancel,
+            tools::tools_grant_add,
+            tools::tools_grant_list,
+            tools::tools_grant_revoke,
+            tools::tools_settings_get,
+            tools::tools_set_run_command_enabled,
+            tools::tools_propose,
+            tools::tools_execute,
+            tools::tools_deny,
+            tools::tools_audit_tail
         ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -286,7 +302,16 @@ pub fn run() {
         tts::tts_stop,
         stt::stt_transcribe,
         images::image_generate,
-        images::image_cancel
+        images::image_cancel,
+        tools::tools_grant_add,
+        tools::tools_grant_list,
+        tools::tools_grant_revoke,
+        tools::tools_settings_get,
+        tools::tools_set_run_command_enabled,
+        tools::tools_propose,
+        tools::tools_execute,
+        tools::tools_deny,
+        tools::tools_audit_tail
     ]);
     builder
         .run(tauri::generate_context!())

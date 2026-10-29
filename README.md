@@ -366,6 +366,118 @@ per-conversation cancel-safe registry, and the store round-trip with
   running — deleting a conversation does not yet delete its image files
   (they stay orphaned on disk, unreferenced by the transcript).
 
+## T8 tools: folder grants + propose/approve/execute (S7)
+
+The tools subsystem lets the assistant work inside folders the user has
+explicitly granted — with the security boundary in the **Rust core**, never
+in the web renderer. The model-driven flow is: **model PROPOSES → UI shows →
+USER approves/denies → Rust core executes ONLY the exact approved action**.
+
+### Flow
+
+1. **Grants.** The user grants one or more folders per profile (native
+   folder picker via `tauri-plugin-dialog`, or a typed absolute path).
+   Grants are stored canonicalized in `tools.json` under the app data dir.
+2. **Propose.** A tool action (`read_file`, `list_files`, `write_file`,
+   `replace_file`; `run_command` behind a flag) is validated against the
+   grants: absolute paths only, lexical `..` rejected, symlinks resolved —
+   the canonical path must sit component-wise under a granted root.
+   Nothing executes. The core stores a proposal (TTL 5 minutes,
+   single-use, uuid id) and answers with a summary + unified diff
+   (vendored LCS diff).
+3. **Approve / deny.** `tools_execute(proposal_id)` runs the EXACT stored
+   action — paths are re-canonicalized and re-verified under the grant
+   right before use, so symlink swaps, grant revocations, or the
+   run_command switch flipping between propose and execute all fail
+   closed. `tools_deny` discards the proposal.
+
+### Threat model
+
+- **Renderer compromise cannot read or write the disk.** There is no
+  "read this path" IPC: the only file access runs through a stored,
+  single-use, TTL-bounded proposal whose canonical path was grant-checked
+  at propose time and re-verified at execute time.
+- **Symlink escapes fail closed.** Canonicalization at propose,
+  under-grant verification at execute, and re-canonicalization equality
+  right before I/O (`verify_stable`/`verify_writable`). Writes refuse a
+  symlink LEAF outright, and — since a dangling symlink BETWEEN the grant
+  root and the leaf is invisible to canonicalization but would be
+  followed by `fs::write` the moment its target materializes —
+  `verify_writable` also walks EVERY path component and rejects any
+  symlink component (not just the leaf). Lexical `..` is rejected before
+  any I/O.
+- **Audit.** Every propose/approve/deny/execute outcome (plus grant and
+  switch changes, and propose-time REJECTIONS such as escape attempts) is
+  appended as JSONL to `tools-audit.log` — paths and summaries ONLY, never
+  file contents. Audit write failures fail closed.
+- **Commands kill their process group.** `run_command` children run in
+  their own process group; the timeout kill is a group SIGKILL, so forked
+  children cannot outlive the kill while holding the pipes. The output
+  drain waits bounded (2 s grace): a grandchild that outlives the shell
+  cannot hang `execute` — the residual is that the abandoned drain thread
+  and the reparented grandchild live until the grandchild exits, and a
+  double-fork daemon can survive the kill entirely (its output is then
+  lost/truncated).
+- **Known limitation (documented, acceptable for v1):** a sub-millisecond
+  TOCTOU window remains between the final verification and the actual
+  open() (a full fix needs openat2/RESOLVE_BENEATH or per-open
+  verification). Also, `fs::write` on a FIFO inside a grant BLOCKS until a
+  reader appears (soft DoS — but only after the user explicitly approved
+  that exact write), and `run_command` children inherit the app's full
+  environment. By design the app keeps NO secrets in environment
+  variables (credentials live in the OS keychain, S4), so there is
+  nothing env-level for an approved command to leak.
+
+### Caps
+
+| Cap | Value |
+| --- | --- |
+| read/write size | 2 MiB per file |
+| binary detection | NUL byte in first 8 KiB → refused ("binary file") |
+| list_files | depth ≤ 3, 500 entries max (summary notes truncation) |
+| run_command output | 64 KiB per stream, 30 s timeout then kill |
+| proposal lifetime | 5 min TTL, single-use |
+
+### run_command — EXPERIMENTAL, OFF by default
+
+`run_command` executes a shell command (`sh -c` / `cmd /C`) inside a
+granted cwd. It is **disabled by default** (`tools_allow_run_command: false`
+in `tools.json`); enabling it is an explicit user action in the Tools
+panel, per-action approval ALWAYS applies, and the flag is re-checked at
+execute time. A shell can do anything the user could — the approval dialog
+is the control. Keep it OFF unless you need it.
+
+### UI
+
+- **Tools & folder grants** (sidebar): grant list (add via folder picker /
+  typed path, revoke), the red-warned run_command switch, and an audit log
+  viewer (last 50 entries).
+- **Tools demo** (composer-adjacent, labeled as test surface): paste an
+  action JSON → see the proposal summary + diff → Approve/Deny → see the
+  result. Model tool-calling integration is a LATER task; this panel drives
+  the exact same Rust-core path that integration will use.
+
+### What's NOT included
+
+- Model-side tool calling (the assistant cannot yet emit tool actions) —
+  later task; the demo panel is the interim test surface.
+- Hard-link escape detection (only symlinks and `..` are handled).
+- File watching / live diffs: the proposal diff is computed at propose
+  time; if the file changes before execution, replace_file re-validates
+  uniqueness against the current content and otherwise applies the exact
+  approved old→new replacement.
+- Streaming command output (run_command result arrives whole, capped).
+- Recursive delete, move, or any destructive action type — not in the v1
+  action set.
+
+### Verify
+
+```sh
+cargo test                # from src-tauri (tools::* suites)
+pnpm build                # frontend gate
+node test/t8-check.mjs    # drives cargo test + audit JSONL schema
+```
+
 ## T13 device-flow login (with T3b profile lockdown)
 
 Signing in is a browser-based device flow (RFC 8628-style, S11/S4): the user

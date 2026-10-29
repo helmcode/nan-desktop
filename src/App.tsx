@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -437,6 +438,374 @@ function ProfilePicker({
       </div>
       {error && <p className="status err">{error}</p>}
     </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// T8 tools (S7): the Rust core is the security boundary. The renderer can
+// only ask for a proposal, see its summary/diff, and approve/deny — the
+// exact approved action is stored and executed inside the Rust core.
+// ---------------------------------------------------------------------------
+
+interface GrantView {
+  id: string;
+  canonical_path: string;
+  granted_at: string;
+  profile_id: string;
+}
+
+interface ToolsSettingsView {
+  tools_allow_run_command: boolean;
+}
+
+interface ProposalView {
+  proposal_id: string;
+  action_kind: string;
+  path: string | null;
+  summary: string;
+  diff: string | null;
+}
+
+interface ToolOutcome {
+  action: string;
+  summary: string;
+  content: string | null;
+  entries: string[] | null;
+  bytes_written: number | null;
+  stdout: string | null;
+  stderr: string | null;
+  exit_code: number | null;
+  timed_out: boolean;
+}
+
+interface AuditEntry {
+  ts: string;
+  event: string;
+  action: string;
+  outcome: string;
+  grant_id: string | null;
+  profile_id: string | null;
+  detail: string | null;
+}
+
+/// Tools rejections arrive as structured {kind, message} IPC errors.
+function toolsErrorLabel(err: unknown): string {
+  if (typeof err === "object" && err !== null && "kind" in err && "message" in err) {
+    const rejection = err as { kind: string; message: string };
+    return `${rejection.kind}: ${rejection.message}`;
+  }
+  return String(err);
+}
+
+const TOOLS_PROPOSAL_EXAMPLE = '{"type":"read_file","path":"/absolute/path/inside/a/grant"}';
+const TOOLS_PREVIEW_CHARS = 2000;
+
+function previewText(text: string): string {
+  return text.length > TOOLS_PREVIEW_CHARS
+    ? `${text.slice(0, TOOLS_PREVIEW_CHARS)}\n… (preview truncated)`
+    : text;
+}
+
+/// Sidebar panel: folder grants, the experimental run_command switch and
+/// the audit log viewer (last 50 entries).
+function ToolsPanel({ profileId }: { profileId: string | null }) {
+  const [grants, setGrants] = useState<GrantView[]>([]);
+  const [runCommandEnabled, setRunCommandEnabled] = useState(false);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [manualPath, setManualPath] = useState("");
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setBusy(true);
+    try {
+      const [grantList, settings, auditTail] = await Promise.all([
+        invoke<GrantView[]>("tools_grant_list"),
+        invoke<ToolsSettingsView>("tools_settings_get"),
+        invoke<AuditEntry[]>("tools_audit_tail", { count: 50 }),
+      ]);
+      setGrants(grantList);
+      setRunCommandEnabled(settings.tools_allow_run_command);
+      setAudit(auditTail);
+      setStatus(null);
+    } catch (err) {
+      setStatus({ ok: false, text: toolsErrorLabel(err) });
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const addFolder = async (path: string) => {
+    if (!profileId || !path) return;
+    setBusy(true);
+    try {
+      await invoke("tools_grant_add", { profileId, path });
+      setManualPath("");
+      await refresh();
+      setStatus({ ok: true, text: `Granted ${path}` });
+    } catch (err) {
+      setStatus({ ok: false, text: toolsErrorLabel(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pickFolder = async () => {
+    const picked = await openFileDialog({ directory: true, multiple: false });
+    if (typeof picked === "string") {
+      await addFolder(picked);
+    }
+  };
+
+  const revoke = async (grantId: string) => {
+    setBusy(true);
+    try {
+      await invoke("tools_grant_revoke", { grantId });
+      await refresh();
+    } catch (err) {
+      setStatus({ ok: false, text: toolsErrorLabel(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleRunCommand = async (enabled: boolean) => {
+    setBusy(true);
+    try {
+      await invoke("tools_set_run_command_enabled", { enabled });
+      setRunCommandEnabled(enabled);
+      await refresh();
+    } catch (err) {
+      setStatus({ ok: false, text: toolsErrorLabel(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <h2>Tools</h2>
+      <p className="hint">
+        Folders the assistant may read/write after you approve each action.
+      </p>
+      <ul className="tools-grant-list">
+        {grants.map((grant) => (
+          <li key={grant.id}>
+            <code>{grant.canonical_path}</code>
+            <span className="key-note">{grant.profile_id}</span>
+            <button
+              type="button"
+              className="btn btn-ghost tools-grant-revoke"
+              onClick={() => void revoke(grant.id)}
+              disabled={busy}
+            >
+              revoke
+            </button>
+          </li>
+        ))}
+        {grants.length === 0 && <li className="hint">No folders granted yet.</li>}
+      </ul>
+      <div className="row-h">
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => void pickFolder()}
+          disabled={busy || !profileId}
+        >
+          Choose folder…
+        </button>
+        <input
+          value={manualPath}
+          onChange={(e) => setManualPath(e.currentTarget.value)}
+          placeholder="/absolute/path"
+          aria-label="Grant an absolute folder path"
+        />
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => void addFolder(manualPath.trim())}
+          disabled={busy || !profileId || manualPath.trim().length === 0}
+        >
+          Add
+        </button>
+      </div>
+      <label className="tools-runcommand-row">
+        <input
+          type="checkbox"
+          checked={runCommandEnabled}
+          onChange={(e) => void toggleRunCommand(e.currentTarget.checked)}
+          disabled={busy}
+        />
+        <span>Enable run_command (experimental)</span>
+      </label>
+      <p className="tools-warning">
+        ⚠ run_command lets the assistant execute shell commands inside granted
+        folders after per-action approval. Keep it OFF unless you need it.
+      </p>
+      <details className="tools-audit">
+        <summary>Audit log (last 50)</summary>
+        <ul className="tools-audit-list">
+          {audit.map((entry, index) => (
+            <li key={index}>
+              <code>{entry.ts}</code> {entry.event}/{entry.action} → {entry.outcome}
+              {entry.detail ? ` — ${entry.detail}` : ""}
+            </li>
+          ))}
+          {audit.length === 0 && <li className="hint">Empty.</li>}
+        </ul>
+      </details>
+      <div className="row-h">
+        <button type="button" className="btn btn-ghost" onClick={() => void refresh()} disabled={busy}>
+          Refresh
+        </button>
+      </div>
+      {status && <p className={`status ${status.ok ? "ok" : "err"}`}>{status.text}</p>}
+    </div>
+  );
+}
+
+/// Composer-adjacent test surface for the propose → approve/deny → execute
+/// flow. Model tool-calling integration is a later task; this panel drives
+/// the exact same Rust-core path that integration will use.
+function ProposalDemo({
+  profileId,
+  conversationId,
+}: {
+  profileId: string | null;
+  conversationId: number | null;
+}) {
+  const [actionJson, setActionJson] = useState("");
+  const [proposal, setProposal] = useState<ProposalView | null>(null);
+  const [outcome, setOutcome] = useState<ToolOutcome | null>(null);
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const propose = async () => {
+    if (!profileId) return;
+    setBusy(true);
+    setProposal(null);
+    setOutcome(null);
+    try {
+      const view = await invoke<ProposalView>("tools_propose", {
+        profileId,
+        conversationId,
+        actionJson,
+      });
+      setProposal(view);
+      setStatus({ ok: true, text: "Proposal stored — review and approve or deny." });
+    } catch (err) {
+      setStatus({ ok: false, text: toolsErrorLabel(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const approve = async () => {
+    if (!proposal) return;
+    setBusy(true);
+    try {
+      const result = await invoke<ToolOutcome>("tools_execute", {
+        proposalId: proposal.proposal_id,
+      });
+      setOutcome(result);
+      setProposal(null);
+      setStatus({ ok: true, text: "Executed." });
+    } catch (err) {
+      setStatus({ ok: false, text: toolsErrorLabel(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deny = async () => {
+    if (!proposal) return;
+    setBusy(true);
+    try {
+      await invoke("tools_deny", { proposalId: proposal.proposal_id });
+      setProposal(null);
+      setStatus({ ok: true, text: "Denied — nothing was executed." });
+    } catch (err) {
+      setStatus({ ok: false, text: toolsErrorLabel(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <details className="tools-demo">
+      <summary>Tools demo — test surface (model integration comes later)</summary>
+      <div className="panel">
+        <p className="hint">
+          Paste an action JSON. The Rust core validates it against your
+          grants and stores a proposal; execution happens only after you
+          approve, and runs the exact stored action.
+        </p>
+        <textarea
+          className="tools-json"
+          value={actionJson}
+          onChange={(e) => setActionJson(e.currentTarget.value)}
+          placeholder={TOOLS_PROPOSAL_EXAMPLE}
+          rows={4}
+          spellCheck={false}
+        />
+        <div className="row-h">
+          <button type="button" className="btn btn-ghost" onClick={() => void propose()} disabled={busy || !profileId}>
+            Propose
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => setActionJson(TOOLS_PROPOSAL_EXAMPLE)}
+            disabled={busy}
+          >
+            Example
+          </button>
+        </div>
+        {proposal && (
+          <div className="tools-proposal">
+            <p>
+              <strong>{proposal.action_kind}</strong> <code>{proposal.path}</code>
+            </p>
+            <p className="hint">{proposal.summary}</p>
+            {proposal.diff && <pre className="tools-diff">{previewText(proposal.diff)}</pre>}
+            <div className="row-h">
+              <button type="button" className="btn btn-primary" onClick={() => void approve()} disabled={busy}>
+                Approve
+              </button>
+              <button type="button" className="btn btn-ghost" onClick={() => void deny()} disabled={busy}>
+                Deny
+              </button>
+            </div>
+          </div>
+        )}
+        {outcome && (
+          <div className="tools-outcome">
+            <p className="hint">{outcome.summary}</p>
+            {outcome.content != null && <pre className="tools-diff">{previewText(outcome.content)}</pre>}
+            {outcome.entries && (
+              <ul className="tools-entries">
+                {outcome.entries.map((entry) => (
+                  <li key={entry}>{entry}</li>
+                ))}
+              </ul>
+            )}
+            {outcome.stdout != null && (
+              <pre className="tools-diff">
+                {previewText(
+                  `exit ${outcome.exit_code ?? "signal"}${outcome.timed_out ? " (killed after timeout)" : ""}\n${outcome.stdout}`,
+                )}
+              </pre>
+            )}
+            {outcome.stderr && <pre className="tools-diff tools-stderr">{previewText(outcome.stderr)}</pre>}
+          </div>
+        )}
+        {status && <p className={`status ${status.ok ? "ok" : "err"}`}>{status.text}</p>}
+      </div>
+    </details>
   );
 }
 
@@ -1011,6 +1380,11 @@ function ChatShell({
           </button>
           {/* T1 spike diagnostics, kept working and collapsed. */}
           <details className="spike-details">{spike}</details>
+          {/* T8 tools settings: grants, run_command switch, audit viewer. */}
+          <details className="tools-details">
+            <summary>Tools &amp; folder grants</summary>
+            <ToolsPanel profileId={overview.active_profile} />
+          </details>
         </div>
       </aside>
 
@@ -1157,6 +1531,9 @@ function ChatShell({
         </div>
 
         <footer className="composer">
+          {/* T8 proposal demo: test surface driving the Rust-core
+              propose → approve/deny → execute path. */}
+          <ProposalDemo profileId={overview.active_profile} conversationId={activeConvId} />
           {sttHint && (
             <p className="hint composer-hint" role="status">
               {sttHint}
