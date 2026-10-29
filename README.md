@@ -111,13 +111,83 @@ node test/t4-check.mjs
 ### What is NOT in the MVP
 
 - Tool use / computer use (T8), vision upload + image generation/editing
-  (T5), TTS kokoro + dictation whisper (T6) — the model picker deliberately
-  filters those models out for now.
+  (T5) — the model picker deliberately filters those models out for now.
 - Conversation rename, message editing/regeneration, persisted model choice
   (in-memory per session, default `deepseek-v4-flash`), streaming cancellation
   button (re-sending into the conversation already aborts the stream).
 - On error the partial assistant text is dropped by design (only the user
   message stays persisted); no partial-message marker in this MVP.
+
+## T6 voice: TTS kokoro + dictation whisper (S5, S10)
+
+Both locked tenants serve the audio models (S10), so the voice surface is
+identical on either profile: kokoro reads assistant messages aloud and
+whisper transcribes composer dictation.
+
+### Architecture: audio never touches the renderer (S4)
+
+All voice HTTP lives in the Rust core, exactly like chat. The renderer only
+sees control commands and status events:
+
+- **TTS** (`tts_speak` / `tts_stop`): the core reads the keychain key, sends
+  `POST {inference_base}/audio/speech` with `{model: "kokoro", voice, input,
+  response_format: "wav"}`, decodes the WAV reply IN MEMORY (rodio's
+  wav-only decoder over a `Cursor` — no temp files) and plays it natively
+  through the default audio device. The renderer receives `tts://started`,
+  `tts://ended` and `tts://error {kind}` events only — never audio bytes,
+  the key, or any URL. `tts://error` kinds are chat's `ErrorKind` plus the
+  audio-only `decode` kind (a non-WAV or corrupt reply).
+- **STT** (`stt_transcribe`): the composer records with the browser's
+  `MediaRecorder` (guarded — devices without it get an inline hint), hands
+  the bytes to the core over IPC, and the core uploads them as multipart
+  (`model=whisper`, `file=<bytes>`) to
+  `{inference_base}/audio/transcriptions`, returning `{text}`. Recordings
+  are never persisted and never logged; uploads over 25 MiB are rejected
+  locally (kind `protocol`) before anything is sent.
+
+Cancel safety mirrors the chat streams: exactly ONE active playback globally
+(single-slot registry with a generation counter). Speaking another message
+replaces the current playback; `tts_stop` aborts the task, stops the rodio
+player and emits `tts://ended` itself — a superseded task never emits stray
+events.
+
+### Voice picker
+
+Three kokoro voices are offered (persisted in `localStorage`):
+`ef_dora` (ES), `em_alex` (ES), `af_heart` (EN). Anything else is rejected by
+the Rust core before any request is made.
+
+### Testing with the voice mock
+
+`test/mock-voice.mjs` is a dependency-free Node server that synthesizes a
+valid PCM16 mono 22050 Hz WAV for `/v1/audio/speech` and hand-parses the
+multipart upload for `/v1/audio/transcriptions` (port 14324):
+
+```sh
+node test/mock-voice.mjs     # mock voice inference on http://127.0.0.1:14324
+NAN_DESKTOP_MOCK_INFERENCE=http://127.0.0.1:14324 pnpm tauri dev
+```
+
+`trigger-429` / `trigger-500` answer 429/500 on both endpoints for
+classification tests; oversized transcription uploads get 413.
+
+Integration check (mock wire contract + full Rust suite):
+
+```sh
+node test/t6-check.mjs
+```
+
+### What is NOT in the voice MVP
+
+- No pause/resume or progress bar — playback is start/stop only.
+- No automatic read-aloud of streaming replies; playback is per
+  assistant-message via the ▶ button.
+- Dictation is push-to-talk (record → stop → transcribe), not live
+  streaming; the transcribed text lands in the composer for review before
+  sending.
+- macOS microphone permission metadata (Info.plist) is not yet wired — on a
+  clean macOS install the browser layer may deny `getUserMedia`; the UI
+  surfaces it as an inline hint (T7 packaging will add the plist entry).
 
 ## T13 device-flow login (with T3b profile lockdown)
 

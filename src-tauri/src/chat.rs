@@ -15,7 +15,8 @@
 //! Error kinds: `missing_key` / `unauthorized` (401 → the session must
 //! re-login) / `rate_limited` (429) / `server` (other non-2xx) / `network`
 //! (transport) / `protocol` (local failures: keychain, store, malformed
-//! payloads).
+//! payloads) / `decode` (audio-only: the TTS reply could not be decoded —
+//! chat never produces this kind).
 //!
 //! Persistence: the user message is stored BEFORE streaming starts; the
 //! assistant message is stored after the stream finishes with the final
@@ -56,8 +57,9 @@ pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 // Pure, unit-tested core
 // ---------------------------------------------------------------------------
 
-/// Why a chat attempt failed. Serialized into `chat://error` payloads and
-/// returned by `models_list`.
+/// Why a chat or audio (TTS/STT) attempt failed. Serialized into
+/// `chat://error` / `tts://error` payloads and returned by `models_list`,
+/// `stt_transcribe` and the `ErrorKind`-returning TTS helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
@@ -71,8 +73,12 @@ pub enum ErrorKind {
     Server,
     /// Transport failure (DNS, connect, reset, mid-stream read error).
     Network,
-    /// A local failure: keychain error, store error, malformed payload.
+    /// A local failure: keychain error, store error, malformed payload,
+    /// no audio output device.
     Protocol,
+    /// Audio-only (T6): the reply bytes could not be decoded as the
+    /// requested audio format. Never produced by the chat surface.
+    Decode,
 }
 
 /// The outcome of parsing one SSE `data:` payload of the OpenAI streaming
@@ -356,8 +362,9 @@ fn release_stream(state: &ChatState, conversation_id: i64, generation: u64) {
 // ---------------------------------------------------------------------------
 
 /// Read a profile's inference key from the OS keychain (never rendered,
-/// logged, or echoed — S4).
-fn read_profile_key(profile_id: &str) -> Result<String, ErrorKind> {
+/// logged, or echoed — S4). Shared with the audio surfaces (`tts.rs` /
+/// `stt.rs`, T6) so classification and keychain access stay identical.
+pub(crate) fn read_profile_key(profile_id: &str) -> Result<String, ErrorKind> {
     match keyring::Entry::new(KEYRING_SERVICE, &profile::key_account(profile_id))
         .and_then(|entry| entry.get_password())
     {
@@ -775,6 +782,7 @@ mod tests {
             (ErrorKind::Server, "server"),
             (ErrorKind::Network, "network"),
             (ErrorKind::Protocol, "protocol"),
+            (ErrorKind::Decode, "decode"),
         ];
         for (kind, expected) in cases {
             let payload = serde_json::to_string(&ChatErrorPayload {

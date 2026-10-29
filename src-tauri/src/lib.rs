@@ -21,22 +21,33 @@ mod profile;
 #[cfg(debug_assertions)]
 mod spike_db;
 mod sse;
+mod stt;
+mod tts;
 
+#[cfg(debug_assertions)]
 use std::sync::Mutex;
 
 use serde::Serialize;
+#[cfg(debug_assertions)]
+use tauri::State;
+#[cfg(debug_assertions)]
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager, State, Window};
+use tauri::{AppHandle, Manager};
+#[cfg(debug_assertions)]
+use tauri::{Emitter, Window};
 
 use profile::ProfileStore;
+#[cfg(debug_assertions)]
 use sse::{flush_sse_buffer, parse_sse_buffer};
 
 /// Handle of the running SSE demo task. Starting a new stream aborts the
 /// previous one, so `sse_demo_start` stays cancel-safe.
+#[cfg(debug_assertions)]
 #[derive(Default)]
 struct SseState(Mutex<Option<JoinHandle<()>>>);
 
 /// One parsed SSE event, forwarded to the frontend as `sse://chunk`.
+#[cfg(debug_assertions)]
 #[derive(Clone, Serialize)]
 struct SseChunk {
     seq: usize,
@@ -61,6 +72,7 @@ fn sse_demo_start(url: String, window: Window, state: State<'_, SseState>) -> Re
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 async fn run_sse_demo(url: String, window: Window) {
     match reqwest::get(&url).await {
         Ok(response) if !response.status().is_success() => {
@@ -73,6 +85,7 @@ async fn run_sse_demo(url: String, window: Window) {
     }
 }
 
+#[cfg(debug_assertions)]
 async fn stream_sse(response: reqwest::Response, window: &Window) {
     use futures_util::StreamExt;
 
@@ -224,27 +237,32 @@ pub fn run() {
     // builds. Release IPC exposes exactly the product surface.
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(SseState::default())
         .manage(device_flow::DeviceLoginState::default())
-        .manage(chat::ChatState::default());
+        .manage(chat::ChatState::default())
+        .manage(tts::TtsState::default());
     #[cfg(debug_assertions)]
-    let builder = builder.invoke_handler(tauri::generate_handler![
-        sse_demo_start,
-        keyring_set,
-        keyring_get,
-        db_demo,
-        profiles_load,
-        conn_test::connection_test,
-        device_flow::device_login_start,
-        device_flow::device_login_cancel,
-        device_flow::device_logout,
-        chat::chat_send,
-        chat::models_list,
-        chat::conversation_list,
-        chat::conversation_create,
-        chat::conversation_delete,
-        chat::messages_list
-    ]);
+    let builder = builder
+        .manage(SseState::default())
+        .invoke_handler(tauri::generate_handler![
+            sse_demo_start,
+            keyring_set,
+            keyring_get,
+            db_demo,
+            profiles_load,
+            conn_test::connection_test,
+            device_flow::device_login_start,
+            device_flow::device_login_cancel,
+            device_flow::device_logout,
+            chat::chat_send,
+            chat::models_list,
+            chat::conversation_list,
+            chat::conversation_create,
+            chat::conversation_delete,
+            chat::messages_list,
+            tts::tts_speak,
+            tts::tts_stop,
+            stt::stt_transcribe
+        ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         profiles_load,
@@ -257,7 +275,10 @@ pub fn run() {
         chat::conversation_list,
         chat::conversation_create,
         chat::conversation_delete,
-        chat::messages_list
+        chat::messages_list,
+        tts::tts_speak,
+        tts::tts_stop,
+        stt::stt_transcribe
     ]);
     builder
         .run(tauri::generate_context!())

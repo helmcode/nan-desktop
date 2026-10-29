@@ -54,6 +54,11 @@ interface ChatError {
   conversation_id: number;
   kind: string;
 }
+// TTS payloads (T6): only the classified error kind crosses the IPC
+// boundary — never the audio bytes, the key or any URL.
+interface TtsError {
+  kind: string;
+}
 interface ConversationView {
   id: number;
   title: string;
@@ -91,11 +96,47 @@ const CHAT_ERROR_LABELS: Record<string, string> = {
   server: "The inference service reported an error. Try again.",
   network: "Could not reach the inference service. Check your connection and try again.",
   protocol: "Something went wrong on this device. Try again.",
+  decode: "The audio reply could not be decoded. Try again.",
 };
 
 // Must match src-tauri/src/chat.rs DEFAULT_MODEL (the renderer cannot import
 // Rust constants; the Rust side falls back to the same value).
 const DEFAULT_MODEL = "deepseek-v4-flash";
+
+// Must match src-tauri/src/tts.rs VOICES (the Rust side rejects any other
+// voice with a `protocol`-style command error before any request is made).
+const VOICES: Array<{ id: string; label: string }> = [
+  { id: "ef_dora", label: "Dora · ES" },
+  { id: "em_alex", label: "Alex · ES" },
+  { id: "af_heart", label: "Heart · EN" },
+];
+const DEFAULT_VOICE = VOICES[0].id;
+const VOICE_STORAGE_KEY = "nan-desktop-tts-voice";
+
+// Must match src-tauri/src/stt.rs MAX_AUDIO_BYTES (the Rust side rejects
+// larger uploads locally before anything is sent).
+const MAX_STT_BYTES = 25 * 1024 * 1024;
+
+// The recorder MIME types we accept, in preference order (webm/opus where
+// supported — Chrome/WebKit; mp4/AAC fallback — Safari).
+const RECORDING_MIME_CANDIDATES = ["audio/webm", "audio/mp4"];
+
+const TTS_ERROR_KINDS = new Set([
+  "missing_key",
+  "unauthorized",
+  "rate_limited",
+  "server",
+  "network",
+  "protocol",
+  "decode",
+]);
+
+// Command errors arrive either as a classified ErrorKind string (stt/tts)
+// or as a free-form message; render known kinds with the shared copy.
+function commandErrorLabel(err: unknown): string {
+  const text = String(err);
+  return TTS_ERROR_KINDS.has(text) ? chatErrorLabel(text) : text;
+}
 
 type Screen = "loading" | "error" | "picker" | "authorizing" | "chat";
 type AuthPhase = "waiting" | "denied" | "expired" | "error";
@@ -374,6 +415,19 @@ function ChatShell({
   const [sessionExpired, setSessionExpired] = useState(false);
   const [inlineError, setInlineError] = useState<string>("");
 
+  // Voice (T6): TTS playback + dictation. The chosen voice persists across
+  // sessions; only the three app-locked kokoro voices are offered.
+  const [voice, setVoice] = useState<string>(() => {
+    const stored = window.localStorage.getItem(VOICE_STORAGE_KEY);
+    return VOICES.some((v) => v.id === stored) ? (stored as string) : DEFAULT_VOICE;
+  });
+  const [speakingMsgId, setSpeakingMsgId] = useState<number | null>(null);
+  const [ttsHint, setTtsHint] = useState("");
+  const [recording, setRecording] = useState(false);
+  const [sttBusy, setSttBusy] = useState(false);
+  const [sttHint, setSttHint] = useState("");
+  const recorderRef = useRef<MediaRecorder | null>(null);
+
   const activeProfileRef = useRef<string | null>(overview.active_profile);
   useEffect(() => {
     activeProfileRef.current = overview.active_profile;
@@ -498,6 +552,138 @@ function ChatShell({
     },
     [loadMessages],
   );
+
+  // Voice event transport (T6): one global playback — any end or error
+  // clears the playing marker; errors surface as an inline hint.
+  useEffect(() => {
+    const unlistens: Promise<UnlistenFn>[] = [
+      listen("tts://ended", () => setSpeakingMsgId(null)),
+      listen<TtsError>("tts://error", (event) => {
+        setSpeakingMsgId(null);
+        setTtsHint(chatErrorLabel(event.payload.kind));
+      }),
+    ];
+    return () => {
+      unlistens.forEach((promise) => {
+        promise.then((unlisten) => unlisten());
+      });
+    };
+  }, []);
+
+  // Persist the chosen voice across sessions (localStorage, UI-only data).
+  useEffect(() => {
+    window.localStorage.setItem(VOICE_STORAGE_KEY, voice);
+  }, [voice]);
+
+  // Stop any playback and recording when the chat shell unmounts.
+  useEffect(() => {
+    return () => {
+      recorderRef.current?.stop();
+      recorderRef.current = null;
+      void invoke("tts_stop").catch(() => {});
+    };
+  }, []);
+
+  const toggleSpeak = useCallback(
+    async (message: ChatMessageRow): Promise<void> => {
+      setTtsHint("");
+      if (speakingMsgId === message.id) {
+        try {
+          await invoke("tts_stop");
+        } catch (err) {
+          setSpeakingMsgId(null);
+          setTtsHint(commandErrorLabel(err));
+        }
+        return;
+      }
+      const profileId = activeProfileRef.current;
+      if (!profileId) return;
+      // Optimistic: the Rust core keeps exactly one global playback — a new
+      // speak silently replaces the previous one (no ended event for it).
+      setSpeakingMsgId(message.id);
+      try {
+        await invoke("tts_speak", { profileId, voice, input: message.content });
+      } catch (err) {
+        setSpeakingMsgId(null);
+        setTtsHint(commandErrorLabel(err));
+      }
+    },
+    [speakingMsgId, voice],
+  );
+
+  const stopRecording = useCallback((): void => {
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    setRecording(false);
+  }, []);
+
+  const finishRecording = useCallback(
+    async (chunks: Blob[], mimeType: string): Promise<void> => {
+      const profileId = activeProfileRef.current;
+      if (!profileId) return;
+      const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
+      if (blob.size === 0) {
+        setSttHint("The recording was empty — try again.");
+        return;
+      }
+      if (blob.size > MAX_STT_BYTES) {
+        setSttHint("The recording is too long (over 25 MB) — record a shorter clip.");
+        return;
+      }
+      setSttBusy(true);
+      try {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const { text } = await invoke<{ text: string }>("stt_transcribe", {
+          profileId,
+          audioBytes: bytes,
+          mime: blob.type,
+        });
+        if (text.trim().length > 0) {
+          setComposer((prev) => (prev.trim().length > 0 ? `${prev} ${text}` : text));
+        } else {
+          setSttHint("Nothing was transcribed — try again, a bit closer to the mic.");
+        }
+      } catch (err) {
+        setSttHint(commandErrorLabel(err));
+      } finally {
+        setSttBusy(false);
+      }
+    },
+    [],
+  );
+
+  const toggleRecording = useCallback(async (): Promise<void> => {
+    setSttHint("");
+    if (recording) {
+      stopRecording();
+      return;
+    }
+    if (
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof window.MediaRecorder === "undefined"
+    ) {
+      setSttHint("Voice input is not available on this device.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = RECORDING_MIME_CANDIDATES.find((t) => MediaRecorder.isTypeSupported(t));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        void finishRecording(chunks, recorder.mimeType);
+      };
+      recorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+    } catch {
+      setSttHint("Microphone access was denied — dictation is unavailable.");
+    }
+  }, [recording, stopRecording, finishRecording]);
 
   const newChat = useCallback((): void => {
     setActiveConvId(null);
@@ -664,6 +850,22 @@ function ChatShell({
               </option>
             ))}
           </select>
+          <label className="model-label voice-label" htmlFor="voice-select">
+            Voice
+          </label>
+          <select
+            id="voice-select"
+            className="model-select"
+            value={voice}
+            onChange={(e) => setVoice(e.currentTarget.value)}
+            aria-label="Text-to-speech voice"
+          >
+            {VOICES.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.label}
+              </option>
+            ))}
+          </select>
         </header>
 
         <div className="messages" ref={messagesRef}>
@@ -675,20 +877,43 @@ function ChatShell({
               </p>
             </div>
           )}
-          {messages.map((m) => (
-            <article key={m.id} className={`msg msg-${m.role}`}>
-              {m.role === "assistant" ? (
+          {messages.map((m) =>
+            m.role === "assistant" ? (
+              <article
+                key={m.id}
+                className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}
+              >
                 <Markdown text={m.content} />
-              ) : (
+                {m.content.trim().length > 0 && (
+                  <button
+                    type="button"
+                    className="speak-btn"
+                    aria-label={
+                      speakingMsgId === m.id ? "Stop reading aloud" : "Read message aloud"
+                    }
+                    title={speakingMsgId === m.id ? "Stop" : "Read aloud"}
+                    onClick={() => void toggleSpeak(m)}
+                  >
+                    {speakingMsgId === m.id ? "■" : "▶"}
+                  </button>
+                )}
+              </article>
+            ) : (
+              <article key={m.id} className="msg msg-user">
                 <p className="msg-user-text">{m.content}</p>
-              )}
-            </article>
-          ))}
+              </article>
+            ),
+          )}
           {streamingActive && activeDraft !== undefined && (
             <article className="msg msg-assistant streaming">
               <Markdown text={activeDraft} />
               <span className="caret" aria-hidden="true" />
             </article>
+          )}
+          {ttsHint && (
+            <div className="msg-error" role="status">
+              {ttsHint}
+            </div>
           )}
           {inlineError && (
             <div className="msg-error" role="alert">
@@ -698,28 +923,47 @@ function ChatShell({
         </div>
 
         <footer className="composer">
-          <textarea
-            className="composer-input"
-            value={composer}
-            onChange={(e) => setComposer(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                void send();
+          {sttHint && (
+            <p className="hint composer-hint" role="status">
+              {sttHint}
+            </p>
+          )}
+          <div className="composer-row">
+            <textarea
+              className="composer-input"
+              value={composer}
+              onChange={(e) => setComposer(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+              placeholder={
+                sttBusy ? "Transcribing…" : streamingActive ? "Waiting for the reply…" : "Message…"
               }
-            }}
-            placeholder={streamingActive ? "Waiting for the reply…" : "Message…"}
-            rows={3}
-            disabled={streamingActive}
-          />
-          <button
-            type="button"
-            className="btn btn-primary send-btn"
-            onClick={() => void send()}
-            disabled={streamingActive || composer.trim().length === 0}
-          >
-            Send
-          </button>
+              rows={3}
+              disabled={streamingActive}
+            />
+            <button
+              type="button"
+              className={`btn icon-btn mic-btn${recording ? " recording" : ""}`}
+              aria-label={recording ? "Stop recording" : "Dictate"}
+              title={recording ? "Stop recording" : "Dictate"}
+              onClick={() => void toggleRecording()}
+              disabled={sttBusy || streamingActive}
+            >
+              {recording ? "■" : "●"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary send-btn"
+              onClick={() => void send()}
+              disabled={streamingActive || composer.trim().length === 0}
+            >
+              Send
+            </button>
+          </div>
         </footer>
       </section>
     </main>

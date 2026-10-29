@@ -480,6 +480,10 @@ input::placeholder {
   font-size: 0.8rem;
 }
 
+.voice-label {
+  margin-left: auto;
+}
+
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -531,7 +535,43 @@ input::placeholder {
   background-color: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px 12px 12px 3px;
-  padding: 0.75rem 1.1rem;
+  padding: 0.75rem 2.6rem 0.75rem 1.1rem;
+  position: relative;
+}
+
+/* Read-aloud control (T6): a quiet glyph button in the bubble's corner. */
+.speak-btn {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.55rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--faint);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+
+.speak-btn:hover {
+  color: var(--accent);
+  border-color: var(--border-strong);
+}
+
+.msg-assistant.speaking {
+  border-color: var(--accent);
+}
+
+.msg-assistant.speaking .speak-btn {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .msg-error {
@@ -803,6 +843,45 @@ input::placeholder {
 
 .send-btn {
   align-self: flex-end;
+}
+
+/* ---- voice (T6): dictation + read-aloud ---------------------------------- */
+
+.composer-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-end;
+  width: 100%;
+}
+
+.composer-hint {
+  margin: 0 0 0.5rem;
+}
+
+.icon-btn {
+  width: 2.6rem;
+  height: 2.6rem;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  background-color: transparent;
+  border-color: var(--border-strong);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.icon-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.mic-btn.recording {
+  color: var(--error);
+  border-color: var(--error);
+  animation: pulse 1.6s ease-in-out infinite;
 }
 
 /* ---- panels (T1 spike, inside the sidebar) ------------------------------- */
