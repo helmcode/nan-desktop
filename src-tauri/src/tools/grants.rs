@@ -473,6 +473,7 @@ mod tests {
         assert_eq!(canonical, expected_base.join("missing.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn canonicalize_best_effort_resolves_symlinks() {
         let (dir, _tmp) = tempdir();
@@ -566,6 +567,7 @@ mod tests {
         assert_eq!(err.kind, "no_grant");
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_under_grant_rejects_symlink_escape() {
         let (root, _tmp) = tempdir();
@@ -599,6 +601,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_under_grant_allows_symlink_inside_grant() {
         let (root, _tmp) = tempdir();
@@ -655,6 +658,7 @@ mod tests {
         verify_stable(&root, &canonical).expect("stable");
     }
 
+    #[cfg(unix)]
     #[test]
     fn verify_stable_detects_symlink_swap() {
         let (root, _tmp) = tempdir();
@@ -685,6 +689,7 @@ mod tests {
         verify_writable(&root, &canonical).expect("missing leaf is writable");
     }
 
+    #[cfg(unix)]
     #[test]
     fn verify_writable_rejects_broken_symlink_leaf() {
         let (root, _tmp) = tempdir();
