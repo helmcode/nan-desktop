@@ -562,7 +562,7 @@ mod tests {
         ));
         // A query string does not change the page path.
         assert!(is_valid_verification_url(
-            "https://api.helmcode.com/api/auth/device?x=1",
+            "https://cloud-api.helmcode.com/api/auth/device?x=1",
             HELMCODE_PLATFORM_BASE,
         ));
     }
