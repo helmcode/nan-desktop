@@ -11,9 +11,10 @@
   --border-strong: #343e55;
   --text: #e7ebf3;
   --muted: #99a2b8;
-  --faint: #6b7488;
+  --faint: #8a94aa; /* AA on all surfaces (>=4.5:1) */
   --accent: #5b8cff;
   --accent-strong: #3f6fe8;
+  --accent-btn-hover: #3a66da;
   --error: #f0716c;
   --ok: #6fd28a;
 
@@ -220,14 +221,16 @@ h1 {
 }
 
 .btn-primary {
-  background-color: var(--accent);
-  border-color: var(--accent);
+  /* UX review blocker 1: white on --accent fails AA (3.16:1); the stronger
+     accent passes (4.52:1) while staying on-brand. */
+  background-color: var(--accent-strong);
+  border-color: var(--accent-strong);
   color: #ffffff;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background-color: var(--accent-strong);
-  border-color: var(--accent-strong);
+  background-color: var(--accent-btn-hover);
+  border-color: var(--accent-btn-hover);
 }
 
 .btn-ghost {
@@ -366,6 +369,16 @@ input::placeholder {
   cursor: pointer;
   opacity: 0;
   transition: opacity 0.12s ease;
+}
+
+/* Armed confirmation (UX blocker 2): must be clearly visible while the
+   destructive second click is pending. */
+.conv-delete.armed {
+  opacity: 1;
+  color: var(--error);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .conv-item:hover .conv-delete,
@@ -1090,17 +1103,9 @@ input::placeholder {
   border-radius: 10px;
 }
 
-.signin-panel {
-  margin-bottom: 2rem;
-}
-
-.signin-row {
-  margin: 0 0 0.75rem;
-}
-
-.key-note {
-  color: var(--muted);
-}
+/* QA dead-code cleanup: .signin-panel/.signin-row belonged to the removed
+   key-based onboarding; the duplicate .key-note at the end of the file
+   (var(--muted)) won by cascade and made the intended faint styling dead. */
 
 .panel h2 {
   margin: 0 0 0.75rem;

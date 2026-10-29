@@ -1194,6 +1194,26 @@ function ChatShell({
     [refreshConversations],
   );
 
+  // UX review blocker 2: deletion is permanent and unrecoverable — the first
+  // click only arms an inline confirmation (auto-disarmed after 4s); the
+  // second, explicit click deletes.
+  const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null);
+  const deleteArmTimer = useRef<number | null>(null);
+  const confirmDeleteConversation = useCallback(
+    (conversationId: number): void => {
+      if (pendingDeleteId !== conversationId) {
+        setPendingDeleteId(conversationId);
+        if (deleteArmTimer.current !== null) window.clearTimeout(deleteArmTimer.current);
+        deleteArmTimer.current = window.setTimeout(() => setPendingDeleteId(null), 4000);
+        return;
+      }
+      if (deleteArmTimer.current !== null) window.clearTimeout(deleteArmTimer.current);
+      setPendingDeleteId(null);
+      void deleteConversation(conversationId);
+    },
+    [pendingDeleteId, deleteConversation],
+  );
+
   const streamingActive = activeConvId !== null && streamingIds.has(activeConvId);
   const activeDraft = activeConvId !== null ? drafts.get(activeConvId) : undefined;
   const imageGeneratingActive =
@@ -1354,11 +1374,15 @@ function ChatShell({
               </button>
               <button
                 type="button"
-                className="conv-delete"
-                aria-label={`Delete conversation ${c.title}`}
-                onClick={() => void deleteConversation(c.id)}
+                className={`conv-delete${pendingDeleteId === c.id ? " armed" : ""}`}
+                aria-label={
+                  pendingDeleteId === c.id
+                    ? `Click again to permanently delete conversation ${c.title}`
+                    : `Delete conversation ${c.title}`
+                }
+                onClick={() => confirmDeleteConversation(c.id)}
               >
-                ×
+                {pendingDeleteId === c.id ? "Delete?" : "×"}
               </button>
             </div>
           ))}
