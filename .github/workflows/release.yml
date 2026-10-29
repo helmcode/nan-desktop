@@ -81,8 +81,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: nan-desktop-v{{version}}
-          releaseName: 'nan-desktop v{{version}}'
+          tagName: ${{ github.ref_name }}
+          releaseName: 'nan-desktop ${{ github.ref_name }}'
           releaseBody: |
             Installers for Windows (msi / setup exe), macOS (dmg, arm64 and x64) and Linux (AppImage / deb).
 
