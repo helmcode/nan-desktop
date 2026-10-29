@@ -1507,6 +1507,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn list_files_does_not_descend_symlinked_dirs() {
         let (folder, _guard) = tempdir();
@@ -1807,6 +1808,7 @@ mod tests {
 
     /// Dangling-intermediate setup with clean guard ownership: the grant
     /// folder, the outside folder and the app-data dir (all guards kept).
+    #[cfg(unix)]
     #[test]
     fn write_rejects_intermediate_symlink_at_execute() {
         let (folder, outside, dir, _anchor) = simple_dangling_setup();
@@ -1862,6 +1864,7 @@ mod tests {
 
     /// Grant folder + `G/blink -> <outside>/later` dangling symlink, with
     /// clean guard ownership (all guards kept alive in the returned Vec).
+    #[cfg(unix)]
     fn simple_dangling_setup() -> (PathBuf, PathBuf, PathBuf, Vec<tempfile::TempDir>) {
         let (folder, guard1) = tempdir();
         let (outside, guard2) = tempdir();
