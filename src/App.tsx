@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -305,13 +304,60 @@ function CodeBlock({ node, children }: { node?: HastNode; children?: ReactNode }
   );
 }
 
+/// Extract plain text from a ReactNode tree (for the SafeLink duplicate
+/// check). Handles the common markdown cases: strings, numbers and nested
+/// simple elements.
+function nodeToText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeToText).join("");
+  if (typeof node === "object" && "props" in (node as unknown as Record<string, unknown>)) {
+    const props = (node as unknown as { props?: { children?: ReactNode } }).props;
+    return nodeToText(props?.children);
+  }
+  return "";
+}
+
+/// Model-supplied links never navigate the main window (external review
+/// B3, frontend layer): the anchor is rendered as a NEUTRAL element with no
+/// href — clicking it asks the Rust core (open_external) to open the URL
+/// in the system browser after https-only validation. The URL itself is
+/// shown as visible text so the target is never hidden. The Rust-side
+/// on_navigation allowlist is the second, independent layer.
+function SafeLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const url = typeof href === "string" ? href : "";
+  const open = () => {
+    if (url) {
+      void invoke("open_external", { url }).catch(() => {
+        /* invalid URL — the Rust core rejected it; stay silent */
+      });
+    }
+  };
+  const label = nodeToText(children);
+  return (
+    <span
+      className="safe-link"
+      role="link"
+      tabIndex={0}
+      title={url}
+      onClick={open}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") open();
+      }}
+    >
+      {children}
+      {url && !label.includes(url) ? <span className="safe-link-url"> ({url})</span> : null}
+    </span>
+  );
+}
+
 function Markdown({ text }: { text: string }) {
   return (
     <div className="md">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight, [rehypeSanitize, sanitizeSchema]]}
-        components={{ pre: CodeBlock }}
+        components={{ pre: CodeBlock, a: SafeLink }}
       >
         {text}
       </ReactMarkdown>
@@ -512,7 +558,6 @@ function ToolsPanel({ profileId }: { profileId: string | null }) {
   const [grants, setGrants] = useState<GrantView[]>([]);
   const [runCommandEnabled, setRunCommandEnabled] = useState(false);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
-  const [manualPath, setManualPath] = useState("");
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -539,14 +584,18 @@ function ToolsPanel({ profileId }: { profileId: string | null }) {
     void refresh();
   }, [refresh]);
 
-  const addFolder = async (path: string) => {
-    if (!profileId || !path) return;
+  const addFolder = async () => {
+    if (!profileId) return;
     setBusy(true);
     try {
-      await invoke("tools_grant_add", { profileId, path });
-      setManualPath("");
-      await refresh();
-      setStatus({ ok: true, text: `Granted ${path}` });
+      // The folder picker runs INSIDE the Rust core (native dialog); the
+      // picked path never crosses the renderer and scope policy is applied
+      // there (app data, root, $HOME and app-data ancestors are rejected).
+      const grant = await invoke<GrantView | null>("tools_grant_add", { profileId });
+      if (grant) {
+        await refresh();
+        setStatus({ ok: true, text: `Granted ${grant.canonical_path}` });
+      }
     } catch (err) {
       setStatus({ ok: false, text: toolsErrorLabel(err) });
     } finally {
@@ -555,10 +604,7 @@ function ToolsPanel({ profileId }: { profileId: string | null }) {
   };
 
   const pickFolder = async () => {
-    const picked = await openFileDialog({ directory: true, multiple: false });
-    if (typeof picked === "string") {
-      await addFolder(picked);
-    }
+    await addFolder();
   };
 
   const revoke = async (grantId: string) => {
@@ -618,21 +664,11 @@ function ToolsPanel({ profileId }: { profileId: string | null }) {
         >
           Choose folder…
         </button>
-        <input
-          value={manualPath}
-          onChange={(e) => setManualPath(e.currentTarget.value)}
-          placeholder="/absolute/path"
-          aria-label="Grant an absolute folder path"
-        />
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => void addFolder(manualPath.trim())}
-          disabled={busy || !profileId || manualPath.trim().length === 0}
-        >
-          Add
-        </button>
       </div>
+      <p className="hint">
+        The native picker decides the folder — typed paths are not accepted.
+        App data, the home folder itself and system roots are refused.
+      </p>
       <label className="tools-runcommand-row">
         <input
           type="checkbox"

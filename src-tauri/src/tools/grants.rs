@@ -341,6 +341,58 @@ pub fn verify_writable(root: &Path, canonical: &Path) -> Result<(), Rejection> {
     }
 }
 
+/// Reject grants that would hand the assistant the app's own configuration
+/// surface or trivially-crown-jewel locations. Protected (all paths must be
+/// canonical):
+/// (a) the app data dir itself or anything INSIDE it (tools-grants.json,
+///     tools-audit.log, chat.db, profiles.json live there);
+/// (b) the filesystem root;
+/// (c) `$HOME` itself (subtrees of `$HOME` outside the app data are fine);
+/// (d) any folder that CONTAINS the app data dir (granting ~ covers it).
+/// `app_data` and `home` are injected so tests can use tempdirs.
+pub fn validate_grant_scope(
+    canonical: &Path,
+    app_data: &Path,
+    home: Option<&Path>,
+) -> Result<(), Rejection> {
+    // (b) The filesystem root: either no parent at all (/, C:\) or a path
+    // whose only component is the root. Everything else is too broad to
+    // hand to the assistant.
+    let is_root = canonical.parent().is_none_or(|parent| parent == canonical)
+        || canonical.components().count() <= 1;
+    if is_root {
+        return Err(Rejection::new(
+            "scope",
+            "refusing to grant the filesystem root",
+        ));
+    }
+    // (a) The app data dir itself or anything inside it: tools-grants.json,
+    // tools-audit.log, chat.db and profiles.json live there — a grant on
+    // them would let an approved write rewrite the tool policy itself.
+    if is_under(app_data, canonical) {
+        return Err(Rejection::new(
+            "scope",
+            "refusing to grant inside the app data dir (tool config, audit log, profiles live there)",
+        ));
+    }
+    // (d) An ancestor of the app data dir: granting it covers the app data
+    // (e.g. granting ~ covers ~/Library/Application Support/...).
+    if is_under(canonical, app_data) {
+        return Err(Rejection::new(
+            "scope",
+            "refusing to grant a folder that contains the app data dir",
+        ));
+    }
+    // (c) $HOME itself. Subtrees of $HOME outside the app data dir are fine.
+    if home.is_some_and(|home| canonical == home) {
+        return Err(Rejection::new(
+            "scope",
+            "refusing to grant the whole home folder",
+        ));
+    }
+    Ok(())
+}
+
 fn longest_covering<'a>(grants: &[&'a Grant], canonical: &Path) -> Option<&'a Grant> {
     grants
         .iter()
@@ -749,5 +801,59 @@ mod tests {
         fs::create_dir(root.join("sub")).expect("dir");
         let canonical = canonicalize_best_effort(&root.join("sub").join("new.txt")).expect("ok");
         verify_writable(&root, &canonical).expect("plain missing leaf stays writable");
+    }
+
+    // ------------------------------------------------------ B2 scope --
+
+    /// Canonicalized base layout: `base/app-data` (the protected dir) and
+    /// `base/home` as a stand-in $HOME that CONTAINS the app data.
+    fn scope_layout() -> (PathBuf, PathBuf, PathBuf, tempfile::TempDir) {
+        let (base, guard) = tempdir();
+        let base = fs::canonicalize(&base).expect("canon");
+        let app_data = base.join("app-data");
+        let home = base.join("home");
+        fs::create_dir_all(&app_data).expect("app-data");
+        fs::create_dir_all(&home).expect("home");
+        (base, app_data, home, guard)
+    }
+
+    #[test]
+    fn grant_scope_rejects_app_data_itself_and_inside_it() {
+        let (_base, app_data, home, _guard) = scope_layout();
+        for bad in [app_data.clone(), app_data.join("sub")] {
+            let err = validate_grant_scope(&bad, &app_data, Some(&home)).expect_err("app data");
+            assert_eq!(err.kind, "scope");
+        }
+    }
+
+    #[test]
+    fn grant_scope_rejects_root() {
+        let (_base, app_data, home, _guard) = scope_layout();
+        let err = validate_grant_scope(Path::new("/"), &app_data, Some(&home)).expect_err("root");
+        assert_eq!(err.kind, "scope");
+    }
+
+    #[test]
+    fn grant_scope_rejects_home_itself_and_app_data_ancestors() {
+        let (base, app_data, home, _guard) = scope_layout();
+        // (c) $HOME itself.
+        let err = validate_grant_scope(&home, &app_data, Some(&home)).expect_err("home");
+        assert_eq!(err.kind, "scope");
+        // (d) an ancestor of the app data dir (granting it covers app data),
+        // even when it is not $HOME.
+        let err = validate_grant_scope(&base, &app_data, None).expect_err("ancestor");
+        assert_eq!(err.kind, "scope");
+    }
+
+    #[test]
+    fn grant_scope_allows_home_subtree_and_unrelated_folders() {
+        let (base, app_data, home, _guard) = scope_layout();
+        // Subtree of $HOME outside the app data dir: fine.
+        fs::create_dir_all(home.join("Projects")).expect("projects");
+        validate_grant_scope(&home.join("Projects"), &app_data, Some(&home)).expect("~/Projects");
+        // Unrelated folder: fine (existence is the caller's concern — the
+        // command canonicalizes before calling this).
+        fs::create_dir_all(base.join("work")).expect("work");
+        validate_grant_scope(&base.join("work"), &app_data, Some(&home)).expect("unrelated");
     }
 }

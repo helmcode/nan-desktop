@@ -15,6 +15,9 @@ mod chat_store;
 mod conn_test;
 mod device_flow;
 mod images;
+// Safe URL handling: open_external validation + main-window navigation
+// guard (external review B3).
+mod links;
 mod profile;
 // T8 tools subsystem: folder grants + propose/approve/execute tool actions.
 // Production IPC surface (registered in BOTH debug and release handlers).
@@ -248,7 +251,20 @@ pub fn run() {
         .manage(tools::ToolsState::default())
         // T8: native folder picker for tools grants (S7). Registered in
         // lib.rs so the capability is dialog:default only.
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        // External review B3: the main window is created PROGRAMMATICALLY
+        // (not from tauri.conf.json) so the navigation guard can be
+        // attached — the renderer can never navigate the window to a remote
+        // origin (in-window phishing). Markdown links go through
+        // links::open_external instead.
+        .setup(|app| {
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                .title("nan-desktop")
+                .inner_size(800.0, 600.0)
+                .on_navigation(|url| links::navigation_allowed(url.as_str()))
+                .build()?;
+            Ok(())
+        });
     #[cfg(debug_assertions)]
     let builder = builder
         .manage(SseState::default())
@@ -280,6 +296,7 @@ pub fn run() {
             tools::tools_settings_get,
             tools::tools_set_run_command_enabled,
             tools::tools_propose,
+            links::open_external,
             tools::tools_execute,
             tools::tools_deny,
             tools::tools_audit_tail
@@ -309,6 +326,7 @@ pub fn run() {
         tools::tools_settings_get,
         tools::tools_set_run_command_enabled,
         tools::tools_propose,
+        links::open_external,
         tools::tools_execute,
         tools::tools_deny,
         tools::tools_audit_tail

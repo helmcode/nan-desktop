@@ -415,14 +415,16 @@ async fn run_device_login(app: AppHandle, window: Window, profile_id: String) {
     };
 
     // Open the system browser from the Rust core; the verification URL is
-    // never sent to the renderer. Security review R3: only open URLs on the
-    // platform origin itself — a compromised or malicious server must not be
-    // able to point the approval browser elsewhere (phishing hand-off).
-    let expected_prefix = format!(
-        "{}/api/auth/device",
-        profile::platform_base_for(&profile_id).unwrap_or_default()
-    );
-    if !start.verification_url.starts_with(&expected_prefix) {
+    // never sent to the renderer. Security review R3 + QW3: only open URLs
+    // on the platform origin itself — real parse (scheme https, same host,
+    // exact /api/auth/device path); a compromised or malicious server must
+    // not be able to point the approval browser elsewhere (phishing
+    // hand-off).
+    let Some(platform_for_check) = profile::platform_base_for(&profile_id) else {
+        emit_error(ErrorKind::Protocol);
+        return;
+    };
+    if !is_valid_verification_url(&start.verification_url, platform_for_check) {
         emit_error(ErrorKind::Protocol);
         return;
     }
@@ -517,9 +519,30 @@ async fn run_device_login(app: AppHandle, window: Window, profile_id: String) {
     }
 }
 
+/// Validate the server-returned verification URL against the platform
+/// origin (external review QW3, replacing a prefix match): the URL must
+/// parse, use https, point at the platform's host (same port) and have the
+/// exact path `/api/auth/device` (a query string is tolerated). A
+/// compromised or malicious server must not be able to point the approval
+/// browser elsewhere (phishing hand-off).
+pub fn is_valid_verification_url(url: &str, platform_base: &str) -> bool {
+    let Ok(url) = tauri::Url::parse(url) else {
+        return false;
+    };
+    let Ok(base) = tauri::Url::parse(platform_base) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && base.scheme() == "https"
+        && url.host_str() == base.host_str()
+        && url.port() == base.port()
+        && url.path() == "/api/auth/device"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::{HELMCODE_PLATFORM_BASE, NAN_PLATFORM_BASE};
 
     const START_BODY: &str = r#"{
         "device_code": "abc123def456ghi789jkl012mno345pqr678stuv",
@@ -528,6 +551,51 @@ mod tests {
         "expires_in": 900,
         "interval": 5
     }"#;
+
+    // ---- verification_url origin check (QW3) ------------------------------
+
+    #[test]
+    fn verification_url_accepts_platform_origin() {
+        assert!(is_valid_verification_url(
+            "https://cloud-api.nan.builders/api/auth/device",
+            NAN_PLATFORM_BASE,
+        ));
+        // A query string does not change the page path.
+        assert!(is_valid_verification_url(
+            "https://api.helmcode.com/api/auth/device?x=1",
+            HELMCODE_PLATFORM_BASE,
+        ));
+    }
+
+    #[test]
+    fn verification_url_rejects_other_hosts_schemes_and_paths() {
+        // Different host (phishing hand-off).
+        assert!(!is_valid_verification_url(
+            "https://evil.com/api/auth/device",
+            NAN_PLATFORM_BASE,
+        ));
+        // Host that merely CONTAINS the platform host.
+        assert!(!is_valid_verification_url(
+            "https://cloud-api.nan.builders.evil.com/api/auth/device",
+            NAN_PLATFORM_BASE,
+        ));
+        // Same host, downgraded scheme.
+        assert!(!is_valid_verification_url(
+            "http://cloud-api.nan.builders/api/auth/device",
+            NAN_PLATFORM_BASE,
+        ));
+        // Same host, wrong path.
+        assert!(!is_valid_verification_url(
+            "https://cloud-api.nan.builders/other/path",
+            NAN_PLATFORM_BASE,
+        ));
+        assert!(!is_valid_verification_url(
+            "https://cloud-api.nan.builders/api/auth/device/extra",
+            NAN_PLATFORM_BASE,
+        ));
+        // Not a URL at all.
+        assert!(!is_valid_verification_url("not a url", NAN_PLATFORM_BASE));
+    }
 
     // ---- parse_start ------------------------------------------------------
 

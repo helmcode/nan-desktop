@@ -58,6 +58,14 @@ jobs:
       - name: Frontend build (typecheck + vite)
         run: pnpm build
 
+      # Advisory dependency audit (prod deps only). Fails on high+ severity;
+      # lower levels are informational. Rust-side auditing (cargo-audit /
+      # cargo-deny) is a documented MANUAL step for now — see the README
+      # security section.
+      - name: Dependency audit (prod, fail on high+)
+        if: runner.os == 'Linux'
+        run: pnpm audit --prod --audit-level high
+
       - name: Rust fmt
         working-directory: src-tauri
         run: cargo fmt --check

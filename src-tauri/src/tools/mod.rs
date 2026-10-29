@@ -499,6 +499,35 @@ pub fn propose(
     Ok(proposal)
 }
 
+/// Whether executing this action requires a native, renderer-proof
+/// confirmation dialog (external review B1): anything that changes disk or
+/// process state (write/replace/run_command). Reads and listings are
+/// protected by grants + the proposal scope and skip the dialog.
+pub fn needs_native_confirmation(action: &ToolAction) -> bool {
+    matches!(
+        action,
+        ToolAction::WriteFile { .. }
+            | ToolAction::ReplaceFile { .. }
+            | ToolAction::RunCommand { .. }
+    )
+}
+
+/// Peek at a pending proposal WITHOUT consuming it: (action, summary,
+/// canonical path) for the native confirmation dialog. Unknown/expired id
+/// → None (the later execute reports unknown_proposal).
+pub fn pending_view(
+    state: &ToolsState,
+    proposal_id: &str,
+) -> Option<(ToolAction, String, Option<PathBuf>)> {
+    let map = state.inner.lock().ok()?;
+    let proposal = map.get(proposal_id)?;
+    Some((
+        proposal.action.clone(),
+        proposal.summary.clone(),
+        proposal.canonical_path.clone(),
+    ))
+}
+
 // ------------------------------------------------------------- execute --
 
 /// Read helper: text file with the size cap + NUL-sniff binary check.
@@ -1021,25 +1050,43 @@ pub fn deny(dir: &Path, state: &ToolsState, proposal_id: &str) -> Result<(), Str
 
 // ------------------------------------------------------------ commands --
 
-/// Register a folder grant for a profile. `path` must be an existing
-/// absolute folder (the UI passes the native folder-picker result, or a
-/// typed path).
+/// Register a folder grant for a profile. The ONLY way in is the NATIVE
+/// folder picker opened from the Rust core (external review B1): the picked
+/// path never crosses the renderer, so a compromised renderer cannot add a
+/// grant by typing a path. Returns None when the user cancels the picker.
 #[tauri::command]
 pub fn tools_grant_add(
     app: AppHandle,
     profile_id: String,
-    path: String,
-) -> Result<grants::Grant, Rejection> {
+) -> Result<Option<grants::Grant>, Rejection> {
+    use tauri_plugin_dialog::DialogExt;
     let dir = data_dir(&app).map_err(|err| Rejection::new("io", err))?;
     if !profile::is_known_profile_id(&profile_id) {
         return Err(Rejection::new("protocol", "unknown profile"));
     }
+    let Some(picked) = app.dialog().file().blocking_pick_folder() else {
+        // User cancelled the picker — not an error, nothing granted.
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|err| {
+        Rejection::new(
+            "protocol",
+            format!("picker returned an unusable path: {err}"),
+        )
+    })?;
     let canonical = std::fs::canonicalize(&path).map_err(|err| {
-        Rejection::new("protocol", format!("cannot resolve folder {path}: {err}"))
+        Rejection::new(
+            "protocol",
+            format!("cannot resolve folder {}: {err}", path.display()),
+        )
     })?;
     if !canonical.is_dir() {
         return Err(Rejection::new("protocol", "grant path must be a folder"));
     }
+    // B2: protected-scope policy — the app data dir (tool config, audit
+    // log, profiles, chat DB), the filesystem root, $HOME itself, and any
+    // folder that CONTAINS the app data dir are all rejected.
+    grants::validate_grant_scope(&canonical, &dir, std::env::home_dir().as_deref())?;
     let mut store = load_store(&dir)?;
     let grant_id = uuid::Uuid::new_v4().to_string();
     let grant = store
@@ -1063,7 +1110,7 @@ pub fn tools_grant_add(
             detail: Some(format!("granted folder {}", canonical.display())),
         },
     )?;
-    Ok(grant)
+    Ok(Some(grant))
 }
 
 #[tauri::command]
@@ -1107,6 +1154,38 @@ pub fn tools_settings_get(app: AppHandle) -> Result<ToolsSettingsView, String> {
 
 #[tauri::command]
 pub fn tools_set_run_command_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    if enabled {
+        // B1: enabling the experimental shell escape hatch must be
+        // confirmed by a NATIVE dialog the renderer cannot fake.
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+        let confirmed = app
+            .dialog()
+            .message(
+                "⚠ Enable run_command?\n\nrun_command lets the assistant execute SHELL COMMANDS \
+                 inside granted folders, after a per-action confirmation. A shell can do anything \
+                 you could: read files, use the network, change settings.\n\nKeep it OFF unless \
+                 you really need it.",
+            )
+            .title("Enable run_command (experimental)")
+            .buttons(MessageDialogButtons::OkCancel)
+            .blocking_show();
+        if !confirmed {
+            let dir = data_dir(&app)?;
+            audit::append(
+                &dir,
+                &AuditEntry {
+                    ts: audit::timestamp_now_rfc3339(),
+                    event: "settings".into(),
+                    action: "run_command".into(),
+                    outcome: "ignored".into(),
+                    grant_id: None,
+                    profile_id: None,
+                    detail: Some("user declined the native confirmation dialog".into()),
+                },
+            )?;
+            return Err("user declined — run_command stays off".into());
+        }
+    }
     let dir = data_dir(&app)?;
     let mut store = grants::load_or_seed(&dir)?;
     store.set_run_command_enabled(enabled);
@@ -1146,6 +1225,25 @@ pub fn tools_propose(
     })
 }
 
+/// Native confirmation dialog shown FROM the Rust core (external review B1):
+/// a compromised renderer cannot fake, suppress or auto-confirm it. Uses the
+/// plugin's `blocking_show`, which the plugin documents as main-thread-
+/// unsafe — it must only run on a command's worker thread (Tauri sync
+/// commands execute off the main event loop thread).
+fn confirm_action(app: &AppHandle, summary: &str, path: Option<&Path>) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let mut text = format!("The assistant requests a tool action:\n\n{summary}\n");
+    if let Some(path) = path {
+        text.push_str(&format!("\nPath: {}\n", path.display()));
+    }
+    text.push_str("\nApprove and execute? Nothing runs without this confirmation.");
+    app.dialog()
+        .message(text)
+        .title("Approve tool action")
+        .buttons(MessageDialogButtons::OkCancel)
+        .blocking_show()
+}
+
 #[tauri::command]
 pub fn tools_execute(
     app: AppHandle,
@@ -1153,6 +1251,21 @@ pub fn tools_execute(
     proposal_id: String,
 ) -> Result<ToolOutcome, Rejection> {
     let dir = data_dir(&app).map_err(|err| Rejection::new("io", err))?;
+    // B1: "the human approved" must mean a human saw a NATIVE dialog — the
+    // renderer merely calling tools_execute is never enough for
+    // state-changing actions (write/replace/run_command).
+    if let Some((action, summary, path)) = pending_view(&state, &proposal_id)
+        && needs_native_confirmation(&action)
+        && !confirm_action(&app, &summary, path.as_deref())
+    {
+        // Declined in the dialog: consume + audit as a deny so the
+        // proposal cannot be retried without a new propose.
+        deny(&dir, &state, &proposal_id).map_err(|msg| Rejection::new("io", msg))?;
+        return Err(Rejection::new(
+            "protocol",
+            "user declined the action in the native confirmation dialog",
+        ));
+    }
     execute(&dir, &state, &proposal_id)
 }
 
@@ -2004,5 +2117,57 @@ mod tests {
         assert_eq!(last.event, "propose");
         assert_eq!(last.outcome, "rejected");
         assert_eq!(last.profile_id.as_deref(), Some("bogus"));
+    }
+
+    // ----------------------------------------- B1 native confirmation --
+
+    #[test]
+    fn state_changing_actions_need_native_confirmation() {
+        // write/replace/run_command change disk or process state → the
+        // command layer must confirm them with a native dialog the renderer
+        // cannot fake. read/list skip it.
+        assert!(needs_native_confirmation(&ToolAction::WriteFile {
+            path: "/a".into(),
+            content: "x".into(),
+        }));
+        assert!(needs_native_confirmation(&ToolAction::ReplaceFile {
+            path: "/a".into(),
+            old: "x".into(),
+            new: "y".into(),
+        }));
+        assert!(needs_native_confirmation(&ToolAction::RunCommand {
+            cmd: "ls".into(),
+            cwd_in_grant: "/a".into(),
+        }));
+        assert!(!needs_native_confirmation(&ToolAction::ReadFile {
+            path: "/a".into()
+        }));
+        assert!(!needs_native_confirmation(&ToolAction::ListFiles {
+            path: "/a".into()
+        }));
+    }
+
+    #[test]
+    fn pending_view_peeks_without_consuming() {
+        let (folder, _guard) = tempdir();
+        let (dir, _guard2) = granted_dir(&folder);
+        let st = state();
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::WriteFile {
+                path: canon(&folder).join("a.md").display().to_string(),
+                content: "x".into(),
+            },
+        );
+        let (action, summary, path) = pending_view(&st, &proposal.id).expect("pending");
+        assert_eq!(action.kind(), "write_file");
+        assert!(!summary.is_empty());
+        assert_eq!(path.as_deref(), proposal.canonical_path.as_deref());
+        // Peeking must NOT consume: the proposal is still executable.
+        assert!(pending_view(&st, &proposal.id).is_some());
+        execute(&dir, &st, &proposal.id).expect("still executes after peeks");
+        assert!(pending_view(&st, &proposal.id).is_none(), "consumed");
+        assert!(pending_view(&st, "no-such-id").is_none());
     }
 }

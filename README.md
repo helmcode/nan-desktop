@@ -442,16 +442,67 @@ USER approves/denies → Rust core executes ONLY the exact approved action**.
 
 `run_command` executes a shell command (`sh -c` / `cmd /C`) inside a
 granted cwd. It is **disabled by default** (`tools_allow_run_command: false`
-in `tools.json`); enabling it is an explicit user action in the Tools
-panel, per-action approval ALWAYS applies, and the flag is re-checked at
-execute time. A shell can do anything the user could — the approval dialog
-is the control. Keep it OFF unless you need it.
+in `tools.json`); enabling it requires a NATIVE confirmation dialog shown
+from the Rust core (a renderer cannot fake it), per-action approval ALWAYS
+applies as another native dialog, and the flag is re-checked at execute
+time. A shell can do anything the user could — the native confirmation is
+the control. Keep it OFF unless you need it.
+
+### Native confirmations (renderer-proof approvals)
+
+Approvals for state-changing actions are NATIVE dialogs rendered by the
+Rust core via `tauri-plugin-dialog`, not web UI a compromised renderer
+could fake or auto-click:
+
+- `tools_execute` on write/replace/run_command proposals: blocking
+  Ok/Cancel dialog with the stored summary + canonical path; cancel
+  consumes the proposal as a deny (nothing runs).
+- `tools_set_run_command_enabled(true)`: blocking warning dialog; cancel
+  keeps the flag off (audited as `settings/ignored`).
+- `tools_grant_add`: the ONLY path in is the native folder picker opened
+  from Rust — the picked path never crosses the renderer (there is no
+  typed-path IPC at all), and the protected-scope policy below applies.
+
+Pattern note: the plugin's `blocking_show()` is documented as
+main-thread-unsafe, so it is called only from command worker threads
+(Tauri sync commands run off the main event loop thread).
+
+### Grant scope policy (protected locations)
+
+`validate_grant_scope` (Rust, unit-tested with injected dirs) rejects a
+grant when the canonical path is: the app data dir or anything INSIDE it
+(tools-grants.json, tools-audit.log, chat.db, profiles.json — an approved
+write must never be able to rewrite the tool policy itself); the
+filesystem root; `$HOME` itself; or any folder that CONTAINS the app data
+dir (granting ~ would cover it). Subtrees of `$HOME` outside the app data
+(e.g. `~/Projects`) and unrelated folders are fine.
+
+### Link safety (two independent layers)
+
+Model-generated links can never navigate the main window (in-window
+phishing):
+
+1. **Rust navigation guard**: the main window is created programmatically
+   with `WebviewWindowBuilder::on_navigation` — an allowlist (app origins,
+   asset protocol, about/blob/data/ipc, dev server) decides every
+   navigation; remote http(s) origins are cancelled.
+2. **Frontend**: markdown anchors render as a NEUTRAL element (no href).
+   Clicking invokes `open_external(url)`, a Rust command that validates
+   the URL (https-only, host required, no credentials) before handing it
+   to the OS opener; the URL is shown as visible text next to the link.
+
+### Dependency auditing
+
+CI runs `pnpm audit --prod --audit-level high` (fails on high+).
+Rust-side auditing (cargo-audit / cargo-deny) is a MANUAL step for now:
+run `cargo install cargo-audit && cargo audit` from `src-tauri/` when
+reviewing dependency changes.
 
 ### UI
 
-- **Tools & folder grants** (sidebar): grant list (add via folder picker /
-  typed path, revoke), the red-warned run_command switch, and an audit log
-  viewer (last 50 entries).
+- **Tools & folder grants** (sidebar): grant list (add ONLY via the
+  native folder picker, revoke), the red-warned run_command switch, and an
+  audit log viewer (last 50 entries).
 - **Tools demo** (composer-adjacent, labeled as test surface): paste an
   action JSON → see the proposal summary + diff → Approve/Deny → see the
   result. Model tool-calling integration is a LATER task; this panel drives
