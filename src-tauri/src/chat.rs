@@ -12,6 +12,18 @@
 //! - `chat://done`  `{conversation_id}` — stream finished cleanly
 //! - `chat://error` `{conversation_id, kind}` — classified failure
 //! - `chat://stopped` `{conversation_id}` — the user stopped the stream (T4b)
+//! - `chat://activity` `{conversation_id, activity}` — `searching` /
+//!   `working` while a tool runs, `null` when the model writes again
+//!
+//! Tool calling (P1-7 + workspace): every request offers the `web_search`
+//! function (see `web_search.rs`) and, when the user set up a workspace,
+//! the file tools. Requested calls are run by the core — web search through
+//! the platform API (silent when unavailable), file actions through the
+//! tools subsystem with a NATIVE approval dialog per action — and the
+//! results are fed back until the model answers in text (at most
+//! [`MAX_TOOL_ROUNDS`] rounds). A server that rejects `tools` (400) is
+//! retried once without them. Web sources are persisted with the reply and
+//! rendered as citation chips.
 //!
 //! Error kinds: `missing_key` / `unauthorized` (401 → the session must
 //! re-login) / `rate_limited` (429) / `server` (other non-2xx) / `network`
@@ -47,9 +59,10 @@ use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Window};
 
-use crate::chat_store::{self, ChatMessageRow, ConversationView};
+use crate::chat_store::{self, ChatMessageRow, ConversationView, WebSource};
 use crate::profile::{self, KEYRING_SERVICE};
 use crate::sse::{flush_sse_buffer, parse_sse_buffer};
+use crate::{tools, web_search};
 
 /// Connect timeout for chat/model requests. No overall request timeout: a
 /// long stream must not be killed mid-generation.
@@ -124,6 +137,258 @@ pub fn extract_delta(data: &str) -> DeltaOutcome {
         return DeltaOutcome::None;
     }
     DeltaOutcome::Delta(content.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Tool calling (P1-7 web search + workspace file tools)
+// ---------------------------------------------------------------------------
+
+/// Most model ↔ tool round trips in one reply. The final round is sent
+/// without tools so the model must answer in text.
+pub const MAX_TOOL_ROUNDS: usize = 6;
+
+/// Longest tool output fed back to the model (chars). Keeps one big file
+/// read from flooding the context window.
+pub const MAX_TOOL_RESULT_CHARS: usize = 60_000;
+
+/// One complete tool call requested by the model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Rebuilds streamed `delta.tool_calls` fragments (OpenAI streaming shape:
+/// `{index, id?, function: {name?, arguments?}}`, arguments arrive in
+/// pieces) into complete calls.
+#[derive(Debug, Default)]
+pub struct ToolCallAccumulator {
+    calls: Vec<ToolCall>,
+}
+
+impl ToolCallAccumulator {
+    /// Absorb the tool-call fragments of one SSE data payload (ignores
+    /// payloads without any).
+    pub fn absorb(&mut self, data: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            return;
+        };
+        let Some(fragments) = value
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("delta"))
+            .and_then(|delta| delta.get("tool_calls"))
+            .and_then(|calls| calls.as_array())
+        else {
+            return;
+        };
+        for (position, fragment) in fragments.iter().enumerate() {
+            let index = fragment
+                .get("index")
+                .and_then(|i| i.as_u64())
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(position);
+            // A bounded index: a hostile stream cannot make us allocate.
+            if index >= 32 {
+                continue;
+            }
+            if self.calls.len() <= index {
+                self.calls.resize(index + 1, ToolCall::default());
+            }
+            let call = &mut self.calls[index];
+            if let Some(id) = fragment.get("id").and_then(|id| id.as_str())
+                && !id.is_empty()
+            {
+                call.id = id.to_string();
+            }
+            if let Some(function) = fragment.get("function") {
+                if let Some(name) = function.get("name").and_then(|n| n.as_str()) {
+                    call.name.push_str(name);
+                }
+                if let Some(arguments) = function.get("arguments").and_then(|a| a.as_str()) {
+                    call.arguments.push_str(arguments);
+                }
+            }
+        }
+    }
+
+    /// The complete calls (unnamed fragments dropped, missing ids filled).
+    pub fn finish(self) -> Vec<ToolCall> {
+        self.calls
+            .into_iter()
+            .enumerate()
+            .filter(|(_, call)| !call.name.is_empty())
+            .map(|(i, mut call)| {
+                if call.id.is_empty() {
+                    call.id = format!("call_{i}");
+                }
+                call
+            })
+            .collect()
+    }
+}
+
+/// File tools offered when the profile has a workspace (OpenAI function
+/// definitions; paths are absolute and must sit inside a workspace folder —
+/// the Rust core enforces that, the model is only told).
+fn file_tool_definitions(run_command: bool) -> Vec<serde_json::Value> {
+    let path = serde_json::json!({ "type": "string", "description": "Absolute path inside one of the workspace folders." });
+    let mut defs = vec![
+        serde_json::json!({ "type": "function", "function": {
+            "name": "list_files",
+            "description": "List the files and folders inside a folder (up to 3 levels deep).",
+            "parameters": { "type": "object", "properties": { "path": path }, "required": ["path"] }
+        }}),
+        serde_json::json!({ "type": "function", "function": {
+            "name": "read_file",
+            "description": "Read a text file.",
+            "parameters": { "type": "object", "properties": { "path": path }, "required": ["path"] }
+        }}),
+        serde_json::json!({ "type": "function", "function": {
+            "name": "write_file",
+            "description": "Create a text file or replace its whole content.",
+            "parameters": { "type": "object", "properties": {
+                "path": path,
+                "content": { "type": "string", "description": "The full new content." }
+            }, "required": ["path", "content"] }
+        }}),
+        serde_json::json!({ "type": "function", "function": {
+            "name": "replace_file",
+            "description": "Replace one exact, unique piece of text in a file.",
+            "parameters": { "type": "object", "properties": {
+                "path": path,
+                "old": { "type": "string", "description": "Exact text to replace (must appear once)." },
+                "new": { "type": "string", "description": "Replacement text." }
+            }, "required": ["path", "old", "new"] }
+        }}),
+    ];
+    if run_command {
+        defs.push(serde_json::json!({ "type": "function", "function": {
+            "name": "run_command",
+            "description": "Run a shell command inside a workspace folder (30 s limit).",
+            "parameters": { "type": "object", "properties": {
+                "cmd": { "type": "string", "description": "The command line." },
+                "cwd": { "type": "string", "description": "Absolute workspace folder to run it in." }
+            }, "required": ["cmd", "cwd"] }
+        }}));
+    }
+    defs
+}
+
+/// Every tool offered to the model for one reply: web search always, file
+/// tools only when the user set up a workspace.
+pub fn tool_definitions(workspace: Option<&tools::Workspace>) -> Vec<serde_json::Value> {
+    let mut defs = vec![web_search::tool_definition()];
+    if let Some(workspace) = workspace {
+        defs.extend(file_tool_definitions(workspace.run_command));
+    }
+    defs
+}
+
+/// System message describing the workspace (only sent when one exists).
+pub fn workspace_prompt(workspace: &tools::Workspace) -> String {
+    let folders = workspace
+        .roots
+        .iter()
+        .map(|root| format!("- {}", root.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let scope = if workspace.computer_wide {
+        "The user gave you access to their whole user folder."
+    } else {
+        "You may only work inside these folders."
+    };
+    format!(
+        "You can work with the user's files through the file tools. {scope}\n\
+         Workspace folders:\n{folders}\n\
+         Always use absolute paths. Every action is shown to the user for approval; \
+         if they decline, do not retry — ask them how to proceed."
+    )
+}
+
+/// Map a model file-tool call onto a core [`tools::ToolAction`]. Unknown
+/// names and malformed arguments are rejected (fed back to the model).
+pub fn action_from_call(name: &str, arguments: &str) -> Result<tools::ToolAction, String> {
+    let mut args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(if arguments.trim().is_empty() {
+            "{}"
+        } else {
+            arguments
+        })
+        .map_err(|_| "arguments are not a JSON object".to_string())?;
+    if name == "run_command"
+        && let Some(cwd) = args.remove("cwd")
+    {
+        args.insert("cwd_in_grant".into(), cwd);
+    }
+    args.insert("type".into(), serde_json::Value::String(name.to_string()));
+    tools::parse_action(&serde_json::Value::Object(args).to_string())
+        .map_err(|rejection| rejection.message)
+}
+
+fn cap_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut capped: String = text.chars().take(max).collect();
+    capped.push_str("\n… (truncated)");
+    capped
+}
+
+/// The tool-message content fed back to the model for a file action.
+pub fn outcome_for_model(result: Result<tools::ToolOutcome, tools::Rejection>) -> String {
+    match result {
+        Ok(outcome) => {
+            let mut value = serde_json::json!({ "ok": true, "summary": outcome.summary });
+            if let Some(content) = outcome.content {
+                value["content"] = cap_chars(&content, MAX_TOOL_RESULT_CHARS).into();
+            }
+            if let Some(entries) = outcome.entries {
+                value["entries"] = entries.into();
+            }
+            if let Some(stdout) = outcome.stdout {
+                value["stdout"] = cap_chars(&stdout, MAX_TOOL_RESULT_CHARS).into();
+            }
+            if let Some(stderr) = outcome.stderr {
+                value["stderr"] = cap_chars(&stderr, MAX_TOOL_RESULT_CHARS).into();
+            }
+            if let Some(code) = outcome.exit_code {
+                value["exit_code"] = code.into();
+            }
+            value.to_string()
+        }
+        Err(rejection) if rejection.kind == "declined" => serde_json::json!({
+            "ok": false,
+            "error": "declined",
+            "message": "The user did not allow this action. Do not retry it; ask them how to proceed."
+        })
+        .to_string(),
+        Err(rejection) => serde_json::json!({
+            "ok": false,
+            "error": rejection.kind,
+            "message": rejection.message
+        })
+        .to_string(),
+    }
+}
+
+/// The chat-completions request body for one round.
+pub fn request_body(
+    model: &str,
+    messages: &[serde_json::Value],
+    tools: &[serde_json::Value],
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+    if !tools.is_empty() {
+        body["tools"] = serde_json::Value::Array(tools.to_vec());
+        body["tool_choice"] = "auto".into();
+    }
+    body
 }
 
 /// Whether a data payload is the OpenAI `[DONE]` stream terminator.
@@ -401,6 +666,17 @@ pub(crate) fn read_profile_key(profile_id: &str) -> Result<String, ErrorKind> {
     }
 }
 
+/// Read a profile's login session JWT from the OS keychain (account
+/// `<profile-id>.session`). Used for platform calls (web search, memory
+/// sync). Missing, empty or unreadable → None: callers degrade silently.
+/// Never rendered, logged or echoed (S4).
+pub(crate) fn read_session_token(profile_id: &str) -> Option<String> {
+    keyring::Entry::new(KEYRING_SERVICE, &profile::session_account(profile_id))
+        .and_then(|entry| entry.get_password())
+        .ok()
+        .filter(|token| !token.is_empty())
+}
+
 /// Send a user message into a conversation and stream the assistant reply.
 ///
 /// Persisting happens here in the command (BEFORE the stream task starts):
@@ -537,17 +813,31 @@ async fn run_chat_stream(
             return;
         }
     };
-    let history: Vec<serde_json::Value> = match chat_store::list_messages(&conn, conversation_id) {
-        Ok(rows) => rows
-            .iter()
-            .map(|row| serde_json::json!({ "role": row.role, "content": row.content }))
-            .collect(),
-        Err(_) => {
-            emit_error(ErrorKind::Protocol);
-            release_stream(&state, conversation_id, generation);
-            return;
-        }
-    };
+    let mut messages: Vec<serde_json::Value> =
+        match chat_store::list_messages(&conn, conversation_id) {
+            Ok(rows) => rows
+                .iter()
+                .map(|row| serde_json::json!({ "role": row.role, "content": row.content }))
+                .collect(),
+            Err(_) => {
+                emit_error(ErrorKind::Protocol);
+                release_stream(&state, conversation_id, generation);
+                return;
+            }
+        };
+
+    // ---- tools offered this reply ------------------------------------------
+    // Web search is always offered (provider-invisible, silent when the
+    // platform cannot serve it). File tools only exist when the user picked
+    // a workspace; the system message tells the model where it may work.
+    let workspace = tools::workspace_for(&app, &profile_id);
+    if let Some(workspace) = &workspace {
+        messages.insert(
+            0,
+            serde_json::json!({ "role": "system", "content": workspace_prompt(workspace) }),
+        );
+    }
+    let mut offered_tools = tool_definitions(workspace.as_ref());
 
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
@@ -561,130 +851,165 @@ async fn run_chat_stream(
         }
     };
 
-    // ---- POST /chat/completions (stream: true) ---------------------------
-    let response = match client
-        .post(format!("{base}/chat/completions"))
-        .bearer_auth(&key)
-        .json(&serde_json::json!({
-            "model": model,
-            "messages": history,
-            "stream": true,
-        }))
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(err) => {
-            emit_error(classify_transport(err.is_timeout()));
-            release_stream(&state, conversation_id, generation);
-            return;
-        }
-    };
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
-        emit_error(classify_chat_status(status));
-        release_stream(&state, conversation_id, generation);
-        return;
-    }
-
-    // ---- in-progress assistant row (T4b delta persistence) ----------------
-    // Created only after a 2xx (a rejected request persists nothing
-    // assistant-side). Every received chunk's deltas overwrite this row, so
-    // a kill mid-stream leaves the partial reply in the DB. It is created
+    // ---- model ↔ tool rounds -------------------------------------------------
+    // The in-progress assistant row (T4b delta persistence) is created after
+    // the FIRST 2xx (a rejected request persists nothing assistant-side) and
     // AFTER the history read above: interrupted leftovers stay part of the
-    // request history as-is, while this row (the reply now being generated)
-    // must not be.
-    let row_id =
-        match chat_store::insert_in_progress_assistant(&conn, conversation_id, Some(&model)) {
-            Ok(id) => id,
-            Err(_) => {
-                emit_error(ErrorKind::Protocol);
-                release_stream(&state, conversation_id, generation);
-                return;
+    // request history as-is, while this row must not be. Text from every
+    // round accumulates into that one row.
+    let mut row_id: Option<i64> = None;
+    let mut accumulated = String::new();
+    let mut sources: Vec<WebSource> = Vec::new();
+    let mut failed: Option<ErrorKind> = None;
+
+    for round in 0..=MAX_TOOL_ROUNDS {
+        // The last round offers no tools: the model must answer in text.
+        let mut offer_tools = round < MAX_TOOL_ROUNDS && !offered_tools.is_empty();
+        let no_tools: &[serde_json::Value] = &[];
+        let body = request_body(
+            &model,
+            &messages,
+            if offer_tools {
+                offered_tools.as_slice()
+            } else {
+                no_tools
+            },
+        );
+        let mut response = match post_completion(&client, &base, &key, &body).await {
+            Ok(response) => response,
+            Err(err) => {
+                failed = Some(err);
+                break;
             }
         };
-
-    // ---- stream the SSE reply --------------------------------------------
-    use futures_util::StreamExt;
-
-    let mut stream = response.bytes_stream();
-    let mut byte_buffer: Vec<u8> = Vec::new();
-    let mut sse_buffer = String::new();
-    let mut accumulated = String::new();
-    let mut failed: Option<ErrorKind> = None;
-    let mut finished = false;
-
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(bytes) => {
-                byte_buffer.extend_from_slice(&bytes);
-                sse_buffer.push_str(&decode_incremental(&mut byte_buffer));
-                let mut pending_flush = false;
-                for data in parse_sse_buffer(&mut sse_buffer) {
-                    if is_done_sentinel(&data) {
-                        finished = true;
+        let mut status = response.status().as_u16();
+        if status == 400 && offer_tools {
+            // Silent degradation: a model/server without tool-calling
+            // support rejects the `tools` field. Retry once without any
+            // tools and never offer them again in this reply.
+            offered_tools.clear();
+            offer_tools = false;
+            response =
+                match post_completion(&client, &base, &key, &request_body(&model, &messages, &[]))
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        failed = Some(err);
                         break;
                     }
-                    if let DeltaOutcome::Delta(text) = extract_delta(&data) {
-                        accumulated.push_str(&text);
-                        pending_flush = true;
-                        let _ = window.emit(
-                            "chat://delta",
-                            DeltaPayload {
-                                conversation_id,
-                                delta: text,
-                            },
-                        );
+                };
+            status = response.status().as_u16();
+        }
+        if !(200..300).contains(&status) {
+            failed = Some(classify_chat_status(status));
+            break;
+        }
+        let row = match row_id {
+            Some(row) => row,
+            None => {
+                match chat_store::insert_in_progress_assistant(&conn, conversation_id, Some(&model))
+                {
+                    Ok(id) => {
+                        row_id = Some(id);
+                        id
                     }
-                }
-                if finished {
-                    break;
-                }
-                if pending_flush {
-                    // T4b: flush everything received so far BEFORE waiting
-                    // for the next chunk — a kill from here on keeps every
-                    // byte that reached the app.
-                    if chat_store::update_message_content(&conn, row_id, &accumulated).is_err() {
+                    Err(_) => {
                         failed = Some(ErrorKind::Protocol);
                         break;
                     }
                 }
             }
-            Err(err) => {
-                failed = Some(classify_transport(err.is_timeout()));
+        };
+
+        let round_out = match stream_round(
+            &window,
+            &dir,
+            conversation_id,
+            row,
+            response,
+            &mut accumulated,
+        )
+        .await
+        {
+            Ok(round_out) => round_out,
+            Err(kind) => {
+                failed = Some(kind);
                 break;
             }
+        };
+        if round_out.tool_calls.is_empty() || !offer_tools {
+            break;
         }
-    }
 
-    if failed.is_none() && !finished {
-        // Flush a stream that ended without a trailing blank line / [DONE].
-        for data in flush_sse_buffer(&mut sse_buffer) {
-            if let DeltaOutcome::Delta(text) = extract_delta(&data) {
-                accumulated.push_str(&text);
-                let _ = window.emit(
-                    "chat://delta",
-                    DeltaPayload {
-                        conversation_id,
-                        delta: text,
-                    },
-                );
-            }
+        // ---- run the requested tools, feed results back -------------------
+        let round_text = if round_out.text.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(round_out.text.clone())
+        };
+        let requested: Vec<serde_json::Value> = round_out
+            .tool_calls
+            .iter()
+            .map(|call| {
+                serde_json::json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": { "name": call.name, "arguments": call.arguments },
+                })
+            })
+            .collect();
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": round_text,
+            "tool_calls": requested,
+        }));
+        for call in &round_out.tool_calls {
+            let content = run_tool_call(
+                &app,
+                &window,
+                &profile_id,
+                conversation_id,
+                call,
+                &mut sources,
+            )
+            .await;
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": content,
+            }));
         }
+        let _ = window.emit(
+            "chat://activity",
+            ActivityPayload {
+                conversation_id,
+                activity: None,
+            },
+        );
     }
 
     // ---- persist + notify --------------------------------------------------
-    match failed {
-        Some(kind) => {
+    match (failed, row_id) {
+        (Some(kind), row) => {
             // A failed stream drops the partial text by design (unchanged
             // from T4): remove the in-progress row, then report the error.
-            let _ = chat_store::delete_message(&conn, row_id);
+            if let Some(row) = row {
+                let _ = chat_store::delete_message(&conn, row);
+            }
             emit_error(kind);
         }
-        None => {
-            // Clean finish OR deliberate stop: finalize the in-progress row
-            // in place with the final accumulated text.
-            let persisted = chat_store::finalize_message(&conn, row_id, &accumulated)
+        (None, Some(row)) => {
+            // Clean finish: finalize the in-progress row in place with the
+            // final accumulated text and its web sources (citation chips).
+            let persisted = chat_store::finalize_message(&conn, row, &accumulated)
+                .and_then(|_| {
+                    if sources.is_empty() {
+                        Ok(())
+                    } else {
+                        chat_store::set_message_sources(&conn, row, &sources)
+                    }
+                })
                 .and_then(|_| chat_store::touch_conversation(&conn, conversation_id));
             match persisted {
                 Ok(()) => {
@@ -693,8 +1018,167 @@ async fn run_chat_stream(
                 Err(_) => emit_error(ErrorKind::Protocol),
             }
         }
+        (None, None) => emit_error(ErrorKind::Protocol),
     }
     release_stream(&state, conversation_id, generation);
+}
+
+/// `chat://activity` — what the assistant is doing between text deltas
+/// (`searching` the web, `working` on files — waiting for the user's
+/// approval) or `null` when it is writing again. Shown as a calm status
+/// line; never technical detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ActivityPayload {
+    pub conversation_id: i64,
+    pub activity: Option<&'static str>,
+}
+
+/// POST one chat-completions request; transport failures are classified,
+/// the status is left to the caller (it may retry a 400 without tools).
+async fn post_completion(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, ErrorKind> {
+    client
+        .post(format!("{base}/chat/completions"))
+        .bearer_auth(key)
+        .json(body)
+        .send()
+        .await
+        .map_err(|err| classify_transport(err.is_timeout()))
+}
+
+/// What one streamed round produced.
+struct RoundOutput {
+    /// This round's text only (sent back with its tool calls).
+    text: String,
+    tool_calls: Vec<ToolCall>,
+}
+
+/// Stream one SSE reply: emit and persist text deltas into `row` (T4b:
+/// flushed per network chunk), collect tool calls. Opens its own store
+/// connection: a `&Connection` (not `Sync`) must not live across awaits of
+/// a spawned task.
+async fn stream_round(
+    window: &Window,
+    dir: &std::path::Path,
+    conversation_id: i64,
+    row: i64,
+    response: reqwest::Response,
+    accumulated: &mut String,
+) -> Result<RoundOutput, ErrorKind> {
+    use futures_util::StreamExt;
+
+    let conn = chat_store::open_db(dir).map_err(|_| ErrorKind::Protocol)?;
+    let mut stream = response.bytes_stream();
+    let mut byte_buffer: Vec<u8> = Vec::new();
+    let mut sse_buffer = String::new();
+    let mut calls = ToolCallAccumulator::default();
+    let mut text = String::new();
+    let mut finished = false;
+
+    // Text of a later round is separated from the earlier rounds' text.
+    let push_delta = |delta: String, text: &mut String, accumulated: &mut String| {
+        let delta = if text.is_empty() && !accumulated.is_empty() && !accumulated.ends_with('\n') {
+            format!("\n\n{delta}")
+        } else {
+            delta
+        };
+        text.push_str(&delta);
+        accumulated.push_str(&delta);
+        let _ = window.emit(
+            "chat://delta",
+            DeltaPayload {
+                conversation_id,
+                delta,
+            },
+        );
+    };
+
+    while let Some(item) = stream.next().await {
+        let bytes = item.map_err(|err| classify_transport(err.is_timeout()))?;
+        byte_buffer.extend_from_slice(&bytes);
+        sse_buffer.push_str(&decode_incremental(&mut byte_buffer));
+        let mut pending_flush = false;
+        for data in parse_sse_buffer(&mut sse_buffer) {
+            if is_done_sentinel(&data) {
+                finished = true;
+                break;
+            }
+            calls.absorb(&data);
+            if let DeltaOutcome::Delta(delta) = extract_delta(&data) {
+                push_delta(delta, &mut text, &mut *accumulated);
+                pending_flush = true;
+            }
+        }
+        if pending_flush {
+            // T4b: flush everything received so far BEFORE waiting for the
+            // next chunk — a kill from here on keeps every byte that
+            // reached the app.
+            chat_store::update_message_content(&conn, row, accumulated)
+                .map_err(|_| ErrorKind::Protocol)?;
+        }
+        if finished {
+            break;
+        }
+    }
+    if !finished {
+        // Flush a stream that ended without a trailing blank line / [DONE].
+        for data in flush_sse_buffer(&mut sse_buffer) {
+            calls.absorb(&data);
+            if let DeltaOutcome::Delta(delta) = extract_delta(&data) {
+                push_delta(delta, &mut text, &mut *accumulated);
+            }
+        }
+    }
+    Ok(RoundOutput {
+        text,
+        tool_calls: calls.finish(),
+    })
+}
+
+/// Run one model tool call and return the tool-message content. Web search
+/// degrades silently; file actions go through the core's per-action native
+/// approval (`tools::run_model_action`).
+async fn run_tool_call(
+    app: &AppHandle,
+    window: &Window,
+    profile_id: &str,
+    conversation_id: i64,
+    call: &ToolCall,
+    sources: &mut Vec<WebSource>,
+) -> String {
+    let activity = if call.name == web_search::TOOL_NAME {
+        "searching"
+    } else {
+        "working"
+    };
+    let _ = window.emit(
+        "chat://activity",
+        ActivityPayload {
+            conversation_id,
+            activity: Some(activity),
+        },
+    );
+    if call.name == web_search::TOOL_NAME {
+        let results = match web_search::parse_query(&call.arguments) {
+            Some(query) => web_search::search(profile_id, &query).await,
+            None => Vec::new(),
+        };
+        web_search::merge_sources(sources, &results);
+        return web_search::results_for_model(&results);
+    }
+    match action_from_call(&call.name, &call.arguments) {
+        Ok(action) => outcome_for_model(
+            tools::run_model_action(app, profile_id, conversation_id, action).await,
+        ),
+        Err(message) => {
+            serde_json::json!({ "ok": false, "error": "invalid_call", "message": message })
+                .to_string()
+        }
+    }
 }
 
 /// Sidebar list: a profile's conversations, most recent first, each with a
@@ -1163,6 +1647,163 @@ mod tests {
     // is not unit-tested: mutating process-global env vars in parallel tests is
     // unsound. The constants path is covered by the profile suite; the mock
     // override is exercised via `NAN_DESKTOP_MOCK_INFERENCE pnpm tauri dev`.
+
+    // ---- tool calling ---------------------------------------------------------
+
+    #[test]
+    fn accumulator_rebuilds_streamed_tool_call_fragments() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.absorb(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"web_search","arguments":""}}]}}]}"#);
+        acc.absorb(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":"}}]}}]}"#);
+        acc.absorb(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"clima\"}"}}]}}]}"#);
+        acc.absorb(r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"name":"read_file","arguments":"{}"}}]}}]}"#);
+        acc.absorb(r#"{"choices":[{"delta":{"content":"plain text"}}]}"#);
+        let calls = acc.finish();
+        assert_eq!(
+            calls,
+            vec![
+                ToolCall {
+                    id: "call_a".into(),
+                    name: "web_search".into(),
+                    arguments: r#"{"query":"clima"}"#.into(),
+                },
+                ToolCall {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn accumulator_ignores_noise_and_bounds_indices() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.absorb("not json");
+        acc.absorb(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":100000,"function":{"name":"x"}}]}}]}"#,
+        );
+        acc.absorb(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#,
+        );
+        assert!(
+            acc.finish().is_empty(),
+            "nameless and out-of-range calls dropped"
+        );
+    }
+
+    #[test]
+    fn web_search_is_always_offered_file_tools_only_with_a_workspace() {
+        let names = |defs: Vec<serde_json::Value>| -> Vec<String> {
+            defs.iter()
+                .map(|d| {
+                    d["function"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect()
+        };
+        assert_eq!(names(tool_definitions(None)), vec!["web_search"]);
+        let ws = tools::Workspace {
+            roots: vec![std::path::PathBuf::from("/Users/me/Proyecto")],
+            computer_wide: false,
+            run_command: false,
+        };
+        assert_eq!(
+            names(tool_definitions(Some(&ws))),
+            vec![
+                "web_search",
+                "list_files",
+                "read_file",
+                "write_file",
+                "replace_file"
+            ]
+        );
+        let ws = tools::Workspace {
+            run_command: true,
+            ..ws
+        };
+        assert!(names(tool_definitions(Some(&ws))).contains(&"run_command".to_string()));
+    }
+
+    #[test]
+    fn workspace_prompt_lists_folders_and_scope() {
+        let ws = tools::Workspace {
+            roots: vec![std::path::PathBuf::from("/Users/me/Proyecto")],
+            computer_wide: false,
+            run_command: false,
+        };
+        let prompt = workspace_prompt(&ws);
+        assert!(prompt.contains("/Users/me/Proyecto"));
+        assert!(prompt.contains("only work inside"));
+        let wide = workspace_prompt(&tools::Workspace {
+            computer_wide: true,
+            ..ws
+        });
+        assert!(wide.contains("whole user folder"));
+    }
+
+    #[test]
+    fn request_body_adds_tools_only_when_offered() {
+        let messages = vec![serde_json::json!({"role":"user","content":"hola"})];
+        let plain = request_body("m", &messages, &[]);
+        assert!(plain.get("tools").is_none());
+        assert!(plain.get("tool_choice").is_none());
+        assert_eq!(plain["stream"], true);
+        let with = request_body("m", &messages, &tool_definitions(None));
+        assert_eq!(with["tools"][0]["function"]["name"], "web_search");
+        assert_eq!(with["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn model_calls_map_onto_core_actions() {
+        assert_eq!(
+            action_from_call("read_file", r#"{"path":"/a/b.txt"}"#),
+            Ok(tools::ToolAction::ReadFile {
+                path: "/a/b.txt".into()
+            })
+        );
+        assert_eq!(
+            action_from_call("run_command", r#"{"cmd":"ls","cwd":"/a"}"#),
+            Ok(tools::ToolAction::RunCommand {
+                cmd: "ls".into(),
+                cwd_in_grant: "/a".into()
+            })
+        );
+        assert!(action_from_call("delete_everything", r#"{"path":"/"}"#).is_err());
+        assert!(action_from_call("read_file", "not json").is_err());
+        // A model cannot smuggle a different action kind through arguments.
+        assert_eq!(
+            action_from_call(
+                "read_file",
+                r#"{"type":"write_file","path":"/a","content":"x"}"#
+            ),
+            Ok(tools::ToolAction::ReadFile { path: "/a".into() })
+        );
+    }
+
+    #[test]
+    fn tool_outcomes_are_capped_and_declines_say_do_not_retry() {
+        let big = "x".repeat(MAX_TOOL_RESULT_CHARS + 10);
+        let text = outcome_for_model(Ok(tools::ToolOutcome {
+            action: "read_file".into(),
+            summary: "read".into(),
+            content: Some(big),
+            ..Default::default()
+        }));
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert!(
+            value["content"]
+                .as_str()
+                .expect("content")
+                .ends_with("(truncated)")
+        );
+        let declined = outcome_for_model(Err(tools::Rejection::new("declined", "no")));
+        assert!(declined.contains("Do not retry"));
+        let rejected = outcome_for_model(Err(tools::Rejection::new("escape", "outside")));
+        assert!(rejected.contains("\"error\":\"escape\""));
+    }
 
     #[test]
     fn default_model_is_the_headliner() {

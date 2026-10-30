@@ -27,6 +27,20 @@ pub const STORE_FILE: &str = "tools.json";
 /// Store schema version. A mismatch refuses to load (fail closed).
 pub const STORE_VERSION: u32 = 1;
 
+/// How wide a grant is. `Folder` is the normal, user-picked private folder.
+/// `ComputerWide` roots the grant at `$HOME` ("the whole computer" in the
+/// UI): it is only ever created by `tools_grant_computer_wide` after the user
+/// confirmed a NATIVE warning dialog, and every action under it is still
+/// approved one by one. The app data dir stays protected under both scopes
+/// (see [`is_protected`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantScope {
+    #[default]
+    Folder,
+    ComputerWide,
+}
+
 /// One approved folder grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
@@ -36,6 +50,10 @@ pub struct Grant {
     /// RFC 3339 UTC timestamp.
     pub granted_at: String,
     pub profile_id: String,
+    /// Grant breadth. Files written before scopes existed have no field and
+    /// load as `Folder` (no schema bump needed).
+    #[serde(default)]
+    pub scope: GrantScope,
 }
 
 /// On-disk tools settings: folder grants plus the experimental
@@ -120,9 +138,42 @@ impl GrantsStore {
             canonical_path,
             granted_at,
             profile_id: profile_id.to_string(),
+            scope: GrantScope::Folder,
         };
         self.grants.push(grant.clone());
         Ok(grant)
+    }
+
+    /// Add (or return the existing) computer-wide grant for a profile,
+    /// rooted at the canonical `$HOME`. Callers MUST have validated the root
+    /// with [`validate_computer_wide_root`] and obtained the user's native
+    /// confirmation first.
+    pub fn add_computer_wide_grant(
+        &mut self,
+        grant_id: String,
+        profile_id: &str,
+        canonical_home: PathBuf,
+        granted_at: String,
+    ) -> Grant {
+        if let Some(existing) = self.computer_wide_grant(profile_id) {
+            return existing.clone();
+        }
+        let grant = Grant {
+            id: grant_id,
+            canonical_path: canonical_home,
+            granted_at,
+            profile_id: profile_id.to_string(),
+            scope: GrantScope::ComputerWide,
+        };
+        self.grants.push(grant.clone());
+        grant
+    }
+
+    /// The profile's computer-wide grant, if the user enabled that mode.
+    pub fn computer_wide_grant(&self, profile_id: &str) -> Option<&Grant> {
+        self.grants
+            .iter()
+            .find(|grant| grant.profile_id == profile_id && grant.scope == GrantScope::ComputerWide)
     }
 
     /// Remove a grant by id. Returns true when a grant was removed.
@@ -391,6 +442,102 @@ pub fn validate_grant_scope(
         ));
     }
     Ok(())
+}
+
+/// Validate the root of a computer-wide grant: it must be the canonical
+/// `$HOME` itself (never the filesystem root, never inside the app data dir).
+/// The app data dir under `$HOME` stays off limits through [`is_protected`],
+/// which every proposal and every execution checks.
+pub fn validate_computer_wide_root(
+    canonical_home: &Path,
+    app_data: &Path,
+) -> Result<(), Rejection> {
+    let is_root = canonical_home
+        .parent()
+        .is_none_or(|parent| parent == canonical_home)
+        || canonical_home.components().count() <= 1;
+    if is_root {
+        return Err(Rejection::new(
+            "scope",
+            "refusing to grant the filesystem root",
+        ));
+    }
+    if is_under(app_data, canonical_home) {
+        return Err(Rejection::new(
+            "scope",
+            "refusing to root a computer-wide grant inside the app data dir",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `canonical` is the app data dir or lies inside it (tool policy,
+/// audit log, profiles, chat history). No action may ever touch it — this
+/// matters for computer-wide grants, whose `$HOME` root contains the app
+/// data dir. `app_data` should be canonical; a non-canonical value is also
+/// checked so a missing dir cannot slip through.
+pub fn is_protected(app_data: &Path, canonical: &Path) -> bool {
+    if is_under(app_data, canonical) {
+        return true;
+    }
+    std::fs::canonicalize(app_data).is_ok_and(|real| is_under(&real, canonical))
+}
+
+/// Folders under `$HOME` that hold credentials or auto-run code. The agent
+/// never needs to write there, so no grant (not even computer-wide) and no
+/// user approval can unlock a write inside them.
+const SENSITIVE_HOME_DIRS: &[&[&str]] = &[
+    &[".ssh"],
+    &[".gnupg"],
+    &["Library", "Keychains"],
+    &["Library", "LaunchAgents"],
+];
+
+/// Shell startup files: a write here runs code on the next terminal launch.
+/// Matched by file name anywhere (dotfiles repos are routinely symlinked
+/// into `$HOME`).
+const SHELL_STARTUP_FILES: &[&str] = &[
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".profile",
+];
+
+/// Key material extensions (case-insensitive), refused anywhere.
+const KEY_EXTENSIONS: &[&str] = &["pem", "key"];
+
+/// Whether `canonical` is a write target that is ALWAYS refused, whatever
+/// the grant scope and whatever the user approves: credential stores, login
+/// items, shell startup files and private-key files. Reads are unaffected.
+/// `home` is injected so tests can use tempdirs; it is checked both as given
+/// and canonicalized so a symlinked `$HOME` cannot slip through.
+pub fn is_sensitive_write_target(home: Option<&Path>, canonical: &Path) -> bool {
+    let file_name = canonical.file_name().and_then(|name| name.to_str());
+    if file_name.is_some_and(|name| SHELL_STARTUP_FILES.contains(&name)) {
+        return true;
+    }
+    let extension = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase);
+    if extension.is_some_and(|ext| KEY_EXTENSIONS.contains(&ext.as_str())) {
+        return true;
+    }
+    let Some(home) = home else {
+        return false;
+    };
+    let real_home = std::fs::canonicalize(home).ok();
+    let mut homes = std::iter::once(home).chain(real_home.as_deref());
+    homes.any(|home| {
+        SENSITIVE_HOME_DIRS.iter().any(|parts| {
+            let dir: PathBuf = parts.iter().fold(home.to_path_buf(), |acc, p| acc.join(p));
+            is_under(&dir, canonical)
+        })
+    })
 }
 
 fn longest_covering<'a>(grants: &[&'a Grant], canonical: &Path) -> Option<&'a Grant> {
@@ -855,5 +1002,189 @@ mod tests {
         // command canonicalizes before calling this).
         fs::create_dir_all(base.join("work")).expect("work");
         validate_grant_scope(&base.join("work"), &app_data, Some(&home)).expect("unrelated");
+    }
+
+    // ------------------------------------------------ computer-wide --
+
+    /// Layout where the app data lives INSIDE the stand-in $HOME, exactly
+    /// like macOS (`~/Library/Application Support/<id>`).
+    fn home_with_app_data() -> (PathBuf, PathBuf, tempfile::TempDir) {
+        let (base, guard) = tempdir();
+        let home = fs::canonicalize(&base).expect("canon").join("home");
+        let app_data = home.join("Library").join("app-data");
+        fs::create_dir_all(&app_data).expect("app-data");
+        (home, app_data, guard)
+    }
+
+    #[test]
+    fn folder_scope_still_rejects_home_but_computer_wide_root_accepts_it() {
+        let (home, app_data, _guard) = home_with_app_data();
+        // The normal folder path keeps refusing $HOME (contains app data)…
+        let err = validate_grant_scope(&home, &app_data, Some(&home)).expect_err("folder");
+        assert_eq!(err.kind, "scope");
+        // …while the explicit computer-wide mode accepts it as a root.
+        validate_computer_wide_root(&home, &app_data).expect("computer-wide root");
+    }
+
+    #[test]
+    fn computer_wide_root_rejects_filesystem_root_and_app_data() {
+        let (_home, app_data, _guard) = home_with_app_data();
+        let err = validate_computer_wide_root(Path::new("/"), &app_data).expect_err("root");
+        assert_eq!(err.kind, "scope");
+        let err = validate_computer_wide_root(&app_data.join("x"), &app_data).expect_err("inside");
+        assert_eq!(err.kind, "scope");
+    }
+
+    #[test]
+    fn app_data_stays_protected_under_a_computer_wide_grant() {
+        let (home, app_data, _guard) = home_with_app_data();
+        assert!(is_protected(&app_data, &app_data));
+        assert!(is_protected(&app_data, &app_data.join("tools.json")));
+        assert!(!is_protected(
+            &app_data,
+            &home.join("Documents").join("a.txt")
+        ));
+        assert!(!is_protected(&app_data, &home));
+    }
+
+    // ------------------------------------------- sensitive write deny-list --
+
+    #[test]
+    fn sensitive_dirs_under_home_are_never_writable() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        for bad in [
+            home.join(".ssh"),
+            home.join(".ssh").join("authorized_keys"),
+            home.join(".ssh").join("config"),
+            home.join(".gnupg").join("gpg.conf"),
+            home.join("Library")
+                .join("Keychains")
+                .join("login.keychain-db"),
+            home.join("Library")
+                .join("LaunchAgents")
+                .join("com.evil.plist"),
+        ] {
+            assert!(
+                is_sensitive_write_target(Some(&home), &bad),
+                "{} must be refused",
+                bad.display()
+            );
+        }
+    }
+
+    #[test]
+    fn shell_startup_files_are_never_writable() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        for name in [
+            ".zshrc",
+            ".zshenv",
+            ".zprofile",
+            ".zlogin",
+            ".bashrc",
+            ".bash_profile",
+            ".bash_login",
+            ".profile",
+        ] {
+            assert!(
+                is_sensitive_write_target(Some(&home), &home.join(name)),
+                "~/{name} must be refused"
+            );
+            // A copy anywhere else (e.g. a dotfiles repo symlinked into ~)
+            // is refused too.
+            assert!(
+                is_sensitive_write_target(Some(&home), &home.join("dotfiles").join(name)),
+                "dotfiles/{name} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn key_material_extensions_are_never_writable_anywhere() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        for bad in [
+            home.join("Projects").join("server.pem"),
+            home.join("Projects").join("tls.key"),
+            home.join("Projects").join("UPPER.PEM"),
+            home.join("Projects").join("Mixed.Key"),
+        ] {
+            assert!(
+                is_sensitive_write_target(Some(&home), &bad),
+                "{} must be refused",
+                bad.display()
+            );
+        }
+        // The extension rule holds even without a known $HOME.
+        assert!(is_sensitive_write_target(
+            None,
+            Path::new("/srv/certs/server.pem")
+        ));
+    }
+
+    #[test]
+    fn ordinary_files_stay_writable() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        for ok in [
+            home.join("Documents").join("notes.md"),
+            home.join("Projects").join("app").join("main.rs"),
+            home.join("Projects").join("keys.rs"),
+            home.join("Projects").join("monkey"),
+            home.join("Projects").join(".ssh-notes.md"),
+            home.join("Library").join("Preferences").join("x.plist"),
+            home.join("Projects").join(".zshrc.d").join("readme.md"),
+        ] {
+            assert!(
+                !is_sensitive_write_target(Some(&home), &ok),
+                "{} must stay writable",
+                ok.display()
+            );
+        }
+        // Without $HOME, the home-relative dirs cannot be matched (no false
+        // positives on look-alike paths elsewhere).
+        assert!(!is_sensitive_write_target(
+            None,
+            Path::new("/srv/project/readme.md")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sensitive_dirs_match_through_a_non_canonical_home() {
+        // $HOME as reported by the environment may sit behind a symlink
+        // (macOS /var → /private/var); canonical targets must still match.
+        let (base, _guard) = tempdir();
+        let real_home = fs::canonicalize(&base).expect("canon").join("real-home");
+        fs::create_dir_all(real_home.join(".ssh")).expect("ssh");
+        let link_home = fs::canonicalize(&base).expect("canon").join("link-home");
+        std::os::unix::fs::symlink(&real_home, &link_home).expect("symlink");
+        assert!(is_sensitive_write_target(
+            Some(&link_home),
+            &real_home.join(".ssh").join("authorized_keys")
+        ));
+    }
+
+    #[test]
+    fn computer_wide_grant_is_idempotent_and_scoped_per_profile() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        let mut store = default_store();
+        let first = store.add_computer_wide_grant("cw1".into(), "nan", home.clone(), "t".into());
+        let again = store.add_computer_wide_grant("cw2".into(), "nan", home.clone(), "t".into());
+        assert_eq!(first, again, "re-enabling returns the existing grant");
+        assert_eq!(first.scope, GrantScope::ComputerWide);
+        assert!(store.computer_wide_grant("nan").is_some());
+        assert!(store.computer_wide_grant("helmcode").is_none());
+        // Covers paths anywhere under $HOME for that profile only.
+        let docs = home.join("Documents");
+        fs::create_dir_all(&docs).expect("docs");
+        let (grant_id, _) =
+            resolve_under_grant(&store, "nan", &docs.display().to_string()).expect("covered");
+        assert_eq!(grant_id, "cw1");
+        assert!(resolve_under_grant(&store, "helmcode", &docs.display().to_string()).is_err());
+    }
+
+    #[test]
+    fn legacy_grants_without_scope_load_as_folder() {
+        let raw = r#"{"version":1,"tools_allow_run_command":false,"grants":[{"id":"g","canonical_path":"/tmp/x","granted_at":"t","profile_id":"nan"}]}"#;
+        let store = parse_store(raw).expect("legacy file parses");
+        assert_eq!(store.grants[0].scope, GrantScope::Folder);
     }
 }

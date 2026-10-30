@@ -88,7 +88,9 @@ pub fn append(dir: &Path, entry: &AuditEntry) -> Result<(), String> {
 }
 
 /// Return the last `count` entries, oldest first. Corrupt lines are
-/// skipped; a missing file yields an empty list.
+/// skipped; a missing file yields an empty list. Test-only since the audit
+/// viewer left the UI (the log itself is still written for every action).
+#[cfg(test)]
 pub fn tail(dir: &Path, count: usize) -> Result<Vec<AuditEntry>, String> {
     let raw = match std::fs::read_to_string(dir.join(AUDIT_FILE)) {
         Ok(raw) => raw,
