@@ -1,7 +1,7 @@
-//! Minimal SSE parsing for the T1 spike: HTTP lives in the Rust core (S4),
-//! parsed events are forwarded to the UI as Tauri events.
+//! Minimal SSE parsing for the streaming chat (`chat.rs`): HTTP lives in the
+//! Rust core (S4), parsed events are forwarded to the UI as Tauri events.
 //!
-//! The parser only implements what the spike needs: `data:` lines and
+//! The parser only implements what OpenAI-style streams need: `data:` lines and
 //! blank-line event boundaries. `event:`, `id:`, `retry:` fields and
 //! `:`-prefixed comments are ignored, and events with empty data are
 //! skipped. Both `\n` and `\r\n` line endings are supported.
@@ -41,8 +41,8 @@ pub fn parse_sse_buffer(buffer: &mut String) -> Vec<String> {
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
             current.push(rest.to_string());
         }
-        // `event:`, `id:`, `retry:` and unknown fields are ignored for the
-        // spike (see module docs).
+        // `event:`, `id:`, `retry:` and unknown fields are ignored (see
+        // module docs).
     }
 
     // The event is not finished until a blank line arrives: re-encode the

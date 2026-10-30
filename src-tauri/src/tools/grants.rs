@@ -27,6 +27,20 @@ pub const STORE_FILE: &str = "tools.json";
 /// Store schema version. A mismatch refuses to load (fail closed).
 pub const STORE_VERSION: u32 = 1;
 
+/// How wide a grant is. `Folder` is the normal, user-picked private folder.
+/// `ComputerWide` roots the grant at `$HOME` ("the whole computer" in the
+/// UI): it is only ever created by `tools_grant_computer_wide` after the user
+/// confirmed a NATIVE warning dialog, and every action under it is still
+/// approved one by one. The app data dir stays protected under both scopes
+/// (see [`is_protected`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantScope {
+    #[default]
+    Folder,
+    ComputerWide,
+}
+
 /// One approved folder grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
@@ -36,6 +50,10 @@ pub struct Grant {
     /// RFC 3339 UTC timestamp.
     pub granted_at: String,
     pub profile_id: String,
+    /// Grant breadth. Files written before scopes existed have no field and
+    /// load as `Folder` (no schema bump needed).
+    #[serde(default)]
+    pub scope: GrantScope,
 }
 
 /// On-disk tools settings: folder grants plus the experimental
@@ -120,9 +138,42 @@ impl GrantsStore {
             canonical_path,
             granted_at,
             profile_id: profile_id.to_string(),
+            scope: GrantScope::Folder,
         };
         self.grants.push(grant.clone());
         Ok(grant)
+    }
+
+    /// Add (or return the existing) computer-wide grant for a profile,
+    /// rooted at the canonical `$HOME`. Callers MUST have validated the root
+    /// with [`validate_computer_wide_root`] and obtained the user's native
+    /// confirmation first.
+    pub fn add_computer_wide_grant(
+        &mut self,
+        grant_id: String,
+        profile_id: &str,
+        canonical_home: PathBuf,
+        granted_at: String,
+    ) -> Grant {
+        if let Some(existing) = self.computer_wide_grant(profile_id) {
+            return existing.clone();
+        }
+        let grant = Grant {
+            id: grant_id,
+            canonical_path: canonical_home,
+            granted_at,
+            profile_id: profile_id.to_string(),
+            scope: GrantScope::ComputerWide,
+        };
+        self.grants.push(grant.clone());
+        grant
+    }
+
+    /// The profile's computer-wide grant, if the user enabled that mode.
+    pub fn computer_wide_grant(&self, profile_id: &str) -> Option<&Grant> {
+        self.grants
+            .iter()
+            .find(|grant| grant.profile_id == profile_id && grant.scope == GrantScope::ComputerWide)
     }
 
     /// Remove a grant by id. Returns true when a grant was removed.
@@ -391,6 +442,45 @@ pub fn validate_grant_scope(
         ));
     }
     Ok(())
+}
+
+/// Validate the root of a computer-wide grant: it must be the canonical
+/// `$HOME` itself (never the filesystem root, never inside the app data dir).
+/// The app data dir under `$HOME` stays off limits through [`is_protected`],
+/// which every proposal and every execution checks.
+pub fn validate_computer_wide_root(
+    canonical_home: &Path,
+    app_data: &Path,
+) -> Result<(), Rejection> {
+    let is_root = canonical_home
+        .parent()
+        .is_none_or(|parent| parent == canonical_home)
+        || canonical_home.components().count() <= 1;
+    if is_root {
+        return Err(Rejection::new(
+            "scope",
+            "refusing to grant the filesystem root",
+        ));
+    }
+    if is_under(app_data, canonical_home) {
+        return Err(Rejection::new(
+            "scope",
+            "refusing to root a computer-wide grant inside the app data dir",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `canonical` is the app data dir or lies inside it (tool policy,
+/// audit log, profiles, chat history). No action may ever touch it — this
+/// matters for computer-wide grants, whose `$HOME` root contains the app
+/// data dir. `app_data` should be canonical; a non-canonical value is also
+/// checked so a missing dir cannot slip through.
+pub fn is_protected(app_data: &Path, canonical: &Path) -> bool {
+    if is_under(app_data, canonical) {
+        return true;
+    }
+    std::fs::canonicalize(app_data).is_ok_and(|real| is_under(&real, canonical))
 }
 
 fn longest_covering<'a>(grants: &[&'a Grant], canonical: &Path) -> Option<&'a Grant> {
@@ -855,5 +945,74 @@ mod tests {
         // command canonicalizes before calling this).
         fs::create_dir_all(base.join("work")).expect("work");
         validate_grant_scope(&base.join("work"), &app_data, Some(&home)).expect("unrelated");
+    }
+
+    // ------------------------------------------------ computer-wide --
+
+    /// Layout where the app data lives INSIDE the stand-in $HOME, exactly
+    /// like macOS (`~/Library/Application Support/<id>`).
+    fn home_with_app_data() -> (PathBuf, PathBuf, tempfile::TempDir) {
+        let (base, guard) = tempdir();
+        let home = fs::canonicalize(&base).expect("canon").join("home");
+        let app_data = home.join("Library").join("app-data");
+        fs::create_dir_all(&app_data).expect("app-data");
+        (home, app_data, guard)
+    }
+
+    #[test]
+    fn folder_scope_still_rejects_home_but_computer_wide_root_accepts_it() {
+        let (home, app_data, _guard) = home_with_app_data();
+        // The normal folder path keeps refusing $HOME (contains app data)…
+        let err = validate_grant_scope(&home, &app_data, Some(&home)).expect_err("folder");
+        assert_eq!(err.kind, "scope");
+        // …while the explicit computer-wide mode accepts it as a root.
+        validate_computer_wide_root(&home, &app_data).expect("computer-wide root");
+    }
+
+    #[test]
+    fn computer_wide_root_rejects_filesystem_root_and_app_data() {
+        let (_home, app_data, _guard) = home_with_app_data();
+        let err = validate_computer_wide_root(Path::new("/"), &app_data).expect_err("root");
+        assert_eq!(err.kind, "scope");
+        let err = validate_computer_wide_root(&app_data.join("x"), &app_data).expect_err("inside");
+        assert_eq!(err.kind, "scope");
+    }
+
+    #[test]
+    fn app_data_stays_protected_under_a_computer_wide_grant() {
+        let (home, app_data, _guard) = home_with_app_data();
+        assert!(is_protected(&app_data, &app_data));
+        assert!(is_protected(&app_data, &app_data.join("tools.json")));
+        assert!(!is_protected(
+            &app_data,
+            &home.join("Documents").join("a.txt")
+        ));
+        assert!(!is_protected(&app_data, &home));
+    }
+
+    #[test]
+    fn computer_wide_grant_is_idempotent_and_scoped_per_profile() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        let mut store = default_store();
+        let first = store.add_computer_wide_grant("cw1".into(), "nan", home.clone(), "t".into());
+        let again = store.add_computer_wide_grant("cw2".into(), "nan", home.clone(), "t".into());
+        assert_eq!(first, again, "re-enabling returns the existing grant");
+        assert_eq!(first.scope, GrantScope::ComputerWide);
+        assert!(store.computer_wide_grant("nan").is_some());
+        assert!(store.computer_wide_grant("helmcode").is_none());
+        // Covers paths anywhere under $HOME for that profile only.
+        let docs = home.join("Documents");
+        fs::create_dir_all(&docs).expect("docs");
+        let (grant_id, _) =
+            resolve_under_grant(&store, "nan", &docs.display().to_string()).expect("covered");
+        assert_eq!(grant_id, "cw1");
+        assert!(resolve_under_grant(&store, "helmcode", &docs.display().to_string()).is_err());
+    }
+
+    #[test]
+    fn legacy_grants_without_scope_load_as_folder() {
+        let raw = r#"{"version":1,"tools_allow_run_command":false,"grants":[{"id":"g","canonical_path":"/tmp/x","granted_at":"t","profile_id":"nan"}]}"#;
+        let store = parse_store(raw).expect("legacy file parses");
+        assert_eq!(store.grants[0].scope, GrantScope::Folder);
     }
 }
