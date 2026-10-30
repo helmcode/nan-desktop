@@ -13,6 +13,14 @@
 //!
 //! The renderer only ever sees the resulting sources (title + URL) as
 //! citation chips, persisted with the assistant message.
+//!
+//! Privacy boundary: the query is written by the model, so it may carry
+//! context the model has read (chat history, file contents from granted
+//! folders, tool output). It is sent ONLY to our own platform endpoint
+//! with the user's session — never directly to a third-party search
+//! provider from the device — and is capped at [`MAX_QUERY_CHARS`]. What the
+//! platform forwards upstream is governed by our platform's privacy terms;
+//! that is the boundary we own and document.
 
 use std::time::Duration;
 

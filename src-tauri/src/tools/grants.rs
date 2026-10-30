@@ -483,6 +483,63 @@ pub fn is_protected(app_data: &Path, canonical: &Path) -> bool {
     std::fs::canonicalize(app_data).is_ok_and(|real| is_under(&real, canonical))
 }
 
+/// Folders under `$HOME` that hold credentials or auto-run code. The agent
+/// never needs to write there, so no grant (not even computer-wide) and no
+/// user approval can unlock a write inside them.
+const SENSITIVE_HOME_DIRS: &[&[&str]] = &[
+    &[".ssh"],
+    &[".gnupg"],
+    &["Library", "Keychains"],
+    &["Library", "LaunchAgents"],
+];
+
+/// Shell startup files: a write here runs code on the next terminal launch.
+/// Matched by file name anywhere (dotfiles repos are routinely symlinked
+/// into `$HOME`).
+const SHELL_STARTUP_FILES: &[&str] = &[
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".profile",
+];
+
+/// Key material extensions (case-insensitive), refused anywhere.
+const KEY_EXTENSIONS: &[&str] = &["pem", "key"];
+
+/// Whether `canonical` is a write target that is ALWAYS refused, whatever
+/// the grant scope and whatever the user approves: credential stores, login
+/// items, shell startup files and private-key files. Reads are unaffected.
+/// `home` is injected so tests can use tempdirs; it is checked both as given
+/// and canonicalized so a symlinked `$HOME` cannot slip through.
+pub fn is_sensitive_write_target(home: Option<&Path>, canonical: &Path) -> bool {
+    let file_name = canonical.file_name().and_then(|name| name.to_str());
+    if file_name.is_some_and(|name| SHELL_STARTUP_FILES.contains(&name)) {
+        return true;
+    }
+    let extension = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase);
+    if extension.is_some_and(|ext| KEY_EXTENSIONS.contains(&ext.as_str())) {
+        return true;
+    }
+    let Some(home) = home else {
+        return false;
+    };
+    let real_home = std::fs::canonicalize(home).ok();
+    let mut homes = std::iter::once(home).chain(real_home.as_deref());
+    homes.any(|home| {
+        SENSITIVE_HOME_DIRS.iter().any(|parts| {
+            let dir: PathBuf = parts.iter().fold(home.to_path_buf(), |acc, p| acc.join(p));
+            is_under(&dir, canonical)
+        })
+    })
+}
+
 fn longest_covering<'a>(grants: &[&'a Grant], canonical: &Path) -> Option<&'a Grant> {
     grants
         .iter()
@@ -988,6 +1045,121 @@ mod tests {
             &home.join("Documents").join("a.txt")
         ));
         assert!(!is_protected(&app_data, &home));
+    }
+
+    // ------------------------------------------- sensitive write deny-list --
+
+    #[test]
+    fn sensitive_dirs_under_home_are_never_writable() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        for bad in [
+            home.join(".ssh"),
+            home.join(".ssh").join("authorized_keys"),
+            home.join(".ssh").join("config"),
+            home.join(".gnupg").join("gpg.conf"),
+            home.join("Library")
+                .join("Keychains")
+                .join("login.keychain-db"),
+            home.join("Library")
+                .join("LaunchAgents")
+                .join("com.evil.plist"),
+        ] {
+            assert!(
+                is_sensitive_write_target(Some(&home), &bad),
+                "{} must be refused",
+                bad.display()
+            );
+        }
+    }
+
+    #[test]
+    fn shell_startup_files_are_never_writable() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        for name in [
+            ".zshrc",
+            ".zshenv",
+            ".zprofile",
+            ".zlogin",
+            ".bashrc",
+            ".bash_profile",
+            ".bash_login",
+            ".profile",
+        ] {
+            assert!(
+                is_sensitive_write_target(Some(&home), &home.join(name)),
+                "~/{name} must be refused"
+            );
+            // A copy anywhere else (e.g. a dotfiles repo symlinked into ~)
+            // is refused too.
+            assert!(
+                is_sensitive_write_target(Some(&home), &home.join("dotfiles").join(name)),
+                "dotfiles/{name} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn key_material_extensions_are_never_writable_anywhere() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        for bad in [
+            home.join("Projects").join("server.pem"),
+            home.join("Projects").join("tls.key"),
+            home.join("Projects").join("UPPER.PEM"),
+            home.join("Projects").join("Mixed.Key"),
+        ] {
+            assert!(
+                is_sensitive_write_target(Some(&home), &bad),
+                "{} must be refused",
+                bad.display()
+            );
+        }
+        // The extension rule holds even without a known $HOME.
+        assert!(is_sensitive_write_target(
+            None,
+            Path::new("/srv/certs/server.pem")
+        ));
+    }
+
+    #[test]
+    fn ordinary_files_stay_writable() {
+        let (home, _app_data, _guard) = home_with_app_data();
+        for ok in [
+            home.join("Documents").join("notes.md"),
+            home.join("Projects").join("app").join("main.rs"),
+            home.join("Projects").join("keys.rs"),
+            home.join("Projects").join("monkey"),
+            home.join("Projects").join(".ssh-notes.md"),
+            home.join("Library").join("Preferences").join("x.plist"),
+            home.join("Projects").join(".zshrc.d").join("readme.md"),
+        ] {
+            assert!(
+                !is_sensitive_write_target(Some(&home), &ok),
+                "{} must stay writable",
+                ok.display()
+            );
+        }
+        // Without $HOME, the home-relative dirs cannot be matched (no false
+        // positives on look-alike paths elsewhere).
+        assert!(!is_sensitive_write_target(
+            None,
+            Path::new("/srv/project/readme.md")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sensitive_dirs_match_through_a_non_canonical_home() {
+        // $HOME as reported by the environment may sit behind a symlink
+        // (macOS /var → /private/var); canonical targets must still match.
+        let (base, _guard) = tempdir();
+        let real_home = fs::canonicalize(&base).expect("canon").join("real-home");
+        fs::create_dir_all(real_home.join(".ssh")).expect("ssh");
+        let link_home = fs::canonicalize(&base).expect("canon").join("link-home");
+        std::os::unix::fs::symlink(&real_home, &link_home).expect("symlink");
+        assert!(is_sensitive_write_target(
+            Some(&link_home),
+            &real_home.join(".ssh").join("authorized_keys")
+        ));
     }
 
     #[test]
