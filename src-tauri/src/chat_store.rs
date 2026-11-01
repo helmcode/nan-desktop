@@ -1,12 +1,15 @@
 //! Chat persistence (T4, S3): conversations and messages in SQLite.
 //!
-//! The chat store lives in its own file (`chat.db` in the app data dir) —
-//! deliberately separate from the T1 spike's `spike.db` so the demo
-//! `messages` table (no conversation/model columns) can never collide with
-//! the real schema.
+//! The chat store lives in its own file (`chat.db` in the app data dir).
 //!
-//! All functions are connection-injected pure logic (same pattern as
-//! `spike_db`), unit-tested against a temp file — never the real app dir.
+//! All functions are connection-injected pure logic, unit-tested against a
+//! temp file — never the real app dir.
+//!
+//! Memory sync (P1-6): every conversation carries a stable `remote_id`
+//! (uuid) shared across devices and a `synced_at` watermark; deleting a
+//! synced conversation leaves a row in `memory_tombstones` so the remote
+//! copy is deleted on the next sync instead of being pulled back. Web
+//! search sources (P1-7) are stored per message as a JSON array.
 //!
 //! Timestamps use `strftime('%Y-%m-%dT%H:%M:%fZ','now')` (millisecond ISO-8601)
 //! so "most recent first" ordering is deterministic even for rows written in
@@ -21,8 +24,21 @@
 //! their content is overwritten per network chunk, so a crash mid-stream
 //! leaves the partial reply queryable.
 
-use rusqlite::Connection;
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+
+/// One web search source cited under an assistant message (P1-7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSource {
+    pub title: String,
+    pub url: String,
+}
+
+/// Decode the `sources` column: NULL or corrupt JSON → no sources.
+fn decode_sources(raw: Option<String>) -> Vec<WebSource> {
+    raw.and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
 
 /// Message status: the row is finalized (a normal historical message).
 pub const STATUS_COMPLETE: &str = "complete";
@@ -34,8 +50,8 @@ pub const STATUS_IN_PROGRESS: &str = "in_progress";
 pub const DB_FILE: &str = "chat.db";
 
 /// Fallback title for conversations that have not been auto-titled yet (no
-/// first user message seen).
-pub const UNTITLED_FALLBACK: &str = "New chat";
+/// first user message seen). UI copy, so Spanish like the rest of the UI.
+pub const UNTITLED_FALLBACK: &str = "Nueva conversación";
 
 /// Maximum characters of the last message shown as a preview in the sidebar.
 pub const PREVIEW_MAX_CHARS: usize = 80;
@@ -76,6 +92,9 @@ pub struct ChatMessageRow {
     /// messages (`qwen-image-2.1`). `None` for every text row; the renderer
     /// loads the file through the asset protocol (never the raw bytes).
     pub media_path: Option<String>,
+    /// P1-7: web search sources cited by this assistant reply (empty for
+    /// every other row).
+    pub sources: Vec<WebSource>,
 }
 
 /// Create both tables if missing and enable foreign keys for this
@@ -101,10 +120,41 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
              status TEXT NOT NULL DEFAULT 'complete'
          );
          CREATE INDEX IF NOT EXISTS idx_messages_conversation
-             ON messages(conversation_id, id);",
+             ON messages(conversation_id, id);
+         CREATE TABLE IF NOT EXISTS memory_tombstones (
+             remote_id TEXT PRIMARY KEY,
+             profile_id TEXT NOT NULL
+         );",
     )?;
     ensure_status_column(conn)?;
-    ensure_media_path_column(conn)
+    ensure_media_path_column(conn)?;
+    ensure_column(conn, "messages", "sources", "TEXT")?;
+    ensure_column(conn, "conversations", "remote_id", "TEXT")?;
+    ensure_column(conn, "conversations", "synced_at", "TEXT")?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_remote_id
+             ON conversations(remote_id);",
+    )
+}
+
+/// Add a nullable column in place when an older database lacks it (same
+/// pattern as the status/media_path migrations). `table`/`column`/`decl`
+/// are compile-time constants, never user input.
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<(), rusqlite::Error> {
+    let present: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+        [column],
+        |row| row.get(0),
+    )?;
+    if present == 0 {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
+    }
+    Ok(())
 }
 
 /// Pre-T4b databases have a `messages` table without the `status` column
@@ -155,6 +205,8 @@ pub fn insert_conversation(
     profile_id: &str,
     title: &str,
 ) -> Result<i64, rusqlite::Error> {
+    // `remote_id` is assigned lazily by `ensure_remote_ids` (memory sync),
+    // so this insert also works on a not-yet-migrated legacy schema.
     conn.execute(
         "INSERT INTO conversations (title, profile_id, created_at, updated_at)
          VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
@@ -318,6 +370,25 @@ pub fn delete_message(conn: &Connection, message_id: i64) -> Result<(), rusqlite
     Ok(())
 }
 
+/// Attach web search sources to a message (P1-7). An empty slice clears
+/// them (NULL).
+pub fn set_message_sources(
+    conn: &Connection,
+    message_id: i64,
+    sources: &[WebSource],
+) -> Result<(), rusqlite::Error> {
+    let json = if sources.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(sources).unwrap_or_else(|_| "[]".to_string()))
+    };
+    conn.execute(
+        "UPDATE messages SET sources = ?1 WHERE id = ?2",
+        rusqlite::params![json, message_id],
+    )?;
+    Ok(())
+}
+
 /// List a profile's conversations, most recently updated first. The title is
 /// the stored one, or the untitled fallback when still empty; `last_message`
 /// is the newest message's content, truncated to [`PREVIEW_MAX_CHARS`].
@@ -353,30 +424,34 @@ pub fn list_conversations(
     Ok(views)
 }
 
+/// Column list read by [`map_message_row`] (order matters).
+const MESSAGE_COLUMNS: &str =
+    "id, conversation_id, role, content, model, media_path, created_at, status, sources";
+
+fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::Error> {
+    let status: String = row.get(7)?;
+    Ok(ChatMessageRow {
+        id: row.get(0)?,
+        conversation_id: row.get(1)?,
+        role: row.get(2)?,
+        content: row.get(3)?,
+        model: row.get(4)?,
+        media_path: row.get(5)?,
+        created_at: row.get(6)?,
+        partial: status == STATUS_IN_PROGRESS,
+        sources: decode_sources(row.get(8)?),
+    })
+}
+
 /// The newest message of a conversation, if any.
 fn last_message(
     conn: &Connection,
     conversation_id: i64,
 ) -> Result<Option<ChatMessageRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT id, conversation_id, role, content, model, media_path, created_at, status
-         FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1",
-    )?;
-    let mut rows = stmt.query_map([conversation_id], |row| {
-        Ok(ChatMessageRow {
-            id: row.get(0)?,
-            conversation_id: row.get(1)?,
-            role: row.get(2)?,
-            content: row.get(3)?,
-            model: row.get(4)?,
-            media_path: row.get(5)?,
-            created_at: row.get(6)?,
-            partial: {
-                let status: String = row.get(7)?;
-                status == STATUS_IN_PROGRESS
-            },
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {MESSAGE_COLUMNS} FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1"
+    ))?;
+    let mut rows = stmt.query_map([conversation_id], map_message_row)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
         None => Ok(None),
@@ -389,25 +464,10 @@ pub fn list_messages(
     conn: &Connection,
     conversation_id: i64,
 ) -> Result<Vec<ChatMessageRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT id, conversation_id, role, content, model, media_path, created_at, status
-         FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
-    )?;
-    let rows = stmt.query_map([conversation_id], |row| {
-        Ok(ChatMessageRow {
-            id: row.get(0)?,
-            conversation_id: row.get(1)?,
-            role: row.get(2)?,
-            content: row.get(3)?,
-            model: row.get(4)?,
-            media_path: row.get(5)?,
-            created_at: row.get(6)?,
-            partial: {
-                let status: String = row.get(7)?;
-                status == STATUS_IN_PROGRESS
-            },
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {MESSAGE_COLUMNS} FROM messages WHERE conversation_id = ?1 ORDER BY id ASC"
+    ))?;
+    let rows = stmt.query_map([conversation_id], map_message_row)?;
     let mut messages: Vec<ChatMessageRow> = Vec::new();
     for row in rows {
         messages.push(row?);
@@ -416,13 +476,270 @@ pub fn list_messages(
 }
 
 /// Delete a conversation and (explicitly, before the FK cascade) its
-/// messages. Deleting an unknown id is a no-op.
+/// messages. Deleting an unknown id is a no-op. A conversation that was
+/// already synced to the account leaves a tombstone so the next memory sync
+/// deletes the remote copy instead of pulling it back.
 pub fn delete_conversation(conn: &Connection, conversation_id: i64) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR IGNORE INTO memory_tombstones (remote_id, profile_id)
+         SELECT remote_id, profile_id FROM conversations
+         WHERE id = ?1 AND remote_id IS NOT NULL AND synced_at IS NOT NULL",
+        [conversation_id],
+    )?;
     conn.execute(
         "DELETE FROM messages WHERE conversation_id = ?1",
         [conversation_id],
     )?;
     conn.execute("DELETE FROM conversations WHERE id = ?1", [conversation_id])?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Memory sync helpers (P1-6)
+// ---------------------------------------------------------------------------
+
+/// A message in the portable (device-independent) shape exchanged with the
+/// account memory API. Image rows are never part of it: their files are
+/// device-local.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageRecord {
+    pub role: String,
+    pub content: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub sources: Vec<WebSource>,
+}
+
+/// Sync metadata of one local conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncConversation {
+    pub id: i64,
+    pub remote_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub synced_at: Option<String>,
+    /// A reply is streaming (or was interrupted): never overwrite or upload.
+    pub has_in_progress: bool,
+}
+
+impl SyncConversation {
+    /// Changed locally since the last successful upload.
+    pub fn is_dirty(&self) -> bool {
+        self.synced_at
+            .as_deref()
+            .is_none_or(|synced| self.updated_at.as_str() > synced)
+    }
+}
+
+/// Normalize an RFC 3339 UTC timestamp to the store's millisecond form
+/// (`YYYY-MM-DDTHH:MM:SS.mmmZ`) so lexicographic order is chronological
+/// order (`…:00Z` vs `…:00.500Z` would otherwise sort wrong). Anything that
+/// is not a recognizable UTC timestamp is returned unchanged.
+pub fn normalize_timestamp(raw: &str) -> String {
+    let raw = raw.trim();
+    let (body, utc) = if let Some(body) = raw.strip_suffix('Z') {
+        (body, true)
+    } else if let Some(body) = raw.strip_suffix("+00:00") {
+        (body, true)
+    } else {
+        (raw, false)
+    };
+    let bytes = body.as_bytes();
+    let shape_ok = utc
+        && bytes.len() >= 19
+        && body.is_char_boundary(19)
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && (bytes[10] == b'T' || bytes[10] == b' ')
+        && bytes[13] == b':'
+        && bytes[16] == b':';
+    if !shape_ok {
+        return raw.to_string();
+    }
+    let (seconds, fraction) = body.split_at(19);
+    let digits: String = fraction
+        .strip_prefix('.')
+        .unwrap_or("")
+        .chars()
+        .filter(char::is_ascii_digit)
+        .chain(std::iter::repeat('0'))
+        .take(3)
+        .collect();
+    format!("{}T{}.{digits}Z", &seconds[..10], &seconds[11..])
+}
+
+/// Give every legacy conversation of a profile (created before memory
+/// sync existed) a stable remote id.
+pub fn ensure_remote_ids(conn: &Connection, profile_id: &str) -> Result<(), rusqlite::Error> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM conversations WHERE profile_id = ?1 AND remote_id IS NULL")?;
+        stmt.query_map([profile_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    for id in ids {
+        conn.execute(
+            "UPDATE conversations SET remote_id = ?1 WHERE id = ?2",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Sync metadata for every conversation of a profile (remote ids are
+/// backfilled first).
+pub fn list_sync_conversations(
+    conn: &Connection,
+    profile_id: &str,
+) -> Result<Vec<SyncConversation>, rusqlite::Error> {
+    ensure_remote_ids(conn, profile_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.remote_id, c.title, c.created_at, c.updated_at, c.synced_at,
+                EXISTS (SELECT 1 FROM messages m
+                        WHERE m.conversation_id = c.id AND m.status = ?2)
+         FROM conversations c WHERE c.profile_id = ?1 ORDER BY c.id ASC",
+    )?;
+    stmt.query_map(rusqlite::params![profile_id, STATUS_IN_PROGRESS], |row| {
+        Ok(SyncConversation {
+            id: row.get(0)?,
+            remote_id: row.get(1)?,
+            title: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+            synced_at: row.get(5)?,
+            has_in_progress: row.get(6)?,
+        })
+    })?
+    .collect()
+}
+
+/// Owner profile and local id of a conversation by remote id, if present.
+pub fn find_by_remote_id(
+    conn: &Connection,
+    remote_id: &str,
+) -> Result<Option<(i64, String)>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT id, profile_id FROM conversations WHERE remote_id = ?1",
+        [remote_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+}
+
+/// The portable messages of a conversation: complete text rows only (image
+/// rows are device-local, in-progress rows are not final).
+pub fn export_messages(
+    conn: &Connection,
+    conversation_id: i64,
+) -> Result<Vec<MessageRecord>, rusqlite::Error> {
+    Ok(list_messages(conn, conversation_id)?
+        .into_iter()
+        .filter(|row| row.media_path.is_none() && !row.partial)
+        .map(|row| MessageRecord {
+            role: row.role,
+            content: row.content,
+            model: row.model,
+            created_at: row.created_at,
+            sources: row.sources,
+        })
+        .collect())
+}
+
+/// Insert (`local_id: None`) or overwrite a conversation with the remote
+/// copy: title, timestamps and all TEXT messages are replaced; local image
+/// rows are kept (they never travel). The row is marked synced at the
+/// remote `updated_at`. Runs in one transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn write_remote_conversation(
+    conn: &Connection,
+    local_id: Option<i64>,
+    profile_id: &str,
+    remote_id: &str,
+    title: &str,
+    created_at: &str,
+    updated_at: &str,
+    messages: &[MessageRecord],
+) -> Result<i64, rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    let id = match local_id {
+        Some(id) => {
+            tx.execute(
+                "UPDATE conversations SET title = ?1, updated_at = ?2, synced_at = ?2 WHERE id = ?3",
+                rusqlite::params![title, updated_at, id],
+            )?;
+            tx.execute(
+                "DELETE FROM messages WHERE conversation_id = ?1 AND media_path IS NULL",
+                [id],
+            )?;
+            id
+        }
+        None => {
+            tx.execute(
+                "INSERT INTO conversations (title, profile_id, created_at, updated_at, remote_id, synced_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?4)",
+                rusqlite::params![title, profile_id, created_at, updated_at, remote_id],
+            )?;
+            tx.last_insert_rowid()
+        }
+    };
+    for message in messages {
+        let sources = if message.sources.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&message.sources).ok()
+        };
+        tx.execute(
+            "INSERT INTO messages (conversation_id, role, content, model, created_at, status, sources)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                id,
+                message.role,
+                message.content,
+                message.model,
+                message.created_at,
+                STATUS_COMPLETE,
+                sources
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(id)
+}
+
+/// Record a successful upload of the conversation state at `updated_at`.
+pub fn mark_synced(
+    conn: &Connection,
+    conversation_id: i64,
+    updated_at: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE conversations SET synced_at = ?1 WHERE id = ?2",
+        rusqlite::params![updated_at, conversation_id],
+    )?;
+    Ok(())
+}
+
+/// Remote ids deleted locally whose remote copy still has to be removed.
+pub fn list_tombstones(
+    conn: &Connection,
+    profile_id: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT remote_id FROM memory_tombstones WHERE profile_id = ?1 ORDER BY remote_id",
+    )?;
+    stmt.query_map([profile_id], |row| row.get(0))?.collect()
+}
+
+/// Forget a tombstone once the remote delete succeeded.
+pub fn remove_tombstone(conn: &Connection, remote_id: &str) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM memory_tombstones WHERE remote_id = ?1",
+        [remote_id],
+    )?;
     Ok(())
 }
 
@@ -796,6 +1113,283 @@ mod tests {
         let messages = list_messages(&conn, conv).expect("list");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].media_path.as_deref(), Some("/data/x.png"));
+    }
+
+    // ---- P1-7: web search sources -------------------------------------------
+
+    #[test]
+    fn sources_roundtrip_and_clear() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let row = insert_message(&conn, conv, "assistant", "answer", Some("m")).expect("insert");
+        assert!(
+            list_messages(&conn, conv).expect("list")[0]
+                .sources
+                .is_empty()
+        );
+
+        let sources = vec![
+            WebSource {
+                title: "Example".into(),
+                url: "https://example.com/a".into(),
+            },
+            WebSource {
+                title: "Other".into(),
+                url: "https://example.org/b".into(),
+            },
+        ];
+        set_message_sources(&conn, row, &sources).expect("set");
+        assert_eq!(
+            list_messages(&conn, conv).expect("list")[0].sources,
+            sources
+        );
+
+        set_message_sources(&conn, row, &[]).expect("clear");
+        assert!(
+            list_messages(&conn, conv).expect("list")[0]
+                .sources
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn corrupt_sources_json_reads_as_empty() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let row = insert_message(&conn, conv, "assistant", "answer", None).expect("insert");
+        conn.execute(
+            "UPDATE messages SET sources = 'not json' WHERE id = ?1",
+            [row],
+        )
+        .expect("corrupt");
+        assert!(
+            list_messages(&conn, conv).expect("list")[0]
+                .sources
+                .is_empty()
+        );
+    }
+
+    // ---- P1-6: memory sync helpers ------------------------------------------
+
+    #[test]
+    fn new_conversations_get_a_unique_remote_id_and_start_dirty() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        insert_conversation(&conn, "nan", "a").expect("insert");
+        insert_conversation(&conn, "nan", "b").expect("insert");
+        let sync = list_sync_conversations(&conn, "nan").expect("list");
+        assert_eq!(sync.len(), 2);
+        assert_ne!(sync[0].remote_id, sync[1].remote_id);
+        assert!(sync.iter().all(|c| !c.remote_id.is_empty()));
+        assert!(sync.iter().all(SyncConversation::is_dirty), "never synced");
+    }
+
+    #[test]
+    fn legacy_conversations_are_backfilled_with_remote_ids() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let id = insert_conversation(&conn, "nan", "legacy").expect("insert");
+        conn.execute(
+            "UPDATE conversations SET remote_id = NULL WHERE id = ?1",
+            [id],
+        )
+        .expect("null");
+        let sync = list_sync_conversations(&conn, "nan").expect("list");
+        assert_eq!(sync[0].id, id);
+        assert!(!sync[0].remote_id.is_empty());
+        // Stable: a second listing keeps the same id.
+        let again = list_sync_conversations(&conn, "nan").expect("list");
+        assert_eq!(again[0].remote_id, sync[0].remote_id);
+    }
+
+    #[test]
+    fn dirty_tracks_updates_after_the_sync_watermark() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let id = insert_conversation(&conn, "nan", "t").expect("insert");
+        let sync = list_sync_conversations(&conn, "nan").expect("list");
+        mark_synced(&conn, id, &sync[0].updated_at).expect("mark");
+        assert!(!list_sync_conversations(&conn, "nan").expect("list")[0].is_dirty());
+
+        conn.execute(
+            "UPDATE conversations SET updated_at = '2999-01-01T00:00:00.000Z' WHERE id = ?1",
+            [id],
+        )
+        .expect("bump");
+        assert!(list_sync_conversations(&conn, "nan").expect("list")[0].is_dirty());
+    }
+
+    #[test]
+    fn in_progress_rows_are_flagged_for_sync() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        assert!(!list_sync_conversations(&conn, "nan").expect("list")[0].has_in_progress);
+        insert_in_progress_assistant(&conn, conv, Some("m")).expect("insert");
+        assert!(list_sync_conversations(&conn, "nan").expect("list")[0].has_in_progress);
+    }
+
+    #[test]
+    fn export_excludes_image_and_in_progress_rows() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        insert_message(&conn, conv, "user", "draw a cat", None).expect("insert");
+        insert_image_message(&conn, conv, "a cat", "qwen-image-2.1", "/local/cat.png")
+            .expect("image");
+        insert_message(&conn, conv, "assistant", "done", Some("m")).expect("insert");
+        insert_in_progress_assistant(&conn, conv, Some("m")).expect("in progress");
+
+        let exported = export_messages(&conn, conv).expect("export");
+        assert_eq!(
+            exported
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["draw a cat", "done"]
+        );
+        assert!(
+            serde_json::to_string(&exported)
+                .expect("json")
+                .find("/local/cat.png")
+                .is_none(),
+            "media paths never leave the device"
+        );
+    }
+
+    #[test]
+    fn write_remote_conversation_inserts_then_replaces_text_keeping_images() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let first = vec![MessageRecord {
+            role: "user".into(),
+            content: "hola".into(),
+            model: None,
+            created_at: "2026-10-01T00:00:00.000Z".into(),
+            sources: vec![],
+        }];
+        let id = write_remote_conversation(
+            &conn,
+            None,
+            "nan",
+            "rid-1",
+            "Remote title",
+            "2026-10-01T00:00:00.000Z",
+            "2026-10-01T00:00:01.000Z",
+            &first,
+        )
+        .expect("insert");
+        assert_eq!(
+            find_by_remote_id(&conn, "rid-1").expect("find"),
+            Some((id, "nan".into()))
+        );
+        let sync = &list_sync_conversations(&conn, "nan").expect("list")[0];
+        assert!(!sync.is_dirty(), "a pulled conversation is already synced");
+
+        insert_image_message(&conn, id, "img", "qwen-image-2.1", "/local/x.png").expect("img");
+        let second = vec![
+            first[0].clone(),
+            MessageRecord {
+                role: "assistant".into(),
+                content: "¡hola!".into(),
+                model: Some("m".into()),
+                created_at: "2026-10-02T00:00:00.000Z".into(),
+                sources: vec![WebSource {
+                    title: "t".into(),
+                    url: "https://example.com".into(),
+                }],
+            },
+        ];
+        let same = write_remote_conversation(
+            &conn,
+            Some(id),
+            "nan",
+            "rid-1",
+            "New title",
+            "2026-10-01T00:00:00.000Z",
+            "2026-10-02T00:00:00.000Z",
+            &second,
+        )
+        .expect("replace");
+        assert_eq!(same, id);
+        let conv = conversation_get(&conn, id).expect("get").expect("exists");
+        assert_eq!(conv.title, "New title");
+        assert_eq!(conv.updated_at, "2026-10-02T00:00:00.000Z");
+        let messages = list_messages(&conn, id).expect("list");
+        assert_eq!(messages.len(), 3, "2 text rows + the kept local image");
+        assert_eq!(
+            messages.iter().filter(|m| m.media_path.is_some()).count(),
+            1
+        );
+        assert_eq!(messages.last().expect("last").sources.len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_synced_conversation_leaves_a_tombstone() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let never_synced = insert_conversation(&conn, "nan", "local only").expect("insert");
+        let synced = insert_conversation(&conn, "nan", "synced").expect("insert");
+        mark_synced(&conn, synced, "2026-10-01T00:00:00.000Z").expect("mark");
+        let remote_id = list_sync_conversations(&conn, "nan")
+            .expect("list")
+            .into_iter()
+            .find(|c| c.id == synced)
+            .expect("synced row")
+            .remote_id;
+
+        delete_conversation(&conn, never_synced).expect("delete");
+        assert!(
+            list_tombstones(&conn, "nan")
+                .expect("tombstones")
+                .is_empty()
+        );
+
+        delete_conversation(&conn, synced).expect("delete");
+        assert_eq!(
+            list_tombstones(&conn, "nan").expect("tombstones"),
+            vec![remote_id.clone()]
+        );
+        assert!(
+            list_tombstones(&conn, "helmcode")
+                .expect("tombstones")
+                .is_empty()
+        );
+
+        remove_tombstone(&conn, &remote_id).expect("remove");
+        assert!(
+            list_tombstones(&conn, "nan")
+                .expect("tombstones")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn normalize_timestamp_makes_lexicographic_order_chronological() {
+        assert_eq!(
+            normalize_timestamp("2026-10-30T12:00:00Z"),
+            "2026-10-30T12:00:00.000Z"
+        );
+        assert_eq!(
+            normalize_timestamp("2026-10-30T12:00:00.5+00:00"),
+            "2026-10-30T12:00:00.500Z"
+        );
+        assert_eq!(
+            normalize_timestamp("2026-10-30T12:00:00.123456Z"),
+            "2026-10-30T12:00:00.123Z"
+        );
+        assert!(
+            normalize_timestamp("2026-10-30T12:00:00Z")
+                < normalize_timestamp("2026-10-30T12:00:00.5Z")
+        );
+        assert_eq!(normalize_timestamp("garbage"), "garbage");
+        assert_eq!(
+            normalize_timestamp("2026-10-30T12:00:00+02:00"),
+            "2026-10-30T12:00:00+02:00",
+            "non-UTC offsets are left untouched"
+        );
     }
 
     #[test]

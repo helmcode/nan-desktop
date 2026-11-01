@@ -15,6 +15,112 @@ connects to `api.nan.builders` and `api.helmcode.com`. See
 [CONTRIBUTING.md](CONTRIBUTING.md) to get started and
 [SECURITY.md](SECURITY.md) to report anything sensitive privately.
 
+## Using the app (UX overview)
+
+The app is built for non-technical users: everything is pre-made and
+self-contained, the UI copy is Spanish, and no technical term (API, SSE,
+IPC, SQLite, keys, providers…) ever reaches the screen. There is no
+developer surface in the UI — the old T1 spike diagnostics and the tools
+"demo" panel are gone, and so are their IPC commands.
+
+| Screen | What the user sees |
+| --- | --- |
+| Welcome | Helmcode mark + two account cards (Comunidad NaN / Helmcode para empresas). Sign-in is confirmed in the browser. |
+| Authorizing | The device code in large Roboto Mono, "Esperando tu confirmación…", Cancel. Denied/expired/error states each explain what happened and offer "Volver a intentarlo". |
+| Chat | Sidebar (mark, "Nueva conversación", history), header (model picker + gear), messages with citation chips, composer with the **workspace chip**, image mode, dictation and send. |
+| Settings (gear) | **Carpetas de trabajo**, **Memoria**, **Voz**, **Acerca de** (account, version, sign out). Esc or "Volver al chat" returns. |
+
+**Workspace chip (composer).** The user never has to wonder where the
+assistant works. The chip always says it: `Carpeta privada: <name>` (folders
+picked with the native picker), `Elegir carpeta de trabajo` when none is set
+(one click opens the picker), or — amber — `Todo el equipo — bajo tu
+responsabilidad`. One click opens a menu to switch, add a folder or manage
+folders. Switching to the whole computer first shows a plain-language
+warning, then the Rust core's own native confirmation (see "Computer-wide
+mode" in the T8 section).
+
+**Activity line.** While the assistant searches the web or waits for a file
+permission the reply shows a calm status ("Buscando en internet…",
+"Esperando tu permiso para usar tus archivos…") instead of silence.
+
+### Design system (Helmcode brand kit)
+
+Tokens live at the top of `src/App.css`:
+
+- Canvas `#0a0a0a` (warm black), surfaces `#111111` / `#161616`.
+- Text `#ffffff`, `rgba(255,255,255,.55)`, `rgba(255,255,255,.35)` (never
+  lower; `.35` only for decoration/disabled — body text stays ≥ `.55` for
+  WCAG AA).
+- Accent indigo `#4934E1` in at most 4–5 moments per screen: the primary
+  button, the active conversation, the focus ring, one status. Small accent
+  text uses `#818CF8` (base indigo is never used as text below ~24px).
+- Severity colors only for severity: `#ff5f56` error, `#ffbd2e` warning
+  (the whole-computer mode), `#27c93f` ok.
+- Typography: Roboto (UI) + Roboto Mono (device codes, model ids, paths,
+  code). The CSP allows same-origin fonts only, so the stack falls back to
+  the system sans/mono until the font files are bundled
+  (`pnpm add @fontsource-variable/roboto @fontsource-variable/roboto-mono`
+  and import them in `src/main.tsx`).
+- Radii 8–12px, generous spacing, one focus treatment (indigo ring),
+  `prefers-reduced-motion` honored.
+- Brand mark: `src/icons.tsx` (`BrandMark`, `Wordmark` "helmcode_") and
+  `public/helmcode-symbol.svg` (favicon). These are drawn to the hexagon
+  symbol spec; replace them with the official
+  `branding/helmcode-symbol-{color,white}.svg` files when syncing assets.
+
+### Web search (built-in, P1-7)
+
+There is no search button or toggle: every chat request offers the model a
+`web_search` function (OpenAI tool-calling). When the model calls it, the
+Rust core sends `POST {platform_base}/v1/search {"query": "…"}` with the
+session JWT from the keychain; our platform API answers
+`{results:[{title, url, snippet}]}`. The provider behind that API is never
+named in the app (a unit test guards the tool definition). The results go
+back to the model, the answer keeps streaming, and the cited pages are saved
+with the message and shown as small citation chips (click → system browser
+through `open_external`, https-only).
+
+Silent degradation: no session, offline, 404 (endpoint not deployed yet),
+5xx or a malformed body all yield "no results" — the model is told to answer
+without the search and the user sees nothing unusual. A server that rejects
+the `tools` field (400) is retried once without tools. At most 6 tool rounds
+per reply; the last round offers no tools.
+
+### Conversation memory (P1-6)
+
+Your conversations are saved in your account by default, so they are
+available on every device you sign in to. In **Ajustes → Memoria** you can
+switch to **Solo en este dispositivo**.
+
+- **Account (default).** The app keeps a local copy and syncs it with your
+  account in the background: at startup, after each reply or image, and
+  after you delete a conversation. Sync downloads conversations from your
+  other devices, uploads the ones that changed here, and removes the ones you
+  deleted. When the same conversation changed in two places, the most recent
+  version wins. A conversation is never changed while a reply is still being
+  written.
+- **Only on this device.** Conversations stay in the local database
+  (`chat.db` in the app data folder) and nothing is sent anywhere.
+- **Switching** moves your history once, in the right direction: to the
+  account when you choose account storage, down to this device when you
+  choose device-only storage. You never configure anything.
+- **Images** are files on this device. They never leave it; only the text of
+  a conversation is synced.
+- **Offline or not yet available.** If the account memory can't be reached
+  (unreachable, timeout, 401/403/404/5xx), the app quietly keeps working
+  with the local copy for the rest of the session and syncs the next time.
+  You see no error, and you are never signed out because of it.
+
+Under the hood: `src-tauri/src/memory.rs` defines a `MemoryBackend`
+abstraction with `RemoteMemory` (`GET` / `PUT
+{platform}/api/memory/conversations`, `DELETE
+{platform}/api/memory/conversations/{id}`, Bearer = sign-in session from the
+OS keychain, never sent to the app window) and `LocalMemory` (SQLite). Each
+device has a random device id stored in `memory.json` in the app data folder,
+together with the chosen mode. Commands: `memory_settings_get`,
+`memory_set_mode`, `memory_sync` (always `Ok`; returns whether the list
+changed).
+
 ## T4 chat MVP (S3)
 
 After sign-in the app is a full chat client: streaming SSE replies, markdown
@@ -52,15 +158,18 @@ React state (drafts per conversation) → react-markdown + highlight + sanitize
   task only removes its own entry). Different conversations may stream in
   parallel.
 - **Error kinds** (`chat://error`): `missing_key`, `unauthorized` (401 → the
-  UI shows the "Session expired — sign in again" banner with a Sign out
+  UI shows the "Tu sesión ha caducado" banner with a "Volver a entrar"
   action), `rate_limited` (429), `server` (other non-2xx), `network`
   (transport), `protocol` (local failures). Errors render inline in the
   message area — never `alert()`.
 - **Persistence** (`src-tauri/src/chat_store.rs`, SQLite file `chat.db` in
-  the app data dir, separate from the spike's `spike.db`): tables
-  `conversations(id, title, profile_id, created_at, updated_at)` and
-  `messages(id, conversation_id, role, content, model, created_at, status)`
-  (`status`: `complete` default, `in_progress` while streaming — T4b). The
+  the app data dir): tables
+  `conversations(id, title, profile_id, created_at, updated_at, remote_id,
+  synced_at)`, `messages(id, conversation_id, role, content, model,
+  media_path, created_at, status, sources)` and `memory_tombstones`
+  (`status`: `complete` default, `in_progress` while streaming — T4b;
+  `sources`: JSON citation list from web search; `remote_id`/`synced_at`/
+  tombstones: memory sync). The
   user message is stored before streaming starts; the assistant reply is
   stored as an in-progress row whose content is overwritten per network
   chunk and finalized on done/stop (see T4b below). Commands:
@@ -227,7 +336,8 @@ events.
 
 ### Voice picker
 
-Three kokoro voices are offered (persisted in `localStorage`):
+Chosen in **Ajustes → Voz** (it used to sit in the chat header). Three
+kokoro voices are offered (persisted in `localStorage`):
 `ef_dora` (ES), `em_alex` (ES), `af_heart` (EN). Anything else is rejected by
 the Rust core before any request is made.
 
@@ -370,26 +480,37 @@ per-conversation cancel-safe registry, and the store round-trip with
 
 The tools subsystem lets the assistant work inside folders the user has
 explicitly granted — with the security boundary in the **Rust core**, never
-in the web renderer. The model-driven flow is: **model PROPOSES → UI shows →
-USER approves/denies → Rust core executes ONLY the exact approved action**.
+in the web renderer. The flow is: **model REQUESTS (tool call) → Rust core
+validates and stores a proposal → USER approves/denies in a NATIVE dialog →
+Rust core executes ONLY the exact approved action → result goes back to the
+model**.
 
 ### Flow
 
-1. **Grants.** The user grants one or more folders per profile (native
-   folder picker via `tauri-plugin-dialog`, or a typed absolute path).
-   Grants are stored canonicalized in `tools.json` under the app data dir.
-2. **Propose.** A tool action (`read_file`, `list_files`, `write_file`,
-   `replace_file`; `run_command` behind a flag) is validated against the
-   grants: absolute paths only, lexical `..` rejected, symlinks resolved —
-   the canonical path must sit component-wise under a granted root.
-   Nothing executes. The core stores a proposal (TTL 5 minutes,
-   single-use, uuid id) and answers with a summary + unified diff
-   (vendored LCS diff).
-3. **Approve / deny.** `tools_execute(proposal_id)` runs the EXACT stored
+1. **Grants.** The user grants one or more folders per profile with the
+   native folder picker (`tauri-plugin-dialog`, opened from Rust — there is
+   no typed-path IPC), or enables the computer-wide mode (below). Grants
+   are stored canonicalized in `tools.json` under the app data dir.
+2. **Model tool call.** When the profile has a workspace, every chat
+   request offers the file tools (`list_files`, `read_file`, `write_file`,
+   `replace_file`; `run_command` only when enabled) plus a system message
+   naming the workspace folders. A call is mapped onto a `ToolAction` and
+   validated against the grants: absolute paths only, lexical `..`
+   rejected, symlinks resolved — the canonical path must sit
+   component-wise under a granted root and outside the app data dir.
+   The core stores a proposal (TTL 5 minutes, single-use, uuid id) with a
+   summary + unified diff (vendored LCS diff).
+3. **Approve / deny — every action.** The core shows a native dialog in
+   plain Spanish naming the exact file/folder/command (writes include a
+   short preview of the change). "Permitir" executes the EXACT stored
    action — paths are re-canonicalized and re-verified under the grant
    right before use, so symlink swaps, grant revocations, or the
-   run_command switch flipping between propose and execute all fail
-   closed. `tools_deny` discards the proposal.
+   run_command switch flipping in between all fail closed. "No permitir"
+   consumes the proposal as a deny and tells the model not to retry.
+
+The renderer can no longer propose or execute anything: the former
+`tools_propose` / `tools_execute` / `tools_deny` / `tools_audit_tail` IPC
+test surface was removed together with the demo panel.
 
 ### Threat model
 
@@ -450,22 +571,29 @@ the control. Keep it OFF unless you need it.
 
 ### Native confirmations (renderer-proof approvals)
 
-Approvals for state-changing actions are NATIVE dialogs rendered by the
-Rust core via `tauri-plugin-dialog`, not web UI a compromised renderer
-could fake or auto-click:
+Approvals are NATIVE dialogs rendered by the Rust core via
+`tauri-plugin-dialog`, not web UI a compromised renderer could fake or
+auto-click:
 
-- `tools_execute` on write/replace/run_command proposals: blocking
-  Ok/Cancel dialog with the stored summary + canonical path; cancel
-  consumes the proposal as a deny (nothing runs).
-- `tools_set_run_command_enabled(true)`: blocking warning dialog; cancel
-  keeps the flag off (audited as `settings/ignored`).
+- Every model tool action (reads included): "Permitir" / "No permitir"
+  with the target path or command; declining consumes the proposal as a
+  deny (nothing runs).
+- `tools_set_run_command_enabled(true)`: warning dialog; cancel keeps the
+  flag off (audited as `settings/ignored`).
 - `tools_grant_add`: the ONLY path in is the native folder picker opened
-  from Rust — the picked path never crosses the renderer (there is no
-  typed-path IPC at all), and the protected-scope policy below applies.
+  from Rust — the picked path never crosses the renderer, and the
+  protected-scope policy below applies.
+- `tools_grant_computer_wide`: warning dialog ("Activar bajo mi
+  responsabilidad"); the core creates the grant only when it is confirmed.
 
-Pattern note: the plugin's `blocking_show()` is documented as
-main-thread-unsafe, so it is called only from command worker threads
-(Tauri sync commands run off the main event loop thread).
+**Threading (P0-3 regression note).** Tauri v2 runs SYNC commands on the
+main thread, and the dialog plugin's `blocking_pick_folder()` /
+`blocking_show()` wait for the main thread to present the dialog — a sync
+command calling them deadlocks the app (the "Choose folder…" hang on
+macOS). Every dialog-opening command is therefore `async` and runs the
+blocking call on Tauri's blocking pool (`spawn_blocking`, helper
+`off_main_thread` in `tools/mod.rs`). Never call a `blocking_*` dialog API
+from a sync command.
 
 ### Grant scope policy (protected locations)
 
@@ -476,6 +604,23 @@ write must never be able to rewrite the tool policy itself); the
 filesystem root; `$HOME` itself; or any folder that CONTAINS the app data
 dir (granting ~ would cover it). Subtrees of `$HOME` outside the app data
 (e.g. `~/Projects`) and unrelated folders are fine.
+
+### Computer-wide mode (P1-5)
+
+Grants carry a `scope`: `folder` (default; files written before scopes
+existed load as `folder`) or `computer_wide`. A computer-wide grant is
+rooted at the canonical `$HOME` and is created ONLY by
+`tools_grant_computer_wide`, after the user confirms the core's native
+warning (the UI shows a plain-language explanation first). `$HOME` stays
+rejected for normal folder grants. Even in this mode:
+
+- every action is still approved one by one in a native dialog;
+- the app data dir (tool policy, audit log, profiles, chat DB) is off
+  limits: `is_protected` is checked at propose time AND again right before
+  execution, whatever the grant;
+- the filesystem root can never be a grant root.
+
+Switching back to "Carpeta privada" revokes the computer-wide grant.
 
 ### Link safety (two independent layers)
 
@@ -500,18 +645,16 @@ reviewing dependency changes.
 
 ### UI
 
-- **Tools & folder grants** (sidebar): grant list (add ONLY via the
-  native folder picker, revoke), the red-warned run_command switch, and an
-  audit log viewer (last 50 entries).
-- **Tools demo** (composer-adjacent, labeled as test surface): paste an
-  action JSON → see the proposal summary + diff → Approve/Deny → see the
-  result. Model tool-calling integration is a LATER task; this panel drives
-  the exact same Rust-core path that integration will use.
+- **Ajustes → Carpetas de trabajo**: friendly cards ("El asistente puede
+  leer y escribir en <carpeta>"), "Añadir carpeta…" (native picker),
+  "Quitar", "Dar acceso a todo el equipo…" (amber), and the red-warned
+  "Ejecutar órdenes en tu equipo (Experimental)" switch.
+- **Composer workspace chip**: shows and switches where the assistant
+  works (see "Using the app").
+- The audit log is still written for every action; the viewer left the UI.
 
 ### What's NOT included
 
-- Model-side tool calling (the assistant cannot yet emit tool actions) —
-  later task; the demo panel is the interim test surface.
 - Hard-link escape detection (only symlinks and `..` are handled).
 - File watching / live diffs: the proposal diff is computed at propose
   time; if the file changes before execution, replace_file re-validates
@@ -635,59 +778,26 @@ node test/t13-check.mjs
 - No "Test connection" in the UI: the `connection_test` command remains as a
   Rust-side diagnostic (stored key only) but the login screen no longer needs
   it.
-- The T1 spike panel (SSE / keychain / SQLite) is kept under a collapsed
-  `<details>` in the chat shell — it still proves the foundations.
+## Foundations (formerly the T1 spike)
 
-## T1 spike
-
-T1 proves three Rust-core capabilities end to end before the chat MVP (T4)
-builds on them:
-
-1. **SSE streaming, Rust → frontend** (`sse_demo_start`): HTTP lives in the
-   Rust core (reqwest, S4 — the UI never talks to the API directly). The Rust
-   side parses the SSE stream incrementally (`src-tauri/src/sse.rs`, pure and
-   unit-tested) and emits Tauri events to the window:
-   - `sse://chunk` — payload `{seq, text}` per parsed data event
-   - `sse://done` — stream closed cleanly (payload: final chunk count)
-   - `sse://error` — payload: error message
-   Calling `sse_demo_start` again aborts the previous stream task
-   (cancel-safe; handle kept in app state).
-
-2. **Keychain storage** (`keyring_set` / `keyring_get`): OS credential store
-   via the `keyring` crate — macOS Keychain, Windows Credential Manager,
-   Linux Secret Service under one API (S4: the API key never enters the web
-   renderer process). The UI only ever displays whether a value exists, and
-   masks it to the last 4 characters.
-
-3. **SQLite local history** (`db_demo`): `rusqlite` (bundled) creates a
-   `messages` table under the app data dir, inserts one demo row per call
-   and returns the last 10 rows by id. The DB logic is unit-tested against a
-   temp file (`tempfile`), never against the real app dir.
-
-### Running the spike
-
-```sh
-pnpm install
-node test/mock-sse.mjs          # mock SSE server on http://127.0.0.1:14321/events
-pnpm tauri dev                  # app window with the spike panels
-```
-
-Integration check (mock server wire format + Rust unit tests):
-
-```sh
-node test/spike-check.mjs
-```
+The T1 spike proved SSE streaming, keychain storage and SQLite history; all
+three now live in the product (`sse.rs` parser used by `chat.rs`, keychain
+credentials in `device_flow.rs`/`chat.rs`, `chat_store.rs`). The spike
+diagnostics panel, its debug-only IPC commands (`sse_demo_start`,
+`keyring_set`, `keyring_get`, `db_demo`), the `spike_db` module, the
+`SseState` demo plumbing and `test/spike-check.mjs` / `test/mock-sse.mjs`
+were removed: debug and release builds expose the same, product-only IPC
+surface. The SSE parser keeps its unit tests in `sse.rs`.
 
 ### What is NOT yet implemented
 
 - Updater and code signing (T2/T7) and the Linux CI build, as deferred from
-  T1. (The real chat landed in T4 — see the T4 section at the top.)
+  T1.
 
 ### What remains untested (deferred per spec T1)
 
 - **Keyring automated test**: deliberately omitted — macOS may pop a
-  Keychain permission prompt in headless runs. Covered manually via the UI
-  buttons (Set/Get) for now; the account-name conventions
+  Keychain permission prompt in headless runs. The account-name conventions
   (`<profile-id>` / `<profile-id>.session`) are unit-tested in
   `profile.rs`.
 - **Updater**: config deferred to T2/T7 (signed updater needs release
@@ -700,6 +810,6 @@ Rust-side verification:
 ```sh
 cd src-tauri
 cargo fmt --check
-cargo clippy -- -D warnings
-cargo test                      # 9 SSE + 2 SQLite + 11 profile + 18 device-flow + 9 conn-test + 23 chat + 7 chat_store
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```

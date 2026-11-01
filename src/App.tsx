@@ -7,31 +7,57 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import "./App.css";
+import {
+  DEFAULT_IMAGE_SIZE,
+  IMAGE_SIZES,
+  PROFILE_COPY,
+  VOICE_STORAGE_KEY,
+  chatErrorLabel,
+  commandErrorLabel,
+  folderName,
+  hostOf,
+  imageErrorLabel,
+  profileTitle,
+  signInErrorLabel,
+  storedVoice,
+} from "./copy";
+import {
+  BrandMark,
+  IconArrowUp,
+  IconCheck,
+  IconChevronDown,
+  IconComputer,
+  IconCopy,
+  IconFolder,
+  IconGear,
+  IconGlobe,
+  IconImage,
+  IconMic,
+  IconPlus,
+  IconSpeaker,
+  IconStop,
+  IconTrash,
+  IconWarning,
+  Wordmark,
+} from "./icons";
+import { Settings } from "./Settings";
+import type {
+  ChatMessageRow,
+  ConversationView,
+  ProfileOverview,
+  ProfileView,
+  WebSource,
+} from "./types";
+import { useWorkspace, type Workspace } from "./workspace";
 
 // The renderer never sees profile URLs, API keys or session tokens (S4/S12):
 // profiles arrive as {id, name, has_key, key_mask} from the Rust core, and
-// all HTTP — device flow, chat streaming, model listing — happens in Rust.
-// Chat arrives as delta/done/error events only (T4).
+// all HTTP — sign-in, chat streaming, web search, memory sync — happens in
+// Rust. Chat arrives as delta/done/error/activity events only.
 
-interface ProfileView {
-  id: string;
-  name: string;
-  has_key: boolean;
-  key_mask: string | null;
-}
-
-interface ProfileOverview {
-  profiles: ProfileView[];
-  active_profile: string | null;
-}
-
-// Device-flow payloads (Rust core → renderer). Only non-secret fields cross
-// the IPC boundary: the user_code, the status, the key alias (S4).
+// Device-flow payloads (Rust core → renderer): only non-secret fields.
 interface DeviceStarted {
   user_code: string;
-}
-interface DeviceStatus {
-  status: string;
 }
 interface DeviceApproved {
   key_alias: string;
@@ -41,196 +67,55 @@ interface DeviceError {
   kind: string;
 }
 
-// Chat payloads (T4): the renderer receives only delta text, conversation
-// metadata and classified error kinds — never the key, never URLs.
+// Chat payloads: delta text, conversation ids and classified error kinds.
 interface ChatDelta {
   conversation_id: number;
   delta: string;
 }
-interface ChatDone {
+interface ChatIdPayload {
   conversation_id: number;
 }
 interface ChatError {
   conversation_id: number;
   kind: string;
 }
-// T4b: a deliberate stop — same payload shape as done. Whatever text
-// arrived stays persisted as a complete message.
-interface ChatStopped {
+// What the assistant is doing between text deltas.
+interface ChatActivity {
   conversation_id: number;
+  activity: "searching" | "working" | null;
 }
-// TTS payloads (T6): only the classified error kind crosses the IPC
-// boundary — never the audio bytes, the key or any URL.
 interface TtsError {
   kind: string;
-}
-// Image payloads (T5): status events plus the saved file's path only — the
-// image bytes never cross the IPC boundary; the renderer loads the file
-// through the Tauri asset protocol (scope: app data images dir).
-interface ImagesStarted {
-  conversation_id: number;
-}
-interface ImagesDone {
-  conversation_id: number;
-  media_path: string;
 }
 interface ImagesError {
   conversation_id: number;
   kind: string;
 }
-interface ImagesStopped {
-  conversation_id: number;
-}
-interface ConversationView {
-  id: number;
-  title: string;
-  updated_at: string;
-  last_message: string | null;
-}
-interface ChatMessageRow {
-  id: number;
-  conversation_id: number;
-  role: string;
-  content: string;
-  model: string | null;
-  created_at: string;
-  // T4b: crash leftovers of a mid-stream kill — the reply never finished.
-  partial: boolean;
-  // T5: absolute path of the generated image (assistant image rows only).
-  media_path: string | null;
-}
 
-// One-line description per locked profile (S2: exactly two, no URLs).
-const PROFILE_DESCRIPTIONS: Record<string, string> = {
-  nan: "Inference for the NaN builders community.",
-  helmcode: "Self-service inference for your team.",
-};
-
-const ERROR_KIND_LABELS: Record<string, string> = {
-  network: "Could not reach the sign-in service. Check your connection and try again.",
-  timeout: "The sign-in service took too long to answer. Try again.",
-  rate_limited: "Too many attempts. Wait a moment and try again.",
-  server: "The sign-in service reported an error. Try again.",
-  protocol: "Something went wrong on this device. Try again.",
-};
-
-// Chat error kinds (src-tauri/src/chat.rs ErrorKind) → inline user copy.
-const CHAT_ERROR_LABELS: Record<string, string> = {
-  missing_key: "No inference key is stored for this profile — sign in again.",
-  unauthorized: "Session expired — sign in again.",
-  rate_limited: "Rate limited by the inference service. Wait a moment and try again.",
-  server: "The inference service reported an error. Try again.",
-  network: "Could not reach the inference service. Check your connection and try again.",
-  protocol: "Something went wrong on this device. Try again.",
-  decode: "The audio reply could not be decoded. Try again.",
-};
-
-// Image error kinds (src-tauri/src/images.rs) → inline user copy. On this
-// surface 429 means the tenant's monthly image quota is exhausted (the
-// shared 100-images/month pool), so it gets a dedicated quota message.
-const IMAGE_ERROR_LABELS: Record<string, string> = {
-  ...CHAT_ERROR_LABELS,
-  rate_limited: "Monthly image quota reached. Your allowance resets next month.",
-  decode: "The image reply could not be decoded. Try again.",
-};
-
-function imageErrorLabel(kind: string): string {
-  return IMAGE_ERROR_LABELS[kind] ?? "Something went wrong. Try again.";
-}
-
-// Must match src-tauri/src/chat.rs DEFAULT_MODEL (the renderer cannot import
-// Rust constants; the Rust side falls back to the same value).
+// Must match src-tauri/src/chat.rs DEFAULT_MODEL.
 const DEFAULT_MODEL = "deepseek-v4-flash";
 
-// Must match src-tauri/src/tts.rs VOICES (the Rust side rejects any other
-// voice with a `protocol`-style command error before any request is made).
-const VOICES: Array<{ id: string; label: string }> = [
-  { id: "ef_dora", label: "Dora · ES" },
-  { id: "em_alex", label: "Alex · ES" },
-  { id: "af_heart", label: "Heart · EN" },
-];
-const DEFAULT_VOICE = VOICES[0].id;
-const VOICE_STORAGE_KEY = "nan-desktop-tts-voice";
-
-// Must match src-tauri/src/stt.rs MAX_AUDIO_BYTES (the Rust side rejects
-// larger uploads locally before anything is sent).
+// Must match src-tauri/src/stt.rs MAX_AUDIO_BYTES.
 const MAX_STT_BYTES = 25 * 1024 * 1024;
 
-// The recorder MIME types we accept, in preference order (webm/opus where
-// supported — Chrome/WebKit; mp4/AAC fallback — Safari).
+// Recorder MIME types in preference order (webm/opus, then mp4/AAC).
 const RECORDING_MIME_CANDIDATES = ["audio/webm", "audio/mp4"];
 
-const TTS_ERROR_KINDS = new Set([
-  "missing_key",
-  "unauthorized",
-  "rate_limited",
-  "server",
-  "network",
-  "protocol",
-  "decode",
-]);
-
-// Must match src-tauri/src/images.rs bounds (512..1280, multiples of 16; the
-// Rust side rejects anything else with a `protocol` command error before any
-// request is made). 1024x1024 is the 1k-tier default.
-const IMAGE_SIZES = [
-  "1024x1024",
-  "512x512",
-  "768x512",
-  "512x768",
-  "1280x768",
-  "768x1280",
-  "1152x896",
-];
-const DEFAULT_IMAGE_SIZE = "1024x1024";
-
-// Command errors arrive either as a classified ErrorKind string (stt/tts)
-// or as a free-form message; render known kinds with the shared copy.
-function commandErrorLabel(err: unknown): string {
-  const text = String(err);
-  return TTS_ERROR_KINDS.has(text) ? chatErrorLabel(text) : text;
-}
+const ACTIVITY_COPY: Record<string, string> = {
+  searching: "Buscando en internet…",
+  working: "Esperando tu permiso para usar tus archivos…",
+};
 
 type Screen = "loading" | "error" | "picker" | "authorizing" | "chat";
 type AuthPhase = "waiting" | "denied" | "expired" | "error";
 
-interface SseChunkPayload {
-  seq: number;
-  text: string;
-}
-
-interface SpikeMessage {
-  id: number;
-  content: string;
-  created_at: string;
-  role: string;
-}
-
-// Security posture: a key value is never rendered. This helper only ever
-// masks the demo value typed into the T1 spike panel, last-4 only.
-function maskValue(value: string): string {
-  return `••••${value.slice(-4)}`;
-}
-
-function errorLabel(kind: string): string {
-  return ERROR_KIND_LABELS[kind] ?? "Something went wrong. Try again.";
-}
-
-function chatErrorLabel(kind: string): string {
-  return CHAT_ERROR_LABELS[kind] ?? "Something went wrong. Try again.";
-}
-
 // ---------------------------------------------------------------------------
 // Markdown rendering (S3): GFM + highlight + sanitize. NEVER raw HTML.
 //
-// Highlighter choice: rehype-highlight (highlight.js) keeps the react-markdown
-// pipeline synchronous — shiki's async highlighting would stall or complicate
-// the render of streaming deltas, and its grammar bundle dwarfs highlight.js.
-// rehype-sanitize runs AFTER highlighting so its output is the last pass; the
-// schema below whitelists the highlight classes it must keep.
+// rehype-highlight keeps the pipeline synchronous (streaming-friendly);
+// rehype-sanitize runs AFTER highlighting so its output is the last pass.
 // ---------------------------------------------------------------------------
 
-// Minimal hast shape used to read language/raw text out of a code block node.
 interface HastNode {
   type?: string;
   value?: string;
@@ -245,28 +130,18 @@ function hastText(node: HastNode | undefined): string {
   return (node.children ?? []).map(hastText).join("");
 }
 
-// GitHub-style default schema, extended to keep the highlighter's classes
-// (span.hljs-* and code.language-*/hljs) — everything else, including raw
-// HTML, is stripped. See the rehype-highlight README recipe.
 const sanitizeSchema = {
   ...defaultSchema,
-  // Security review R1 (defense in depth with the app CSP): markdown from the
-  // model may not load remote images — an <img> to an attacker host would be a
-  // conversation-content exfiltration channel. Images are dropped entirely for
-  // the MVP; the model still communicates through text.
+  // Security review R1 (defense in depth with the app CSP): model markdown
+  // may not load remote images — an <img> to an attacker host would be a
+  // conversation-content exfiltration channel.
   tagNames: (defaultSchema.tagNames ?? []).filter(
     (t) => t !== "img" && t !== "picture" && t !== "source",
   ),
   attributes: {
     ...defaultSchema.attributes,
-    code: [
-      ...(defaultSchema.attributes?.code ?? []),
-      ["className", /^language-./, /^hljs$/],
-    ],
-    span: [
-      ...(defaultSchema.attributes?.span ?? []),
-      ["className", /^hljs-./],
-    ],
+    code: [...(defaultSchema.attributes?.code ?? []), ["className", /^language-./, /^hljs$/]],
+    span: [...(defaultSchema.attributes?.span ?? []), ["className", /^hljs-./]],
   },
 };
 
@@ -294,9 +169,10 @@ function CodeBlock({ node, children }: { node?: HastNode; children?: ReactNode }
   return (
     <div className="codeblock">
       <div className="codeblock-bar">
-        <span className="codeblock-lang">{language ?? "text"}</span>
+        <span className="codeblock-lang">{language ?? "texto"}</span>
         <button type="button" className="codeblock-copy" onClick={() => void copy()}>
-          {copied ? "Copied" : "Copy"}
+          {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+          {copied ? "Copiado" : "Copiar"}
         </button>
       </div>
       <pre>{children}</pre>
@@ -304,9 +180,6 @@ function CodeBlock({ node, children }: { node?: HastNode; children?: ReactNode }
   );
 }
 
-/// Extract plain text from a ReactNode tree (for the SafeLink duplicate
-/// check). Handles the common markdown cases: strings, numbers and nested
-/// simple elements.
 function nodeToText(node: ReactNode): string {
   if (node == null || typeof node === "boolean") return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -318,21 +191,20 @@ function nodeToText(node: ReactNode): string {
   return "";
 }
 
+/// Ask the Rust core to open a URL in the system browser (https-only
+/// validation happens there). Invalid URLs are rejected silently.
+function openExternal(url: string): void {
+  if (url) {
+    void invoke("open_external", { url }).catch(() => {});
+  }
+}
+
 /// Model-supplied links never navigate the main window (external review
-/// B3, frontend layer): the anchor is rendered as a NEUTRAL element with no
-/// href — clicking it asks the Rust core (open_external) to open the URL
-/// in the system browser after https-only validation. The URL itself is
-/// shown as visible text so the target is never hidden. The Rust-side
-/// on_navigation allowlist is the second, independent layer.
+/// B3): a neutral element with no href; clicking asks the Rust core to open
+/// the URL in the system browser. The URL stays visible so the target is
+/// never hidden. The Rust-side navigation allowlist is a second layer.
 function SafeLink({ href, children }: { href?: string; children?: ReactNode }) {
   const url = typeof href === "string" ? href : "";
-  const open = () => {
-    if (url) {
-      void invoke("open_external", { url }).catch(() => {
-        /* invalid URL — the Rust core rejected it; stay silent */
-      });
-    }
-  };
   const label = nodeToText(children);
   return (
     <span
@@ -340,9 +212,9 @@ function SafeLink({ href, children }: { href?: string; children?: ReactNode }) {
       role="link"
       tabIndex={0}
       title={url}
-      onClick={open}
+      onClick={() => openExternal(url)}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") open();
+        if (e.key === "Enter" || e.key === " ") openExternal(url);
       }}
     >
       {children}
@@ -365,83 +237,50 @@ function Markdown({ text }: { text: string }) {
   );
 }
 
-function Authorizing({
-  profileName,
-  userCode,
-  phase,
-  errorKind,
-  pollCount,
-  onTryAgain,
-  onPickAnother,
-  onCancel,
-}: {
-  profileName: string;
-  userCode: string;
-  phase: AuthPhase;
-  errorKind: string;
-  pollCount: number;
-  onTryAgain: () => void;
-  onPickAnother: () => void;
-  onCancel: () => void;
-}) {
-  const waiting = phase === "waiting";
-  const headline =
-    phase === "denied"
-      ? "Sign-in denied"
-      : phase === "expired"
-        ? "Sign-in request expired"
-        : phase === "error"
-          ? "Sign-in failed"
-          : `Authorizing ${profileName}`;
-
+/// Citation chips under an answer that used the built-in web search.
+function SourceChips({ sources }: { sources: WebSource[] }) {
+  if (sources.length === 0) return null;
   return (
-    <main className="screen">
-      <p className="brand">{"// nan-desktop"}</p>
-      <h1>{headline}</h1>
-      {waiting ? (
-        <>
-          <p className="lede">Approve this device in your browser to sign in.</p>
-          <div className="user-code" aria-label="device code">
-            {userCode || "····-····"}
-          </div>
-          <p className="status-line">
-            <span className="pulse-dot" />
-            A browser window has opened — approve the device there.
-          </p>
-          <p className="status-line muted">
-            <span className="dot" />
-            Waiting for approval — checking every few seconds ({pollCount} check
-            {pollCount === 1 ? "" : "s"}).
-          </p>
-          <div className="actions">
-            <button type="button" className="btn btn-ghost" onClick={onCancel}>
-              Cancel
+    <div className="sources" aria-label="Fuentes">
+      <span className="sources-label">Fuentes</span>
+      <ul>
+        {sources.map((source, index) => (
+          <li key={source.url}>
+            <button
+              type="button"
+              className="source-chip"
+              title={source.url}
+              onClick={() => openExternal(source.url)}
+            >
+              <span className="source-index">{index + 1}</span>
+              <span className="source-title">{source.title}</span>
+              <span className="source-host">{hostOf(source.url)}</span>
             </button>
-          </div>
-        </>
-      ) : (
-        <>
-          <p className="lede">
-            {phase === "denied" &&
-              "The request was denied in the browser. Nothing was stored on this device."}
-            {phase === "expired" &&
-              "The sign-in request expired. Start again to get a new code."}
-            {phase === "error" && errorLabel(errorKind)}
-          </p>
-          <div className="user-code dimmed" aria-hidden="true">
-            {userCode || "····-····"}
-          </div>
-          <div className="actions">
-            <button type="button" className="btn btn-primary" onClick={onTryAgain}>
-              Try again
-            </button>
-            <button type="button" className="btn btn-ghost" onClick={onPickAnother}>
-              Use a different profile
-            </button>
-          </div>
-        </>
-      )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sign-in screens
+// ---------------------------------------------------------------------------
+
+function CenterScreen({ children }: { children: ReactNode }) {
+  return (
+    <main className="center-screen">
+      <div className="center-card">{children}</div>
     </main>
+  );
+}
+
+function BrandHero() {
+  return (
+    <div className="brand-hero">
+      <BrandMark variant="tile" size={56} />
+      <Wordmark />
+    </div>
   );
 }
 
@@ -457,436 +296,339 @@ function ProfilePicker({
   onPick: (id: string) => void;
 }) {
   return (
-    <main className="screen">
-      <p className="brand">{"// nan-desktop"}</p>
-      <h1>Sign in</h1>
+    <CenterScreen>
+      <BrandHero />
+      <h1>Te damos la bienvenida</h1>
       <p className="lede">
-        Choose your workspace. Sign-in happens in your browser — no keys to paste.
+        Elige cómo quieres entrar. Confirmarás el acceso en tu navegador: no tienes que copiar
+        ninguna clave.
       </p>
-      <div className="cards">
+      <div className="profile-cards">
         {overview.profiles.map((p) => (
           <button
             key={p.id}
             type="button"
-            className="card"
+            className="profile-card"
             onClick={() => onPick(p.id)}
             disabled={busy}
           >
-            <strong>{p.name}</strong>
-            <span>{PROFILE_DESCRIPTIONS[p.id] ?? ""}</span>
-            {p.has_key && (
-              <span className="card-meta">
-                signed in before — key stored {p.key_mask}
-              </span>
-            )}
+            <span className="profile-card-text">
+              <strong>{profileTitle(p.id, p.name)}</strong>
+              <span>{PROFILE_COPY[p.id]?.description ?? ""}</span>
+              {p.has_key && <span className="profile-card-meta">Ya has entrado antes en este equipo</span>}
+            </span>
+            <span className="profile-card-arrow" aria-hidden="true">
+              →
+            </span>
           </button>
         ))}
       </div>
-      {error && <p className="status err">{error}</p>}
-    </main>
+      {error && (
+        <p className="inline-error" role="alert">
+          {error}
+        </p>
+      )}
+    </CenterScreen>
+  );
+}
+
+function Authorizing({
+  profileName,
+  userCode,
+  phase,
+  errorKind,
+  onTryAgain,
+  onPickAnother,
+  onCancel,
+}: {
+  profileName: string;
+  userCode: string;
+  phase: AuthPhase;
+  errorKind: string;
+  onTryAgain: () => void;
+  onPickAnother: () => void;
+  onCancel: () => void;
+}) {
+  const waiting = phase === "waiting";
+  const headline =
+    phase === "denied"
+      ? "Acceso rechazado"
+      : phase === "expired"
+        ? "El código ha caducado"
+        : phase === "error"
+          ? "No hemos podido completar el acceso"
+          : "Confirma el acceso en tu navegador";
+
+  return (
+    <CenterScreen>
+      <BrandHero />
+      <p className="eyebrow">{profileName}</p>
+      <h1>{headline}</h1>
+      {waiting ? (
+        <>
+          <p className="lede">
+            Hemos abierto una ventana en tu navegador. Comprueba que muestra este mismo código y
+            confirma el acceso.
+          </p>
+          <div className="device-code" aria-label="Código de acceso">
+            {userCode || "····-····"}
+          </div>
+          <p className="status-line" role="status">
+            <span className="pulse-dot" aria-hidden="true" />
+            Esperando tu confirmación…
+          </p>
+          <div className="actions">
+            <button type="button" className="btn btn-ghost" onClick={onCancel}>
+              Cancelar
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="lede">
+            {phase === "denied" &&
+              "Se ha rechazado el acceso desde el navegador. No se ha guardado nada en este equipo."}
+            {phase === "expired" && "Ha pasado demasiado tiempo. Empieza de nuevo para obtener un código nuevo."}
+            {phase === "error" && signInErrorLabel(errorKind)}
+          </p>
+          <div className="actions">
+            <button type="button" className="btn btn-primary" onClick={onTryAgain}>
+              Volver a intentarlo
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={onPickAnother}>
+              Elegir otra cuenta
+            </button>
+          </div>
+        </>
+      )}
+    </CenterScreen>
   );
 }
 
 // ---------------------------------------------------------------------------
-// T8 tools (S7): the Rust core is the security boundary. The renderer can
-// only ask for a proposal, see its summary/diff, and approve/deny — the
-// exact approved action is stored and executed inside the Rust core.
+// Workspace chip + whole-computer confirmation (composer)
 // ---------------------------------------------------------------------------
 
-interface GrantView {
-  id: string;
-  canonical_path: string;
-  granted_at: string;
-  profile_id: string;
+function workspaceLabel(workspace: Workspace): string {
+  if (workspace.computerWide) return "Todo el equipo — bajo tu responsabilidad";
+  const [first, ...rest] = workspace.folders;
+  if (!first) return "Elegir carpeta de trabajo";
+  const extra = rest.length > 0 ? ` +${rest.length}` : "";
+  return `Carpeta privada: ${folderName(first.canonical_path)}${extra}`;
 }
 
-interface ToolsSettingsView {
-  tools_allow_run_command: boolean;
-}
-
-interface ProposalView {
-  proposal_id: string;
-  action_kind: string;
-  path: string | null;
-  summary: string;
-  diff: string | null;
-}
-
-interface ToolOutcome {
-  action: string;
-  summary: string;
-  content: string | null;
-  entries: string[] | null;
-  bytes_written: number | null;
-  stdout: string | null;
-  stderr: string | null;
-  exit_code: number | null;
-  timed_out: boolean;
-}
-
-interface AuditEntry {
-  ts: string;
-  event: string;
-  action: string;
-  outcome: string;
-  grant_id: string | null;
-  profile_id: string | null;
-  detail: string | null;
-}
-
-/// Tools rejections arrive as structured {kind, message} IPC errors.
-function toolsErrorLabel(err: unknown): string {
-  if (typeof err === "object" && err !== null && "kind" in err && "message" in err) {
-    const rejection = err as { kind: string; message: string };
-    return `${rejection.kind}: ${rejection.message}`;
-  }
-  return String(err);
-}
-
-const TOOLS_PROPOSAL_EXAMPLE = '{"type":"read_file","path":"/absolute/path/inside/a/grant"}';
-const TOOLS_PREVIEW_CHARS = 2000;
-
-function previewText(text: string): string {
-  return text.length > TOOLS_PREVIEW_CHARS
-    ? `${text.slice(0, TOOLS_PREVIEW_CHARS)}\n… (preview truncated)`
-    : text;
-}
-
-/// Sidebar panel: folder grants, the experimental run_command switch and
-/// the audit log viewer (last 50 entries).
-function ToolsPanel({ profileId }: { profileId: string | null }) {
-  const [grants, setGrants] = useState<GrantView[]>([]);
-  const [runCommandEnabled, setRunCommandEnabled] = useState(false);
-  const [audit, setAudit] = useState<AuditEntry[]>([]);
-  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const refresh = useCallback(async () => {
-    setBusy(true);
-    try {
-      const [grantList, settings, auditTail] = await Promise.all([
-        invoke<GrantView[]>("tools_grant_list"),
-        invoke<ToolsSettingsView>("tools_settings_get"),
-        invoke<AuditEntry[]>("tools_audit_tail", { count: 50 }),
-      ]);
-      setGrants(grantList);
-      setRunCommandEnabled(settings.tools_allow_run_command);
-      setAudit(auditTail);
-      setStatus(null);
-    } catch (err) {
-      setStatus({ ok: false, text: toolsErrorLabel(err) });
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+function WorkspaceChip({
+  workspace,
+  onAskComputerWide,
+  onOpenSettings,
+}: {
+  workspace: Workspace;
+  onAskComputerWide: () => void;
+  onOpenSettings: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const wide = workspace.computerWide !== null;
+  const empty = !wide && workspace.folders.length === 0;
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
-  const addFolder = async () => {
-    if (!profileId) return;
-    setBusy(true);
-    try {
-      // The folder picker runs INSIDE the Rust core (native dialog); the
-      // picked path never crosses the renderer and scope policy is applied
-      // there (app data, root, $HOME and app-data ancestors are rejected).
-      const grant = await invoke<GrantView | null>("tools_grant_add", { profileId });
-      if (grant) {
-        await refresh();
-        setStatus({ ok: true, text: `Granted ${grant.canonical_path}` });
-      }
-    } catch (err) {
-      setStatus({ ok: false, text: toolsErrorLabel(err) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const pickFolder = async () => {
-    await addFolder();
-  };
-
-  const revoke = async (grantId: string) => {
-    setBusy(true);
-    try {
-      await invoke("tools_grant_revoke", { grantId });
-      await refresh();
-    } catch (err) {
-      setStatus({ ok: false, text: toolsErrorLabel(err) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const toggleRunCommand = async (enabled: boolean) => {
-    setBusy(true);
-    try {
-      await invoke("tools_set_run_command_enabled", { enabled });
-      setRunCommandEnabled(enabled);
-      await refresh();
-    } catch (err) {
-      setStatus({ ok: false, text: toolsErrorLabel(err) });
-    } finally {
-      setBusy(false);
-    }
+  const pick = async (action: () => Promise<unknown> | void): Promise<void> => {
+    setOpen(false);
+    await action();
   };
 
   return (
-    <div className="panel">
-      <h2>Tools</h2>
-      <p className="hint">
-        Folders the assistant may read/write after you approve each action.
-      </p>
-      <ul className="tools-grant-list">
-        {grants.map((grant) => (
-          <li key={grant.id}>
-            <code>{grant.canonical_path}</code>
-            <span className="key-note">{grant.profile_id}</span>
+    <div className="ws" ref={rootRef}>
+      <button
+        type="button"
+        className={`ws-chip${wide ? " ws-chip-wide" : ""}${empty ? " ws-chip-empty" : ""}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="Dónde puede trabajar el asistente"
+        onClick={() => {
+          if (empty) {
+            void workspace.addFolder();
+          } else {
+            setOpen((value) => !value);
+          }
+        }}
+        disabled={workspace.busy}
+      >
+        {wide ? <IconWarning size={15} /> : empty ? <IconPlus size={15} /> : <IconFolder size={15} />}
+        <span className="ws-chip-label">{workspaceLabel(workspace)}</span>
+        {!empty && <IconChevronDown size={14} />}
+      </button>
+      {open && (
+        <div className="ws-menu" role="menu" aria-label="Dónde trabaja el asistente">
+          <p className="ws-menu-heading">Carpeta privada</p>
+          {workspace.folders.map((grant) => (
             <button
+              key={grant.id}
               type="button"
-              className="btn btn-ghost tools-grant-revoke"
-              onClick={() => void revoke(grant.id)}
-              disabled={busy}
+              role="menuitemradio"
+              aria-checked={!wide}
+              className="ws-menu-item"
+              onClick={() => void pick(() => (wide ? workspace.disableComputerWide() : undefined))}
             >
-              revoke
+              <IconFolder size={15} />
+              <span className="ws-menu-text">{folderName(grant.canonical_path)}</span>
+              {!wide && <IconCheck size={14} />}
             </button>
-          </li>
-        ))}
-        {grants.length === 0 && <li className="hint">No folders granted yet.</li>}
-      </ul>
-      <div className="row-h">
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => void pickFolder()}
-          disabled={busy || !profileId}
-        >
-          Choose folder…
-        </button>
-      </div>
-      <p className="hint">
-        The native picker decides the folder — typed paths are not accepted.
-        App data, the home folder itself and system roots are refused.
-      </p>
-      <label className="tools-runcommand-row">
-        <input
-          type="checkbox"
-          checked={runCommandEnabled}
-          onChange={(e) => void toggleRunCommand(e.currentTarget.checked)}
-          disabled={busy}
-        />
-        <span>Enable run_command (experimental)</span>
-      </label>
-      <p className="tools-warning">
-        ⚠ run_command lets the assistant execute shell commands inside granted
-        folders after per-action approval. Keep it OFF unless you need it.
-      </p>
-      <details className="tools-audit">
-        <summary>Audit log (last 50)</summary>
-        <ul className="tools-audit-list">
-          {audit.map((entry, index) => (
-            <li key={index}>
-              <code>{entry.ts}</code> {entry.event}/{entry.action} → {entry.outcome}
-              {entry.detail ? ` — ${entry.detail}` : ""}
-            </li>
           ))}
-          {audit.length === 0 && <li className="hint">Empty.</li>}
-        </ul>
-      </details>
-      <div className="row-h">
-        <button type="button" className="btn btn-ghost" onClick={() => void refresh()} disabled={busy}>
-          Refresh
-        </button>
-      </div>
-      {status && <p className={`status ${status.ok ? "ok" : "err"}`}>{status.text}</p>}
+          <button
+            type="button"
+            role="menuitem"
+            className="ws-menu-item"
+            onClick={() => void pick(() => workspace.addFolder())}
+          >
+            <IconPlus size={15} />
+            <span className="ws-menu-text">Añadir carpeta…</span>
+          </button>
+          <div className="ws-menu-sep" role="separator" />
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={wide}
+            className="ws-menu-item ws-menu-item-wide"
+            onClick={() => void pick(() => (wide ? undefined : onAskComputerWide()))}
+          >
+            <IconComputer size={15} />
+            <span className="ws-menu-text">Todo el equipo — bajo tu responsabilidad</span>
+            {wide && <IconCheck size={14} />}
+          </button>
+          <div className="ws-menu-sep" role="separator" />
+          <button
+            type="button"
+            role="menuitem"
+            className="ws-menu-item ws-menu-item-muted"
+            onClick={() => void pick(onOpenSettings)}
+          >
+            <IconGear size={15} />
+            <span className="ws-menu-text">Gestionar carpetas</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
-/// Composer-adjacent test surface for the propose → approve/deny → execute
-/// flow. Model tool-calling integration is a later task; this panel drives
-/// the exact same Rust-core path that integration will use.
-function ProposalDemo({
-  profileId,
-  conversationId,
+/// Plain-language warning before the whole-computer mode. Continuing asks
+/// the Rust core, which shows its own native confirmation — this dialog
+/// explains, the native one decides (the renderer cannot grant anything).
+function ComputerWideDialog({
+  onCancel,
+  onContinue,
 }: {
-  profileId: string | null;
-  conversationId: number | null;
+  onCancel: () => void;
+  onContinue: () => void;
 }) {
-  const [actionJson, setActionJson] = useState("");
-  const [proposal, setProposal] = useState<ProposalView | null>(null);
-  const [outcome, setOutcome] = useState<ToolOutcome | null>(null);
-  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const propose = async () => {
-    if (!profileId) return;
-    setBusy(true);
-    setProposal(null);
-    setOutcome(null);
-    try {
-      const view = await invoke<ProposalView>("tools_propose", {
-        profileId,
-        conversationId,
-        actionJson,
-      });
-      setProposal(view);
-      setStatus({ ok: true, text: "Proposal stored — review and approve or deny." });
-    } catch (err) {
-      setStatus({ ok: false, text: toolsErrorLabel(err) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const approve = async () => {
-    if (!proposal) return;
-    setBusy(true);
-    try {
-      const result = await invoke<ToolOutcome>("tools_execute", {
-        proposalId: proposal.proposal_id,
-      });
-      setOutcome(result);
-      setProposal(null);
-      setStatus({ ok: true, text: "Executed." });
-    } catch (err) {
-      setStatus({ ok: false, text: toolsErrorLabel(err) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const deny = async () => {
-    if (!proposal) return;
-    setBusy(true);
-    try {
-      await invoke("tools_deny", { proposalId: proposal.proposal_id });
-      setProposal(null);
-      setStatus({ ok: true, text: "Denied — nothing was executed." });
-    } catch (err) {
-      setStatus({ ok: false, text: toolsErrorLabel(err) });
-    } finally {
-      setBusy(false);
-    }
-  };
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
 
   return (
-    <details className="tools-demo">
-      <summary>Tools demo — test surface (model integration comes later)</summary>
-      <div className="panel">
-        <p className="hint">
-          Paste an action JSON. The Rust core validates it against your
-          grants and stores a proposal; execution happens only after you
-          approve, and runs the exact stored action.
-        </p>
-        <textarea
-          className="tools-json"
-          value={actionJson}
-          onChange={(e) => setActionJson(e.currentTarget.value)}
-          placeholder={TOOLS_PROPOSAL_EXAMPLE}
-          rows={4}
-          spellCheck={false}
-        />
-        <div className="row-h">
-          <button type="button" className="btn btn-ghost" onClick={() => void propose()} disabled={busy || !profileId}>
-            Propose
+    <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
+      <div
+        className="modal modal-warn"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="cw-title"
+        aria-describedby="cw-body"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <span className="modal-icon">
+          <IconWarning size={22} />
+        </span>
+        <h2 id="cw-title">¿Dar acceso a todo tu equipo?</h2>
+        <div id="cw-body">
+          <ul className="modal-points">
+            <li>
+              El asistente podrá pedirte permiso para leer, crear o cambiar <strong>cualquier
+              archivo de tu usuario</strong>: documentos, fotos, descargas…
+            </li>
+            <li>
+              Te pedirá confirmación antes de cada acción. Pero si aceptas algo por error, podría
+              borrar o estropear archivos importantes.
+            </li>
+            <li>Los datos de esta aplicación siempre quedan protegidos.</li>
+            <li>Puedes volver a una carpeta privada cuando quieras.</li>
+          </ul>
+          <p className="modal-note">A continuación tu equipo te pedirá una última confirmación.</p>
+        </div>
+        <div className="modal-actions">
+          <button ref={cancelRef} type="button" className="btn btn-ghost" onClick={onCancel}>
+            Cancelar
           </button>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => setActionJson(TOOLS_PROPOSAL_EXAMPLE)}
-            disabled={busy}
-          >
-            Example
+          <button type="button" className="btn btn-warn-solid" onClick={onContinue}>
+            Continuar bajo mi responsabilidad
           </button>
         </div>
-        {proposal && (
-          <div className="tools-proposal">
-            <p>
-              <strong>{proposal.action_kind}</strong> <code>{proposal.path}</code>
-            </p>
-            <p className="hint">{proposal.summary}</p>
-            {proposal.diff && <pre className="tools-diff">{previewText(proposal.diff)}</pre>}
-            <div className="row-h">
-              <button type="button" className="btn btn-primary" onClick={() => void approve()} disabled={busy}>
-                Approve
-              </button>
-              <button type="button" className="btn btn-ghost" onClick={() => void deny()} disabled={busy}>
-                Deny
-              </button>
-            </div>
-          </div>
-        )}
-        {outcome && (
-          <div className="tools-outcome">
-            <p className="hint">{outcome.summary}</p>
-            {outcome.content != null && <pre className="tools-diff">{previewText(outcome.content)}</pre>}
-            {outcome.entries && (
-              <ul className="tools-entries">
-                {outcome.entries.map((entry) => (
-                  <li key={entry}>{entry}</li>
-                ))}
-              </ul>
-            )}
-            {outcome.stdout != null && (
-              <pre className="tools-diff">
-                {previewText(
-                  `exit ${outcome.exit_code ?? "signal"}${outcome.timed_out ? " (killed after timeout)" : ""}\n${outcome.stdout}`,
-                )}
-              </pre>
-            )}
-            {outcome.stderr && <pre className="tools-diff tools-stderr">{previewText(outcome.stderr)}</pre>}
-          </div>
-        )}
-        {status && <p className={`status ${status.ok ? "ok" : "err"}`}>{status.text}</p>}
       </div>
-    </details>
+    </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Chat shell (T4, S3)
+// Chat shell
 // ---------------------------------------------------------------------------
 
 function ChatShell({
   overview,
   busy,
   onSignOut,
-  spike,
 }: {
   overview: ProfileOverview;
   busy: boolean;
   onSignOut: () => void;
-  spike: ReactNode;
 }) {
-  const activeProfile = overview.profiles.find((p) => p.id === overview.active_profile);
+  const activeProfile: ProfileView | undefined = overview.profiles.find(
+    (p) => p.id === overview.active_profile,
+  );
+  const workspace = useWorkspace(overview.active_profile);
+
+  const [view, setView] = useState<"chat" | "settings">("chat");
+  const [askComputerWide, setAskComputerWide] = useState(false);
 
   const [conversations, setConversations] = useState<ConversationView[]>([]);
   const [activeConvId, setActiveConvId] = useState<number | null>(null);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
   const [drafts, setDrafts] = useState<Map<number, string>>(() => new Map());
   const [streamingIds, setStreamingIds] = useState<Set<number>>(() => new Set());
+  const [activities, setActivities] = useState<Map<number, string>>(() => new Map());
   const [composer, setComposer] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [sessionExpired, setSessionExpired] = useState(false);
-  const [inlineError, setInlineError] = useState<string>("");
+  const [inlineError, setInlineError] = useState("");
 
-  // Image mode (T5): the composer switches into image generation — the
-  // prompt is sent to `image_generate` and the reply renders inline.
+  // Image mode: the composer sends the prompt to `image_generate`.
   const [imageMode, setImageMode] = useState(false);
   const [imageSize, setImageSize] = useState(DEFAULT_IMAGE_SIZE);
-  const [imageGeneratingIds, setImageGeneratingIds] = useState<Set<number>>(
-    () => new Set(),
-  );
+  const [imageGeneratingIds, setImageGeneratingIds] = useState<Set<number>>(() => new Set());
 
-  // Voice (T6): TTS playback + dictation. The chosen voice persists across
-  // sessions; only the three app-locked kokoro voices are offered.
-  const [voice, setVoice] = useState<string>(() => {
-    const stored = window.localStorage.getItem(VOICE_STORAGE_KEY);
-    return VOICES.some((v) => v.id === stored) ? (stored as string) : DEFAULT_VOICE;
-  });
+  // Voice: read-aloud + dictation. The voice is chosen in Settings.
+  const [voice, setVoice] = useState<string>(storedVoice);
   const [speakingMsgId, setSpeakingMsgId] = useState<number | null>(null);
   const [ttsHint, setTtsHint] = useState("");
   const [recording, setRecording] = useState(false);
@@ -904,26 +646,17 @@ function ChatShell({
   }, [activeConvId]);
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const refreshConversations = useCallback(async (): Promise<void> => {
+  const refreshConversations = useCallback(async (): Promise<ConversationView[]> => {
     const profileId = activeProfileRef.current;
-    if (!profileId) return;
+    if (!profileId) return [];
     try {
       const list = await invoke<ConversationView[]>("conversation_list", { profileId });
       setConversations(list);
+      return list;
     } catch {
-      // The sidebar stays as-is on a transient failure.
-    }
-  }, []);
-
-  const refreshModels = useCallback(async (): Promise<void> => {
-    try {
-      const list = await invoke<string[]>("models_list");
-      setModels(list);
-      setModel((current) => (list.includes(current) ? current : (list[0] ?? DEFAULT_MODEL)));
-    } catch {
-      // models_list failed (missing key / offline): the picker keeps the
-      // default model; the send path surfaces the real error.
+      return []; // the sidebar stays as-is on a transient failure
     }
   }, []);
 
@@ -936,26 +669,43 @@ function ChatShell({
     }
   }, []);
 
-  // Boot the chat: conversations + models, most recent conversation open.
-  useEffect(() => {
-    void refreshConversations().then(async () => {
-      // Re-read via the same source so the id can drive the first selection.
-      const profileId = activeProfileRef.current;
-      if (!profileId) return;
-      try {
-        const list = await invoke<ConversationView[]>("conversation_list", { profileId });
-        if (list.length > 0) {
-          setActiveConvId(list[0].id);
-          void loadMessages(list[0].id);
-        }
-      } catch {
-        // handled by refreshConversations' own failure path
+  // Account memory: reconcile with the account in the background. Silent
+  // by design — any failure keeps the local copy; nothing is ever shown.
+  const syncMemory = useCallback(async (): Promise<void> => {
+    const profileId = activeProfileRef.current;
+    if (!profileId) return;
+    try {
+      const changed = await invoke<boolean>("memory_sync", { profileId });
+      if (changed) {
+        await refreshConversations();
+        const current = activeConvRef.current;
+        if (current !== null) void loadMessages(current);
       }
-    });
-    void refreshModels();
-  }, [refreshConversations, refreshModels, loadMessages]);
+    } catch {
+      // Silent: memory sync never interrupts the user.
+    }
+  }, [refreshConversations, loadMessages]);
 
-  // Chat event transport (T4). Registered once; refs carry the active ids.
+  // Boot: conversations, models, most recent conversation open, then sync.
+  useEffect(() => {
+    void refreshConversations().then((list) => {
+      if (list.length > 0) {
+        setActiveConvId(list[0].id);
+        void loadMessages(list[0].id);
+      }
+      void syncMemory();
+    });
+    void invoke<string[]>("models_list")
+      .then((list) => {
+        setModels(list);
+        setModel((current) => (list.includes(current) ? current : (list[0] ?? DEFAULT_MODEL)));
+      })
+      .catch(() => {
+        // Offline or no key: keep the default; sending surfaces the error.
+      });
+  }, [refreshConversations, loadMessages, syncMemory]);
+
+  // Chat event transport. Registered once; refs carry the active ids.
   useEffect(() => {
     const markStreaming = (conversationId: number, streaming: boolean): void => {
       setStreamingIds((prev) => {
@@ -971,6 +721,17 @@ function ChatShell({
         next.delete(conversationId);
         return next;
       });
+      setActivities((prev) => {
+        const next = new Map(prev);
+        next.delete(conversationId);
+        return next;
+      });
+    };
+    const finish = (conversationId: number): void => {
+      markStreaming(conversationId, false);
+      clearDraft(conversationId);
+      if (activeConvRef.current === conversationId) void loadMessages(conversationId);
+      void refreshConversations();
     };
     const unlistens: Promise<UnlistenFn>[] = [
       listen<ChatDelta>("chat://delta", (event) => {
@@ -981,25 +742,22 @@ function ChatShell({
           return next;
         });
       }),
-      listen<ChatDone>("chat://done", (event) => {
-        const conversationId = event.payload.conversation_id;
-        markStreaming(conversationId, false);
-        clearDraft(conversationId);
-        if (activeConvRef.current === conversationId) {
-          void loadMessages(conversationId);
-        }
-        void refreshConversations();
+      listen<ChatActivity>("chat://activity", (event) => {
+        const { conversation_id, activity } = event.payload;
+        setActivities((prev) => {
+          const next = new Map(prev);
+          if (activity) next.set(conversation_id, activity);
+          else next.delete(conversation_id);
+          return next;
+        });
       }),
-      // T4b: the user pressed Stop. The text that arrived stays persisted;
-      // reload to render it as a normal (complete) message.
-      listen<ChatStopped>("chat://stopped", (event) => {
-        const conversationId = event.payload.conversation_id;
-        markStreaming(conversationId, false);
-        clearDraft(conversationId);
-        if (activeConvRef.current === conversationId) {
-          void loadMessages(conversationId);
-        }
-        void refreshConversations();
+      listen<ChatIdPayload>("chat://done", (event) => {
+        finish(event.payload.conversation_id);
+        void syncMemory();
+      }),
+      // The user pressed Stop: what arrived stays persisted.
+      listen<ChatIdPayload>("chat://stopped", (event) => {
+        finish(event.payload.conversation_id);
       }),
       listen<ChatError>("chat://error", (event) => {
         const { conversation_id, kind } = event.payload;
@@ -1015,13 +773,12 @@ function ChatShell({
     ];
     return () => {
       unlistens.forEach((promise) => {
-        promise.then((unlisten) => unlisten());
+        void promise.then((unlisten) => unlisten());
       });
     };
-  }, [loadMessages, refreshConversations]);
+  }, [loadMessages, refreshConversations, syncMemory]);
 
-  // Image event transport (T5): the Rust core persists the message row
-  // before `done` fires, so reloading the transcript renders the image.
+  // Image event transport: the core persists the row before `done`.
   useEffect(() => {
     const markGenerating = (conversationId: number, generating: boolean): void => {
       setImageGeneratingIds((prev) => {
@@ -1032,16 +789,15 @@ function ChatShell({
       });
     };
     const unlistens: Promise<UnlistenFn>[] = [
-      listen<ImagesStarted>("images://started", (event) => {
+      listen<ChatIdPayload>("images://started", (event) => {
         markGenerating(event.payload.conversation_id, true);
       }),
-      listen<ImagesDone>("images://done", (event) => {
+      listen<ChatIdPayload>("images://done", (event) => {
         const conversationId = event.payload.conversation_id;
         markGenerating(conversationId, false);
-        if (activeConvRef.current === conversationId) {
-          void loadMessages(conversationId);
-        }
+        if (activeConvRef.current === conversationId) void loadMessages(conversationId);
         void refreshConversations();
+        void syncMemory();
       }),
       listen<ImagesError>("images://error", (event) => {
         const { conversation_id, kind } = event.payload;
@@ -1053,29 +809,18 @@ function ChatShell({
         }
         void refreshConversations();
       }),
-      listen<ImagesStopped>("images://stopped", (event) => {
+      listen<ChatIdPayload>("images://stopped", (event) => {
         markGenerating(event.payload.conversation_id, false);
       }),
     ];
     return () => {
       unlistens.forEach((promise) => {
-        promise.then((unlisten) => unlisten());
+        void promise.then((unlisten) => unlisten());
       });
     };
-  }, [loadMessages, refreshConversations]);
+  }, [loadMessages, refreshConversations, syncMemory]);
 
-  const selectConversation = useCallback(
-    (conversationId: number): void => {
-      setActiveConvId(conversationId);
-      setInlineError("");
-      setSessionExpired(false);
-      void loadMessages(conversationId);
-    },
-    [loadMessages],
-  );
-
-  // Voice event transport (T6): one global playback — any end or error
-  // clears the playing marker; errors surface as an inline hint.
+  // Voice transport: one global playback.
   useEffect(() => {
     const unlistens: Promise<UnlistenFn>[] = [
       listen("tts://ended", () => setSpeakingMsgId(null)),
@@ -1086,17 +831,16 @@ function ChatShell({
     ];
     return () => {
       unlistens.forEach((promise) => {
-        promise.then((unlisten) => unlisten());
+        void promise.then((unlisten) => unlisten());
       });
     };
   }, []);
 
-  // Persist the chosen voice across sessions (localStorage, UI-only data).
   useEffect(() => {
     window.localStorage.setItem(VOICE_STORAGE_KEY, voice);
   }, [voice]);
 
-  // Stop any playback and recording when the chat shell unmounts.
+  // Stop playback and recording when the shell unmounts.
   useEffect(() => {
     return () => {
       recorderRef.current?.stop();
@@ -1104,6 +848,17 @@ function ChatShell({
       void invoke("tts_stop").catch(() => {});
     };
   }, []);
+
+  const selectConversation = useCallback(
+    (conversationId: number): void => {
+      setView("chat");
+      setActiveConvId(conversationId);
+      setInlineError("");
+      setSessionExpired(false);
+      void loadMessages(conversationId);
+    },
+    [loadMessages],
+  );
 
   const toggleSpeak = useCallback(
     async (message: ChatMessageRow): Promise<void> => {
@@ -1119,8 +874,6 @@ function ChatShell({
       }
       const profileId = activeProfileRef.current;
       if (!profileId) return;
-      // Optimistic: the Rust core keeps exactly one global playback — a new
-      // speak silently replaces the previous one (no ended event for it).
       setSpeakingMsgId(message.id);
       try {
         await invoke("tts_speak", { profileId, voice, input: message.content });
@@ -1132,58 +885,49 @@ function ChatShell({
     [speakingMsgId, voice],
   );
 
-  const stopRecording = useCallback((): void => {
-    recorderRef.current?.stop();
-    recorderRef.current = null;
-    setRecording(false);
+  const finishRecording = useCallback(async (chunks: Blob[], mimeType: string): Promise<void> => {
+    const profileId = activeProfileRef.current;
+    if (!profileId) return;
+    const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
+    if (blob.size === 0) {
+      setSttHint("No se ha grabado nada. Vuelve a intentarlo.");
+      return;
+    }
+    if (blob.size > MAX_STT_BYTES) {
+      setSttHint("La grabación es demasiado larga. Prueba con un mensaje más corto.");
+      return;
+    }
+    setSttBusy(true);
+    try {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const { text } = await invoke<{ text: string }>("stt_transcribe", {
+        profileId,
+        audioBytes: bytes,
+        mime: blob.type,
+      });
+      if (text.trim().length > 0) {
+        setComposer((prev) => (prev.trim().length > 0 ? `${prev} ${text}` : text));
+        composerRef.current?.focus();
+      } else {
+        setSttHint("No hemos entendido nada. Prueba a hablar un poco más cerca del micrófono.");
+      }
+    } catch (err) {
+      setSttHint(commandErrorLabel(err));
+    } finally {
+      setSttBusy(false);
+    }
   }, []);
-
-  const finishRecording = useCallback(
-    async (chunks: Blob[], mimeType: string): Promise<void> => {
-      const profileId = activeProfileRef.current;
-      if (!profileId) return;
-      const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
-      if (blob.size === 0) {
-        setSttHint("The recording was empty — try again.");
-        return;
-      }
-      if (blob.size > MAX_STT_BYTES) {
-        setSttHint("The recording is too long (over 25 MB) — record a shorter clip.");
-        return;
-      }
-      setSttBusy(true);
-      try {
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        const { text } = await invoke<{ text: string }>("stt_transcribe", {
-          profileId,
-          audioBytes: bytes,
-          mime: blob.type,
-        });
-        if (text.trim().length > 0) {
-          setComposer((prev) => (prev.trim().length > 0 ? `${prev} ${text}` : text));
-        } else {
-          setSttHint("Nothing was transcribed — try again, a bit closer to the mic.");
-        }
-      } catch (err) {
-        setSttHint(commandErrorLabel(err));
-      } finally {
-        setSttBusy(false);
-      }
-    },
-    [],
-  );
 
   const toggleRecording = useCallback(async (): Promise<void> => {
     setSttHint("");
     if (recording) {
-      stopRecording();
+      recorderRef.current?.stop();
+      recorderRef.current = null;
+      setRecording(false);
       return;
     }
-    if (
-      !navigator.mediaDevices?.getUserMedia ||
-      typeof window.MediaRecorder === "undefined"
-    ) {
-      setSttHint("Voice input is not available on this device.");
+    if (!navigator.mediaDevices?.getUserMedia || typeof window.MediaRecorder === "undefined") {
+      setSttHint("El dictado por voz no está disponible en este equipo.");
       return;
     }
     try {
@@ -1202,15 +946,17 @@ function ChatShell({
       recorder.start();
       setRecording(true);
     } catch {
-      setSttHint("Microphone access was denied — dictation is unavailable.");
+      setSttHint("No tenemos permiso para usar el micrófono.");
     }
-  }, [recording, stopRecording, finishRecording]);
+  }, [recording, finishRecording]);
 
   const newChat = useCallback((): void => {
+    setView("chat");
     setActiveConvId(null);
     setMessages([]);
     setInlineError("");
     setSessionExpired(false);
+    composerRef.current?.focus();
   }, []);
 
   const deleteConversation = useCallback(
@@ -1225,14 +971,14 @@ function ChatShell({
         setActiveConvId(null);
         setMessages([]);
       }
-      void refreshConversations();
+      await refreshConversations();
+      void syncMemory();
     },
-    [refreshConversations],
+    [refreshConversations, syncMemory],
   );
 
-  // UX review blocker 2: deletion is permanent and unrecoverable — the first
-  // click only arms an inline confirmation (auto-disarmed after 4s); the
-  // second, explicit click deletes.
+  // Deletion is permanent: the first click arms an inline confirmation
+  // (auto-disarmed after 4 s); the second, explicit click deletes.
   const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null);
   const deleteArmTimer = useRef<number | null>(null);
   const confirmDeleteConversation = useCallback(
@@ -1252,13 +998,11 @@ function ChatShell({
 
   const streamingActive = activeConvId !== null && streamingIds.has(activeConvId);
   const activeDraft = activeConvId !== null ? drafts.get(activeConvId) : undefined;
-  const imageGeneratingActive =
-    activeConvId !== null && imageGeneratingIds.has(activeConvId);
+  const activeActivity = activeConvId !== null ? activities.get(activeConvId) : undefined;
+  const imageGeneratingActive = activeConvId !== null && imageGeneratingIds.has(activeConvId);
   const composerBusy = streamingActive || imageGeneratingActive;
 
-  // Stop button (T4b): abort the active stream; the text that already
-  // arrived stays persisted. The chat://stopped handler clears the draft
-  // and reloads the persisted transcript.
+  // Stop: abort the stream; what already arrived stays persisted.
   const stopGenerating = useCallback(async (): Promise<void> => {
     const conversationId = activeConvRef.current;
     if (conversationId === null) return;
@@ -1269,9 +1013,6 @@ function ChatShell({
     }
   }, []);
 
-  // Cancel button (T5): abort the active image generation (~1 min — worth
-  // an escape hatch). image_cancel emits images://stopped; the local clear
-  // makes the UI reset instant even if the event races.
   const cancelImage = useCallback(async (): Promise<void> => {
     const conversationId = activeConvRef.current;
     if (conversationId === null) return;
@@ -1288,403 +1029,419 @@ function ChatShell({
     });
   }, []);
 
+  const ensureConversation = useCallback(async (): Promise<number | null> => {
+    const profileId = activeProfileRef.current;
+    if (!profileId) return null;
+    if (activeConvRef.current !== null) return activeConvRef.current;
+    const created = await invoke<number>("conversation_create", { profileId });
+    activeConvRef.current = created;
+    setActiveConvId(created);
+    return created;
+  }, []);
+
   const send = useCallback(async (): Promise<void> => {
     const text = composer.trim();
     if (!text || streamingActive) return;
     setSessionExpired(false);
     setInlineError("");
-    const profileId = activeProfileRef.current;
-    if (!profileId) return;
-
-    let conversationId = activeConvId;
+    let conversationId: number | null = null;
     try {
-      if (conversationId === null) {
-        conversationId = await invoke<number>("conversation_create", { profileId });
-        activeConvRef.current = conversationId;
-        setActiveConvId(conversationId);
-      }
-      // Optimistic user bubble; the Rust core persists the real row before
-      // streaming starts (the refetch after done/error is the source of truth).
+      conversationId = await ensureConversation();
+      if (conversationId === null) return;
+      const id = conversationId;
+      // Optimistic user bubble; the core persists the real row first.
       setMessages((prev) => [
         ...prev,
         {
           id: -Date.now(),
-          conversation_id: conversationId as number,
+          conversation_id: id,
           role: "user",
           content: text,
           model: null,
           created_at: "",
           partial: false,
           media_path: null,
+          sources: [],
         },
       ]);
       setComposer("");
-      setStreamingIds((prev) => new Set(prev).add(conversationId as number));
-      setDrafts((prev) => new Map(prev).set(conversationId as number, ""));
-      await invoke("chat_send", {
-        conversationId,
-        model,
-        content: text,
-      });
-    } catch (err) {
-      setStreamingIds((prev) => {
-        const next = new Set(prev);
-        if (conversationId !== null) next.delete(conversationId);
-        return next;
-      });
-      setDrafts((prev) => {
-        const next = new Map(prev);
-        if (conversationId !== null) next.delete(conversationId);
-        return next;
-      });
-      setInlineError(String(err));
+      setStreamingIds((prev) => new Set(prev).add(id));
+      setDrafts((prev) => new Map(prev).set(id, ""));
+      await invoke("chat_send", { conversationId: id, model, content: text });
+    } catch {
+      if (conversationId !== null) {
+        const id = conversationId;
+        setStreamingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        setDrafts((prev) => {
+          const next = new Map(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+      setInlineError("No se ha podido enviar el mensaje. Vuelve a intentarlo.");
       void refreshConversations();
     }
-  }, [composer, streamingActive, activeConvId, model, refreshConversations]);
+  }, [composer, streamingActive, ensureConversation, model, refreshConversations]);
 
-  // Image send (T5): nothing is stored client-side — the Rust core saves
-  // the PNG, appends the assistant row (media_path) and only then emits
-  // done, which reloads the transcript.
   const sendImage = useCallback(async (): Promise<void> => {
     const prompt = composer.trim();
     if (!prompt || imageGeneratingActive) return;
     setSessionExpired(false);
     setInlineError("");
-    const profileId = activeProfileRef.current;
-    if (!profileId) return;
-
-    let conversationId = activeConvId;
+    let conversationId: number | null = null;
     try {
-      if (conversationId === null) {
-        conversationId = await invoke<number>("conversation_create", { profileId });
-        activeConvRef.current = conversationId;
-        setActiveConvId(conversationId);
-      }
-      setImageGeneratingIds((prev) => new Set(prev).add(conversationId as number));
+      conversationId = await ensureConversation();
+      if (conversationId === null) return;
+      const id = conversationId;
+      setImageGeneratingIds((prev) => new Set(prev).add(id));
       setComposer("");
-      await invoke("image_generate", {
-        conversationId,
-        prompt,
-        size: imageSize,
-      });
+      await invoke("image_generate", { conversationId: id, prompt, size: imageSize });
     } catch (err) {
-      setImageGeneratingIds((prev) => {
-        const next = new Set(prev);
-        if (conversationId !== null) next.delete(conversationId);
-        return next;
-      });
+      if (conversationId !== null) {
+        const id = conversationId;
+        setImageGeneratingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
       setInlineError(commandErrorLabel(err));
       void refreshConversations();
     }
-  }, [composer, imageGeneratingActive, activeConvId, imageSize, refreshConversations]);
+  }, [composer, imageGeneratingActive, ensureConversation, imageSize, refreshConversations]);
 
   // Auto-scroll to the newest content.
   useEffect(() => {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, activeDraft, streamingActive, imageGeneratingActive]);
+  }, [messages, activeDraft, activeActivity, streamingActive, imageGeneratingActive]);
+
+  const confirmComputerWide = useCallback(async (): Promise<void> => {
+    setAskComputerWide(false);
+    await workspace.enableComputerWide();
+  }, [workspace]);
+
+  const submit = (): void => {
+    void (imageMode ? sendImage() : send());
+  };
 
   return (
-    <main className="chat-shell">
-      <aside className="sidebar">
+    <main className="shell">
+      <aside className="sidebar" aria-label="Conversaciones">
         <div className="sidebar-top">
-          <p className="brand">{"// nan-desktop"}</p>
+          <div className="sidebar-brand">
+            <BrandMark size={22} />
+            <Wordmark />
+          </div>
           <button type="button" className="btn btn-primary new-chat-btn" onClick={newChat}>
-            + New chat
+            <IconPlus size={16} />
+            Nueva conversación
           </button>
         </div>
-        <nav className="conv-list" aria-label="conversations">
+        <nav className="conv-list" aria-label="Historial">
           {conversations.length === 0 && (
-            <p className="conv-empty">No conversations yet</p>
+            <p className="conv-empty">Tus conversaciones aparecerán aquí.</p>
           )}
-          {conversations.map((c) => (
-            <div key={c.id} className={`conv-item${c.id === activeConvId ? " active" : ""}`}>
-              <button
-                type="button"
-                className="conv-main"
-                onClick={() => selectConversation(c.id)}
-                title={c.title}
+          {conversations.map((c) => {
+            const armed = pendingDeleteId === c.id;
+            return (
+              <div
+                key={c.id}
+                className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}`}
               >
-                <span className="conv-title">{c.title}</span>
-                {c.last_message && <span className="conv-preview">{c.last_message}</span>}
-              </button>
-              <button
-                type="button"
-                className={`conv-delete${pendingDeleteId === c.id ? " armed" : ""}`}
-                aria-label={
-                  pendingDeleteId === c.id
-                    ? `Click again to permanently delete conversation ${c.title}`
-                    : `Delete conversation ${c.title}`
-                }
-                onClick={() => confirmDeleteConversation(c.id)}
-              >
-                {pendingDeleteId === c.id ? "Delete?" : "×"}
-              </button>
-            </div>
-          ))}
+                <button
+                  type="button"
+                  className="conv-main"
+                  onClick={() => selectConversation(c.id)}
+                  title={c.title}
+                  aria-current={c.id === activeConvId ? "page" : undefined}
+                >
+                  <span className="conv-title">{c.title}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`conv-delete${armed ? " armed" : ""}`}
+                  aria-label={
+                    armed
+                      ? `Pulsa otra vez para borrar «${c.title}» para siempre`
+                      : `Borrar la conversación «${c.title}»`
+                  }
+                  title={armed ? "Pulsa otra vez para borrar" : "Borrar"}
+                  onClick={() => confirmDeleteConversation(c.id)}
+                >
+                  {armed ? "¿Borrar?" : <IconTrash size={15} />}
+                </button>
+              </div>
+            );
+          })}
         </nav>
         <div className="sidebar-bottom">
-          <div className="profile-row">
-            <span className="profile-name">{activeProfile?.name ?? "unknown profile"}</span>
-            {activeProfile?.has_key && (
-              <span className="key-note">key {activeProfile.key_mask}</span>
-            )}
-          </div>
-          <button
-            type="button"
-            className="btn btn-ghost signout-btn"
-            onClick={onSignOut}
-            disabled={busy}
-          >
-            Sign out
-          </button>
-          {/* T1 spike diagnostics, kept working and collapsed. */}
-          <details className="spike-details">{spike}</details>
-          {/* T8 tools settings: grants, run_command switch, audit viewer. */}
-          <details className="tools-details">
-            <summary>Tools &amp; folder grants</summary>
-            <ToolsPanel profileId={overview.active_profile} />
-          </details>
+          <span className="account-dot" aria-hidden="true" />
+          <span className="account-name">
+            {activeProfile ? profileTitle(activeProfile.id, activeProfile.name) : "Sin cuenta"}
+          </span>
         </div>
       </aside>
 
-      <section className="chat-main">
-        {sessionExpired && (
-          <div className="banner banner-error" role="alert">
-            <span>Session expired — sign in again</span>
-            <button type="button" className="btn btn-ghost banner-btn" onClick={onSignOut}>
-              Sign out
-            </button>
-          </div>
-        )}
-        <header className="chat-header">
-          <label className="model-label" htmlFor="model-select">
-            Model
-          </label>
-          <select
-            id="model-select"
-            className="model-select"
-            value={model}
-            onChange={(e) => setModel(e.currentTarget.value)}
-          >
-            {(models.length > 0 ? models : [model]).map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-          </select>
-          <label className="model-label voice-label" htmlFor="voice-select">
-            Voice
-          </label>
-          <select
-            id="voice-select"
-            className="model-select"
-            value={voice}
-            onChange={(e) => setVoice(e.currentTarget.value)}
-            aria-label="Text-to-speech voice"
-          >
-            {VOICES.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.label}
-              </option>
-            ))}
-          </select>
-          {imageMode && (
-            <>
-              <label className="model-label voice-label" htmlFor="image-size-select">
-                Size
-              </label>
+      {view === "settings" ? (
+        <Settings
+          profile={activeProfile}
+          workspace={workspace}
+          voice={voice}
+          onVoiceChange={setVoice}
+          onAskComputerWide={() => setAskComputerWide(true)}
+          onBack={() => setView("chat")}
+          onSignOut={onSignOut}
+          signingOut={busy}
+        />
+      ) : (
+        <section className="chat-main">
+          {sessionExpired && (
+            <div className="banner" role="alert">
+              <span>Tu sesión ha caducado. Vuelve a entrar para seguir.</span>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={onSignOut}>
+                Volver a entrar
+              </button>
+            </div>
+          )}
+          <header className="chat-header">
+            <label className="model-picker">
+              <span className="visually-hidden">Modelo</span>
               <select
-                id="image-size-select"
-                className="model-select"
-                value={imageSize}
-                onChange={(e) => setImageSize(e.currentTarget.value)}
-                aria-label="Image size"
+                value={model}
+                onChange={(e) => setModel(e.currentTarget.value)}
+                aria-label="Modelo del asistente"
               >
-                {IMAGE_SIZES.map((size) => (
-                  <option key={size} value={size}>
-                    {size}
+                {(models.length > 0 ? models : [model]).map((id) => (
+                  <option key={id} value={id}>
+                    {id}
                   </option>
                 ))}
               </select>
-            </>
-          )}
-        </header>
+              <IconChevronDown size={14} />
+            </label>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="Ajustes"
+              title="Ajustes"
+              onClick={() => setView("settings")}
+            >
+              <IconGear size={19} />
+            </button>
+          </header>
 
-        <div className="messages" ref={messagesRef}>
-          {messages.length === 0 && !activeDraft && (
-            <div className="empty-state">
-              <p className="empty-title">New conversation</p>
-              <p className="empty-hint">
-                Send your first message — Enter sends, Shift+Enter adds a newline.
-              </p>
-            </div>
-          )}
-          {messages.map((m) =>
-            m.role === "assistant" ? (
-              m.media_path ? (
-                // T5: inline generated image. The renderer loads the saved
-                // file through the Tauri asset protocol (scope: the app
-                // data images dir) — the bytes never crossed IPC.
-                <article key={m.id} className="msg msg-assistant msg-image-row">
-                  <img
-                    className="msg-image"
-                    src={convertFileSrc(m.media_path)}
-                    alt={m.content}
-                  />
-                  <p className="image-caption">{m.content}</p>
-                </article>
-              ) : (
-                <article
-                  key={m.id}
-                  className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}
-                >
-                  <Markdown text={m.content} />
-                  {m.partial && (
-                    <span className="partial-note" role="note">
-                      message interrupted
-                    </span>
+          <div className="messages" ref={messagesRef}>
+            <div className="messages-inner">
+              {messages.length === 0 && activeDraft === undefined && (
+                <div className="empty-state">
+                  <BrandMark size={40} />
+                  <p className="empty-title">¿En qué puedo ayudarte?</p>
+                  <p className="empty-hint">
+                    Escribe tu mensaje abajo. Intro envía; Mayús + Intro añade una línea.
+                  </p>
+                </div>
+              )}
+              {messages.map((m) =>
+                m.role === "assistant" ? (
+                  m.media_path ? (
+                    <article key={m.id} className="msg msg-assistant">
+                      <img className="msg-image" src={convertFileSrc(m.media_path)} alt={m.content} />
+                      <p className="image-caption">{m.content}</p>
+                    </article>
+                  ) : (
+                    <article
+                      key={m.id}
+                      className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}
+                    >
+                      <Markdown text={m.content} />
+                      {m.partial && (
+                        <p className="partial-note" role="note">
+                          La respuesta se interrumpió.
+                        </p>
+                      )}
+                      <SourceChips sources={m.sources ?? []} />
+                      {m.content.trim().length > 0 && (
+                        <div className="msg-actions">
+                          <button
+                            type="button"
+                            className={`msg-action${speakingMsgId === m.id ? " active" : ""}`}
+                            onClick={() => void toggleSpeak(m)}
+                          >
+                            {speakingMsgId === m.id ? <IconStop size={14} /> : <IconSpeaker size={14} />}
+                            {speakingMsgId === m.id ? "Detener" : "Escuchar"}
+                          </button>
+                        </div>
+                      )}
+                    </article>
+                  )
+                ) : (
+                  <article key={m.id} className="msg msg-user">
+                    <p className="msg-user-text">{m.content}</p>
+                  </article>
+                ),
+              )}
+              {streamingActive && activeDraft !== undefined && (
+                <article className="msg msg-assistant streaming" aria-live="polite">
+                  {activeDraft.length > 0 && <Markdown text={activeDraft} />}
+                  {activeActivity ? (
+                    <p className="activity" role="status">
+                      {activeActivity === "searching" ? <IconGlobe size={15} /> : <IconFolder size={15} />}
+                      {ACTIVITY_COPY[activeActivity] ?? ""}
+                    </p>
+                  ) : activeDraft.length === 0 ? (
+                    <p className="activity" role="status">
+                      <span className="pulse-dot" aria-hidden="true" />
+                      Pensando…
+                    </p>
+                  ) : (
+                    <span className="caret" aria-hidden="true" />
                   )}
-                  {m.content.trim().length > 0 && (
+                </article>
+              )}
+              {imageGeneratingActive && (
+                <article className="msg msg-assistant" role="status">
+                  <p className="activity">
+                    <span className="pulse-dot" aria-hidden="true" />
+                    Creando la imagen… suele tardar alrededor de un minuto.
+                  </p>
+                </article>
+              )}
+              {ttsHint && (
+                <p className="inline-error" role="status">
+                  {ttsHint}
+                </p>
+              )}
+              {inlineError && (
+                <p className="inline-error" role="alert">
+                  {inlineError}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <footer className="composer">
+            <div className={`composer-box${imageMode ? " image-mode" : ""}`}>
+              <textarea
+                ref={composerRef}
+                className="composer-input"
+                value={composer}
+                onChange={(e) => setComposer(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    submit();
+                  }
+                }}
+                placeholder={
+                  sttBusy
+                    ? "Transcribiendo…"
+                    : imageMode
+                      ? "Describe la imagen que quieres crear"
+                      : "Escribe tu mensaje"
+                }
+                aria-label={imageMode ? "Descripción de la imagen" : "Mensaje"}
+                rows={2}
+                disabled={composerBusy}
+              />
+              <div className="composer-bar">
+                <WorkspaceChip
+                  workspace={workspace}
+                  onAskComputerWide={() => setAskComputerWide(true)}
+                  onOpenSettings={() => setView("settings")}
+                />
+                <div className="composer-tools">
+                  {imageMode && (
+                    <label className="size-picker">
+                      <span className="visually-hidden">Formato de la imagen</span>
+                      <select
+                        value={imageSize}
+                        onChange={(e) => setImageSize(e.currentTarget.value)}
+                        aria-label="Formato de la imagen"
+                      >
+                        {IMAGE_SIZES.map((size) => (
+                          <option key={size.id} value={size.id}>
+                            {size.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    className={`icon-btn${imageMode ? " active" : ""}`}
+                    aria-pressed={imageMode}
+                    aria-label={imageMode ? "Volver a escribir mensajes" : "Crear una imagen"}
+                    title={imageMode ? "Volver a escribir mensajes" : "Crear una imagen"}
+                    onClick={() => setImageMode((value) => !value)}
+                    disabled={composerBusy}
+                  >
+                    <IconImage size={18} />
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-btn${recording ? " recording" : ""}`}
+                    aria-label={recording ? "Terminar el dictado" : "Dictar por voz"}
+                    title={recording ? "Terminar el dictado" : "Dictar por voz"}
+                    onClick={() => void toggleRecording()}
+                    disabled={sttBusy || composerBusy}
+                  >
+                    {recording ? <IconStop size={18} /> : <IconMic size={18} />}
+                  </button>
+                  {imageGeneratingActive ? (
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => void cancelImage()}>
+                      <IconStop size={14} />
+                      Cancelar
+                    </button>
+                  ) : streamingActive ? (
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => void stopGenerating()}>
+                      <IconStop size={14} />
+                      Detener
+                    </button>
+                  ) : (
                     <button
                       type="button"
-                      className="speak-btn"
-                      aria-label={
-                        speakingMsgId === m.id ? "Stop reading aloud" : "Read message aloud"
-                      }
-                      title={speakingMsgId === m.id ? "Stop" : "Read aloud"}
-                      onClick={() => void toggleSpeak(m)}
+                      className="send-btn"
+                      onClick={submit}
+                      disabled={composer.trim().length === 0}
+                      aria-label={imageMode ? "Crear imagen" : "Enviar"}
+                      title={imageMode ? "Crear imagen" : "Enviar"}
                     >
-                      {speakingMsgId === m.id ? "■" : "▶"}
+                      <IconArrowUp size={18} />
                     </button>
                   )}
-                </article>
-              )
-            ) : (
-              <article key={m.id} className="msg msg-user">
-                <p className="msg-user-text">{m.content}</p>
-              </article>
-            ),
-          )}
-          {streamingActive && activeDraft !== undefined && (
-            <article className="msg msg-assistant streaming">
-              <Markdown text={activeDraft} />
-              <span className="caret" aria-hidden="true" />
-            </article>
-          )}
-          {imageGeneratingActive && (
-            <article className="msg msg-assistant image-pending" role="status">
-              <span className="pulse-dot" aria-hidden="true" />
-              Generating image (~1 min)
-            </article>
-          )}
-          {ttsHint && (
-            <div className="msg-error" role="status">
-              {ttsHint}
+                </div>
+              </div>
             </div>
-          )}
-          {inlineError && (
-            <div className="msg-error" role="alert">
-              {inlineError}
-            </div>
-          )}
-        </div>
-
-        <footer className="composer">
-          {/* T8 proposal demo: test surface driving the Rust-core
-              propose → approve/deny → execute path. */}
-          <ProposalDemo profileId={overview.active_profile} conversationId={activeConvId} />
-          {sttHint && (
-            <p className="hint composer-hint" role="status">
-              {sttHint}
-            </p>
-          )}
-          <div className="composer-row">
-            <button
-              type="button"
-              className={`btn icon-btn image-btn${imageMode ? " active" : ""}`}
-              aria-pressed={imageMode}
-              aria-label={imageMode ? "Switch to text chat" : "Image mode"}
-              title={imageMode ? "Switch to text chat" : "Generate an image"}
-              onClick={() => setImageMode((value) => !value)}
-              disabled={composerBusy}
-            >
-              img
-            </button>
-            <textarea
-              className="composer-input"
-              value={composer}
-              onChange={(e) => setComposer(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  void (imageMode ? sendImage() : send());
-                }
-              }}
-              placeholder={
-                sttBusy
-                  ? "Transcribing…"
-                  : imageGeneratingActive
-                    ? "Generating image…"
-                    : streamingActive
-                      ? "Waiting for the reply…"
-                      : imageMode
-                        ? "Describe the image"
-                        : "Message…"
-              }
-              rows={3}
-              disabled={composerBusy}
-            />
-            <button
-              type="button"
-              className={`btn icon-btn mic-btn${recording ? " recording" : ""}`}
-              aria-label={recording ? "Stop recording" : "Dictate"}
-              title={recording ? "Stop recording" : "Dictate"}
-              onClick={() => void toggleRecording()}
-              disabled={sttBusy || composerBusy}
-            >
-              {recording ? "■" : "●"}
-            </button>
-            {imageGeneratingActive ? (
-              // T5: while an image is generating (~1 min), Send is replaced
-              // by a cancel button — the task aborts, nothing is persisted.
-              <button
-                type="button"
-                className="btn stop-btn"
-                onClick={() => void cancelImage()}
-              >
-                Cancel image
-              </button>
-            ) : streamingActive ? (
-              // T4b: while streaming, Send is replaced by Stop — the reply
-              // is being persisted as it arrives, so stopping keeps it.
-              <button
-                type="button"
-                className="btn stop-btn"
-                onClick={() => void stopGenerating()}
-              >
-                Stop generating
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="btn btn-primary send-btn"
-                onClick={() => void (imageMode ? sendImage() : send())}
-                disabled={composer.trim().length === 0}
-              >
-                {imageMode ? "Generate" : "Send"}
-              </button>
+            {(sttHint || workspace.error) && (
+              <p className="composer-hint" role="status">
+                {sttHint || workspace.error}
+              </p>
             )}
-          </div>
-        </footer>
-      </section>
+          </footer>
+        </section>
+      )}
+
+      {askComputerWide && (
+        <ComputerWideDialog
+          onCancel={() => setAskComputerWide(false)}
+          onContinue={() => void confirmComputerWide()}
+        />
+      )}
     </main>
   );
 }
 
+// ---------------------------------------------------------------------------
+// App state machine
+// ---------------------------------------------------------------------------
+
 function App() {
   const [screen, setScreen] = useState<Screen>("loading");
-  const [loadError, setLoadError] = useState("");
   const [overview, setOverview] = useState<ProfileOverview | null>(null);
   const [pickerError, setPickerError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1693,28 +1450,11 @@ function App() {
   const [authProfileId, setAuthProfileId] = useState<string | null>(null);
   const [authPhase, setAuthPhase] = useState<AuthPhase>("waiting");
   const [userCode, setUserCode] = useState("");
-  const [pollCount, setPollCount] = useState(0);
   const [errorKind, setErrorKind] = useState("");
   const authProfileRef = useRef<string | null>(null);
   useEffect(() => {
     authProfileRef.current = authProfileId;
   }, [authProfileId]);
-
-  // (a) SSE demo (T1 spike panel)
-  const [sseUrl, setSseUrl] = useState("http://127.0.0.1:14321/events");
-  const [chunks, setChunks] = useState<string[]>([]);
-  const [sseStatus, setSseStatus] = useState<"idle" | "streaming" | "done" | "error">("idle");
-  const [sseError, setSseError] = useState("");
-
-  // (b) Keychain demo (T1 spike panel)
-  const [krService, setKrService] = useState("nan-desktop-spike");
-  const [krAccount, setKrAccount] = useState("demo-api-key");
-  const [krValue, setKrValue] = useState("");
-  const [krStatus, setKrStatus] = useState("");
-
-  // (c) SQLite demo (T1 spike panel)
-  const [spikeMessages, setSpikeMessages] = useState<SpikeMessage[]>([]);
-  const [dbStatus, setDbStatus] = useState("");
 
   const refreshOverview = useCallback(
     async (): Promise<ProfileOverview> => invoke<ProfileOverview>("profiles_load"),
@@ -1728,8 +1468,7 @@ function App() {
       setOverview(next);
       const active = next.profiles.find((p) => p.id === next.active_profile);
       setScreen(active && active.has_key ? "chat" : "picker");
-    } catch (err) {
-      setLoadError(String(err));
+    } catch {
       setScreen("error");
     }
   }, [refreshOverview]);
@@ -1738,16 +1477,11 @@ function App() {
     void boot();
   }, [boot]);
 
-  // Rust → frontend event transport. Registered once; cleanup on unmount.
+  // Rust → frontend sign-in events. Registered once; cleanup on unmount.
   useEffect(() => {
     const unlistens: Promise<UnlistenFn>[] = [
       listen<DeviceStarted>("device://started", (event) => {
         setUserCode(event.payload.user_code);
-      }),
-      listen<DeviceStatus>("device://status", (event) => {
-        if (event.payload.status === "pending") {
-          setPollCount((count) => count + 1);
-        }
       }),
       listen<DeviceApproved>("device://approved", (event) => {
         // Ignore stale approvals from an earlier, cancelled flow.
@@ -1758,13 +1492,10 @@ function App() {
             setAuthProfileId(null);
             setScreen("chat");
           })
-          .catch((err) => {
-            setLoadError(String(err));
-            setScreen("error");
-          });
+          .catch(() => setScreen("error"));
       }),
-      listen<DeviceStatus>("device://denied", () => setAuthPhase("denied")),
-      listen<DeviceStatus>("device://expired", () => setAuthPhase("expired")),
+      listen("device://denied", () => setAuthPhase("denied")),
+      listen("device://expired", () => setAuthPhase("expired")),
       listen<DeviceError>("device://error", (event) => {
         setErrorKind(event.payload.kind);
         setAuthPhase("error");
@@ -1772,53 +1503,29 @@ function App() {
     ];
     return () => {
       unlistens.forEach((promise) => {
-        promise.then((unlisten) => unlisten());
+        void promise.then((unlisten) => unlisten());
       });
     };
   }, [refreshOverview]);
 
-  // Spike-panel event transport (T1).
-  useEffect(() => {
-    const unlistens: Promise<UnlistenFn>[] = [
-      listen<SseChunkPayload>("sse://chunk", (event) => {
-        setChunks((prev) => [...prev, event.payload.text]);
-        setSseStatus("streaming");
-      }),
-      listen<number>("sse://done", () => setSseStatus("done")),
-      listen<string>("sse://error", (event) => {
-        setSseError(event.payload);
-        setSseStatus("error");
-      }),
-    ];
-    return () => {
-      unlistens.forEach((promise) => {
-        promise.then((unlisten) => unlisten());
-      });
-    };
+  const startLogin = useCallback(async (profileId: string): Promise<void> => {
+    setBusy(true);
+    setPickerError("");
+    // Track the flow from before the request so no early event is missed.
+    setAuthProfileId(profileId);
+    setAuthPhase("waiting");
+    setUserCode("");
+    setErrorKind("");
+    try {
+      await invoke("device_login_start", { profileId });
+      setScreen("authorizing");
+    } catch {
+      setAuthProfileId(null);
+      setPickerError("No hemos podido iniciar el acceso. Revisa tu conexión y vuelve a intentarlo.");
+    } finally {
+      setBusy(false);
+    }
   }, []);
-
-  const startLogin = useCallback(
-    async (profileId: string): Promise<void> => {
-      setBusy(true);
-      setPickerError("");
-      // Track the flow from before the request so no early event is missed.
-      setAuthProfileId(profileId);
-      setAuthPhase("waiting");
-      setUserCode("");
-      setPollCount(0);
-      setErrorKind("");
-      try {
-        await invoke("device_login_start", { profileId });
-        setScreen("authorizing");
-      } catch (err) {
-        setAuthProfileId(null);
-        setPickerError(String(err));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [],
-  );
 
   const cancelLogin = useCallback(async (): Promise<void> => {
     try {
@@ -1839,172 +1546,37 @@ function App() {
       const next = await refreshOverview();
       setOverview(next);
       setScreen("picker");
-    } catch (err) {
-      setLoadError(String(err));
+    } catch {
       setScreen("error");
     } finally {
       setBusy(false);
     }
   }, [overview, refreshOverview]);
 
-  async function startSse(): Promise<void> {
-    setChunks([]);
-    setSseError("");
-    setSseStatus("streaming");
-    try {
-      await invoke("sse_demo_start", { url: sseUrl });
-    } catch (err) {
-      setSseError(String(err));
-      setSseStatus("error");
-    }
-  }
-
-  async function keyringSet(): Promise<void> {
-    try {
-      await invoke("keyring_set", {
-        service: krService,
-        account: krAccount,
-        value: krValue,
-      });
-      setKrStatus("stored in the OS keychain");
-      setKrValue(""); // do not keep the secret in the DOM
-    } catch (err) {
-      setKrStatus(`error: ${String(err)}`);
-    }
-  }
-
-  async function keyringGet(): Promise<void> {
-    try {
-      const value = await invoke<string | null>("keyring_get", {
-        service: krService,
-        account: krAccount,
-      });
-      setKrStatus(
-        value === null ? "no entry found" : `retrieved: ${maskValue(value)}`,
-      );
-    } catch (err) {
-      setKrStatus(`error: ${String(err)}`);
-    }
-  }
-
-  async function runDbDemo(): Promise<void> {
-    try {
-      const rows = await invoke<SpikeMessage[]>("db_demo");
-      setSpikeMessages(rows);
-      setDbStatus(`${rows.length} row(s) returned (last 10 by id)`);
-    } catch (err) {
-      setDbStatus(`error: ${String(err)}`);
-    }
-  }
-
-  // The T1 spike panel JSX (rendered inside the sidebar's <details> on the
-  // chat screen; it needs no props — all state lives here). Dev-only:
-  // the spike IPC commands do not exist in release builds (security review
-  // B1/B2/B6), so the panel must not render there either.
-  const spikePanel = import.meta.env.DEV ? (
-    <>
-      <summary>T1 spike diagnostics (SSE / keychain / SQLite)</summary>
-
-      <section className="panel">
-        <h2>SSE demo (Rust → UI)</h2>
-        <p className="hint">
-          Requires the mock server: <code>node test/mock-sse.mjs</code>
-        </p>
-        <div className="row-h">
-          <input
-            value={sseUrl}
-            onChange={(e) => setSseUrl(e.currentTarget.value)}
-            placeholder="SSE URL"
-          />
-          <button type="button" className="btn btn-ghost" onClick={() => void startSse()}>
-            Start
-          </button>
-        </div>
-        <p className="status">
-          status: {sseStatus}
-          {sseError ? ` — ${sseError}` : ""}
-        </p>
-        <ul className="chunk-list">
-          {chunks.map((text, i) => (
-            <li key={i}>{text}</li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="panel">
-        <h2>Keychain (OS credential store)</h2>
-        <div className="row-h">
-          <input
-            value={krService}
-            onChange={(e) => setKrService(e.currentTarget.value)}
-            placeholder="service"
-          />
-          <input
-            value={krAccount}
-            onChange={(e) => setKrAccount(e.currentTarget.value)}
-            placeholder="account"
-          />
-        </div>
-        <div className="row-h">
-          <input
-            type="password"
-            value={krValue}
-            onChange={(e) => setKrValue(e.currentTarget.value)}
-            placeholder="value to store"
-            autoComplete="off"
-          />
-          <button type="button" className="btn btn-ghost" onClick={() => void keyringSet()}>
-            Set
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={() => void keyringGet()}>
-            Get
-          </button>
-        </div>
-        <p className="status">{krStatus}</p>
-      </section>
-
-      <section className="panel">
-        <h2>SQLite (local history foundation)</h2>
-        <div className="row-h">
-          <button type="button" className="btn btn-ghost" onClick={() => void runDbDemo()}>
-            Insert demo row + list last 10
-          </button>
-        </div>
-        <p className="status">{dbStatus}</p>
-        <ul className="chunk-list">
-          {spikeMessages.map((m) => (
-            <li key={m.id}>
-              #{m.id} [{m.role}] {m.content} — {m.created_at}
-            </li>
-          ))}
-        </ul>
-      </section>
-    </>
-  ) : null;
-
   if (screen === "loading") {
     return (
-      <main className="screen">
-        <p className="brand">{"// nan-desktop"}</p>
-        <p className="status-line muted">
-          <span className="pulse-dot" /> Loading…
+      <CenterScreen>
+        <BrandHero />
+        <p className="status-line" role="status">
+          <span className="pulse-dot" aria-hidden="true" />
+          Cargando…
         </p>
-      </main>
+      </CenterScreen>
     );
   }
 
   if (screen === "error") {
     return (
-      <main className="screen">
-        <p className="brand">{"// nan-desktop"}</p>
-        <h1>Something went wrong</h1>
-        <p className="status err">{loadError}</p>
+      <CenterScreen>
+        <BrandHero />
+        <h1>Algo no ha ido bien</h1>
+        <p className="lede">No hemos podido abrir tu cuenta en este equipo. Vuelve a intentarlo.</p>
         <div className="actions">
           <button type="button" className="btn btn-primary" onClick={() => void boot()}>
-            Retry
+            Volver a intentarlo
           </button>
         </div>
-      </main>
+      </CenterScreen>
     );
   }
 
@@ -2012,11 +1584,10 @@ function App() {
     const profile = overview?.profiles.find((p) => p.id === authProfileId);
     return (
       <Authorizing
-        profileName={profile?.name ?? authProfileId}
+        profileName={profileTitle(authProfileId, profile?.name ?? authProfileId)}
         userCode={userCode}
         phase={authPhase}
         errorKind={errorKind}
-        pollCount={pollCount}
         onTryAgain={() => void startLogin(authProfileId)}
         onPickAnother={() => void cancelLogin()}
         onCancel={() => void cancelLogin()}
@@ -2039,9 +1610,7 @@ function App() {
     return null; // unreachable with a consistent state machine
   }
 
-  return (
-    <ChatShell overview={overview} busy={busy} onSignOut={() => void signOut()} spike={spikePanel} />
-  );
+  return <ChatShell overview={overview} busy={busy} onSignOut={() => void signOut()} />;
 }
 
 export default App;
