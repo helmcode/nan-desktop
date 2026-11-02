@@ -73,7 +73,6 @@ fn skip_bars(c: &mut Cursor) -> Option<bool> {
     Some(bars > 0)
 }
 
-
 /// One recognized DSML tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Tag {
@@ -502,10 +501,19 @@ mod tests {
             !shown.contains("DSML") && !shown.contains('\u{FF5C}'),
             "markup leaked to the UI: {shown:?}"
         );
-        assert_eq!(calls.len(), 2, "two web_search invokes recovered: {calls:?}");
+        assert_eq!(
+            calls.len(),
+            2,
+            "two web_search invokes recovered: {calls:?}"
+        );
         assert_eq!(calls[0].name, "web_search");
         let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).expect("args");
-        assert!(args["query"].as_str().unwrap_or_default().contains("Binance EIP-7702"));
+        assert!(
+            args["query"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Binance EIP-7702")
+        );
     }
 
     use super::*;

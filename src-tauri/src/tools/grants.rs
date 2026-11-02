@@ -255,6 +255,21 @@ impl GrantsStore {
         self.run_command_promoted = true;
     }
 
+    /// The store as one conversation sees it: `profile_id`'s folder grants
+    /// are kept only when their id is in `selected`; its computer-wide
+    /// grant (a profile-level mode confirmed natively) is always kept, and
+    /// other profiles' grants are untouched. Unknown ids in `selected` are
+    /// ignored, so a stale selection can only ever NARROW the scope.
+    pub fn scoped_to(&self, profile_id: &str, selected: &[String]) -> GrantsStore {
+        let mut scoped = self.clone();
+        scoped.grants.retain(|grant| {
+            grant.profile_id != profile_id
+                || grant.scope == GrantScope::ComputerWide
+                || selected.contains(&grant.id)
+        });
+        scoped
+    }
+
     pub fn grant_by_id(&self, grant_id: &str) -> Option<&Grant> {
         self.grants.iter().find(|grant| grant.id == grant_id)
     }
@@ -805,6 +820,35 @@ mod tests {
         store
             .set_mode("cw", ApprovalMode::Ask)
             .expect("ask is fine");
+    }
+
+    #[test]
+    fn scoped_store_keeps_only_selected_folders_and_the_computer_wide_grant() {
+        let mut store = default_store();
+        for (id, profile, path) in [
+            ("a", "nan", "/tmp/a"),
+            ("b", "nan", "/tmp/b"),
+            ("other", "helmcode", "/tmp/o"),
+        ] {
+            store
+                .add_grant(id.into(), profile, PathBuf::from(path), "t".into())
+                .expect("add");
+        }
+        let ids = |s: &GrantsStore| s.grants.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
+
+        // One selected: the other folder of the same profile disappears,
+        // another profile's grants are untouched, unknown ids are ignored.
+        let scoped = store.scoped_to("nan", &["b".into(), "ghost".into()]);
+        assert_eq!(ids(&scoped), vec!["b", "other"]);
+
+        // None selected: no folder grant of the profile survives.
+        assert!(store.scoped_to("nan", &[]).grants_for("nan").is_empty());
+
+        // The computer-wide mode is profile-level: never scoped away.
+        store.add_computer_wide_grant("cw".into(), "nan", PathBuf::from("/Users/x"), "t".into());
+        let scoped = store.scoped_to("nan", &[]);
+        assert_eq!(ids(&scoped), vec!["other", "cw"]);
+        assert!(scoped.computer_wide_grant("nan").is_some());
     }
 
     // ------------------------------------------ protected removal targets --

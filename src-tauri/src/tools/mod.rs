@@ -229,6 +229,14 @@ pub struct ToolsState {
     pub ttl: Duration,
     /// Inline approval requests the renderer may answer (and nothing else).
     pub approvals: ApprovalBroker,
+    /// Per-conversation folder selection (grant ids), set with every chat
+    /// send. A conversation without an entry sees every grant (legacy).
+    scopes: Mutex<HashMap<i64, Vec<String>>>,
+    /// Random per-run id naming this run's session temp folders.
+    session_id: String,
+    /// Parent of the session temp folders (the OS temp dir in production;
+    /// tests point it at a tempdir).
+    pub scratch_base: PathBuf,
 }
 
 impl Default for ToolsState {
@@ -237,7 +245,125 @@ impl Default for ToolsState {
             inner: Mutex::new(HashMap::new()),
             ttl: PROPOSAL_TTL,
             approvals: ApprovalBroker::default(),
+            scopes: Mutex::new(HashMap::new()),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            scratch_base: std::env::temp_dir(),
         }
+    }
+}
+
+/// Id prefix of the synthetic session temp-folder grants (never stored in
+/// `tools.json`; they exist only for the running app).
+pub const SCRATCH_GRANT_PREFIX: &str = "session-tmp-";
+
+impl ToolsState {
+    /// Scope one conversation to the selected grant ids (`None` clears the
+    /// scope: every grant of the profile applies, the pre-selection
+    /// behavior).
+    pub fn set_conversation_scope(&self, conversation_id: i64, grant_ids: Option<Vec<String>>) {
+        let Ok(mut scopes) = self.scopes.lock() else {
+            return;
+        };
+        match grant_ids {
+            Some(ids) => {
+                scopes.insert(conversation_id, ids);
+            }
+            None => {
+                scopes.remove(&conversation_id);
+            }
+        }
+    }
+
+    /// The conversation's selected grant ids, when it has a scope.
+    pub fn conversation_scope(&self, conversation_id: Option<i64>) -> Option<Vec<String>> {
+        let conversation_id = conversation_id?;
+        self.scopes.lock().ok()?.get(&conversation_id).cloned()
+    }
+
+    /// This run's temp folder for one conversation (not created here).
+    pub fn scratch_dir(&self, conversation_id: i64) -> PathBuf {
+        self.scratch_base
+            .join("helmcode-desktop")
+            .join(&self.session_id)
+            .join(format!("conversation-{conversation_id}"))
+    }
+}
+
+/// The synthetic grant over a conversation's session temp folder: ask mode
+/// (it is not in `tools.json`, so [`approval_route`] always shows the
+/// inline card), folder scope.
+fn scratch_grant(profile_id: &str, conversation_id: i64, canonical: PathBuf) -> grants::Grant {
+    grants::Grant {
+        id: format!("{SCRATCH_GRANT_PREFIX}{conversation_id}"),
+        canonical_path: canonical,
+        granted_at: audit::timestamp_now_rfc3339(),
+        profile_id: profile_id.to_string(),
+        scope: GrantScope::Folder,
+        mode: ApprovalMode::Ask,
+    }
+}
+
+/// Create (owner-only on unix) and canonicalize a session temp folder.
+fn ensure_scratch_dir(path: &Path) -> Result<PathBuf, Rejection> {
+    std::fs::create_dir_all(path)
+        .map_err(|err| io_rejection("cannot create the session temp folder", err))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|err| io_rejection("cannot protect the session temp folder", err))?;
+    }
+    std::fs::canonicalize(path)
+        .map_err(|err| io_rejection("cannot resolve the session temp folder", err))
+}
+
+/// The grants one conversation may use (S-folder-picker):
+/// - no conversation, or no scope set → the whole store (legacy);
+/// - otherwise only the selected folder grants plus the computer-wide grant
+///   ([`GrantsStore::scoped_to`]);
+/// - NOTHING selected and no computer-wide grant → the session temp folder
+///   is the only workspace (created on demand), so writes can still land
+///   somewhere the user approves, never in their folders.
+pub fn effective_store(
+    store: &GrantsStore,
+    state: &ToolsState,
+    profile_id: &str,
+    conversation_id: Option<i64>,
+) -> Result<GrantsStore, Rejection> {
+    let (Some(conversation_id), Some(selected)) =
+        (conversation_id, state.conversation_scope(conversation_id))
+    else {
+        return Ok(store.clone());
+    };
+    let mut scoped = store.scoped_to(profile_id, &selected);
+    if scoped.grants_for(profile_id).is_empty() {
+        let canonical = ensure_scratch_dir(&state.scratch_dir(conversation_id))?;
+        scoped
+            .grants
+            .push(scratch_grant(profile_id, conversation_id, canonical));
+    }
+    Ok(scoped)
+}
+
+/// The session temp-folder grant behind a stored proposal, when it targets
+/// one (resolved from the running state, never from `tools.json`).
+fn session_grants(state: &ToolsState, proposal: &PendingProposal) -> Vec<grants::Grant> {
+    let Some(conversation_id) = proposal.conversation_id else {
+        return Vec::new();
+    };
+    let id = format!("{SCRATCH_GRANT_PREFIX}{conversation_id}");
+    let touches = proposal.grant_id.as_deref() == Some(id.as_str())
+        || proposal.dest_grant_id.as_deref() == Some(id.as_str());
+    if !touches {
+        return Vec::new();
+    }
+    match std::fs::canonicalize(state.scratch_dir(conversation_id)) {
+        Ok(canonical) => vec![scratch_grant(
+            &proposal.profile_id,
+            conversation_id,
+            canonical,
+        )],
+        Err(_) => Vec::new(),
     }
 }
 
@@ -757,9 +883,27 @@ pub fn propose(
         audit_rejection(dir, action, profile_id, &rejection)?;
         return Err(rejection);
     }
-    let store = load_store(dir)?;
+    let full = load_store(dir)?;
+    // Validate against the conversation's selected grants only; the
+    // protected-removal roots stay the FULL set (an unselected grant root is
+    // still never deletable) plus the session temp folder.
+    let store = match effective_store(&full, state, profile_id, conversation_id) {
+        Ok(store) => store,
+        Err(rejection) => {
+            audit_rejection(dir, action, profile_id, &rejection)?;
+            return Err(rejection);
+        }
+    };
+    let mut protect = full;
+    protect.grants.extend(
+        store
+            .grants
+            .iter()
+            .filter(|grant| grant.id.starts_with(SCRATCH_GRANT_PREFIX))
+            .cloned(),
+    );
     let validated = match validate_action(&store, profile_id, action)
-        .and_then(|validated| reject_protected(dir, &store, validated))
+        .and_then(|validated| reject_protected(dir, &protect, validated))
     {
         Ok(validated) => validated,
         Err(rejection) => {
@@ -839,8 +983,20 @@ fn is_binary(bytes: &[u8]) -> bool {
 
 /// Execute a claimed proposal: re-verify grants/symlinks against the CURRENT
 /// store, then run the exact stored action.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn execute_proposal(dir: &Path, proposal: &PendingProposal) -> Result<ToolOutcome, Rejection> {
-    let store = load_store(dir)?;
+    execute_proposal_with(dir, proposal, &[])
+}
+
+/// [`execute_proposal`] with the running app's session temp-folder grants
+/// (`session`) added to the CURRENT store for re-verification.
+fn execute_proposal_with(
+    dir: &Path,
+    proposal: &PendingProposal,
+    session: &[grants::Grant],
+) -> Result<ToolOutcome, Rejection> {
+    let mut store = load_store(dir)?;
+    store.grants.extend(session.iter().cloned());
     if matches!(proposal.action, ToolAction::RunCommand { .. }) && !store.tools_allow_run_command {
         return Err(Rejection::new(
             "disabled",
@@ -1373,7 +1529,7 @@ pub fn execute(
             }),
         },
     )?;
-    match execute_proposal(dir, &claimed) {
+    match execute_proposal_with(dir, &claimed, &session_grants(state, &claimed)) {
         Ok(outcome) => {
             audit_event(
                 dir,
@@ -2066,6 +2222,19 @@ pub(crate) trait Approver {
     /// Inline card: `request.approval_id` is empty, the approver registers
     /// the pending request and fills it in.
     fn inline(&self, request: ApprovalRequest) -> impl Future<Output = bool> + Send;
+    /// Told the outcome of a native decision (informational only: the
+    /// renderer counts approvals for its allow-mode suggestion).
+    fn native_decided(&self, _request: &ApprovalRequest, _granted: bool) {}
+}
+
+/// `tools://approval-native` payload: the outcome of a native per-action
+/// dialog. Informational; it carries no capability.
+#[derive(Debug, Clone, Serialize)]
+pub struct NativeDecision {
+    pub conversation_id: Option<i64>,
+    pub action: String,
+    pub path: Option<String>,
+    pub granted: bool,
 }
 
 /// Route and obtain approval for a stored proposal. `Auto` is audited as an
@@ -2100,7 +2269,9 @@ pub(crate) async fn approve_proposal<A: Approver>(
                 &proposal.summary,
                 proposal.diff.as_deref(),
             );
-            approver.native(title, text).await
+            let granted = approver.native(title, text).await;
+            approver.native_decided(&approval_request(proposal), granted);
+            granted
         }
         ApprovalRoute::Inline => approver.inline(approval_request(proposal)).await,
     };
@@ -2152,6 +2323,18 @@ impl Approver for AppApprover {
             );
             granted
         }
+    }
+
+    fn native_decided(&self, request: &ApprovalRequest, granted: bool) {
+        let _ = self.app.emit(
+            "tools://approval-native",
+            NativeDecision {
+                conversation_id: request.conversation_id,
+                action: request.action.clone(),
+                path: request.path.clone(),
+                granted,
+            },
+        );
     }
 }
 
@@ -2223,31 +2406,56 @@ pub struct Workspace {
     pub roots: Vec<PathBuf>,
     pub computer_wide: bool,
     pub run_command: bool,
+    /// Set when the conversation has NO folder selected: the only root is
+    /// this session temp folder, and the model is told to ask where to
+    /// save before writing.
+    pub scratch: Option<PathBuf>,
 }
 
 /// The profile's workspace, or None when no folder is granted (the chat
 /// then offers no file tools at all).
 pub fn workspace_from_store(store: &GrantsStore, profile_id: &str) -> Option<Workspace> {
-    let roots: Vec<PathBuf> = store
-        .grants_for(profile_id)
-        .into_iter()
+    let grants = store.grants_for(profile_id);
+    let roots: Vec<PathBuf> = grants
+        .iter()
         .map(|grant| grant.canonical_path.clone())
         .collect();
     if roots.is_empty() {
         return None;
     }
+    let scratch = grants
+        .iter()
+        .find(|grant| grant.id.starts_with(SCRATCH_GRANT_PREFIX))
+        .map(|grant| grant.canonical_path.clone());
     Some(Workspace {
         roots,
         computer_wide: store.computer_wide_grant(profile_id).is_some(),
         run_command: store.tools_allow_run_command,
+        scratch,
     })
 }
 
-/// [`workspace_from_store`] against the app's own tools store.
-pub(crate) fn workspace_for(app: &AppHandle, profile_id: &str) -> Option<Workspace> {
-    let dir = data_dir(app).ok()?;
-    let store = grants::load_or_seed(&dir).ok()?;
+/// The workspace one conversation sees ([`effective_store`]).
+pub fn workspace_for_conversation_in(
+    dir: &Path,
+    state: &ToolsState,
+    profile_id: &str,
+    conversation_id: i64,
+) -> Option<Workspace> {
+    let store = grants::load_or_seed(dir).ok()?;
+    let store = effective_store(&store, state, profile_id, Some(conversation_id)).ok()?;
     workspace_from_store(&store, profile_id)
+}
+
+/// [`workspace_for_conversation_in`] against the app's own tools store.
+pub(crate) fn workspace_for(
+    app: &AppHandle,
+    profile_id: &str,
+    conversation_id: i64,
+) -> Option<Workspace> {
+    let dir = data_dir(app).ok()?;
+    let state = app.state::<ToolsState>();
+    workspace_for_conversation_in(&dir, &state, profile_id, conversation_id)
 }
 
 // --------------------------------------------------------------- tests --
@@ -2749,9 +2957,8 @@ mod tests {
         fs::write(folder.join("f.txt"), "x").expect("write");
         let (dir, _guard2) = granted_dir(&folder);
         let st = ToolsState {
-            inner: Mutex::new(HashMap::new()),
-            approvals: ApprovalBroker::default(),
             ttl: Duration::ZERO,
+            ..ToolsState::default()
         };
         let proposal = propose_ok(
             &dir,
@@ -3925,5 +4132,249 @@ mod tests {
             assert!(!title.contains('—') && !text.contains('—'), "{text}");
         }
         assert!(!COMPUTER_WIDE_WARNING.contains('—'));
+    }
+
+    // ------------------------------- per-conversation folder selection --
+
+    /// Two granted folders ("g1" on `a`, "g2" on `b`), profile nan, and a
+    /// state whose session temp folders live in their own tempdir.
+    struct TwoFolders {
+        dir: PathBuf,
+        a: PathBuf,
+        b: PathBuf,
+        st: ToolsState,
+        _guards: Vec<tempfile::TempDir>,
+    }
+
+    fn two_folder_layout() -> TwoFolders {
+        let (a, ga) = tempdir();
+        let (b, gb) = tempdir();
+        let (scratch_base, gs) = tempdir();
+        let (dir, gd) = granted_dir(&a);
+        let mut store = grants::load_or_seed(&dir).expect("load");
+        store
+            .add_grant("g2".into(), "nan", canon(&b), "t".into())
+            .expect("add");
+        grants::save(&dir, &store).expect("save");
+        let st = ToolsState {
+            scratch_base,
+            ..ToolsState::default()
+        };
+        TwoFolders {
+            dir,
+            a: canon(&a),
+            b: canon(&b),
+            st,
+            _guards: vec![ga, gb, gs, gd],
+        }
+    }
+
+    #[test]
+    fn a_scoped_conversation_only_reaches_its_selected_folders() {
+        let TwoFolders {
+            dir,
+            a,
+            b,
+            st,
+            _guards,
+        } = two_folder_layout();
+        fs::write(a.join("x.txt"), "a").expect("seed");
+        fs::write(b.join("y.txt"), "b").expect("seed");
+        st.set_conversation_scope(1, Some(vec!["g2".into()]));
+        let read = |path: &Path, conversation: Option<i64>| {
+            propose(
+                &dir,
+                &st,
+                "nan",
+                conversation,
+                &ToolAction::ReadFile {
+                    path: path_str(path),
+                },
+            )
+        };
+        // Unselected folder: refused as outside the conversation's scope.
+        let err = read(&a.join("x.txt"), Some(1)).expect_err("g1 not selected");
+        assert_eq!(err.kind, "escape");
+        // Selected folder: fine.
+        let ok = read(&b.join("y.txt"), Some(1)).expect("g2 selected");
+        assert_eq!(ok.grant_id.as_deref(), Some("g2"));
+        // Another conversation without a scope keeps every grant (legacy).
+        read(&a.join("x.txt"), Some(2)).expect("unscoped conversation");
+        // Clearing the scope restores every grant.
+        st.set_conversation_scope(1, None);
+        read(&a.join("x.txt"), Some(1)).expect("scope cleared");
+    }
+
+    #[test]
+    fn no_folder_selected_refuses_reads_and_offers_the_session_temp_folder() {
+        let TwoFolders {
+            dir,
+            a,
+            st,
+            _guards,
+            ..
+        } = two_folder_layout();
+        fs::write(a.join("x.txt"), "a").expect("seed");
+        st.set_conversation_scope(7, Some(Vec::new()));
+
+        // Reads of the user's folders are refused: nothing is mounted.
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            Some(7),
+            &ToolAction::ReadFile {
+                path: path_str(&a.join("x.txt")),
+            },
+        )
+        .expect_err("nothing mounted");
+        assert_eq!(err.kind, "escape");
+
+        // The workspace is the session temp folder only, inside the base.
+        let ws = workspace_for_conversation_in(&dir, &st, "nan", 7).expect("workspace");
+        let scratch = ws.scratch.clone().expect("scratch");
+        assert_eq!(ws.roots, vec![scratch.clone()]);
+        assert!(scratch.starts_with(canon(&st.scratch_base)));
+        assert!(scratch.ends_with("conversation-7"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&scratch).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "owner-only");
+        }
+
+        // A write there still asks inline (never auto) and then lands.
+        let approver = FakeApprover::answering(true);
+        let target = scratch.join("informe.md");
+        let proposal = propose(
+            &dir,
+            &st,
+            "nan",
+            Some(7),
+            &ToolAction::WriteFile {
+                path: path_str(&target),
+                content: "hola".into(),
+            },
+        )
+        .expect("temp write proposed");
+        assert_eq!(
+            proposal.grant_id.as_deref(),
+            Some(format!("{SCRATCH_GRANT_PREFIX}7").as_str())
+        );
+        let route =
+            tauri::async_runtime::block_on(approve_proposal(&dir, &st, &approver, &proposal))
+                .expect("approved");
+        assert_eq!(route, ApprovalRoute::Inline);
+        let card = approver.inline_calls.lock().expect("lock")[0].clone();
+        assert_eq!(
+            card.path.as_deref(),
+            Some(path_str(&target).as_str()),
+            "shown plainly"
+        );
+        execute(&dir, &st, &proposal.id).expect("executed");
+        assert_eq!(fs::read_to_string(&target).expect("written"), "hola");
+
+        // The temp folder never persists into tools.json.
+        let stored = grants::load_or_seed(&dir).expect("load");
+        assert!(
+            stored
+                .grants
+                .iter()
+                .all(|g| !g.id.starts_with(SCRATCH_GRANT_PREFIX))
+        );
+
+        // The temp folder root itself can never be deleted.
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            Some(7),
+            &ToolAction::DeletePath {
+                path: path_str(&scratch),
+            },
+        )
+        .expect_err("root protected");
+        assert_eq!(err.kind, "scope");
+    }
+
+    #[test]
+    fn selecting_a_folder_removes_the_session_temp_folder() {
+        let TwoFolders {
+            dir,
+            b,
+            st,
+            _guards,
+            ..
+        } = two_folder_layout();
+        st.set_conversation_scope(3, Some(vec!["g2".into()]));
+        let ws = workspace_for_conversation_in(&dir, &st, "nan", 3).expect("workspace");
+        assert_eq!(ws.scratch, None);
+        assert_eq!(ws.roots, vec![b]);
+        // A temp-folder path is refused once a real folder is selected.
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            Some(3),
+            &ToolAction::WriteFile {
+                path: path_str(&st.scratch_dir(3).join("x.md")),
+                content: "x".into(),
+            },
+        )
+        .expect_err("temp folder not offered");
+        assert_eq!(err.kind, "escape");
+    }
+
+    #[test]
+    fn computer_wide_conversations_are_unaffected_by_an_empty_selection() {
+        let (home, dir, _guard) = computer_wide_layout();
+        let (scratch_base, _gs) = tempdir();
+        let st = ToolsState {
+            scratch_base,
+            ..ToolsState::default()
+        };
+        st.set_conversation_scope(9, Some(Vec::new()));
+        let ws = workspace_for_conversation_in(&dir, &st, "nan", 9).expect("workspace");
+        assert!(ws.computer_wide);
+        assert_eq!(ws.scratch, None, "no temp folder under computer-wide");
+        assert_eq!(ws.roots, vec![home]);
+    }
+
+    #[test]
+    fn a_native_decision_is_reported_to_the_approver() {
+        struct Recording(Mutex<Vec<(Option<i64>, bool)>>);
+        impl Approver for Recording {
+            async fn native(&self, _t: String, _x: String) -> bool {
+                true
+            }
+            async fn inline(&self, _r: ApprovalRequest) -> bool {
+                false
+            }
+            fn native_decided(&self, request: &ApprovalRequest, granted: bool) {
+                self.0
+                    .lock()
+                    .expect("lock")
+                    .push((request.conversation_id, granted));
+            }
+        }
+        let (home, app_data, _guard) = computer_wide_layout();
+        let st = state();
+        fs::write(home.join("nota.txt"), "x").expect("seed");
+        let proposal = propose(
+            &app_data,
+            &st,
+            "nan",
+            Some(4),
+            &ToolAction::ReadFile {
+                path: path_str(&home.join("nota.txt")),
+            },
+        )
+        .expect("proposed");
+        let approver = Recording(Mutex::new(Vec::new()));
+        let route =
+            tauri::async_runtime::block_on(approve_proposal(&app_data, &st, &approver, &proposal))
+                .expect("approved");
+        assert_eq!(route, ApprovalRoute::Native);
+        assert_eq!(*approver.0.lock().expect("lock"), vec![(Some(4), true)]);
     }
 }

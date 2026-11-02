@@ -140,12 +140,28 @@ export const es: Strings = {
   workspace: {
     chipTitle: "Dónde puede trabajar el asistente",
     menuLabel: "Dónde trabaja el asistente",
-    privateFolder: "Carpeta privada",
+    selectionHeading: "Carpetas de este chat",
     pickFolder: "Elegir carpeta de trabajo",
+    noFolder: "Sin carpeta",
+    none: "Ninguna",
+    all: "Todas",
+    noneHint: "Sin carpeta, el asistente te pregunta dónde guardar o usa una carpeta temporal.",
     folderLabel: (name: string, extra: number) => (extra > 0 ? `${name} +${extra}` : name),
     computerWide: "Todo el equipo, bajo tu responsabilidad",
     addFolder: "Añadir carpeta…",
     manage: "Gestionar carpetas",
+  },
+  nudge: {
+    region: "Sugerencia",
+    folder: (name: string) =>
+      `Estás aprobando muchas acciones en ${name}. ¿Quieres permitir siempre en esta carpeta?`,
+    allowAlways: "Permitir siempre",
+    computerWide:
+      "Estás aprobando muchas acciones. Con acceso a todo el equipo el asistente siempre pregunta. Para no aprobar cada una, añade una carpeta concreta en Ajustes y ponla en permitir.",
+    openSettings: "Abrir ajustes",
+    dismiss: "Descartar sugerencia",
+    switching: "Esperando tu confirmación…",
+    allowed: (name: string) => `Ahora se permite siempre en ${name}.`,
   },
   computerWide: {
     title: "¿Dar acceso a todo tu equipo?",

@@ -365,10 +365,19 @@ pub fn workspace_prompt(workspace: &tools::Workspace) -> String {
         .map(|root| format!("- {}", root.display()))
         .collect::<Vec<_>>()
         .join("\n");
-    let scope = if workspace.computer_wide {
-        "The user gave you access to their whole user folder."
+    let scope = if let Some(scratch) = &workspace.scratch {
+        format!(
+            "No folder is selected for this conversation, so none of the user's folders \
+             are mounted: you cannot read their files (ask them to select a folder in the \
+             folder picker if you need one). Before writing any file, ask the user where to \
+             save it; only if they want no folder of theirs, save it in this session's \
+             temporary folder {} (they still approve every action).",
+            scratch.display()
+        )
+    } else if workspace.computer_wide {
+        "The user gave you access to their whole user folder.".to_string()
     } else {
-        "You may only work inside these folders."
+        "You may only work inside these folders.".to_string()
     };
     let commands = if workspace.run_command {
         "\nYou can also run shell commands in a workspace folder with run_command. \
@@ -767,6 +776,11 @@ pub(crate) fn read_session_token(profile_id: &str) -> Option<String> {
 /// or a deliberate stop and deleted on a classified error. Returns
 /// immediately; progress arrives via `chat://delta`, `chat://done`,
 /// `chat://error` and `chat://stopped` events.
+///
+/// `grant_ids` is the conversation's folder selection (composer picker):
+/// file actions of this conversation are validated against those grants
+/// only (plus the computer-wide grant); an empty list means no folder (the
+/// session temp folder is offered instead). `None` keeps every grant.
 #[tauri::command]
 pub fn chat_send(
     app: AppHandle,
@@ -774,10 +788,13 @@ pub fn chat_send(
     conversation_id: i64,
     model: String,
     content: String,
+    grant_ids: Option<Vec<String>>,
 ) -> Result<(), String> {
     if content.trim().is_empty() {
         return Err("message is empty".to_string());
     }
+    app.state::<tools::ToolsState>()
+        .set_conversation_scope(conversation_id, grant_ids);
     // Defensive fallback: the UI always sends an explicit model; an empty
     // one falls back to the headliner instead of erroring the whole send.
     let model = if model.trim().is_empty() {
@@ -920,7 +937,7 @@ async fn run_chat_stream(
     // Web search is always offered (provider-invisible, silent when the
     // platform cannot serve it). File tools only exist when the user picked
     // a workspace; the system message tells the model where it may work.
-    let workspace = tools::workspace_for(&app, &profile_id);
+    let workspace = tools::workspace_for(&app, &profile_id, conversation_id);
     if let Some(workspace) = &workspace {
         messages.insert(
             0,
@@ -1813,6 +1830,7 @@ mod tests {
             roots: vec![std::path::PathBuf::from("/Users/me/Proyecto")],
             computer_wide: false,
             run_command: false,
+            scratch: None,
         };
         assert_eq!(
             names(tool_definitions(Some(&ws))),
@@ -1918,12 +1936,14 @@ mod tests {
             roots: vec![std::path::PathBuf::from("/Users/me/Proyecto")],
             computer_wide: false,
             run_command: false,
+            scratch: None,
         };
         let prompt = workspace_prompt(&ws);
         assert!(prompt.contains("/Users/me/Proyecto"));
         assert!(prompt.contains("only work inside"));
         assert!(prompt.contains("move_path") && prompt.contains("delete_path"));
         assert!(!prompt.contains("run_command"), "not offered when off");
+        assert!(!prompt.contains("No folder is selected"));
         let with_commands = workspace_prompt(&tools::Workspace {
             run_command: true,
             ..ws.clone()
@@ -1934,6 +1954,21 @@ mod tests {
             ..ws
         });
         assert!(wide.contains("whole user folder"));
+    }
+
+    #[test]
+    fn workspace_prompt_with_no_folder_selected_says_nothing_is_mounted_and_to_ask() {
+        let tmp = std::path::PathBuf::from("/tmp/helmcode-desktop/s/conversation-7");
+        let prompt = workspace_prompt(&tools::Workspace {
+            roots: vec![tmp.clone()],
+            computer_wide: false,
+            run_command: false,
+            scratch: Some(tmp),
+        });
+        assert!(prompt.contains("No folder is selected"));
+        assert!(prompt.contains("ask the user where to save"));
+        assert!(prompt.contains("/tmp/helmcode-desktop/s/conversation-7"));
+        assert!(!prompt.contains("only work inside these folders"));
     }
 
     #[test]

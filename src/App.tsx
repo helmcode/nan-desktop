@@ -4,10 +4,28 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
 import { BrandLogo, BrandMark } from "./brand";
+import {
+  initialNudgeState,
+  loadShownNudges,
+  nudgeReducer,
+  saveShownNudges,
+  targetForPath,
+  type Nudge,
+} from "./chat/allowNudge";
 import { approvalsReducer, placeCards, type ApprovalCardState } from "./chat/approvals";
 import { extractFilePaths } from "./chat/filePaths";
+import {
+  adoptSelection,
+  loadSelections,
+  pruneSelection,
+  saveSelections,
+  selectionFor,
+  type Selections,
+} from "./chat/folderSelection";
 import { stripToolMarkup } from "./chat/toolMarkup";
+import { AllowNudgeCard } from "./components/AllowNudgeCard";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
 import { UserMenu, type SettingsSection } from "./components/UserMenu";
 import {
@@ -25,14 +43,12 @@ import {
   signInErrorLabel,
   storedVoice,
 } from "./copy";
-import { onApprovalRequest, onApprovalResolved, respondToApproval } from "./core";
+import { onApprovalRequest, onApprovalResolved, onNativeDecision, respondToApproval, sendChat } from "./core";
 import { VOICE_UI } from "./flags";
 import { useI18n, useT } from "./i18n";
 import {
   IconArrowUp,
-  IconCheck,
   IconChevronDown,
-  IconComputer,
   IconFile,
   IconFolder,
   IconGlobe,
@@ -44,13 +60,12 @@ import {
   IconStop,
   IconTrash,
   IconWarning,
-  IconGear,
 } from "./icons";
 import { Markdown } from "./Markdown";
 import type { PreviewTarget } from "./preview/kind";
 import { Settings } from "./Settings";
 import type { ChatMessageRow, ConversationView, ProfileOverview, ProfileView, WebSource } from "./types";
-import { useWorkspace, type Workspace } from "./workspace";
+import { useWorkspace } from "./workspace";
 
 // The preview pane and its renderers load on first use (S21).
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
@@ -317,115 +332,8 @@ function Authorizing({
 }
 
 // ---------------------------------------------------------------------------
-// Workspace chip + whole-computer confirmation (composer)
+// Whole-computer confirmation (the composer folder picker opens it)
 // ---------------------------------------------------------------------------
-
-function WorkspaceChip({
-  workspace,
-  onAskComputerWide,
-  onOpenSettings,
-}: {
-  workspace: Workspace;
-  onAskComputerWide: () => void;
-  onOpenSettings: () => void;
-}) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const wide = workspace.computerWide !== null;
-  const empty = !wide && workspace.folders.length === 0;
-  const [first, ...rest] = workspace.folders;
-  const label = wide
-    ? t.workspace.computerWide
-    : first
-      ? t.workspace.folderLabel(folderName(first.canonical_path), rest.length)
-      : t.workspace.pickFolder;
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const pick = async (action: () => Promise<unknown> | void): Promise<void> => {
-    setOpen(false);
-    await action();
-  };
-
-  return (
-    <div className="ws" ref={rootRef}>
-      <button
-        type="button"
-        className={`ws-chip${wide ? " ws-chip-wide" : ""}${empty ? " ws-chip-empty" : ""}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title={t.workspace.chipTitle}
-        onClick={() => {
-          if (empty) {
-            void workspace.addFolder();
-          } else {
-            setOpen((value) => !value);
-          }
-        }}
-        disabled={workspace.busy}
-      >
-        {wide ? <IconWarning size={15} /> : empty ? <IconPlus size={15} /> : <IconFolder size={15} />}
-        <span className="ws-chip-label">{label}</span>
-        {!empty && <IconChevronDown size={14} />}
-      </button>
-      {open && (
-        <div className="ws-menu" role="menu" aria-label={t.workspace.menuLabel}>
-          <p className="ws-menu-heading">{t.workspace.privateFolder}</p>
-          {workspace.folders.map((grant) => (
-            <button
-              key={grant.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={!wide}
-              className="ws-menu-item"
-              onClick={() => void pick(() => (wide ? workspace.disableComputerWide() : undefined))}
-            >
-              <IconFolder size={15} />
-              <span className="ws-menu-text">{folderName(grant.canonical_path)}</span>
-              {!wide && <IconCheck size={14} />}
-            </button>
-          ))}
-          <button type="button" role="menuitem" className="ws-menu-item" onClick={() => void pick(() => workspace.addFolder())}>
-            <IconPlus size={15} />
-            <span className="ws-menu-text">{t.workspace.addFolder}</span>
-          </button>
-          <div className="ws-menu-sep" role="separator" />
-          <button
-            type="button"
-            role="menuitemradio"
-            aria-checked={wide}
-            className="ws-menu-item ws-menu-item-wide"
-            onClick={() => void pick(() => (wide ? undefined : onAskComputerWide()))}
-          >
-            <IconComputer size={15} />
-            <span className="ws-menu-text">{t.workspace.computerWide}</span>
-            {wide && <IconCheck size={14} />}
-          </button>
-          <div className="ws-menu-sep" role="separator" />
-          <button type="button" role="menuitem" className="ws-menu-item ws-menu-item-muted" onClick={() => void pick(onOpenSettings)}>
-            <IconGear size={15} />
-            <span className="ws-menu-text">{t.workspace.manage}</span>
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
 
 /// Plain-language warning before the whole-computer mode. Continuing asks
 /// the Rust core, which shows its own native confirmation: this dialog
@@ -526,6 +434,23 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // Inline approval cards (S14) and per-conversation preview pane (S21).
   const [approvals, dispatchApproval] = useReducer(approvalsReducer, [] as ApprovalCardState[]);
   const [previews, setPreviews] = useState<Map<number, PreviewState>>(() => new Map());
+
+  // Per-conversation folder selection (composer picker): none by default.
+  const [selections, setSelections] = useState<Selections>(loadSelections);
+  useEffect(() => saveSelections(selections), [selections]);
+  const selectionsRef = useRef(selections);
+  useEffect(() => {
+    selectionsRef.current = selections;
+  }, [selections]);
+  const workspaceRef = useRef(workspace);
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  });
+
+  // Allow-mode suggestion: one per conversation, remembered across runs.
+  const [nudges, dispatchNudge] = useReducer(nudgeReducer, undefined, () => initialNudgeState(loadShownNudges()));
+  useEffect(() => saveShownNudges(nudges.shown), [nudges.shown]);
+  const countedApprovals = useRef<Set<string>>(new Set());
 
   // Image mode: the composer sends the prompt to `image_generate`.
   const [imageMode, setImageMode] = useState(false);
@@ -719,6 +644,58 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     }
   }, []);
 
+  // Allow-mode suggestion inputs: every answered card counts once (the
+  // card can be resolved both by the answer and by the core's event), and
+  // native decisions (computer-wide) arrive as their own event. Actions
+  // count towards the conversation's SELECTED folders only.
+  const nudgeDecision = useCallback(
+    (conversationId: number, path: string | null, granted: boolean): void => {
+      const ws = workspaceRef.current;
+      const selected = selectionFor(selectionsRef.current, conversationId);
+      const folders = ws.folders.filter((grant) => selected.includes(grant.id));
+      dispatchNudge({
+        type: "decision",
+        conversationId,
+        target: targetForPath(path, folders, ws.computerWide),
+        granted,
+        anchorIndex: activeConvRef.current === conversationId ? messageCountRef.current : Number.MAX_SAFE_INTEGER,
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    for (const card of approvals) {
+      if (card.status !== "granted" && card.status !== "denied") continue;
+      if (countedApprovals.current.has(card.id)) continue;
+      countedApprovals.current.add(card.id);
+      if (card.conversationId === null) continue;
+      nudgeDecision(card.conversationId, card.cwd ?? card.target, card.status === "granted");
+    }
+  }, [approvals, nudgeDecision]);
+
+  useEffect(() => {
+    const unlisten = onNativeDecision((decision) => {
+      const conversationId = decision.conversation_id ?? activeConvRef.current;
+      if (conversationId !== null) nudgeDecision(conversationId, decision.path, decision.granted);
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [nudgeDecision]);
+
+  const allowFromNudge = useCallback(
+    async (nudge: Nudge): Promise<void> => {
+      if (nudge.target.kind !== "folder") return;
+      const conversationId = nudge.conversationId;
+      dispatchNudge({ type: "switching", conversationId });
+      // The core asks for its own native confirmation; trust what it stored.
+      const stored = await workspace.setMode(nudge.target.grantId, "allow");
+      dispatchNudge(stored === "allow" ? { type: "allowed", conversationId } : { type: "dismiss", conversationId });
+    },
+    [workspace],
+  );
+
   // Image event transport: the core persists the row before `done`.
   useEffect(() => {
     const markGenerating = (conversationId: number, generating: boolean): void => {
@@ -905,6 +882,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       next.delete(NEW_CHAT_KEY);
       return next;
     });
+    // A new conversation starts with no folder selected.
+    setSelections((prev) => {
+      const next = { ...prev };
+      delete next[String(NEW_CHAT_KEY)];
+      return next;
+    });
     composerRef.current?.focus();
   }, []);
 
@@ -921,6 +904,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         setMessages([]);
       }
       dispatchApproval({ type: "clearConversation", conversationId });
+      dispatchNudge({ type: "clearConversation", conversationId });
+      setSelections((prev) => {
+        const next = { ...prev };
+        delete next[String(conversationId)];
+        return next;
+      });
       setPreviews((prev) => {
         const next = new Map(prev);
         next.delete(conversationId);
@@ -981,6 +970,13 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     ? "any"
     : workspace.folders.map((grant) => grant.canonical_path);
 
+  // The open conversation's folder selection (only folders that exist).
+  const selectedFolders = pruneSelection(selectionFor(selections, activeConvId ?? NEW_CHAT_KEY), workspace.folders);
+  const changeSelection = useCallback((grantIds: string[]): void => {
+    const key = String(activeConvRef.current ?? NEW_CHAT_KEY);
+    setSelections((prev) => ({ ...prev, [key]: grantIds }));
+  }, []);
+
   // Stop: abort the stream; what already arrived stays persisted.
   const stopGenerating = useCallback(async (): Promise<void> => {
     const conversationId = activeConvRef.current;
@@ -1024,6 +1020,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       next.set(created, pending);
       return next;
     });
+    // ...and the folders picked on the blank chat.
+    setSelections((prev) => adoptSelection(prev, NEW_CHAT_KEY, created));
     return created;
   }, []);
 
@@ -1033,6 +1031,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     setSessionExpired(false);
     setInlineError("");
     let conversationId: number | null = null;
+    // The open conversation's folders (read before a new row adopts them).
+    const grantIds = selectedFolders;
     try {
       conversationId = await ensureConversation();
       if (conversationId === null) return;
@@ -1055,7 +1055,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       setComposer("");
       setStreamingIds((prev) => new Set(prev).add(id));
       setDrafts((prev) => new Map(prev).set(id, ""));
-      await invoke("chat_send", { conversationId: id, model, content: text });
+      await sendChat({ conversationId: id, model, content: text, grantIds });
     } catch {
       if (conversationId !== null) {
         const id = conversationId;
@@ -1073,7 +1073,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       setInlineError("send");
       void refreshConversations();
     }
-  }, [composer, streamingActive, ensureConversation, model, refreshConversations]);
+  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders]);
 
   const sendImage = useCallback(async (): Promise<void> => {
     const prompt = composer.trim();
@@ -1106,7 +1106,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   useEffect(() => {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, activeDraft, activeActivity, streamingActive, imageGeneratingActive, approvals]);
+  }, [messages, activeDraft, activeActivity, streamingActive, imageGeneratingActive, approvals, nudges.active]);
 
   const confirmComputerWide = useCallback(async (): Promise<void> => {
     setAskComputerWide(false);
@@ -1135,6 +1135,18 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
 
   const accountName = activeProfile ? profileTitle(t, activeProfile.id, activeProfile.name) : t.sidebar.noAccount;
   const placed = placeCards(approvals, activeConvId, messages.length);
+  // The open conversation's allow-mode suggestion, anchored like the cards.
+  const activeNudge = nudges.active.find((nudge) => nudge.conversationId === activeConvId);
+  const nudgeSlot = activeNudge ? Math.min(activeNudge.anchorIndex, messages.length) : -1;
+  const nudgeCard = activeNudge ? (
+    <AllowNudgeCard
+      nudge={activeNudge}
+      folderName={activeNudge.target.kind === "folder" ? folderName(activeNudge.target.path) : ""}
+      onAllow={() => void allowFromNudge(activeNudge)}
+      onOpenSettings={() => openSettings("folders")}
+      onDismiss={() => dispatchNudge({ type: "dismiss", conversationId: activeNudge.conversationId })}
+    />
+  ) : null;
   const workspaceError = grantErrorLabel(t, workspace.error);
 
   const renderMessage = (m: ChatMessageRow): ReactNode => {
@@ -1293,6 +1305,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   </div>
                 )}
                 <ApprovalCards cards={placed.after.get(0)} onRespond={(id, g) => void respondApproval(id, g)} />
+                {nudgeSlot === 0 && messages.length > 0 && nudgeCard}
                 {messages.map((m, index) => (
                   <Fragment key={m.id}>
                     {renderMessage(m)}
@@ -1300,9 +1313,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                       cards={placed.after.get(index + 1)}
                       onRespond={(id, g) => void respondApproval(id, g)}
                     />
+                    {nudgeSlot === index + 1 && index + 1 < messages.length && nudgeCard}
                   </Fragment>
                 ))}
                 <ApprovalCards cards={placed.tail} onRespond={(id, g) => void respondApproval(id, g)} />
+                {nudgeSlot === messages.length && nudgeCard}
                 {streamingActive && visibleDraft !== undefined && (
                   <article className="msg msg-assistant streaming" aria-live="polite">
                     {visibleDraft.length > 0 && <Markdown text={visibleDraft} onOpenLink={openWebPreview} />}
@@ -1363,8 +1378,10 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   disabled={composerBusy}
                 />
                 <div className="composer-bar">
-                  <WorkspaceChip
+                  <FolderPicker
                     workspace={workspace}
+                    selected={selectedFolders}
+                    onChange={changeSelection}
                     onAskComputerWide={() => setAskComputerWide(true)}
                     onOpenSettings={() => openSettings("folders")}
                   />

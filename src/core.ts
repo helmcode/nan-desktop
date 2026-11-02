@@ -65,6 +65,37 @@ export interface ApprovalResolved {
   granted: boolean;
 }
 
+/// Event the core emits after a NATIVE per-action dialog (computer-wide)
+/// was answered. Informational only (it carries no capability): the chat
+/// counts it for the allow-mode suggestion.
+export const APPROVAL_NATIVE_EVENT = "tools://approval-native";
+
+/// `tools://approval-native` payload (`NativeDecision` in the core).
+export interface NativeDecision {
+  conversation_id: number | null;
+  action: ApprovalAction;
+  path: string | null;
+  granted: boolean;
+}
+
+export function onNativeDecision(handler: (decision: NativeDecision) => void): Promise<UnlistenFn> {
+  return listen<NativeDecision>(APPROVAL_NATIVE_EVENT, (event) => handler(event.payload));
+}
+
+/// `chat_send` arguments. `grantIds` is the conversation's folder
+/// selection: the core validates its file actions against those grants
+/// only (empty = no folder: the session temp folder is offered instead).
+export type ChatSendArgs = {
+  conversationId: number;
+  model: string;
+  content: string;
+  grantIds: string[];
+};
+
+export function sendChat(args: ChatSendArgs): Promise<void> {
+  return invoke("chat_send", { ...args });
+}
+
 export function respondToApproval(approvalId: string, granted: boolean): Promise<void> {
   return invoke("tools_approval_respond", { approvalId, granted });
 }

@@ -27,10 +27,15 @@ export interface Workspace {
   /// Opens the native folder picker; resolves true when a folder was added.
   /// The new grant gets `mode` (default ask).
   addFolder: (mode?: GrantMode) => Promise<boolean>;
+  /// Like `addFolder`, resolving to the added (or already granted) folder,
+  /// or null when the picker was cancelled or failed.
+  pickFolder: (mode?: GrantMode) => Promise<GrantView | null>;
   /// Picks a replacement folder; the old grant is revoked only when a new
   /// one was actually added, and the new one keeps the old mode.
   repickFolder: (grantId: string) => Promise<boolean>;
-  setMode: (grantId: string, mode: GrantMode) => Promise<void>;
+  /// Resolves to the mode the core actually stored (null on failure): a
+  /// declined native confirmation leaves the previous mode.
+  setMode: (grantId: string, mode: GrantMode) => Promise<GrantMode | null>;
   /// Asks the core to enable the whole-computer mode (native confirmation).
   enableComputerWide: () => Promise<boolean>;
   /// Back to private folders only.
@@ -93,13 +98,18 @@ export function useWorkspace(profileId: string | null): Workspace {
     [refresh],
   );
 
-  const addFolder = useCallback(
-    async (mode: GrantMode = DEFAULT_GRANT_MODE): Promise<boolean> => {
-      if (!profileId) return false;
+  const pickFolder = useCallback(
+    async (mode: GrantMode = DEFAULT_GRANT_MODE): Promise<GrantView | null> => {
+      if (!profileId) return null;
       // One call: the core applies `mode` (and confirms allow natively).
-      return run(async () => (await addGrant(profileId, mode)) !== null, false);
+      return run(() => addGrant(profileId, mode), null);
     },
     [profileId, run],
+  );
+
+  const addFolder = useCallback(
+    async (mode: GrantMode = DEFAULT_GRANT_MODE): Promise<boolean> => (await pickFolder(mode)) !== null,
+    [pickFolder],
   );
 
   const repickFolder = useCallback(
@@ -117,13 +127,15 @@ export function useWorkspace(profileId: string | null): Workspace {
   );
 
   const setMode = useCallback(
-    async (grantId: string, mode: GrantMode): Promise<void> => {
+    async (grantId: string, mode: GrantMode): Promise<GrantMode | null> => {
       // The core returns the grant as stored: a declined native
       // confirmation leaves it unchanged, and the refresh in `run` shows that.
-      await run(async () => {
+      return run(async (): Promise<GrantMode | null> => {
         const updated = await setGrantMode(grantId, mode);
-        setModes((current) => ({ ...current, [updated.id]: effectiveMode(updated) }));
-      }, undefined);
+        const stored = effectiveMode(updated);
+        setModes((current) => ({ ...current, [updated.id]: stored }));
+        return stored;
+      }, null);
     },
     [run],
   );
@@ -160,6 +172,7 @@ export function useWorkspace(profileId: string | null): Workspace {
     clearError: () => setError(""),
     refresh,
     addFolder,
+    pickFolder,
     repickFolder,
     setMode,
     enableComputerWide,

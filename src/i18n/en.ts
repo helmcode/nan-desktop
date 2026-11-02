@@ -139,12 +139,27 @@ export const en = {
   workspace: {
     chipTitle: "Where the assistant can work",
     menuLabel: "Where the assistant works",
-    privateFolder: "Private folder",
+    selectionHeading: "Folders for this chat",
     pickFolder: "Choose a working folder",
+    noFolder: "No folder",
+    none: "None",
+    all: "All",
+    noneHint: "With no folder, the assistant asks where to save, or uses a temporary folder.",
     folderLabel: (name: string, extra: number) => (extra > 0 ? `${name} +${extra}` : name),
     computerWide: "Whole computer, at your own risk",
     addFolder: "Add folder…",
     manage: "Manage folders",
+  },
+  nudge: {
+    region: "Suggestion",
+    folder: (name: string) => `You are approving many actions in ${name}. Always allow in this folder?`,
+    allowAlways: "Always allow",
+    computerWide:
+      "You are approving many actions. With whole-computer access the assistant always asks. To stop approving each one, add a specific folder in Settings and set it to allow.",
+    openSettings: "Open Settings",
+    dismiss: "Dismiss suggestion",
+    switching: "Waiting for your confirmation…",
+    allowed: (name: string) => `Actions in ${name} are now always allowed.`,
   },
   computerWide: {
     title: "Give access to your whole computer?",

@@ -11,6 +11,8 @@ import { I18nProvider, type Locale } from "./i18n";
 import { LOCALE_STORAGE_KEY } from "./i18n/locale";
 import { APPROVAL_REQUEST_EVENT, APPROVAL_RESOLVED_EVENT, type ApprovalRequest } from "./core";
 import type { ChatMessageRow } from "./types";
+import { FOLDER_SELECTION_STORAGE_KEY } from "./chat/folderSelection";
+import { NUDGE_SHOWN_STORAGE_KEY } from "./chat/allowNudge";
 
 const PROFILES = {
   profiles: [
@@ -219,5 +221,93 @@ describe("chat shell", () => {
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
     expect(screen.getByRole("radiogroup", { name: "Approval mode for Proyecto" })).toBeTruthy();
     expect(screen.getByText("Helmcode Desktop")).toBeTruthy();
+  });
+});
+
+describe("folder selection and allow-mode suggestion", () => {
+  const chipLabel = () => screen.getByTitle("Where the assistant can work").textContent;
+
+  async function sendMessage(text: string): Promise<void> {
+    const box = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: text } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+  }
+
+  it("sends no folder for a conversation nobody picked folders for", async () => {
+    resetTauri({ ...chatHandlers([row(1, "user", "hi")]), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hi");
+    await waitFor(() => expect(chipLabel()).toBe("No folder"));
+    await sendMessage("write a report");
+    await waitFor(() =>
+      expect(invokedWith("chat_send")).toEqual([
+        { conversationId: 7, model: "deepseek-v4-flash", content: "write a report", grantIds: [] },
+      ]),
+    );
+  });
+
+  it("sends the conversation's remembered selection", async () => {
+    window.localStorage.setItem(FOLDER_SELECTION_STORAGE_KEY, JSON.stringify({ "7": ["g1", "gone"] }));
+    resetTauri({ ...chatHandlers([row(1, "user", "hi")]), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hi");
+    await waitFor(() => expect(chipLabel()).toBe("Proyecto"));
+    await sendMessage("read it");
+    await waitFor(() => expect(invokedWith("chat_send")[0]?.grantIds).toEqual(["g1"]));
+  });
+
+  it("suggests always allowing a folder after three approvals and switches it in one click", async () => {
+    window.localStorage.setItem(FOLDER_SELECTION_STORAGE_KEY, JSON.stringify({ "7": ["g1"] }));
+    resetTauri({
+      ...chatHandlers([row(1, "user", "Tidy the folder")]),
+      tools_grant_set_mode: () => ({
+        id: "g1",
+        canonical_path: "/Users/ana/Proyecto",
+        granted_at: "",
+        profile_id: "nan",
+        scope: "folder",
+        mode: "allow",
+      }),
+    });
+    renderApp("en");
+    await screen.findByText("Tidy the folder");
+    await waitFor(() => expect(chipLabel()).toBe("Proyecto"));
+    const suggestion = "You are approving many actions in Proyecto. Always allow in this folder?";
+    for (const n of [1, 2, 3]) {
+      act(() => {
+        emit(APPROVAL_REQUEST_EVENT, approvalPayload({ approval_id: `pa-${n}`, path: `/Users/ana/Proyecto/f${n}.txt` }));
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `pa-${n}`, granted: true });
+      });
+      if (n < 3) expect(screen.queryByText(suggestion)).toBeNull();
+    }
+    expect(await screen.findByText(suggestion)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Always allow" }));
+    await waitFor(() => expect(invokedWith("tools_grant_set_mode")).toEqual([{ grantId: "g1", mode: "allow" }]));
+    expect(await screen.findByText("Actions in Proyecto are now always allowed.")).toBeTruthy();
+    // Shown once: remembered for this conversation.
+    expect(JSON.parse(window.localStorage.getItem(NUDGE_SHOWN_STORAGE_KEY) ?? "[]")).toEqual([7]);
+  });
+
+  it("a denial resets the count", async () => {
+    window.localStorage.setItem(FOLDER_SELECTION_STORAGE_KEY, JSON.stringify({ "7": ["g1"] }));
+    resetTauri(chatHandlers([row(1, "user", "Tidy")]));
+    renderApp("en");
+    await screen.findByText("Tidy");
+    await waitFor(() => expect(chipLabel()).toBe("Proyecto"));
+    const answers = [true, true, false, true, true];
+    answers.forEach((granted, n) => {
+      act(() => {
+        emit(APPROVAL_REQUEST_EVENT, approvalPayload({ approval_id: `pd-${n}`, path: `/Users/ana/Proyecto/f${n}.txt` }));
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `pd-${n}`, granted });
+      });
+    });
+    await screen.findAllByText(/Allowed: Delete a file/);
+    expect(screen.queryByText(/You are approving many actions/)).toBeNull();
   });
 });
