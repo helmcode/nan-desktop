@@ -15,8 +15,8 @@ export function BrandMark({ size = 28, label }: { size?: number; label?: string 
     <img
       className="brand-mark"
       src={symbolUrl}
-      width={size}
       height={size}
+      width={size * (115 / 157)}
       alt={label ?? ""}
       aria-hidden={label ? undefined : true}
       draggable={false}
