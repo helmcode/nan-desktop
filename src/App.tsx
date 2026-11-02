@@ -247,6 +247,7 @@ function Authorizing({
   onCancel: () => void;
 }) {
   const t = useT();
+  const [copied, setCopied] = useState(false);
   const waiting = phase === "waiting";
   const headline =
     phase === "denied"
@@ -265,8 +266,24 @@ function Authorizing({
       {waiting ? (
         <>
           <p className="lede">{t.login.confirmBody}</p>
-          <div className="device-code" aria-label={t.login.codeLabel}>
-            {userCode || "····-····"}
+          <div className="device-code-row">
+            <div className="device-code" aria-label={t.login.codeLabel}>
+              {userCode || "····-····"}
+            </div>
+            {userCode ? (
+              <button
+                type="button"
+                className="btn btn-ghost code-copy"
+                aria-label={t.login.copyCode}
+                title={t.login.copyCode}
+                onClick={() => {
+                  void navigator.clipboard.writeText(userCode);
+                  setCopied(true);
+                }}
+              >
+                {copied ? "✓" : "⧉"}
+              </button>
+            ) : null}
           </div>
           <p className="status-line" role="status">
             <span className="pulse-dot" aria-hidden="true" />

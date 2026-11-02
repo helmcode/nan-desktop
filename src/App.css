@@ -2073,3 +2073,18 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr) minmax(280px, 50%);
   }
 }
+
+/* device code row: code + copy button (round 2) */
+.device-code-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.code-copy {
+  font-size: 16px;
+  line-height: 1;
+  padding: 6px 10px;
+  border-radius: 8px;
+}

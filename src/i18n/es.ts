@@ -34,6 +34,7 @@ export const es: Strings = {
     confirmTitle: "Confirma en tu navegador",
     confirmBody: "Comprueba que tu navegador muestra este código y confirma.",
     codeLabel: "Código de acceso",
+      copyCode: "Copiar código",
     waiting: "Esperando tu confirmación…",
     deniedTitle: "Acceso rechazado",
     deniedBody: "Se ha rechazado el acceso en el navegador. No se ha guardado nada.",

@@ -49,6 +49,31 @@ fn is_bar(ch: char) -> bool {
     ch == '|' || ch == '｜'
 }
 
+/// Consumes one or two bar separators. DeepSeek's live DSML uses DOUBLED
+/// fullwidth bars (`<｜｜DSML｜｜ calls>`, observed 2026-11-02 in the wild);
+/// the compact single-ASCII form is the documented one. Whitespace around
+/// the bars is tolerated. Returns false when no bar is present (NotTag),
+/// true when at least one was consumed, and None when the input ended
+/// inside the run (Partial).
+fn skip_bars(c: &mut Cursor) -> Option<bool> {
+    let mut bars = 0;
+    loop {
+        match c.peek() {
+            None => return if bars > 0 { Some(true) } else { None },
+            Some(ch) if is_bar(ch) => {
+                c.bump();
+                bars += 1;
+            }
+            Some(_) => break,
+        }
+        if bars >= 2 {
+            break;
+        }
+    }
+    Some(bars > 0)
+}
+
+
 /// One recognized DSML tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Tag {
@@ -119,10 +144,10 @@ fn scan_tag(s: &str, start: usize) -> Scan {
         }
         Some(_) => {}
     }
-    match c.peek() {
+    match skip_bars(&mut c) {
         None => return Scan::Partial,
-        Some(ch) if is_bar(ch) => c.bump(),
-        Some(_) => return Scan::NotTag,
+        Some(false) => return Scan::NotTag,
+        Some(true) => {}
     }
     c.skip_ws();
     for expected in ['D', 'S', 'M', 'L'] {
@@ -133,10 +158,10 @@ fn scan_tag(s: &str, start: usize) -> Scan {
         }
     }
     c.skip_ws();
-    match c.peek() {
+    match skip_bars(&mut c) {
         None => return Scan::Partial,
-        Some(ch) if is_bar(ch) => c.bump(),
-        Some(_) => return Scan::NotTag,
+        Some(false) => return Scan::NotTag,
+        Some(true) => {}
     }
     c.skip_ws();
     if c.peek() == Some('/') {
@@ -460,6 +485,29 @@ fn strip_native_tokens(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The EXACT bytes observed in the wild 2026-11-02 (owner report): DOUBLED
+    /// fullwidth bars, space after the last separator, two web_search invokes.
+    /// Compact-ASCII tests above cannot catch this variant.
+    #[test]
+    fn parses_the_live_doubled_fullwidth_dsml_and_hides_it() {
+        let leaks = "\u{2550}\u{2550}"; // placeholder guard so the literal below stays obvious
+        let _ = leaks;
+        let text = "<\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} calls>\n<\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} invoke name=\"web_search\">\n<\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} parameter name=\"query\" string=\"true\">Binance EIP-7702 hot wallet exploit</\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} parameter>\n</\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} invoke>\n<\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} invoke name=\"web_search\">\n<\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} parameter name=\"query\" string=\"true\">Binance hack regulatory reaction Europe</\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} parameter>\n</\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} invoke>\n</\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} calls>\n";
+        let mut filter = MarkupFilter::default();
+        let mut shown = filter.push(text);
+        let (tail, calls) = filter.finish();
+        shown.push_str(&tail);
+        assert!(
+            !shown.contains("DSML") && !shown.contains('\u{FF5C}'),
+            "markup leaked to the UI: {shown:?}"
+        );
+        assert_eq!(calls.len(), 2, "two web_search invokes recovered: {calls:?}");
+        assert_eq!(calls[0].name, "web_search");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).expect("args");
+        assert!(args["query"].as_str().unwrap_or_default().contains("Binance EIP-7702"));
+    }
+
     use super::*;
 
     /// The EXACT leaked sample from log L18 item 4 (separators normalized

@@ -33,6 +33,7 @@ export const en = {
     confirmTitle: "Confirm in your browser",
     confirmBody: "Check that your browser shows this code, then confirm.",
     codeLabel: "Access code",
+      copyCode: "Copy code",
     waiting: "Waiting for your confirmation…",
     deniedTitle: "Access denied",
     deniedBody: "Access was denied in the browser. Nothing was saved.",
