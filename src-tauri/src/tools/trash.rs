@@ -249,6 +249,10 @@ mod tests {
     use super::*;
     use std::fs;
 
+    // Unix-only tests below exercise the ~/.Trash move; on Windows the
+    // Recycle-Bin path is untested this round, so the helper goes dead
+    // there and clippy denies it.
+    #[cfg(unix)]
     fn layout() -> (PathBuf, PathBuf, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = fs::canonicalize(tmp.path()).expect("canon");
