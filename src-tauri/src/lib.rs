@@ -22,7 +22,11 @@ mod profile;
 // Incremental SSE parser shared by the streaming chat surface.
 mod sse;
 mod stt;
-// Tools subsystem: folder grants + propose/approve/execute tool actions.
+// Tool-call markup leaked into content (DSML): streaming filter + parser
+// that turns it into real tool calls and keeps it out of the UI (S16).
+mod tool_markup;
+// Tools subsystem: folder grants (ask/allow modes) + propose / approve
+// (auto, inline card or native dialog) / execute tool actions.
 mod tools;
 mod tts;
 // Built-in web search the model can call (proxied by the platform API).
@@ -96,16 +100,41 @@ fn profiles_load(app: AppHandle) -> Result<ProfileOverview, String> {
     store_overview(&store)
 }
 
-/// Static app facts for the Settings "About" section.
+/// Static app facts for the Settings "About" section and build flags.
 #[derive(Clone, Serialize)]
 struct AppInfo {
     version: String,
+    /// S24: the voice UI (mic dictation + read-aloud) is parked this round.
+    /// The renderer shows mic/listen controls ONLY when this is true; it is
+    /// true only in builds with the `voice-ui` cargo feature (default OFF).
+    /// The voice code (`stt.rs`, `tts.rs` and their commands) is kept and
+    /// still compiled, so re-enabling is a build flag, not a rewrite.
+    voice_ui: bool,
+}
+
+/// Whether this build ships the voice UI (S24, cargo feature `voice-ui`).
+const fn voice_ui_enabled() -> bool {
+    cfg!(feature = "voice-ui")
 }
 
 #[tauri::command]
 fn app_info(app: AppHandle) -> AppInfo {
     AppInfo {
         version: app.package_info().version.to_string(),
+        voice_ui: voice_ui_enabled(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn voice_ui_is_parked_by_default() {
+        // S24: default builds hide the voice UI; `--features voice-ui`
+        // turns it back on.
+        #[cfg(not(feature = "voice-ui"))]
+        assert!(!super::voice_ui_enabled());
+        #[cfg(feature = "voice-ui")]
+        assert!(super::voice_ui_enabled());
     }
 }
 
@@ -130,7 +159,8 @@ pub fn run() {
         // links::open_external instead.
         .setup(|app| {
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
-                .title("Helmcode")
+                // S18: window/about name is "Helmcode Desktop".
+                .title("Helmcode Desktop")
                 .inner_size(1180.0, 780.0)
                 .min_inner_size(820.0, 560.0)
                 .on_navigation(|url| links::navigation_allowed(url.as_str()))
@@ -163,6 +193,9 @@ pub fn run() {
             tools::tools_grant_computer_wide,
             tools::tools_grant_list,
             tools::tools_grant_revoke,
+            tools::tools_grant_mode_get,
+            tools::tools_grant_set_mode,
+            tools::tools_approval_respond,
             tools::tools_settings_get,
             tools::tools_set_run_command_enabled,
             links::open_external

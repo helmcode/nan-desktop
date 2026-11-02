@@ -13,8 +13,17 @@
 //! - the stored path is the canonical path, so a later symlink swap of any
 //!   ancestor makes re-canonicalization disagree and the action fails
 //!   closed (`verify_stable` / `verify_writable`);
-//! - `tools_allow_run_command` defaults to FALSE and lives in the same
-//!   store so the Rust core, not the renderer, owns the switch.
+//! - `tools_allow_run_command` defaults to TRUE since round 2 (S15: the
+//!   tool is promoted; per-action approval still applies) and lives in the
+//!   same store so the Rust core, not the renderer, owns the switch. Stores
+//!   written before the promotion are migrated ON exactly once
+//!   (`run_command_promoted`); a later explicit OFF is respected;
+//! - every grant carries an approval mode (S13): `ask` (default, every
+//!   action is approved one by one) or `allow` (covered actions run without
+//!   a prompt). Switching a grant to `allow` requires a NATIVE confirmation
+//!   in the command layer. Computer-wide grants always ask natively,
+//!   whatever their stored mode, and the sensitive-path deny-list and the
+//!   protected app data dir are refused under every mode.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -41,6 +50,33 @@ pub enum GrantScope {
     ComputerWide,
 }
 
+/// Per-grant approval mode (S13). `Ask` (the default, and what every grant
+/// written before modes existed loads as) approves each action one by one;
+/// `Allow` runs covered actions without a prompt. Computer-wide grants
+/// ignore the stored mode and always ask natively.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    #[default]
+    Ask,
+    Allow,
+}
+
+impl ApprovalMode {
+    /// Parse the IPC string form (`"ask"` / `"allow"`); anything else is
+    /// rejected (never silently mapped to a permissive mode).
+    pub fn parse(raw: &str) -> Result<ApprovalMode, Rejection> {
+        match raw.trim() {
+            "ask" => Ok(ApprovalMode::Ask),
+            "allow" => Ok(ApprovalMode::Allow),
+            other => Err(Rejection::new(
+                "protocol",
+                format!("unknown approval mode {other:?} (expected ask or allow)"),
+            )),
+        }
+    }
+}
+
 /// One approved folder grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
@@ -54,15 +90,38 @@ pub struct Grant {
     /// load as `Folder` (no schema bump needed).
     #[serde(default)]
     pub scope: GrantScope,
+    /// Approval mode (S13). Grants written before modes existed have no
+    /// field and load as `Ask` (no schema bump needed).
+    #[serde(default)]
+    pub mode: ApprovalMode,
 }
 
-/// On-disk tools settings: folder grants plus the experimental
-/// `run_command` switch (default OFF, spec S7).
+impl Grant {
+    /// The mode that actually applies: computer-wide grants always ask.
+    pub fn effective_mode(&self) -> ApprovalMode {
+        match self.scope {
+            GrantScope::ComputerWide => ApprovalMode::Ask,
+            GrantScope::Folder => self.mode,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// On-disk tools settings: folder grants plus the `run_command` switch
+/// (default ON since round 2, spec S15).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantsStore {
     pub version: u32,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub tools_allow_run_command: bool,
+    /// One-shot migration marker: stores written while run_command was
+    /// OFF-by-default carry an implicit `false`; they are switched ON once
+    /// on load and marked, so a later explicit OFF sticks.
+    #[serde(default)]
+    pub run_command_promoted: bool,
     #[serde(default)]
     pub grants: Vec<Grant>,
 }
@@ -70,15 +129,17 @@ pub struct GrantsStore {
 pub fn default_store() -> GrantsStore {
     GrantsStore {
         version: STORE_VERSION,
-        tools_allow_run_command: false,
+        tools_allow_run_command: true,
+        run_command_promoted: true,
         grants: Vec::new(),
     }
 }
 
 /// Parse a stored file. Unknown schema versions and corrupt JSON fail
-/// closed instead of being silently re-seeded.
+/// closed instead of being silently re-seeded. Pre-round-2 stores get the
+/// one-shot run_command promotion (see [`GrantsStore::run_command_promoted`]).
 pub fn parse_store(raw: &str) -> Result<GrantsStore, String> {
-    let store: GrantsStore =
+    let mut store: GrantsStore =
         serde_json::from_str(raw).map_err(|err| format!("corrupt {STORE_FILE}: {err}"))?;
     if store.version != STORE_VERSION {
         return Err(format!(
@@ -86,11 +147,15 @@ pub fn parse_store(raw: &str) -> Result<GrantsStore, String> {
             store.version
         ));
     }
+    if !store.run_command_promoted {
+        store.tools_allow_run_command = true;
+        store.run_command_promoted = true;
+    }
     Ok(store)
 }
 
 /// Load `tools.json` from `dir`, seeding the default store (empty grants,
-/// `run_command` OFF) when the file does not exist yet.
+/// `run_command` ON) when the file does not exist yet.
 pub fn load_or_seed(dir: &Path) -> Result<GrantsStore, String> {
     let path = dir.join(STORE_FILE);
     match std::fs::read_to_string(&path) {
@@ -139,6 +204,7 @@ impl GrantsStore {
             granted_at,
             profile_id: profile_id.to_string(),
             scope: GrantScope::Folder,
+            mode: ApprovalMode::Ask,
         };
         self.grants.push(grant.clone());
         Ok(grant)
@@ -164,6 +230,7 @@ impl GrantsStore {
             granted_at,
             profile_id: profile_id.to_string(),
             scope: GrantScope::ComputerWide,
+            mode: ApprovalMode::Ask,
         };
         self.grants.push(grant.clone());
         grant
@@ -185,6 +252,31 @@ impl GrantsStore {
 
     pub fn set_run_command_enabled(&mut self, enabled: bool) {
         self.tools_allow_run_command = enabled;
+        self.run_command_promoted = true;
+    }
+
+    pub fn grant_by_id(&self, grant_id: &str) -> Option<&Grant> {
+        self.grants.iter().find(|grant| grant.id == grant_id)
+    }
+
+    /// Switch a grant's approval mode. Computer-wide grants cannot be put in
+    /// `allow` (they always ask natively); unknown ids are `not_found`.
+    /// Returns the updated grant. Callers obtain the user's NATIVE
+    /// confirmation before switching to `allow`.
+    pub fn set_mode(&mut self, grant_id: &str, mode: ApprovalMode) -> Result<Grant, Rejection> {
+        let grant = self
+            .grants
+            .iter_mut()
+            .find(|grant| grant.id == grant_id)
+            .ok_or_else(|| Rejection::new("not_found", "no grant with this id"))?;
+        if grant.scope == GrantScope::ComputerWide && mode == ApprovalMode::Allow {
+            return Err(Rejection::new(
+                "scope",
+                "computer-wide access always asks before every action",
+            ));
+        }
+        grant.mode = mode;
+        Ok(grant.clone())
     }
 }
 
@@ -540,6 +632,53 @@ pub fn is_sensitive_write_target(home: Option<&Path>, canonical: &Path) -> bool 
     })
 }
 
+/// Whether REMOVING `canonical` (delete_path, or moving it away with
+/// move_path) is ALWAYS refused, whatever the grant mode and whatever the
+/// user approves:
+/// - the filesystem root, `$HOME` itself and any grant root itself (the
+///   workspace folder is the user's, not the assistant's, to remove);
+/// - the app data dir, anything inside it and any ancestor of it;
+/// - everything the sensitive write deny-list covers
+///   ([`is_sensitive_write_target`]) and any folder that CONTAINS one of the
+///   sensitive home dirs (removing `~/Library` would take the keychains).
+///
+/// `home` and `app_data` are injected so tests can use tempdirs; both are
+/// also checked canonicalized.
+pub fn is_protected_removal_target(
+    home: Option<&Path>,
+    app_data: &Path,
+    grant_roots: &[&Path],
+    canonical: &Path,
+) -> bool {
+    let is_root = canonical.parent().is_none_or(|parent| parent == canonical)
+        || canonical.components().count() <= 1;
+    if is_root || grant_roots.contains(&canonical) {
+        return true;
+    }
+    let real_app_data = std::fs::canonicalize(app_data).ok();
+    let app_datas = std::iter::once(app_data).chain(real_app_data.as_deref());
+    for app_data in app_datas {
+        if is_under(app_data, canonical) || is_under(canonical, app_data) {
+            return true;
+        }
+    }
+    if is_sensitive_write_target(home, canonical) {
+        return true;
+    }
+    let Some(home) = home else {
+        return false;
+    };
+    let real_home = std::fs::canonicalize(home).ok();
+    let mut homes = std::iter::once(home).chain(real_home.as_deref());
+    homes.any(|home| {
+        canonical == home
+            || SENSITIVE_HOME_DIRS.iter().any(|parts| {
+                let dir: PathBuf = parts.iter().fold(home.to_path_buf(), |acc, p| acc.join(p));
+                is_under(canonical, &dir)
+            })
+    })
+}
+
 fn longest_covering<'a>(grants: &[&'a Grant], canonical: &Path) -> Option<&'a Grant> {
     grants
         .iter()
@@ -583,10 +722,127 @@ mod tests {
         let store = load_or_seed(&dir).expect("seed");
         assert_eq!(store, default_store());
         assert!(
-            !store.tools_allow_run_command,
-            "run_command must default OFF"
+            store.tools_allow_run_command,
+            "run_command defaults ON since round 2 (S15)"
         );
         assert!(store.grants.is_empty());
+    }
+
+    // ------------------------------------------------- S15 run_command --
+
+    #[test]
+    fn pre_promotion_store_is_migrated_on_once_and_explicit_off_sticks() {
+        // A round-1 store: run_command persisted as the old implicit OFF.
+        let raw = r#"{"version":1,"tools_allow_run_command":false,"grants":[]}"#;
+        let mut store = parse_store(raw).expect("legacy parses");
+        assert!(store.tools_allow_run_command, "promoted ON on first load");
+        assert!(store.run_command_promoted);
+        // The user turns it OFF explicitly: that choice survives reloads.
+        store.set_run_command_enabled(false);
+        let (dir, _tmp) = tempdir();
+        save(&dir, &store).expect("save");
+        let reloaded = load_or_seed(&dir).expect("load");
+        assert!(!reloaded.tools_allow_run_command, "explicit OFF sticks");
+    }
+
+    // ------------------------------------------------ S13 approval modes --
+
+    #[test]
+    fn legacy_grants_load_in_ask_mode() {
+        let raw = r#"{"version":1,"grants":[{"id":"g","canonical_path":"/tmp/x","granted_at":"t","profile_id":"nan"}]}"#;
+        let store = parse_store(raw).expect("legacy parses");
+        assert_eq!(store.grants[0].mode, ApprovalMode::Ask);
+    }
+
+    #[test]
+    fn approval_mode_round_trips_and_parses_strictly() {
+        let mut store = default_store();
+        store
+            .add_grant("g1".into(), "nan", PathBuf::from("/tmp/g"), "t".into())
+            .expect("add");
+        assert_eq!(store.grants[0].mode, ApprovalMode::Ask, "new grants ask");
+        let updated = store.set_mode("g1", ApprovalMode::Allow).expect("allow");
+        assert_eq!(updated.mode, ApprovalMode::Allow);
+        let (dir, _tmp) = tempdir();
+        save(&dir, &store).expect("save");
+        let raw = fs::read_to_string(dir.join(STORE_FILE)).expect("raw");
+        assert!(raw.contains("\"mode\": \"allow\""), "persisted: {raw}");
+        assert_eq!(
+            load_or_seed(&dir).expect("load").grants[0].mode,
+            ApprovalMode::Allow
+        );
+        assert_eq!(ApprovalMode::parse("ask").expect("ask"), ApprovalMode::Ask);
+        assert_eq!(
+            ApprovalMode::parse(" allow ").expect("allow"),
+            ApprovalMode::Allow
+        );
+        for bad in ["ALLOW", "yes", "", "auto"] {
+            assert_eq!(
+                ApprovalMode::parse(bad).expect_err("strict").kind,
+                "protocol"
+            );
+        }
+        assert_eq!(
+            store
+                .set_mode("missing", ApprovalMode::Ask)
+                .expect_err("unknown")
+                .kind,
+            "not_found"
+        );
+    }
+
+    #[test]
+    fn computer_wide_grants_always_ask() {
+        let mut store = default_store();
+        store.add_computer_wide_grant("cw".into(), "nan", PathBuf::from("/Users/x"), "t".into());
+        let err = store
+            .set_mode("cw", ApprovalMode::Allow)
+            .expect_err("computer-wide cannot allow");
+        assert_eq!(err.kind, "scope");
+        // Even a hand-edited store cannot make it effectively allow.
+        store.grants[0].mode = ApprovalMode::Allow;
+        assert_eq!(store.grants[0].effective_mode(), ApprovalMode::Ask);
+        store
+            .set_mode("cw", ApprovalMode::Ask)
+            .expect("ask is fine");
+    }
+
+    // ------------------------------------------ protected removal targets --
+
+    #[test]
+    fn removal_of_roots_home_app_data_and_sensitive_dirs_is_refused() {
+        let (home, app_data, _guard) = home_with_app_data();
+        let grant_root = home.join("Projects");
+        let roots = [grant_root.as_path()];
+        for bad in [
+            PathBuf::from("/"),
+            home.clone(),
+            grant_root.clone(),
+            app_data.clone(),
+            app_data.join("tools.json"),
+            home.join("Library"),
+            home.join(".ssh"),
+            home.join(".ssh").join("id_ed25519"),
+            home.join(".zshrc"),
+            home.join("Projects").join("server.pem"),
+        ] {
+            assert!(
+                is_protected_removal_target(Some(&home), &app_data, &roots, &bad),
+                "{} must never be removed",
+                bad.display()
+            );
+        }
+        for ok in [
+            grant_root.join("old.txt"),
+            grant_root.join("build"),
+            home.join("Documents").join("draft.md"),
+        ] {
+            assert!(
+                !is_protected_removal_target(Some(&home), &app_data, &roots, &ok),
+                "{} stays removable",
+                ok.display()
+            );
+        }
     }
 
     #[test]
