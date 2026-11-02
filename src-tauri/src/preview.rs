@@ -436,7 +436,14 @@ mod tests {
         fs::write(l.outside.join("a.txt"), "x").expect("write");
         let sneaky = l.grant.join("..").join("..").join("outside").join("a.txt");
         let err = read(&l, &store_with(&[&l.grant]), &sneaky).expect_err("dotdot");
-        assert_eq!(err.kind, "traversal");
+        // The refusal is the property; which check fires first is
+        // platform-dependent (unix canonicalises .. lexically -> "traversal",
+        // Windows resolves the real path first -> "escape"). Both refuse.
+        assert!(
+            err.kind == "traversal" || err.kind == "escape",
+            "unexpected kind {}",
+            err.kind
+        );
     }
 
     #[test]
