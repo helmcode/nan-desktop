@@ -345,7 +345,10 @@ mod tests {
     }
 
     /// Canonical tempdir layout: `home/` (stand-in $HOME), `home/proj` (the
-    /// grant), `home/app-data` (protected), `outside/`.
+    /// grant), `home/app-data` (protected), `outside/`. Only the unix-gated
+    /// tests below use it (macOS trash semantics run everywhere, the rest
+    /// need unix); without the gate Linux/Windows CI flags it as dead code.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn layout() -> Layout {
         let guard = tempfile::tempdir().expect("tempdir");
         let base = fs::canonicalize(guard.path()).expect("canon");
