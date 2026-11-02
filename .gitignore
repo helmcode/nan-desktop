@@ -22,3 +22,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Credentials and local secrets (defense in depth for contributors)
+.env
+.env.*
+*.key
+*.pem
+models.json
+vault.bin
+chat.db
+chat.db-*
+tools-audit.log
