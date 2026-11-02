@@ -95,6 +95,26 @@ pub struct ChatMessageRow {
     /// P1-7: web search sources cited by this assistant reply (empty for
     /// every other row).
     pub sources: Vec<WebSource>,
+    /// Round 3: files the reply's tool actions produced (preview chips) and
+    /// images it generated (shown inline). Empty for every other row.
+    pub artifacts: Vec<Artifact>,
+}
+
+/// What a produced artifact is: a file inside the user's folders (opened in
+/// the preview pane) or a generated image under `app_data/images` (shown
+/// inline through the asset protocol).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    File,
+    Image,
+}
+
+/// One file a reply produced, by absolute path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub path: String,
+    pub kind: ArtifactKind,
 }
 
 /// Create both tables if missing and enable foreign keys for this
@@ -129,6 +149,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_status_column(conn)?;
     ensure_media_path_column(conn)?;
     ensure_column(conn, "messages", "sources", "TEXT")?;
+    ensure_column(conn, "messages", "artifacts", "TEXT")?;
     ensure_column(conn, "conversations", "remote_id", "TEXT")?;
     ensure_column(conn, "conversations", "synced_at", "TEXT")?;
     conn.execute_batch(
@@ -389,6 +410,25 @@ pub fn set_message_sources(
     Ok(())
 }
 
+/// Attach the files/images a reply produced (round 3). An empty slice
+/// clears them (NULL).
+pub fn set_message_artifacts(
+    conn: &Connection,
+    message_id: i64,
+    artifacts: &[Artifact],
+) -> Result<(), rusqlite::Error> {
+    let json = if artifacts.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(artifacts).unwrap_or_else(|_| "[]".to_string()))
+    };
+    conn.execute(
+        "UPDATE messages SET artifacts = ?1 WHERE id = ?2",
+        rusqlite::params![json, message_id],
+    )?;
+    Ok(())
+}
+
 /// List a profile's conversations, most recently updated first. The title is
 /// the stored one, or the untitled fallback when still empty; `last_message`
 /// is the newest message's content, truncated to [`PREVIEW_MAX_CHARS`].
@@ -426,7 +466,7 @@ pub fn list_conversations(
 
 /// Column list read by [`map_message_row`] (order matters).
 const MESSAGE_COLUMNS: &str =
-    "id, conversation_id, role, content, model, media_path, created_at, status, sources";
+    "id, conversation_id, role, content, model, media_path, created_at, status, sources, artifacts";
 
 fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::Error> {
     let status: String = row.get(7)?;
@@ -440,6 +480,10 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::
         created_at: row.get(6)?,
         partial: status == STATUS_IN_PROGRESS,
         sources: decode_sources(row.get(8)?),
+        artifacts: row
+            .get::<_, Option<String>>(9)?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -1167,6 +1211,60 @@ mod tests {
         assert!(
             list_messages(&conn, conv).expect("list")[0]
                 .sources
+                .is_empty()
+        );
+    }
+
+    // ---- Round 3: produced files / generated images ---------------------------
+
+    #[test]
+    fn artifacts_roundtrip_clear_and_tolerate_corrupt_json() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let row = insert_message(&conn, conv, "assistant", "hecho", Some("m")).expect("insert");
+        assert!(
+            list_messages(&conn, conv).expect("list")[0]
+                .artifacts
+                .is_empty()
+        );
+
+        let artifacts = vec![
+            Artifact {
+                path: "/u/web/index.html".into(),
+                kind: ArtifactKind::File,
+            },
+            Artifact {
+                path: "/data/images/a.png".into(),
+                kind: ArtifactKind::Image,
+            },
+        ];
+        set_message_artifacts(&conn, row, &artifacts).expect("set");
+        assert_eq!(
+            list_messages(&conn, conv).expect("list")[0].artifacts,
+            artifacts
+        );
+        // Wire shape the renderer reads.
+        assert_eq!(
+            serde_json::to_value(&artifacts[1]).expect("json"),
+            serde_json::json!({ "path": "/data/images/a.png", "kind": "image" })
+        );
+
+        set_message_artifacts(&conn, row, &[]).expect("clear");
+        assert!(
+            list_messages(&conn, conv).expect("list")[0]
+                .artifacts
+                .is_empty()
+        );
+
+        conn.execute(
+            "UPDATE messages SET artifacts = 'not json' WHERE id = ?1",
+            [row],
+        )
+        .expect("corrupt");
+        assert!(
+            list_messages(&conn, conv).expect("list")[0]
+                .artifacts
                 .is_empty()
         );
     }

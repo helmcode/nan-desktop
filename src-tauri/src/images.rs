@@ -399,47 +399,7 @@ async fn run_image_generation(
         );
     };
 
-    // ---- credentials + endpoint (Rust core only, S4) ---------------------
-    let key = match chat::read_profile_key(&profile_id) {
-        Ok(key) => key,
-        Err(kind) => return emit_error(kind),
-    };
-    let Some(base) = chat::inference_base(&profile_id) else {
-        return emit_error(chat::ErrorKind::Protocol);
-    };
-
-    let client = match reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(chat::CONNECT_TIMEOUT_SECS))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return emit_error(chat::ErrorKind::Protocol),
-    };
-
-    // ---- POST /images/generations ------------------------------------------
-    // No overall request timeout: a ~1-minute generation must not be killed
-    // mid-flight (same policy as the chat streams).
-    let response = match client
-        .post(generations_url(&base))
-        .bearer_auth(&key)
-        .json(&image_body(&prompt, &size))
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(err) => return emit_error(chat::classify_transport(err.is_timeout())),
-    };
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
-        // 429 here is the tenant's monthly image quota (shared 100/month
-        // pool) — the UI renders a quota message for `rate_limited`.
-        return emit_error(chat::classify_chat_status(status));
-    }
-    let body = match response.text().await {
-        Ok(body) => body,
-        Err(err) => return emit_error(chat::classify_transport(err.is_timeout())),
-    };
-    let bytes = match parse_images_response(&body) {
+    let bytes = match request_image(&profile_id, &prompt, &size).await {
         Ok(bytes) => bytes,
         Err(kind) => return emit_error(kind),
     };
@@ -479,6 +439,115 @@ async fn run_image_generation(
             media_path,
         },
     );
+}
+
+/// Generate one image for `profile_id` and return the decoded PNG bytes:
+/// keychain key + compiled-in inference base (Rust core only, S4), then
+/// `POST {base}/images/generations`. Shared by the composer's image mode
+/// and the chat's `generate_image` tool. A 429 is the tenant's monthly
+/// image quota (shared 100/month pool) — classified `rate_limited`.
+pub async fn request_image(
+    profile_id: &str,
+    prompt: &str,
+    size: &str,
+) -> Result<Vec<u8>, chat::ErrorKind> {
+    let key = chat::read_profile_key(profile_id)?;
+    let base = chat::inference_base(profile_id).ok_or(chat::ErrorKind::Protocol)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(chat::CONNECT_TIMEOUT_SECS))
+        .build()
+        .map_err(|_| chat::ErrorKind::Protocol)?;
+    // No overall request timeout: a ~1-minute generation must not be killed
+    // mid-flight (same policy as the chat streams).
+    let response = client
+        .post(generations_url(&base))
+        .bearer_auth(&key)
+        .json(&image_body(prompt, size))
+        .send()
+        .await
+        .map_err(|err| chat::classify_transport(err.is_timeout()))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(chat::classify_chat_status(status));
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|err| chat::classify_transport(err.is_timeout()))?;
+    parse_images_response(&body)
+}
+
+// ---------------------------------------------------------------------------
+// `generate_image` chat tool (round 3): the model can create images itself
+// ---------------------------------------------------------------------------
+
+/// Tool name offered to the model.
+pub const TOOL_NAME: &str = "generate_image";
+
+/// OpenAI function definition for the `generate_image` tool.
+pub fn tool_definition() -> serde_json::Value {
+    serde_json::json!({ "type": "function", "function": {
+        "name": TOOL_NAME,
+        "description": "Create an image from a text description with the platform's image model (about one minute). The image is shown to the user in the chat automatically; reply with a short caption, do not describe a link or path.",
+        "parameters": { "type": "object", "properties": {
+            "prompt": { "type": "string", "description": "Detailed description of the image to create." },
+            "size": { "type": "string", "description": "WIDTHxHEIGHT, each 512-1280 in steps of 16. Default 1024x1024." }
+        }, "required": ["prompt"] }
+    }})
+}
+
+/// Parsed `generate_image` arguments: `(prompt, size)`. An empty prompt is
+/// an invalid call; a missing or invalid size falls back to the default.
+pub fn parse_tool_args(arguments: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let prompt = value.get("prompt")?.as_str()?.trim().to_string();
+    if prompt.is_empty() {
+        return None;
+    }
+    let size = value
+        .get("size")
+        .and_then(|size| size.as_str())
+        .map(str::trim)
+        .filter(|size| validate_size(size).is_ok())
+        .unwrap_or(DEFAULT_SIZE)
+        .to_string();
+    Some((prompt, size))
+}
+
+/// Tool-message content for a finished generation.
+pub fn tool_result_for_model(result: &Result<PathBuf, chat::ErrorKind>) -> String {
+    match result {
+        Ok(path) => serde_json::json!({
+            "ok": true,
+            "summary": "image created and already shown to the user in the chat",
+            "path": path.display().to_string(),
+        })
+        .to_string(),
+        Err(chat::ErrorKind::RateLimited) => serde_json::json!({
+            "ok": false,
+            "error": "quota_exhausted",
+            "message": "The monthly image quota is used up. Tell the user; do not retry.",
+        })
+        .to_string(),
+        Err(kind) => serde_json::json!({
+            "ok": false,
+            "error": "image_failed",
+            "message": format!("Image generation failed ({kind:?}). Tell the user; do not retry more than once."),
+        })
+        .to_string(),
+    }
+}
+
+/// Run the `generate_image` tool: generate, then save under
+/// `app_data/images` (the asset-protocol scope the chat renders from).
+pub async fn run_tool(
+    app_data: &Path,
+    profile_id: &str,
+    prompt: &str,
+    size: &str,
+) -> Result<PathBuf, chat::ErrorKind> {
+    let bytes = request_image(profile_id, prompt, size).await?;
+    save_png(&images_dir(app_data), &bytes)
 }
 
 /// Cancel the active generation for a conversation (if any) and emit
@@ -754,6 +823,54 @@ mod tests {
             generations_url("http://127.0.0.1:1/v1/"),
             "http://127.0.0.1:1/v1/images/generations"
         );
+    }
+
+    #[test]
+    fn generate_image_tool_definition_requires_only_the_prompt() {
+        let def = tool_definition();
+        assert_eq!(def["function"]["name"], TOOL_NAME);
+        assert_eq!(
+            def["function"]["parameters"]["required"],
+            serde_json::json!(["prompt"])
+        );
+    }
+
+    #[test]
+    fn generate_image_args_default_the_size_and_reject_an_empty_prompt() {
+        assert_eq!(
+            parse_tool_args(r#"{"prompt":" un gato astronauta "}"#),
+            Some(("un gato astronauta".into(), DEFAULT_SIZE.into()))
+        );
+        assert_eq!(
+            parse_tool_args(r#"{"prompt":"x","size":"768x1280"}"#),
+            Some(("x".into(), "768x1280".into()))
+        );
+        // An invalid size never fails the call: the default is used.
+        assert_eq!(
+            parse_tool_args(r#"{"prompt":"x","size":"4096x4096"}"#),
+            Some(("x".into(), DEFAULT_SIZE.into()))
+        );
+        assert_eq!(parse_tool_args(r#"{"prompt":"  "}"#), None);
+        assert_eq!(parse_tool_args(r#"{"size":"1024x1024"}"#), None);
+        assert_eq!(parse_tool_args("not json"), None);
+    }
+
+    #[test]
+    fn generate_image_results_tell_the_model_it_is_shown_and_quota_is_final() {
+        let ok: serde_json::Value = serde_json::from_str(&tool_result_for_model(&Ok(
+            PathBuf::from("/data/images/a.png"),
+        )))
+        .expect("json");
+        assert_eq!(ok["ok"], true);
+        assert_eq!(ok["path"], "/data/images/a.png");
+        let quota: serde_json::Value =
+            serde_json::from_str(&tool_result_for_model(&Err(chat::ErrorKind::RateLimited)))
+                .expect("json");
+        assert_eq!(quota["error"], "quota_exhausted");
+        let failed: serde_json::Value =
+            serde_json::from_str(&tool_result_for_model(&Err(chat::ErrorKind::Server)))
+                .expect("json");
+        assert_eq!(failed["ok"], false);
     }
 
     #[test]

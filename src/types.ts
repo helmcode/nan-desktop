@@ -39,6 +39,14 @@ export interface ChatMessageRow {
   media_path: string | null;
   // Web pages the reply cited (built-in web search).
   sources: WebSource[];
+  // Files the reply's tool actions produced and images it generated.
+  // Optional: older cores did not send it.
+  artifacts?: Artifact[];
+}
+
+export interface Artifact {
+  path: string;
+  kind: "file" | "image";
 }
 
 export type GrantScope = "folder" | "computer_wide";

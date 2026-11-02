@@ -3,6 +3,8 @@
 // only inside the user's working folders (or anywhere with computer-wide
 // access). The core re-validates every read; this is presentation only.
 
+import type { Artifact } from "../types";
+
 const POSIX_PATH = /(?:^|[\s(["'<])(\/(?:[^\s`'"()<>[\]]+\/)+[^\s`'"()<>[\]/]+\.[A-Za-z0-9]{1,8})/g;
 const WINDOWS_PATH = /(?:^|[\s(["'<])([A-Za-z]:\\(?:[^\\\s`'"()<>[\]]+\\)*[^\\\s`'"()<>[\]]+\.[A-Za-z0-9]{1,8})/g;
 const INLINE_CODE = /`([^`\n]+)`/g;
@@ -30,6 +32,27 @@ export function isInsideRoots(path: string, roots: string[] | "any"): boolean {
 /// Paths are rejected when they try to climb out of a root.
 function hasTraversal(path: string): boolean {
   return /(^|[\\/])\.\.([\\/]|$)/.test(path);
+}
+
+/// Round 3: what one assistant reply shows under its text. Files the core
+/// reports as produced by the reply's tool actions always get a chip (even
+/// when the model never names them), followed by any other files the text
+/// mentions; generated images render inline instead of as chips.
+export function messageFiles(
+  text: string,
+  roots: string[] | "any",
+  artifacts: Artifact[] | undefined,
+): { chips: string[]; images: string[] } {
+  const produced = artifacts ?? [];
+  const images = produced.filter((a) => a.kind === "image").map((a) => a.path);
+  const chips: string[] = [];
+  for (const path of [
+    ...produced.filter((a) => a.kind === "file").map((a) => a.path),
+    ...extractFilePaths(text, roots),
+  ]) {
+    if (!chips.includes(path)) chips.push(path);
+  }
+  return { chips, images };
 }
 
 export function extractFilePaths(text: string, roots: string[] | "any"): string[] {

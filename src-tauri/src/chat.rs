@@ -70,7 +70,7 @@ use crate::chat_store::{self, ChatMessageRow, ConversationView, WebSource};
 use crate::profile::{self, KEYRING_SERVICE};
 use crate::sse::{flush_sse_buffer, parse_sse_buffer};
 use crate::tool_markup::{self, MarkupFilter};
-use crate::{tools, web_search};
+use crate::{images, tools, web_search};
 
 /// Connect timeout for chat/model requests. No overall request timeout: a
 /// long stream must not be killed mid-generation.
@@ -153,7 +153,12 @@ pub fn extract_delta(data: &str) -> DeltaOutcome {
 
 /// Most model ↔ tool round trips in one reply. The final round is sent
 /// without tools so the model must answer in text.
-pub const MAX_TOOL_ROUNDS: usize = 6;
+///
+/// Round 3: was 6. Real tasks (write HTML, convert to PDF, check the
+/// result, fix it) chain more steps than that; at the cap the model was
+/// forced to answer without tools and could only narrate what it still
+/// meant to do — the "stall" the owner saw (narration, no action).
+pub const MAX_TOOL_ROUNDS: usize = 24;
 
 /// Longest tool output fed back to the model (chars). Keeps one big file
 /// read from flooding the context window.
@@ -337,24 +342,49 @@ fn file_tool_definitions(run_command: bool) -> Vec<serde_json::Value> {
     if run_command {
         defs.push(serde_json::json!({ "type": "function", "function": {
             "name": "run_command",
-            "description": "Run a shell command inside a workspace folder (30 s limit, output capped at 64 KiB). Use it for what the file tools cannot do, including generating binary files such as PDFs, images or spreadsheets with tools installed on the user's computer (for example converting an HTML or Markdown file you wrote into a PDF).",
+            "description": "Run a shell command inside a workspace folder (30 s limit, output capped at 64 KiB). Use it for what the file tools cannot do, including generating binary files such as PDFs, charts or spreadsheets with tools installed on the user's computer (for example converting an HTML or Markdown file you wrote into a PDF).",
             "parameters": { "type": "object", "properties": {
                 "cmd": { "type": "string", "description": "The command line." },
-                "cwd": { "type": "string", "description": "Absolute workspace folder to run it in." }
+                "cwd": { "type": "string", "description": "Absolute folder inside a workspace folder to run it in. It may be a new folder: it is created first." }
             }, "required": ["cmd", "cwd"] }
         }}));
     }
     defs
 }
 
-/// Every tool offered to the model for one reply: web search always, file
-/// tools only when the user set up a workspace.
+/// Every tool offered to the model for one reply: web search and image
+/// generation always, file tools only when the user set up a workspace.
 pub fn tool_definitions(workspace: Option<&tools::Workspace>) -> Vec<serde_json::Value> {
-    let mut defs = vec![web_search::tool_definition()];
+    let mut defs = vec![web_search::tool_definition(), images::tool_definition()];
     if let Some(workspace) = workspace {
         defs.extend(file_tool_definitions(workspace.run_command));
     }
     defs
+}
+
+/// How the assistant must work with tools (round 3). The owner's session
+/// showed the model narrating intentions ("now I'll create…") several
+/// times without acting, and a final answer that never said where the
+/// files landed.
+pub const ASSISTANT_RULES: &str = "How you work:\n\
+- Act, don't announce. When a task needs a tool, call it right away instead of \
+describing what you are about to do. Never end a reply promising future work \
+(\"now I will…\", \"next I'll…\"): do it in this reply, or say plainly what is \
+left and why.\n\
+- Prefer one command that does the whole job (for example \
+`mkdir -p /abs/folder && cd /abs/folder && …`) over many small steps.\n\
+- Only report actions whose tool result succeeded; if one failed, say so.\n\
+- When you created or changed files, end your reply with the absolute path of \
+every one of them, each on its own line, so the user can open them.\n\
+- To create an image, call generate_image: it appears in the chat by itself.";
+
+/// The system message for one reply: the working rules, plus the
+/// workspace description when the user set one up.
+pub fn system_prompt(workspace: Option<&tools::Workspace>) -> String {
+    match workspace {
+        Some(workspace) => format!("{ASSISTANT_RULES}\n\n{}", workspace_prompt(workspace)),
+        None => ASSISTANT_RULES.to_string(),
+    }
 }
 
 /// System message describing the workspace (only sent when one exists).
@@ -380,10 +410,12 @@ pub fn workspace_prompt(workspace: &tools::Workspace) -> String {
         "You may only work inside these folders.".to_string()
     };
     let commands = if workspace.run_command {
-        "\nYou can also run shell commands in a workspace folder with run_command. \
-         write_file only writes text: to produce a binary artifact (PDF, image, \
+        "\nYou can also run shell commands in a workspace folder with run_command \
+         (its cwd may be a new folder: it is created first). \
+         write_file only writes text: to produce a binary artifact (PDF, chart, \
          spreadsheet), write the source (for example HTML or Markdown) and convert it \
-         with run_command using a tool available on the user's computer."
+         with run_command using a tool available on the user's computer. Pictures and \
+         illustrations come from generate_image instead."
     } else {
         ""
     };
@@ -445,6 +477,10 @@ pub fn outcome_for_model(result: Result<tools::ToolOutcome, tools::Rejection>) -
             }
             if let Some(code) = outcome.exit_code {
                 value["exit_code"] = code.into();
+            }
+            if !outcome.produced.is_empty() {
+                // Where the work landed: the model must report these paths.
+                value["files"] = outcome.produced.into();
             }
             value.to_string()
         }
@@ -938,12 +974,10 @@ async fn run_chat_stream(
     // platform cannot serve it). File tools only exist when the user picked
     // a workspace; the system message tells the model where it may work.
     let workspace = tools::workspace_for(&app, &profile_id, conversation_id);
-    if let Some(workspace) = &workspace {
-        messages.insert(
-            0,
-            serde_json::json!({ "role": "system", "content": workspace_prompt(workspace) }),
-        );
-    }
+    messages.insert(
+        0,
+        serde_json::json!({ "role": "system", "content": system_prompt(workspace.as_ref()) }),
+    );
     let mut offered_tools = tool_definitions(workspace.as_ref());
 
     let client = match reqwest::Client::builder()
@@ -967,6 +1001,7 @@ async fn run_chat_stream(
     let mut row_id: Option<i64> = None;
     let mut accumulated = String::new();
     let mut sources: Vec<WebSource> = Vec::new();
+    let mut artifacts: Vec<chat_store::Artifact> = Vec::new();
     let mut failed: Option<ErrorKind> = None;
 
     for round in 0..=MAX_TOOL_ROUNDS {
@@ -1072,15 +1107,20 @@ async fn run_chat_stream(
             "tool_calls": requested,
         }));
         for call in &round_out.tool_calls {
-            let content = run_tool_call(
+            let (content, produced) = run_tool_call(
                 &app,
                 &window,
+                &dir,
                 &profile_id,
                 conversation_id,
                 call,
                 &mut sources,
             )
             .await;
+            if merge_artifacts(&mut artifacts, produced) {
+                // Persisted as they appear: a stopped reply keeps its chips.
+                let _ = chat_store::set_message_artifacts(&conn, row, &artifacts);
+            }
             messages.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": call.id,
@@ -1135,7 +1175,8 @@ async fn run_chat_stream(
 
 /// `chat://activity` — what the assistant is doing between text deltas
 /// (`searching` the web, `working` on files — waiting for the user's
-/// approval) or `null` when it is writing again. Shown as a calm status
+/// approval — or `generating_image`) or `null` when it is writing again.
+/// Shown as a calm status
 /// line; never technical detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ActivityPayload {
@@ -1253,22 +1294,61 @@ async fn stream_round(
     Ok(RoundOutput { text, tool_calls })
 }
 
-/// Run one model tool call and return the tool-message content. Web search
-/// degrades silently; file actions go through the core's per-action native
-/// approval (`tools::run_model_action`).
+/// Add newly produced artifacts (deduplicated by path, first kind wins).
+/// Returns whether anything was added.
+pub fn merge_artifacts(
+    artifacts: &mut Vec<chat_store::Artifact>,
+    produced: Vec<chat_store::Artifact>,
+) -> bool {
+    let before = artifacts.len();
+    for artifact in produced {
+        if !artifacts.iter().any(|known| known.path == artifact.path) {
+            artifacts.push(artifact);
+        }
+    }
+    artifacts.len() > before
+}
+
+/// The files a tool outcome produced, as chat artifacts.
+pub fn file_artifacts(
+    outcome: &Result<tools::ToolOutcome, tools::Rejection>,
+) -> Vec<chat_store::Artifact> {
+    match outcome {
+        Ok(outcome) => outcome
+            .produced
+            .iter()
+            .map(|path| chat_store::Artifact {
+                path: path.clone(),
+                kind: chat_store::ArtifactKind::File,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// `chat://activity` value for a tool call.
+pub fn activity_for_tool(name: &str) -> &'static str {
+    match name {
+        web_search::TOOL_NAME => "searching",
+        images::TOOL_NAME => "generating_image",
+        _ => "working",
+    }
+}
+
+/// Run one model tool call and return the tool-message content plus the
+/// files/images it produced. Web search degrades silently; image
+/// generation reports failures to the model; file actions go through the
+/// core's per-action approval (`tools::run_model_action`).
 async fn run_tool_call(
     app: &AppHandle,
     window: &Window,
+    app_data: &std::path::Path,
     profile_id: &str,
     conversation_id: i64,
     call: &ToolCall,
     sources: &mut Vec<WebSource>,
-) -> String {
-    let activity = if call.name == web_search::TOOL_NAME {
-        "searching"
-    } else {
-        "working"
-    };
+) -> (String, Vec<chat_store::Artifact>) {
+    let activity = activity_for_tool(&call.name);
     let _ = window.emit(
         "chat://activity",
         ActivityPayload {
@@ -1282,17 +1362,37 @@ async fn run_tool_call(
             None => Vec::new(),
         };
         web_search::merge_sources(sources, &results);
-        return web_search::results_for_model(&results);
+        return (web_search::results_for_model(&results), Vec::new());
+    }
+    if call.name == images::TOOL_NAME {
+        let Some((prompt, size)) = images::parse_tool_args(&call.arguments) else {
+            return (
+                invalid_call("generate_image needs a non-empty prompt"),
+                Vec::new(),
+            );
+        };
+        let result = images::run_tool(app_data, profile_id, &prompt, &size).await;
+        let produced = match &result {
+            Ok(path) => vec![chat_store::Artifact {
+                path: path.display().to_string(),
+                kind: chat_store::ArtifactKind::Image,
+            }],
+            Err(_) => Vec::new(),
+        };
+        return (images::tool_result_for_model(&result), produced);
     }
     match action_from_call(&call.name, &call.arguments) {
-        Ok(action) => outcome_for_model(
-            tools::run_model_action(app, profile_id, conversation_id, action).await,
-        ),
-        Err(message) => {
-            serde_json::json!({ "ok": false, "error": "invalid_call", "message": message })
-                .to_string()
+        Ok(action) => {
+            let outcome = tools::run_model_action(app, profile_id, conversation_id, action).await;
+            let produced = file_artifacts(&outcome);
+            (outcome_for_model(outcome), produced)
         }
+        Err(message) => (invalid_call(&message), Vec::new()),
     }
+}
+
+fn invalid_call(message: &str) -> String {
+    serde_json::json!({ "ok": false, "error": "invalid_call", "message": message }).to_string()
 }
 
 /// Sidebar list: a profile's conversations, most recent first, each with a
@@ -1825,7 +1925,11 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(names(tool_definitions(None)), vec!["web_search"]);
+        assert_eq!(
+            names(tool_definitions(None)),
+            vec!["web_search", "generate_image"],
+            "round 3: the model can create images without a workspace"
+        );
         let ws = tools::Workspace {
             roots: vec![std::path::PathBuf::from("/Users/me/Proyecto")],
             computer_wide: false,
@@ -1836,6 +1940,7 @@ mod tests {
             names(tool_definitions(Some(&ws))),
             vec![
                 "web_search",
+                "generate_image",
                 "list_files",
                 "read_file",
                 "write_file",
@@ -2030,6 +2135,95 @@ mod tests {
         assert!(declined.contains("Do not retry"));
         let rejected = outcome_for_model(Err(tools::Rejection::new("escape", "outside")));
         assert!(rejected.contains("\"error\":\"escape\""));
+    }
+
+    // ---- Round 3: act-don't-narrate, produced files, images ----------------
+
+    #[test]
+    fn system_prompt_always_carries_the_working_rules() {
+        let bare = system_prompt(None);
+        assert!(bare.contains("Act, don't announce"));
+        assert!(bare.contains("Never end a reply promising future work"));
+        assert!(bare.contains("absolute path of every one of them"));
+        assert!(bare.contains("mkdir -p /abs/folder && cd /abs/folder"));
+        assert!(bare.contains("generate_image"));
+        assert!(
+            !bare.contains("Workspace folders"),
+            "no workspace, no folders"
+        );
+        let ws = tools::Workspace {
+            roots: vec![std::path::PathBuf::from("/Users/me/Descargas")],
+            computer_wide: false,
+            run_command: true,
+            scratch: None,
+        };
+        let full = system_prompt(Some(&ws));
+        assert!(full.starts_with(ASSISTANT_RULES));
+        assert!(full.contains("/Users/me/Descargas"));
+        assert!(
+            full.contains("it is created first"),
+            "cwd may be a new folder"
+        );
+    }
+
+    #[test]
+    fn tool_outcomes_tell_the_model_which_files_landed_where() {
+        let outcome = Ok(tools::ToolOutcome {
+            action: "run_command".into(),
+            summary: "ok".into(),
+            exit_code: Some(0),
+            produced: vec!["/Users/me/Descargas/informe/index.html".into()],
+            ..Default::default()
+        });
+        let artifacts = file_artifacts(&outcome);
+        assert_eq!(
+            artifacts,
+            vec![chat_store::Artifact {
+                path: "/Users/me/Descargas/informe/index.html".into(),
+                kind: chat_store::ArtifactKind::File,
+            }]
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&outcome_for_model(outcome)).expect("json");
+        assert_eq!(
+            value["files"],
+            serde_json::json!(["/Users/me/Descargas/informe/index.html"])
+        );
+        assert!(file_artifacts(&Err(tools::Rejection::new("io", "x"))).is_empty());
+        let none = outcome_for_model(Ok(tools::ToolOutcome::default()));
+        assert!(!none.contains("\"files\""));
+    }
+
+    #[test]
+    fn artifacts_merge_deduplicated_in_order() {
+        let file = |path: &str| chat_store::Artifact {
+            path: path.into(),
+            kind: chat_store::ArtifactKind::File,
+        };
+        let mut all = Vec::new();
+        assert!(merge_artifacts(
+            &mut all,
+            vec![file("/a/x.html"), file("/a/y.pdf")]
+        ));
+        assert!(
+            !merge_artifacts(&mut all, vec![file("/a/x.html")]),
+            "already known"
+        );
+        assert!(merge_artifacts(&mut all, vec![file("/a/z.css")]));
+        let paths: Vec<&str> = all.iter().map(|a| a.path.as_str()).collect();
+        assert_eq!(paths, vec!["/a/x.html", "/a/y.pdf", "/a/z.css"]);
+    }
+
+    #[test]
+    fn tool_activities_name_what_the_assistant_is_doing() {
+        assert_eq!(activity_for_tool("web_search"), "searching");
+        assert_eq!(activity_for_tool("generate_image"), "generating_image");
+        assert_eq!(activity_for_tool("run_command"), "working");
+    }
+
+    #[test]
+    fn tool_round_budget_fits_real_multi_step_tasks() {
+        assert_eq!(MAX_TOOL_ROUNDS, 24, "6 rounds stalled real tasks");
     }
 
     #[test]

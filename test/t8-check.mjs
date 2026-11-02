@@ -85,6 +85,16 @@ const REQUIRED_TESTS = [
   "preview::tests::no_key_material_or_page_content_leaks_into_errors_or_replies",
   // Image endpoint path (base already ends in /v1)
   "images::tests::generation_url_is_exactly_v1_images_generations_on_both_tenants",
+  // Round 3: act-don't-narrate, produced files as chips, generate_image tool
+  "tools::tests::run_command_cwd_that_is_a_file_is_refused",
+  "tools::tests::file_writes_report_the_produced_file",
+  "chat::tests::system_prompt_always_carries_the_working_rules",
+  "chat::tests::tool_outcomes_tell_the_model_which_files_landed_where",
+  "chat::tests::web_search_is_always_offered_file_tools_only_with_a_workspace",
+  "chat::tests::tool_round_budget_fits_real_multi_step_tasks",
+  "chat_store::tests::artifacts_roundtrip_clear_and_tolerate_corrupt_json",
+  "images::tests::generate_image_args_default_the_size_and_reject_an_empty_prompt",
+  "images::tests::generate_image_results_tell_the_model_it_is_shown_and_quota_is_final",
 ];
 // Unix-only acceptance tests (symlinks / sh): required where they can run.
 if (process.platform !== "win32") {
@@ -93,6 +103,11 @@ if (process.platform !== "win32") {
     "tools::tests::run_command_asks_unless_its_cwd_is_in_an_allow_grant",
     "tools::trash::tests::files_and_folders_land_in_the_trash_and_nothing_is_lost",
     "preview::tests::never_follows_symlinks",
+    // Round 3 wire-style: `mkdir -p X && cd X && …` in one call, allow mode
+    "tools::tests::run_command_one_shot_mkdir_cd_succeeds_when_cwd_is_the_new_folder",
+    "tools::tests::run_command_one_shot_mkdir_cd_succeeds_from_the_parent",
+    "tools::tests::run_command_missing_cwd_behind_a_dangling_symlink_is_refused",
+    "tools::tests::run_command_reports_only_the_files_it_produced",
   );
 }
 const ALLOWED_KEYS = new Set(["ts", "event", "action", "outcome", "grant_id", "profile_id", "detail"]);

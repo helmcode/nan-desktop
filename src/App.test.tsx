@@ -208,6 +208,33 @@ describe("chat shell", () => {
     expect(screen.queryByRole("button", { name: "Open preview: x.pdf" })).toBeNull();
   });
 
+  it("shows every file a reply produced as a chip, even when the text never names it (round 3)", async () => {
+    resetTauri(
+      chatHandlers([
+        row(1, "user", "hazme una web"),
+        {
+          ...row(2, "assistant", "Done."),
+          artifacts: [{ path: "/Users/ana/Downloads/informe-bbva/index.html", kind: "file" }],
+        },
+      ]),
+    );
+    renderApp("en");
+    expect(await screen.findByRole("button", { name: "Open preview: index.html" })).toBeTruthy();
+  });
+
+  it("renders an image the assistant generated inline (round 3)", async () => {
+    resetTauri(
+      chatHandlers([
+        row(1, "user", "draw a cat"),
+        { ...row(2, "assistant", "Here it is."), artifacts: [{ path: "/data/images/cat.png", kind: "image" }] },
+      ]),
+    );
+    renderApp("en");
+    const image = await screen.findByRole("img", { name: "Image created by the assistant" });
+    expect(image.getAttribute("src")).toBe("asset://localhost//data/images/cat.png");
+    expect(screen.queryByRole("button", { name: "Open preview: cat.png" })).toBeNull();
+  });
+
   it("puts settings behind the bottom-left user chip (S20)", async () => {
     resetTauri({
       ...chatHandlers([]),

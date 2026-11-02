@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -380,6 +380,10 @@ pub struct ToolOutcome {
     pub stderr: Option<String>,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// Absolute paths of the regular files this action created or changed
+    /// (inside the grant). The chat shows them as preview chips and the
+    /// model is told where its work landed.
+    pub produced: Vec<String>,
 }
 
 /// `tools_settings_get` view.
@@ -584,7 +588,16 @@ pub fn validate_action(
                     cmd: cmd.clone(),
                     cwd_in_grant: canonical.display().to_string(),
                 },
-                format!("run_command \"{cmd}\" in {}", canonical.display()),
+                format!(
+                    "run_command \"{cmd}\" in {}{}",
+                    canonical.display(),
+                    // Shown on the approval card: execute creates it.
+                    if std::fs::symlink_metadata(&canonical).is_ok() {
+                        ""
+                    } else {
+                        " (new folder, created first)"
+                    }
+                ),
                 None,
                 grant_id,
                 canonical,
@@ -1040,7 +1053,7 @@ fn execute_proposal_with(
             grants::verify_writable(&grant.canonical_path, canonical)?;
         }
         ToolAction::RunCommand { cwd_in_grant, .. } => {
-            grants::verify_stable(&grant.canonical_path, Path::new(cwd_in_grant))?;
+            prepare_command_cwd(&grant.canonical_path, Path::new(cwd_in_grant))?;
         }
         ToolAction::MovePath { .. } => {
             grants::verify_stable(&grant.canonical_path, canonical)?;
@@ -1077,7 +1090,10 @@ fn execute_proposal_with(
         }
         ToolAction::DeletePath { .. } => exec_delete_path(canonical, proposal.permanent_delete),
         ToolAction::RunCommand { cmd, .. } => {
+            let started = SystemTime::now();
             let output = run_captured(cmd, canonical, COMMAND_TIMEOUT)?;
+            let produced =
+                files_produced_by_command(dir, &grant.canonical_path, canonical, cmd, started);
             let truncated_note = if output.stdout_truncated || output.stderr_truncated {
                 " (output truncated at 64 KiB)"
             } else {
@@ -1102,8 +1118,143 @@ fn execute_proposal_with(
                 stderr: Some(output.stderr),
                 exit_code: output.exit_code,
                 timed_out: output.timed_out,
+                produced,
                 ..Default::default()
             })
+        }
+    }
+}
+
+/// Make a command's working folder ready right before it runs. An existing
+/// cwd must still canonicalize to the stored path (symlink-swap defense)
+/// and be a folder. A MISSING cwd inside the grant is created first: models
+/// routinely run `mkdir -p X && cd X && …` with `cwd` = X, the folder the
+/// command itself creates (round-3 regression: the re-verification used to
+/// demand an existing cwd and failed with `path no longer resolves`).
+/// Creation goes through the same symlink-component walk as writes, so a
+/// dangling symlink cannot redirect it outside the grant.
+fn prepare_command_cwd(root: &Path, cwd: &Path) -> Result<(), Rejection> {
+    match std::fs::symlink_metadata(cwd) {
+        Ok(meta) if meta.is_dir() => grants::verify_stable(root, cwd),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            grants::verify_stable(root, cwd)?;
+            if cwd.is_dir() {
+                Ok(())
+            } else {
+                Err(not_a_folder(cwd))
+            }
+        }
+        Ok(_) => Err(not_a_folder(cwd)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            grants::verify_writable(root, cwd)?;
+            std::fs::create_dir_all(cwd)
+                .map_err(|err| io_rejection("cannot create the command's folder", err))?;
+            grants::verify_stable(root, cwd)
+        }
+        Err(err) => Err(io_rejection("cannot stat the command's folder", err)),
+    }
+}
+
+fn not_a_folder(path: &Path) -> Rejection {
+    Rejection::new(
+        "not_a_folder",
+        format!("{} is not a folder; pass the folder as cwd", path.display()),
+    )
+}
+
+/// Folder depth scanned below a command's cwd for produced files.
+const PRODUCED_SCAN_DEPTH: usize = 3;
+/// Entries visited at most while scanning (bounds a computer-wide cwd).
+const PRODUCED_SCAN_BUDGET: usize = 5_000;
+/// Produced files reported at most per command.
+const MAX_PRODUCED: usize = 20;
+
+/// Regular files a command created or changed: files under its cwd (a few
+/// levels deep, hidden folders and `node_modules` skipped) plus absolute
+/// paths named on the command line, modified since it started, inside the
+/// grant and never inside the app's own data dir. Symlinks are never
+/// followed or reported. Sorted, deduplicated, capped.
+fn files_produced_by_command(
+    app_dir: &Path,
+    root: &Path,
+    cwd: &Path,
+    cmd: &str,
+    started: SystemTime,
+) -> Vec<String> {
+    // Whole-second floor: some filesystems store mtimes in seconds.
+    let since = started
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| SystemTime::UNIX_EPOCH + Duration::from_secs(elapsed.as_secs()))
+        .unwrap_or(started);
+    let protected = std::fs::canonicalize(app_dir).unwrap_or_else(|_| app_dir.to_path_buf());
+    let fresh = |path: &Path| -> bool {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| {
+            meta.file_type().is_file() && meta.modified().is_ok_and(|modified| modified >= since)
+        })
+    };
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut budget = PRODUCED_SCAN_BUDGET;
+    scan_produced(cwd, 1, &mut budget, &fresh, &mut found);
+    let separators = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ';' | '|' | '&' | '>' | '<' | '\'' | '"' | '(' | ')' | '=' | '`'
+            )
+    };
+    for token in cmd.split(separators) {
+        if !token.starts_with('/') || grants::has_parent_component(Path::new(token)) {
+            continue;
+        }
+        if !fresh(Path::new(token)) {
+            continue;
+        }
+        if let Ok(canonical) = std::fs::canonicalize(token) {
+            found.push(canonical);
+        }
+    }
+    let mut produced: Vec<String> = found
+        .into_iter()
+        .filter(|path| grants::is_under(root, path) && !grants::is_under(&protected, path))
+        .map(|path| path.display().to_string())
+        .collect();
+    produced.sort();
+    produced.dedup();
+    produced.truncate(MAX_PRODUCED);
+    produced
+}
+
+fn scan_produced(
+    folder: &Path,
+    depth: usize,
+    budget: &mut usize,
+    fresh: &dyn Fn(&Path) -> bool,
+    found: &mut Vec<PathBuf>,
+) {
+    if depth > PRODUCED_SCAN_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            scan_produced(&path, depth + 1, budget, fresh, found);
+        } else if file_type.is_file() && fresh(&path) {
+            found.push(path);
         }
     }
 }
@@ -1207,6 +1358,7 @@ fn exec_write_file(path: &Path, content: &str) -> Result<ToolOutcome, Rejection>
         action: "write_file".into(),
         summary: format!("wrote {} bytes to {}", content.len(), path.display()),
         bytes_written: Some(content.len() as u64),
+        produced: vec![path.display().to_string()],
         ..Default::default()
     })
 }
@@ -1245,6 +1397,7 @@ fn exec_replace_file(path: &Path, old: &str, new: &str) -> Result<ToolOutcome, R
             updated.len()
         ),
         bytes_written: Some(updated.len() as u64),
+        produced: vec![path.display().to_string()],
         ..Default::default()
     })
 }
@@ -1286,6 +1439,11 @@ fn exec_move_path(source: &Path, dest: &Path, overwrite: bool) -> Result<ToolOut
                 ""
             }
         ),
+        produced: if dest.is_file() {
+            vec![dest.display().to_string()]
+        } else {
+            Vec::new()
+        },
         ..Default::default()
     })
 }
@@ -3035,6 +3193,180 @@ mod tests {
         assert_eq!(outcome.stdout.as_deref(), Some("hi\n"));
         assert_eq!(outcome.exit_code, Some(0));
         assert!(!outcome.timed_out);
+    }
+
+    /// Round-3 regression (owner session, conversation 8): the model ran
+    /// `mkdir -p X && cd X && cat > …` with `cwd` = X, the folder the
+    /// command itself creates. The execute-time re-verification required
+    /// the cwd to already exist and failed with `path no longer resolves`.
+    /// A missing cwd inside the grant is now created before the command.
+    #[cfg(unix)]
+    #[test]
+    fn run_command_one_shot_mkdir_cd_succeeds_when_cwd_is_the_new_folder() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let st = state();
+        let approver = FakeApprover::answering(false);
+        let target = root.join("informe-bbva");
+        let cmd = format!(
+            "mkdir -p {t} && cd {t} && printf '<h1>hola</h1>' > index.html",
+            t = target.display()
+        );
+        let (route, outcome) = run_with(
+            &dir,
+            &st,
+            &approver,
+            &ToolAction::RunCommand {
+                cmd,
+                cwd_in_grant: path_str(&target),
+            },
+        )
+        .expect("one-shot mkdir && cd command runs");
+        assert_eq!(route, ApprovalRoute::Auto);
+        assert_eq!(outcome.exit_code, Some(0), "stderr: {:?}", outcome.stderr);
+        let html = target.join("index.html");
+        assert_eq!(fs::read_to_string(&html).expect("html"), "<h1>hola</h1>");
+        assert_eq!(outcome.produced, vec![path_str(&html)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_one_shot_mkdir_cd_succeeds_from_the_parent() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = enabled_dir(&folder);
+        let st = state();
+        let target = root.join("web");
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::RunCommand {
+                cmd: "mkdir -p web && cd web && echo '<p>x</p>' > index.html".into(),
+                cwd_in_grant: path_str(&root),
+            },
+        );
+        let outcome = execute(&dir, &st, &proposal.id).expect("execute");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(outcome.produced, vec![path_str(&target.join("index.html"))]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_missing_cwd_behind_a_dangling_symlink_is_refused() {
+        let (folder, _guard) = tempdir();
+        let (outside, _guard3) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = enabled_dir(&folder);
+        let st = state();
+        // `link` dangles into a not-yet-existing folder OUTSIDE the grant:
+        // creating `link/sub` would materialize it out there.
+        let escape_target = canon(&outside).join("not-yet");
+        std::os::unix::fs::symlink(&escape_target, root.join("link")).expect("symlink");
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::RunCommand {
+                cmd: "echo hi".into(),
+                cwd_in_grant: path_str(&root.join("link").join("sub")),
+            },
+        );
+        let err = execute(&dir, &st, &proposal.id).expect_err("symlink component");
+        assert_eq!(err.kind, "escape");
+        assert!(!escape_target.exists(), "nothing created outside the grant");
+    }
+
+    #[test]
+    fn run_command_cwd_that_is_a_file_is_refused() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        fs::write(root.join("notes.txt"), "x").expect("write");
+        let (dir, _guard2) = enabled_dir(&folder);
+        let st = state();
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::RunCommand {
+                cmd: "echo hi".into(),
+                cwd_in_grant: path_str(&root.join("notes.txt")),
+            },
+        );
+        let err = execute(&dir, &st, &proposal.id).expect_err("file cwd");
+        assert_eq!(err.kind, "not_a_folder");
+    }
+
+    /// Every file a command creates or changes is reported (preview chips),
+    /// files it did not touch are not — including absolute paths outside
+    /// its cwd but inside the grant.
+    #[cfg(unix)]
+    #[test]
+    fn run_command_reports_only_the_files_it_produced() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        fs::create_dir_all(root.join("site")).expect("mkdir");
+        fs::create_dir_all(root.join("other")).expect("mkdir");
+        fs::write(root.join("site/old.css"), "old").expect("write");
+        // Untouched before the command: an mtime well in the past (the
+        // detection floors the start time to whole seconds).
+        fs::File::options()
+            .write(true)
+            .open(root.join("site/old.css"))
+            .and_then(|file| file.set_modified(SystemTime::now() - Duration::from_secs(120)))
+            .expect("age old.css");
+        let (dir, _guard2) = enabled_dir(&folder);
+        let st = state();
+        let report = root.join("other/report.pdf");
+        let cmd = format!(
+            "echo '<p>x</p>' > index.html && mkdir -p .cache && echo c > .cache/x.txt && echo pdf > {}",
+            report.display()
+        );
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::RunCommand {
+                cmd,
+                cwd_in_grant: path_str(&root.join("site")),
+            },
+        );
+        let outcome = execute(&dir, &st, &proposal.id).expect("execute");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(
+            outcome.produced,
+            vec![path_str(&report), path_str(&root.join("site/index.html"))],
+            "hidden folders and untouched files are not reported"
+        );
+    }
+
+    #[test]
+    fn file_writes_report_the_produced_file() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        let st = state();
+        let target = root.join("index.html");
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::WriteFile {
+                path: path_str(&target),
+                content: "<p>hola</p>".into(),
+            },
+        );
+        let outcome = execute(&dir, &st, &proposal.id).expect("write");
+        assert_eq!(outcome.produced, vec![path_str(&target)]);
+        let moved = root.join("web.html");
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::MovePath {
+                from: path_str(&target),
+                to: path_str(&moved),
+                overwrite: false,
+            },
+        );
+        let outcome = execute(&dir, &st, &proposal.id).expect("move");
+        assert_eq!(outcome.produced, vec![path_str(&moved)]);
     }
 
     #[cfg(unix)]

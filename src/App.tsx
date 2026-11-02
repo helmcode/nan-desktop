@@ -13,7 +13,7 @@ import {
   type Nudge,
 } from "./chat/allowNudge";
 import { approvalsReducer, placeCards, type ApprovalCardState } from "./chat/approvals";
-import { extractFilePaths } from "./chat/filePaths";
+import { messageFiles } from "./chat/filePaths";
 import {
   adoptSelection,
   loadSelections,
@@ -102,7 +102,7 @@ interface ChatError {
 // What the assistant is doing between text deltas.
 interface ChatActivity {
   conversation_id: number;
-  activity: "searching" | "working" | null;
+  activity: "searching" | "working" | "generating_image" | null;
 }
 interface TtsError {
   kind: string;
@@ -1166,18 +1166,29 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       );
     }
     const visible = stripToolMarkup(m.content);
+    const files = messageFiles(visible, fileRoots, m.artifacts);
     // A row that was only tool markup has nothing to show (S16).
-    if (visible.trim().length === 0 && !m.partial && (m.sources ?? []).length === 0) return null;
+    if (
+      visible.trim().length === 0 &&
+      !m.partial &&
+      (m.sources ?? []).length === 0 &&
+      files.chips.length === 0 &&
+      files.images.length === 0
+    )
+      return null;
     return (
       <article className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}>
         <Markdown text={visible} onOpenLink={openWebPreview} />
+        {files.images.map((path) => (
+          <img key={path} className="msg-image" src={convertFileSrc(path)} alt={t.chat.generatedImage} />
+        ))}
         {m.partial && (
           <p className="partial-note" role="note">
             {t.chat.interrupted}
           </p>
         )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
-        <FileChips paths={extractFilePaths(visible, fileRoots)} onOpen={openFilePreview} />
+        <FileChips paths={files.chips} onOpen={openFilePreview} />
         {VOICE_UI && visible.trim().length > 0 && (
           <div className="msg-actions">
             <button
@@ -1323,8 +1334,18 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                     {visibleDraft.length > 0 && <Markdown text={visibleDraft} onOpenLink={openWebPreview} />}
                     {activeActivity ? (
                       <p className="activity" role="status">
-                        {activeActivity === "searching" ? <IconGlobe size={15} /> : <IconFolder size={15} />}
-                        {activeActivity === "searching" ? t.chat.searching : t.chat.working}
+                        {activeActivity === "searching" ? (
+                          <IconGlobe size={15} />
+                        ) : activeActivity === "generating_image" ? (
+                          <span className="pulse-dot" aria-hidden="true" />
+                        ) : (
+                          <IconFolder size={15} />
+                        )}
+                        {activeActivity === "searching"
+                          ? t.chat.searching
+                          : activeActivity === "generating_image"
+                            ? t.chat.generatingImage
+                            : t.chat.working}
                       </p>
                     ) : visibleDraft.length === 0 ? (
                       <p className="activity" role="status">
