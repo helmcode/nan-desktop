@@ -6,7 +6,13 @@ import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { BRAND_MARK_SIZES, BrandMark } from "./brand";
 
-import css from "./App.css?raw";
+import { readFileSync } from "node:fs";
+// The CSS is read straight from disk: the ?raw import round-trips through
+// the vite transform pipeline, where vitest hands back an empty string for
+// style files.
+// jsdom's import.meta.url is an http:// URL: resolve from the repo root
+// (vitest always runs with the project as its cwd).
+const css = readFileSync("src/App.css", "utf8");
 
 const sources = import.meta.glob(["./**/*.tsx", "!./**/*.test.tsx", "!./brand.tsx"], {
   query: "?raw",

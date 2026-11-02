@@ -2167,3 +2167,28 @@ button:disabled {
   padding: 6px 10px;
   border-radius: 8px;
 }
+
+/* Brand mark tile (round 5): the official symbol inside a small rounded
+   tile, one corner-radius ratio at every size, matching the avatars and
+   chips. Size variants set ONLY the size via the CSS variable. */
+.brand-mark img {
+  width: auto;
+  height: 100%;
+  display: block;
+}
+
+.brand-mark--sm {
+  --brand-mark-size: 20px;
+}
+
+.brand-mark--md {
+  --brand-mark-size: 28px;
+}
+
+.brand-mark--lg {
+  --brand-mark-size: 32px;
+}
+
+.brand-mark--xl {
+  --brand-mark-size: 40px;
+}
