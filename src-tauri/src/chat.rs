@@ -19,11 +19,18 @@
 //! function (see `web_search.rs`) and, when the user set up a workspace,
 //! the file tools. Requested calls are run by the core — web search through
 //! the platform API (silent when unavailable), file actions through the
-//! tools subsystem with a NATIVE approval dialog per action — and the
-//! results are fed back until the model answers in text (at most
-//! [`MAX_TOOL_ROUNDS`] rounds). A server that rejects `tools` (400) is
-//! retried once without them. Web sources are persisted with the reply and
-//! rendered as citation chips.
+//! tools subsystem, approved per the grant's mode (no prompt in `allow`
+//! mode, an inline card in `ask` mode, a native dialog for computer-wide;
+//! see `tools::approval_route`) — and the results are fed back until the
+//! model answers in text (at most [`MAX_TOOL_ROUNDS`] rounds). A server
+//! that rejects `tools` (400) is retried once without them. Web sources are
+//! persisted with the reply and rendered as citation chips.
+//!
+//! Tool calls arrive as OpenAI `delta.tool_calls` OR, when the server-side
+//! tool parser is missing for the served model, as markup inside the
+//! content (DSML). Content always passes through
+//! `tool_markup::MarkupFilter`: the markup never reaches the UI or the DB
+//! as text and is converted into real tool calls (S16).
 //!
 //! Error kinds: `missing_key` / `unauthorized` (401 → the session must
 //! re-login) / `rate_limited` (429) / `server` (other non-2xx) / `network`
@@ -62,6 +69,7 @@ use tauri::{AppHandle, Emitter, Manager, Window};
 use crate::chat_store::{self, ChatMessageRow, ConversationView, WebSource};
 use crate::profile::{self, KEYRING_SERVICE};
 use crate::sse::{flush_sse_buffer, parse_sse_buffer};
+use crate::tool_markup::{self, MarkupFilter};
 use crate::{tools, web_search};
 
 /// Connect timeout for chat/model requests. No overall request timeout: a
@@ -229,6 +237,55 @@ impl ToolCallAccumulator {
     }
 }
 
+/// Native OpenAI tool calls win; markup recovered from the content is the
+/// fallback for servers whose tool parser does not understand the served
+/// model (S16). When both exist, the markup is the same calls leaked as
+/// text, so it is not executed twice.
+pub fn merge_tool_calls(
+    native: Vec<ToolCall>,
+    fallback: Vec<tool_markup::MarkupCall>,
+) -> Vec<ToolCall> {
+    if !native.is_empty() {
+        return native;
+    }
+    fallback
+        .into_iter()
+        .enumerate()
+        .map(|(i, call)| ToolCall {
+            id: format!("markup_call_{i}"),
+            name: call.name,
+            arguments: call.arguments,
+        })
+        .collect()
+}
+
+/// Per-round parser over SSE data payloads: content deltas go through the
+/// markup filter (only user-facing text comes out), tool calls are
+/// rebuilt from OpenAI deltas or, failing that, from content markup.
+#[derive(Debug, Default)]
+pub struct RoundParser {
+    calls: ToolCallAccumulator,
+    markup: MarkupFilter,
+}
+
+impl RoundParser {
+    /// Absorb one SSE data payload; returns the text that may be shown now
+    /// (possibly empty).
+    pub fn absorb(&mut self, data: &str) -> String {
+        self.calls.absorb(data);
+        match extract_delta(data) {
+            DeltaOutcome::Delta(delta) => self.markup.push(&delta),
+            DeltaOutcome::None => String::new(),
+        }
+    }
+
+    /// End of the round: trailing visible text and the complete tool calls.
+    pub fn finish(self) -> (String, Vec<ToolCall>) {
+        let (tail, fallback) = self.markup.finish();
+        (tail, merge_tool_calls(self.calls.finish(), fallback))
+    }
+}
+
 /// File tools offered when the profile has a workspace (OpenAI function
 /// definitions; paths are absolute and must sit inside a workspace folder —
 /// the Rust core enforces that, the model is only told).
@@ -262,11 +319,25 @@ fn file_tool_definitions(run_command: bool) -> Vec<serde_json::Value> {
                 "new": { "type": "string", "description": "Replacement text." }
             }, "required": ["path", "old", "new"] }
         }}),
+        serde_json::json!({ "type": "function", "function": {
+            "name": "move_path",
+            "description": "Move or rename a file or folder. Both paths must be inside the workspace. An existing destination file is only replaced with overwrite: true; folders are never overwritten.",
+            "parameters": { "type": "object", "properties": {
+                "from": path,
+                "to": { "type": "string", "description": "Absolute destination path (the full new path, not just a folder)." },
+                "overwrite": { "type": "boolean", "description": "Replace an existing destination file. Default false." }
+            }, "required": ["from", "to"] }
+        }}),
+        serde_json::json!({ "type": "function", "function": {
+            "name": "delete_path",
+            "description": "Delete a file or folder (moved to the trash when possible, otherwise permanently; the user is told which). Workspace folders themselves cannot be deleted.",
+            "parameters": { "type": "object", "properties": { "path": path }, "required": ["path"] }
+        }}),
     ];
     if run_command {
         defs.push(serde_json::json!({ "type": "function", "function": {
             "name": "run_command",
-            "description": "Run a shell command inside a workspace folder (30 s limit).",
+            "description": "Run a shell command inside a workspace folder (30 s limit, output capped at 64 KiB). Use it for what the file tools cannot do, including generating binary files such as PDFs, images or spreadsheets with tools installed on the user's computer (for example converting an HTML or Markdown file you wrote into a PDF).",
             "parameters": { "type": "object", "properties": {
                 "cmd": { "type": "string", "description": "The command line." },
                 "cwd": { "type": "string", "description": "Absolute workspace folder to run it in." }
@@ -299,11 +370,21 @@ pub fn workspace_prompt(workspace: &tools::Workspace) -> String {
     } else {
         "You may only work inside these folders."
     };
+    let commands = if workspace.run_command {
+        "\nYou can also run shell commands in a workspace folder with run_command. \
+         write_file only writes text: to produce a binary artifact (PDF, image, \
+         spreadsheet), write the source (for example HTML or Markdown) and convert it \
+         with run_command using a tool available on the user's computer."
+    } else {
+        ""
+    };
     format!(
-        "You can work with the user's files through the file tools. {scope}\n\
+        "You can work with the user's files through the file tools \
+         (list_files, read_file, write_file, replace_file, move_path, delete_path). {scope}\n\
          Workspace folders:\n{folders}\n\
-         Always use absolute paths. Every action is shown to the user for approval; \
-         if they decline, do not retry — ask them how to proceed."
+         Always use absolute paths. Depending on the folder's settings an action runs \
+         directly or is shown to the user for approval first; if they decline, do not \
+         retry, ask them how to proceed.{commands}"
     )
 }
 
@@ -815,9 +896,18 @@ async fn run_chat_stream(
     };
     let mut messages: Vec<serde_json::Value> =
         match chat_store::list_messages(&conn, conversation_id) {
+            // Older replies may hold leaked tool markup (pre-S16): never
+            // feed it back, the model would imitate it.
             Ok(rows) => rows
                 .iter()
-                .map(|row| serde_json::json!({ "role": row.role, "content": row.content }))
+                .map(|row| {
+                    let content = if row.role == "assistant" {
+                        tool_markup::sanitize_for_ui(&row.content)
+                    } else {
+                        row.content.clone()
+                    };
+                    serde_json::json!({ "role": row.role, "content": content })
+                })
                 .collect(),
             Err(_) => {
                 emit_error(ErrorKind::Protocol);
@@ -1002,7 +1092,10 @@ async fn run_chat_stream(
         (None, Some(row)) => {
             // Clean finish: finalize the in-progress row in place with the
             // final accumulated text and its web sources (citation chips).
-            let persisted = chat_store::finalize_message(&conn, row, &accumulated)
+            // Defense in depth (S16): the stream filter already removed any
+            // tool markup; sanitize once more before the final write.
+            let final_text = tool_markup::sanitize_for_ui(&accumulated);
+            let persisted = chat_store::finalize_message(&conn, row, &final_text)
                 .and_then(|_| {
                     if sources.is_empty() {
                         Ok(())
@@ -1075,7 +1168,7 @@ async fn stream_round(
     let mut stream = response.bytes_stream();
     let mut byte_buffer: Vec<u8> = Vec::new();
     let mut sse_buffer = String::new();
-    let mut calls = ToolCallAccumulator::default();
+    let mut parser = RoundParser::default();
     let mut text = String::new();
     let mut finished = false;
 
@@ -1107,9 +1200,9 @@ async fn stream_round(
                 finished = true;
                 break;
             }
-            calls.absorb(&data);
-            if let DeltaOutcome::Delta(delta) = extract_delta(&data) {
-                push_delta(delta, &mut text, &mut *accumulated);
+            let visible = parser.absorb(&data);
+            if !visible.is_empty() {
+                push_delta(visible, &mut text, &mut *accumulated);
                 pending_flush = true;
             }
         }
@@ -1127,16 +1220,20 @@ async fn stream_round(
     if !finished {
         // Flush a stream that ended without a trailing blank line / [DONE].
         for data in flush_sse_buffer(&mut sse_buffer) {
-            calls.absorb(&data);
-            if let DeltaOutcome::Delta(delta) = extract_delta(&data) {
-                push_delta(delta, &mut text, &mut *accumulated);
+            let visible = parser.absorb(&data);
+            if !visible.is_empty() {
+                push_delta(visible, &mut text, &mut *accumulated);
             }
         }
     }
-    Ok(RoundOutput {
-        text,
-        tool_calls: calls.finish(),
-    })
+    let (tail, tool_calls) = parser.finish();
+    if !tail.is_empty() {
+        push_delta(tail, &mut text, &mut *accumulated);
+    }
+    // Persist the final round text (the tail, and anything the in-loop
+    // flush did not cover).
+    chat_store::update_message_content(&conn, row, accumulated).map_err(|_| ErrorKind::Protocol)?;
+    Ok(RoundOutput { text, tool_calls })
 }
 
 /// Run one model tool call and return the tool-message content. Web search
@@ -1226,7 +1323,14 @@ pub fn conversation_delete(app: AppHandle, conversation_id: i64) -> Result<(), S
 pub fn messages_list(app: AppHandle, conversation_id: i64) -> Result<Vec<ChatMessageRow>, String> {
     let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
     let conn = chat_store::open_db(&dir)?;
-    chat_store::list_messages(&conn, conversation_id).map_err(|err| err.to_string())
+    let mut rows =
+        chat_store::list_messages(&conn, conversation_id).map_err(|err| err.to_string())?;
+    // Defense in depth (S16): replies stored before the markup filter may
+    // hold leaked tool-call markup; it is never rendered as text.
+    for row in rows.iter_mut().filter(|row| row.role == "assistant") {
+        row.content = tool_markup::sanitize_for_ui(&row.content);
+    }
+    Ok(rows)
 }
 
 /// Chat-capable models for the active profile: `GET {inference_base}/models`
@@ -1717,14 +1821,95 @@ mod tests {
                 "list_files",
                 "read_file",
                 "write_file",
-                "replace_file"
+                "replace_file",
+                "move_path",
+                "delete_path"
             ]
         );
         let ws = tools::Workspace {
             run_command: true,
             ..ws
         };
-        assert!(names(tool_definitions(Some(&ws))).contains(&"run_command".to_string()));
+        let defs = tool_definitions(Some(&ws));
+        assert!(names(defs.clone()).contains(&"run_command".to_string()));
+        let run = defs
+            .iter()
+            .find(|d| d["function"]["name"] == "run_command")
+            .expect("run_command");
+        assert!(
+            run["function"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("PDF"),
+            "the model learns it can build binary artifacts"
+        );
+    }
+
+    #[test]
+    fn move_and_delete_calls_map_onto_core_actions() {
+        assert_eq!(
+            action_from_call("move_path", r#"{"from":"/a/x","to":"/a/y"}"#),
+            Ok(tools::ToolAction::MovePath {
+                from: "/a/x".into(),
+                to: "/a/y".into(),
+                overwrite: false
+            })
+        );
+        assert_eq!(
+            action_from_call("delete_path", r#"{"path":"/a/x"}"#),
+            Ok(tools::ToolAction::DeletePath {
+                path: "/a/x".into()
+            })
+        );
+    }
+
+    // ---- S16: tool-call markup in content ------------------------------------
+
+    /// SSE `data:` payload carrying one content delta.
+    fn content_chunk(text: &str) -> String {
+        serde_json::json!({ "choices": [{ "delta": { "content": text } }] }).to_string()
+    }
+
+    #[test]
+    fn leaked_dsml_in_streamed_content_becomes_a_tool_call_never_text() {
+        // L18 item 4: the server's tool parser was missing, DSML arrived as
+        // content split across deltas.
+        let leaked = "<|DSML|calls> <|DSML|invoke name=\"replace_file\"> <|DSML|parameter name=\"new\" string=\"true\">2026-09-21|34.40|Fathom|saas ...</|DSML|parameter> <|DSML|parameter name=\"old\" string=\"true\">...</|DSML|parameter> <|DSML|parameter name=\"path\" string=\"true\">/Users/barckcode/Downloads/helmcode/informe-gastos.html</|DSML|parameter> </|DSML|invoke> </|DSML|calls>";
+        let mut parser = RoundParser::default();
+        let mut shown = parser.absorb(&content_chunk("Actualizo el informe. "));
+        for piece in leaked.as_bytes().chunks(7) {
+            let piece = std::str::from_utf8(piece).expect("ascii sample");
+            shown.push_str(&parser.absorb(&content_chunk(piece)));
+        }
+        let (tail, calls) = parser.finish();
+        shown.push_str(&tail);
+        assert_eq!(shown, "Actualizo el informe. ");
+        assert!(!shown.contains("DSML"));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "replace_file");
+        assert_eq!(calls[0].id, "markup_call_0");
+        // The recovered call maps onto a real core action.
+        assert_eq!(
+            action_from_call(&calls[0].name, &calls[0].arguments),
+            Ok(tools::ToolAction::ReplaceFile {
+                path: "/Users/barckcode/Downloads/helmcode/informe-gastos.html".into(),
+                old: "...".into(),
+                new: "2026-09-21|34.40|Fathom|saas ...".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn openai_tool_call_deltas_still_win_over_content_markup() {
+        let mut parser = RoundParser::default();
+        parser.absorb(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"read_file","arguments":"{\"path\":\"/a\"}"}}]}}]}"#);
+        let shown = parser.absorb(&content_chunk(
+            "<|DSML|calls><|DSML|invoke name=\"read_file\"><|DSML|parameter name=\"path\" string=\"true\">/a</|DSML|parameter></|DSML|invoke></|DSML|calls>",
+        ));
+        let (tail, calls) = parser.finish();
+        assert!(shown.is_empty() && tail.is_empty(), "markup hidden anyway");
+        assert_eq!(calls.len(), 1, "not executed twice");
+        assert_eq!(calls[0].id, "call_x");
     }
 
     #[test]
@@ -1737,6 +1922,13 @@ mod tests {
         let prompt = workspace_prompt(&ws);
         assert!(prompt.contains("/Users/me/Proyecto"));
         assert!(prompt.contains("only work inside"));
+        assert!(prompt.contains("move_path") && prompt.contains("delete_path"));
+        assert!(!prompt.contains("run_command"), "not offered when off");
+        let with_commands = workspace_prompt(&tools::Workspace {
+            run_command: true,
+            ..ws.clone()
+        });
+        assert!(with_commands.contains("run_command") && with_commands.contains("PDF"));
         let wide = workspace_prompt(&tools::Workspace {
             computer_wide: true,
             ..ws
