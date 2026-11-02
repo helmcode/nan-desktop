@@ -1,17 +1,16 @@
-// Settings screen: workspace folders, memory, voice, about/sign-out.
-// Plain language only — the target user is not technical.
+// Settings: working folders (with per-grant approval mode), commands,
+// memory, language, voice (hidden this round) and about/sign-out.
+// Plain language only; the target user is not technical.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { VOICES, folderName, profileTitle } from "./copy";
-import {
-  IconArrowLeft,
-  IconCheck,
-  IconComputer,
-  IconFolder,
-  IconPlus,
-  IconWarning,
-} from "./icons";
+import { BrandMark } from "./brand";
+import type { SettingsSection } from "./components/UserMenu";
+import { VOICES, folderName, grantErrorLabel, profileTitle } from "./copy";
+import { DEFAULT_GRANT_MODE, type GrantMode } from "./core";
+import { VOICE_UI } from "./flags";
+import { LOCALES, useI18n } from "./i18n";
+import { IconArrowLeft, IconCheck, IconComputer, IconFolder, IconPlus, IconWarning } from "./icons";
 import type { AppInfo, MemoryMode, MemorySettingsView, ProfileView, ToolsSettingsView } from "./types";
 import type { Workspace } from "./workspace";
 
@@ -24,6 +23,7 @@ export function Settings({
   onBack,
   onSignOut,
   signingOut,
+  focusSection = null,
 }: {
   profile: ProfileView | undefined;
   workspace: Workspace;
@@ -33,12 +33,19 @@ export function Settings({
   onBack: () => void;
   onSignOut: () => void;
   signingOut: boolean;
+  focusSection?: SettingsSection;
 }) {
-  const [runCommand, setRunCommand] = useState(false);
+  const { t, locale, setLocale } = useI18n();
+  // S15: run_command is on by default; the core still asks per action.
+  const [runCommand, setRunCommand] = useState(true);
   const [runCommandBusy, setRunCommandBusy] = useState(false);
   const [memoryMode, setMemoryMode] = useState<MemoryMode>("remote");
   const [memoryBusy, setMemoryBusy] = useState(false);
+  const [newFolderMode, setNewFolderMode] = useState<GrantMode>(DEFAULT_GRANT_MODE);
   const [version, setVersion] = useState("");
+  const foldersRef = useRef<HTMLElement | null>(null);
+  const memoryRef = useRef<HTMLElement | null>(null);
+  const languageRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     void workspace.refresh();
@@ -54,6 +61,19 @@ export function Settings({
     // Load once per visit (the workspace object changes identity per render).
   }, []);
 
+  // Entry from the user menu: bring the requested section into view.
+  useEffect(() => {
+    const target =
+      focusSection === "folders"
+        ? foldersRef.current
+        : focusSection === "memory"
+          ? memoryRef.current
+          : focusSection === "language"
+            ? languageRef.current
+            : null;
+    target?.scrollIntoView?.({ block: "start" });
+  }, [focusSection]);
+
   // Escape returns to the chat.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -65,13 +85,12 @@ export function Settings({
 
   const toggleRunCommand = async (enabled: boolean): Promise<void> => {
     setRunCommandBusy(true);
+    const previous = runCommand;
     try {
-      // Enabling shows a native confirmation from the core; declining
-      // leaves it off.
       await invoke("tools_set_run_command_enabled", { enabled });
       setRunCommand(enabled);
     } catch {
-      setRunCommand(false);
+      setRunCommand(previous);
     } finally {
       setRunCommandBusy(false);
     }
@@ -96,24 +115,24 @@ export function Settings({
     }
   };
 
+  const f = t.settings.folders;
+  const errorText = grantErrorLabel(t, workspace.error);
+
   return (
     <section className="settings" aria-labelledby="settings-title">
       <header className="settings-header">
         <button type="button" className="btn btn-ghost btn-sm" onClick={onBack}>
           <IconArrowLeft size={16} />
-          Volver al chat
+          {t.settings.back}
         </button>
-        <h1 id="settings-title">Ajustes</h1>
+        <h1 id="settings-title">{t.settings.title}</h1>
       </header>
 
       <div className="settings-body">
-        {/* ---- Workspace ------------------------------------------------ */}
-        <section className="settings-section" aria-labelledby="ws-title">
-          <h2 id="ws-title">Carpetas de trabajo</h2>
-          <p className="section-lede">
-            El asistente solo puede trabajar con archivos de las carpetas que elijas aquí, y
-            siempre te pide permiso antes de cada acción.
-          </p>
+        {/* ---- Working folders ------------------------------------------ */}
+        <section className="settings-section" aria-labelledby="ws-title" ref={foldersRef}>
+          <h2 id="ws-title">{f.title}</h2>
+          <p className="section-lede">{f.lede}</p>
 
           <ul className="grant-list">
             {workspace.computerWide && (
@@ -122,11 +141,8 @@ export function Settings({
                   <IconComputer />
                 </span>
                 <div className="grant-text">
-                  <strong>Todo el equipo</strong>
-                  <span>
-                    El asistente puede pedirte acceso a cualquier archivo de tu usuario. Bajo tu
-                    responsabilidad.
-                  </span>
+                  <strong>{f.wideTitle}</strong>
+                  <span>{f.wideBody}</span>
                 </div>
                 <button
                   type="button"
@@ -134,52 +150,76 @@ export function Settings({
                   onClick={() => void workspace.disableComputerWide()}
                   disabled={workspace.busy}
                 >
-                  Desactivar
+                  {f.disable}
                 </button>
               </li>
             )}
-            {workspace.folders.map((grant) => (
-              <li key={grant.id} className="grant-card">
-                <span className="grant-icon">
-                  <IconFolder />
-                </span>
-                <div className="grant-text">
-                  <strong>{folderName(grant.canonical_path)}</strong>
-                  <span>
-                    El asistente puede leer y escribir en {folderName(grant.canonical_path)}.
+            {workspace.folders.map((grant) => {
+              const name = folderName(grant.canonical_path);
+              const mode = workspace.modes[grant.id] ?? DEFAULT_GRANT_MODE;
+              return (
+                <li key={grant.id} className="grant-card">
+                  <span className="grant-icon">
+                    <IconFolder />
                   </span>
-                  <code className="grant-path" title={grant.canonical_path}>
-                    {grant.canonical_path}
-                  </code>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => void workspace.removeGrant(grant.id)}
-                  disabled={workspace.busy}
-                  aria-label={`Quitar la carpeta ${folderName(grant.canonical_path)}`}
-                >
-                  Quitar
-                </button>
-              </li>
-            ))}
+                  <div className="grant-text">
+                    <strong>{name}</strong>
+                    <span>{f.folderBody(name)}</span>
+                    <code className="grant-path" title={grant.canonical_path}>
+                      {grant.canonical_path}
+                    </code>
+                    <ModeSwitch
+                      label={f.modeLabel(name)}
+                      value={mode}
+                      disabled={workspace.busy}
+                      onChange={(next) => void workspace.setMode(grant.id, next)}
+                    />
+                    {mode === "allow" && <span className="grant-mode-hint">{f.modeAllowHint}</span>}
+                  </div>
+                  <div className="grant-actions">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => void workspace.repickFolder(grant.id)}
+                      disabled={workspace.busy}
+                      aria-label={f.repickLabel(name)}
+                    >
+                      {f.repick}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => void workspace.removeGrant(grant.id)}
+                      disabled={workspace.busy}
+                      aria-label={f.removeLabel(name)}
+                    >
+                      {f.remove}
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
             {workspace.folders.length === 0 && !workspace.computerWide && (
-              <li className="grant-empty">
-                Todavía no has elegido ninguna carpeta. El asistente puede conversar contigo, pero
-                no tocará ningún archivo.
-              </li>
+              <li className="grant-empty">{f.empty}</li>
             )}
           </ul>
 
           <div className="row-actions">
+            <ModeSwitch
+              label={f.newFolderMode}
+              showLabel
+              value={newFolderMode}
+              disabled={workspace.busy || !profile}
+              onChange={setNewFolderMode}
+            />
             <button
               type="button"
               className="btn btn-secondary"
-              onClick={() => void workspace.addFolder()}
+              onClick={() => void workspace.addFolder(newFolderMode)}
               disabled={workspace.busy || !profile}
             >
               <IconPlus size={16} />
-              Añadir carpeta…
+              {f.add}
             </button>
             {!workspace.computerWide && (
               <button
@@ -189,13 +229,13 @@ export function Settings({
                 disabled={workspace.busy || !profile}
               >
                 <IconWarning size={16} />
-                Dar acceso a todo el equipo…
+                {f.giveWide}
               </button>
             )}
           </div>
-          {workspace.error && (
+          {errorText && (
             <p className="inline-error" role="alert">
-              {workspace.error}
+              {errorText}
             </p>
           )}
 
@@ -212,86 +252,139 @@ export function Settings({
                 <span className="switch-track" aria-hidden="true" />
               </span>
               <span className="switch-label">
-                <strong>Ejecutar órdenes en tu equipo</strong>
-                <span className="tag tag-danger">Experimental</span>
+                <strong>{t.settings.commands.title}</strong>
               </span>
             </label>
             <p className="danger-note">
               <IconWarning size={16} />
-              <span>
-                Permite que el asistente ejecute órdenes dentro de tus carpetas de trabajo,
-                pidiéndote permiso cada vez. Una orden puede hacer cualquier cosa que harías tú:
-                borrar archivos, usar internet o cambiar ajustes. Déjalo desactivado si no lo
-                necesitas.
-              </span>
+              <span>{t.settings.commands.body}</span>
             </p>
           </div>
         </section>
 
         {/* ---- Memory --------------------------------------------------- */}
-        <section className="settings-section" aria-labelledby="mem-title">
-          <h2 id="mem-title">Memoria</h2>
-          <p className="section-lede">Dónde se guardan tus conversaciones.</p>
+        <section className="settings-section" aria-labelledby="mem-title" ref={memoryRef}>
+          <h2 id="mem-title">{t.settings.memory.title}</h2>
+          <p className="section-lede">{t.settings.memory.lede}</p>
           <div className="choice-list" role="radiogroup" aria-labelledby="mem-title">
             <ChoiceCard
               selected={memoryMode === "remote"}
               disabled={memoryBusy || !profile}
               onSelect={() => void chooseMemory("remote")}
-              title="En tu cuenta"
-              badge="Recomendado"
-              description="Tus conversaciones se guardan en tu cuenta — disponibles en cualquier dispositivo."
+              title={t.settings.memory.remoteTitle}
+              badge={t.settings.memory.remoteBadge}
+              description={t.settings.memory.remoteBody}
             />
             <ChoiceCard
               selected={memoryMode === "local"}
               disabled={memoryBusy || !profile}
               onSelect={() => void chooseMemory("local")}
-              title="Solo en este dispositivo"
-              description="Tus conversaciones no salen de este ordenador. No las verás en otros dispositivos."
+              title={t.settings.memory.localTitle}
+              description={t.settings.memory.localBody}
             />
           </div>
         </section>
 
-        {/* ---- Voice ---------------------------------------------------- */}
-        <section className="settings-section" aria-labelledby="voice-title">
-          <h2 id="voice-title">Voz</h2>
-          <p className="section-lede">La voz que lee en alto las respuestas.</p>
-          <div className="choice-list choice-list-compact" role="radiogroup" aria-labelledby="voice-title">
-            {VOICES.map((v) => (
+        {/* ---- Language ------------------------------------------------- */}
+        <section className="settings-section" aria-labelledby="lang-title" ref={languageRef}>
+          <h2 id="lang-title">{t.settings.language.title}</h2>
+          <p className="section-lede">{t.settings.language.lede}</p>
+          <div className="choice-list choice-list-compact" role="radiogroup" aria-labelledby="lang-title">
+            {LOCALES.map((id) => (
               <ChoiceCard
-                key={v.id}
-                selected={voice === v.id}
-                onSelect={() => onVoiceChange(v.id)}
-                title={v.label}
-                description={v.hint}
+                key={id}
+                selected={locale === id}
+                onSelect={() => setLocale(id)}
+                title={t.language.names[id]}
+                lang={id}
               />
             ))}
           </div>
         </section>
 
+        {/* ---- Voice (S24: hidden this round) ---------------------------- */}
+        {VOICE_UI && (
+          <section className="settings-section" aria-labelledby="voice-title">
+            <h2 id="voice-title">{t.settings.voice.title}</h2>
+            <p className="section-lede">{t.settings.voice.lede}</p>
+            <div className="choice-list choice-list-compact" role="radiogroup" aria-labelledby="voice-title">
+              {VOICES.map((v) => (
+                <ChoiceCard
+                  key={v.id}
+                  selected={voice === v.id}
+                  onSelect={() => onVoiceChange(v.id)}
+                  title={v.label}
+                  description={t.voices[v.id] ?? ""}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* ---- About ---------------------------------------------------- */}
         <section className="settings-section" aria-labelledby="about-title">
-          <h2 id="about-title">Acerca de</h2>
+          <h2 id="about-title">{t.settings.about.title}</h2>
+          <div className="about-product">
+            <BrandMark size={28} />
+            <strong>{t.settings.about.product}</strong>
+          </div>
           <dl className="about-list">
             <div>
-              <dt>Cuenta</dt>
-              <dd>{profile ? profileTitle(profile.id, profile.name) : "—"}</dd>
+              <dt>{t.settings.about.account}</dt>
+              <dd>{profile ? profileTitle(t, profile.id, profile.name) : t.settings.about.none}</dd>
             </div>
             <div>
-              <dt>Versión</dt>
-              <dd className="mono">{version || "—"}</dd>
+              <dt>{t.settings.about.version}</dt>
+              <dd className="mono">{version || "-"}</dd>
             </div>
           </dl>
-          <button
-            type="button"
-            className="btn btn-ghost btn-danger"
-            onClick={onSignOut}
-            disabled={signingOut}
-          >
-            Cerrar sesión
+          <button type="button" className="btn btn-ghost btn-danger" onClick={onSignOut} disabled={signingOut}>
+            {t.settings.about.signOut}
           </button>
         </section>
       </div>
     </section>
+  );
+}
+
+/// Two-option segmented switch for a grant's approval mode (S13).
+function ModeSwitch({
+  label,
+  value,
+  onChange,
+  disabled,
+  showLabel = false,
+}: {
+  label: string;
+  value: GrantMode;
+  onChange: (mode: GrantMode) => void;
+  disabled?: boolean;
+  showLabel?: boolean;
+}) {
+  const { t } = useI18n();
+  const options: Array<{ id: GrantMode; text: string }> = [
+    { id: "ask", text: t.settings.folders.modeAsk },
+    { id: "allow", text: t.settings.folders.modeAllow },
+  ];
+  return (
+    <div className="mode-switch-wrap">
+      {showLabel && <span className="mode-switch-label">{label}</span>}
+      <div className="mode-switch" role="radiogroup" aria-label={label}>
+        {options.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            role="radio"
+            aria-checked={value === option.id}
+            className={`mode-option${value === option.id ? " selected" : ""}${option.id === "allow" ? " allow" : ""}`}
+            onClick={() => value !== option.id && onChange(option.id)}
+            disabled={disabled}
+          >
+            {option.text}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -302,13 +395,15 @@ function ChoiceCard({
   title,
   description,
   badge,
+  lang,
 }: {
   selected: boolean;
   disabled?: boolean;
   onSelect: () => void;
   title: string;
-  description: string;
+  description?: string;
   badge?: string;
+  lang?: string;
 }) {
   return (
     <button
@@ -318,6 +413,7 @@ function ChoiceCard({
       className={`choice-card${selected ? " selected" : ""}`}
       onClick={onSelect}
       disabled={disabled}
+      lang={lang}
     >
       <span className="choice-dot" aria-hidden="true">
         {selected && <IconCheck size={12} />}
@@ -327,7 +423,7 @@ function ChoiceCard({
           {title}
           {badge && <span className="tag">{badge}</span>}
         </strong>
-        <span>{description}</span>
+        {description && <span>{description}</span>}
       </span>
     </button>
   );

@@ -1,6 +1,6 @@
-// Inline stroke icons (24px grid, 1.75 stroke) and the Helmcode hexagon mark.
-// Inline SVG keeps the app self-contained: no icon font, no remote assets
-// (the CSP only allows same-origin resources).
+// Inline stroke icons (24px grid, 1.75 stroke). Inline SVG keeps the app
+// self-contained: no icon font, no remote assets (the CSP only allows
+// same-origin resources). Brand marks live in brand.tsx.
 
 import type { ReactNode, SVGProps } from "react";
 
@@ -131,41 +131,54 @@ export const IconCopy = (p: IconProps) => (
   </Icon>
 );
 
-/// The Helmcode hexagon symbol. `variant="tile"` renders the white mark on
-/// an indigo tile (login hero); `variant="mark"` renders the indigo outline
-/// only (sidebar header, small sizes).
-export function BrandMark({
-  size = 28,
-  variant = "mark",
-}: {
-  size?: number;
-  variant?: "mark" | "tile";
-}) {
-  const hexagon = "M12 2.6 20.1 7.3v9.4L12 21.4 3.9 16.7V7.3z";
-  if (variant === "tile") {
-    return (
-      <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-        <rect width="48" height="48" rx="12" fill="#4934E1" />
-        <g transform="translate(12 12)">
-          <path d={hexagon} fill="none" stroke="#ffffff" strokeWidth="2" strokeLinejoin="round" />
-          <path d="M12 7.6v8.8M8.2 9.8 12 12l3.8-2.2" fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-        </g>
-      </svg>
-    );
-  }
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d={hexagon} fill="none" stroke="#818CF8" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M12 7.6v8.8M8.2 9.8 12 12l3.8-2.2" fill="none" stroke="#818CF8" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
+export const IconX = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M18 6 6 18M6 6l12 12" />
+  </Icon>
+);
 
-/// "helmcode_" wordmark (UI styling allowed by the brand kit).
-export function Wordmark() {
-  return (
-    <span className="wordmark" aria-label="Helmcode">
-      helmcode<span className="wordmark-cursor">_</span>
-    </span>
-  );
-}
+export const IconExternal = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+  </Icon>
+);
+
+export const IconFile = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <path d="M14 3v5h5" />
+  </Icon>
+);
+
+export const IconTerminal = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="m7 9 3 3-3 3M13 15h4" />
+  </Icon>
+);
+
+export const IconMove = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M5 12h14M13 6l6 6-6 6" />
+  </Icon>
+);
+
+export const IconLogout = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H4" />
+  </Icon>
+);
+
+export const IconMemory = (p: IconProps) => (
+  <Icon {...p}>
+    <ellipse cx="12" cy="6" rx="7" ry="3" />
+    <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />
+  </Icon>
+);
+
+export const IconPanel = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M15 4v16" />
+  </Icon>
+);

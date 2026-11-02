@@ -5,35 +5,54 @@
 //!    folder grants. Nothing is executed. A proposal (exact stored action,
 //!    canonical paths) lives in the Rust core for TTL 5 minutes,
 //!    single-use.
-//! 2. The UI shows the summary + unified diff to the user.
-//! 3. `tools_execute` runs ONLY the exact stored action — paths are
+//! 2. The core decides HOW the proposal is approved ([`approval_route`],
+//!    S13/S14): `auto` when every grant it touches is in `allow` mode,
+//!    `inline` (an approval card in the chat stream, answered through
+//!    `tools_approval_respond`) for `ask` mode, `native` (a dialog the
+//!    renderer cannot fake) whenever a computer-wide grant is involved. The
+//!    renderer only ever ANSWERS a pending request the core created
+//!    ([`ApprovalBroker`]); it can never originate an approval.
+//! 3. `execute` runs ONLY the exact stored action — paths are
 //!    re-canonicalized and re-verified under the grant right before use,
 //!    so symlink swaps or grant revocations between propose and execute
-//!    fail closed. `tools_deny` discards a proposal.
+//!    fail closed. A declined approval discards the proposal.
 //!
 //! Caps (spec S7): read/write ≤ 2 MiB, list depth ≤ 3 / 500 entries,
 //! command output ≤ 64 KiB, command timeout 30 s, binary files refused.
-//! `run_command` is experimental: OFF by default, gated by
-//! `tools_set_run_command_enabled`, per-action approval always applies.
+//! `run_command` is ON by default since round 2 (S15), switchable with
+//! `tools_set_run_command_enabled`; it asks in `ask` mode and runs without
+//! a prompt only when its cwd sits in an `allow`-mode grant.
+//!
+//! Destructive tools (S15): `move_path` (both ends inside granted scope,
+//! symlink leaves refused, symlink components refused on the destination,
+//! overwriting needs `overwrite: true`) and `delete_path` (to the OS trash
+//! when one is reachable on the same volume, otherwise PERMANENT, which the
+//! summary and approval text state explicitly). Grant roots, `$HOME`, the
+//! app data dir and the sensitive deny-list can never be removed or moved
+//! away, under any mode ([`grants::is_protected_removal_target`]).
 //!
 //! Audit: every propose/approve/deny/execute outcome is appended to
 //! `tools-audit.log` (paths + summaries only — never file contents).
 
+pub mod approvals;
 pub mod audit;
 pub mod diff;
 pub mod grants;
+pub mod trash;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::profile;
+pub use approvals::{ApprovalBroker, ApprovalRequest};
 use audit::AuditEntry;
-use grants::GrantsStore;
+use grants::{ApprovalMode, GrantScope, GrantsStore};
 
 // ---------------------------------------------------------------- caps --
 
@@ -92,6 +111,20 @@ pub enum ToolAction {
         cmd: String,
         cwd_in_grant: String,
     },
+    /// Move or rename a file/folder. Both ends must sit in granted scope.
+    /// An existing destination is only replaced with `overwrite: true`
+    /// (files only, never folders).
+    MovePath {
+        from: String,
+        to: String,
+        #[serde(default)]
+        overwrite: bool,
+    },
+    /// Delete a file or folder: into the OS trash when reachable, otherwise
+    /// permanently (stated in the summary and the approval text).
+    DeletePath {
+        path: String,
+    },
 }
 
 impl ToolAction {
@@ -102,6 +135,8 @@ impl ToolAction {
             ToolAction::WriteFile { .. } => "write_file",
             ToolAction::ReplaceFile { .. } => "replace_file",
             ToolAction::RunCommand { .. } => "run_command",
+            ToolAction::MovePath { .. } => "move_path",
+            ToolAction::DeletePath { .. } => "delete_path",
         }
     }
 }
@@ -138,10 +173,38 @@ pub struct Validated {
     pub diff: Option<String>,
     pub grant_id: Option<String>,
     pub canonical_path: Option<PathBuf>,
+    /// move_path only: the destination's grant and canonical path.
+    pub dest_grant_id: Option<String>,
+    pub dest_path: Option<PathBuf>,
+    /// delete_path only: no trash is reachable, the delete is permanent.
+    pub permanent_delete: bool,
+}
+
+impl Validated {
+    /// A single-path validation (every action except move_path).
+    fn single(
+        action: ToolAction,
+        summary: String,
+        diff: Option<String>,
+        grant_id: String,
+        canonical: PathBuf,
+    ) -> Self {
+        Validated {
+            action,
+            summary,
+            diff,
+            grant_id: Some(grant_id),
+            canonical_path: Some(canonical),
+            dest_grant_id: None,
+            dest_path: None,
+            permanent_delete: false,
+        }
+    }
 }
 
 /// A pending proposal held in the Rust core. The renderer only ever sees
-/// `ProposalView`; the stored action cannot be modified from outside.
+/// the approval request built from it; the stored action cannot be
+/// modified from outside.
 #[derive(Debug, Clone)]
 pub struct PendingProposal {
     pub id: String,
@@ -152,14 +215,20 @@ pub struct PendingProposal {
     pub diff: Option<String>,
     pub grant_id: Option<String>,
     pub canonical_path: Option<PathBuf>,
+    pub dest_grant_id: Option<String>,
+    pub dest_path: Option<PathBuf>,
+    pub permanent_delete: bool,
     pub created_at: Instant,
 }
 
-/// Rust-core state: pending proposals keyed by id.
+/// Rust-core state: pending proposals keyed by id, plus the inline
+/// approval requests waiting for the user's answer (S14).
 pub struct ToolsState {
     inner: Mutex<HashMap<String, PendingProposal>>,
     /// TTL for proposals. Tests shrink this to assert expiry.
     pub ttl: Duration,
+    /// Inline approval requests the renderer may answer (and nothing else).
+    pub approvals: ApprovalBroker,
 }
 
 impl Default for ToolsState {
@@ -167,6 +236,7 @@ impl Default for ToolsState {
         ToolsState {
             inner: Mutex::new(HashMap::new()),
             ttl: PROPOSAL_TTL,
+            approvals: ApprovalBroker::default(),
         }
     }
 }
@@ -244,19 +314,19 @@ fn diff_against_current(
     if meta.len() as usize > MAX_FILE_BYTES {
         // Overwriting is still legitimate; there is just no old content to
         // diff against within the cap.
-        return Ok((None, " (existing file over cap — no diff)".to_string()));
+        return Ok((None, " (existing file over cap, no diff)".to_string()));
     }
     let bytes =
         std::fs::read(canonical).map_err(|err| io_rejection("cannot read write target", err))?;
     if is_binary(&bytes) {
-        return Ok((None, " (overwrite binary file — no diff)".to_string()));
+        return Ok((None, " (overwrite binary file, no diff)".to_string()));
     }
     match String::from_utf8(bytes) {
         Ok(old) => {
             let diff_text = diff::unified_diff(&canonical.display().to_string(), &old, content);
             Ok((Some(diff_text), String::new()))
         }
-        Err(_) => Ok((None, " (overwrite non-UTF-8 file — no diff)".to_string())),
+        Err(_) => Ok((None, " (overwrite non-UTF-8 file, no diff)".to_string())),
     }
 }
 
@@ -272,27 +342,27 @@ pub fn validate_action(
     match action {
         ToolAction::ReadFile { path } => {
             let (grant_id, canonical) = grants::resolve_under_grant(store, profile_id, path)?;
-            Ok(Validated {
-                action: ToolAction::ReadFile {
+            Ok(Validated::single(
+                ToolAction::ReadFile {
                     path: canonical.display().to_string(),
                 },
-                summary: format!("read_file {}", canonical.display()),
-                diff: None,
-                grant_id: Some(grant_id),
-                canonical_path: Some(canonical),
-            })
+                format!("read_file {}", canonical.display()),
+                None,
+                grant_id,
+                canonical,
+            ))
         }
         ToolAction::ListFiles { path } => {
             let (grant_id, canonical) = grants::resolve_under_grant(store, profile_id, path)?;
-            Ok(Validated {
-                action: ToolAction::ListFiles {
+            Ok(Validated::single(
+                ToolAction::ListFiles {
                     path: canonical.display().to_string(),
                 },
-                summary: format!("list_files {}", canonical.display()),
-                diff: None,
-                grant_id: Some(grant_id),
-                canonical_path: Some(canonical),
-            })
+                format!("list_files {}", canonical.display()),
+                None,
+                grant_id,
+                canonical,
+            ))
         }
         ToolAction::WriteFile { path, content } => {
             if content.len() > MAX_FILE_BYTES {
@@ -310,20 +380,21 @@ pub fn validate_action(
                 .as_deref()
                 .map(diff::diff_line_counts)
                 .unwrap_or((0, 0));
-            Ok(Validated {
-                action: ToolAction::WriteFile {
+            let summary = format!(
+                "write_file {} (+{added} −{removed} lines, {} bytes){note}",
+                canonical.display(),
+                content.len()
+            );
+            Ok(Validated::single(
+                ToolAction::WriteFile {
                     path: canonical.display().to_string(),
                     content: content.clone(),
                 },
-                summary: format!(
-                    "write_file {} (+{added} −{removed} lines, {} bytes){note}",
-                    canonical.display(),
-                    content.len()
-                ),
-                diff: diff_text,
-                grant_id: Some(grant_id),
-                canonical_path: Some(canonical),
-            })
+                summary,
+                diff_text,
+                grant_id,
+                canonical,
+            ))
         }
         ToolAction::ReplaceFile { path, old, new } => {
             if old.is_empty() {
@@ -340,7 +411,7 @@ pub fn validate_action(
             if matches > 1 {
                 return Err(Rejection::new(
                     "ambiguous",
-                    format!("old text matches {matches} times — not unique"),
+                    format!("old text matches {matches} times, not unique"),
                 ));
             }
             let updated_len = current.len() - old.len() + new.len();
@@ -354,26 +425,27 @@ pub fn validate_action(
             let diff_text =
                 diff::unified_diff(&canonical.display().to_string(), &current, &updated);
             let (added, removed) = diff::diff_line_counts(&diff_text);
-            Ok(Validated {
-                action: ToolAction::ReplaceFile {
+            let summary = format!(
+                "replace_file {} (+{added} −{removed} lines)",
+                canonical.display()
+            );
+            Ok(Validated::single(
+                ToolAction::ReplaceFile {
                     path: canonical.display().to_string(),
                     old: old.clone(),
                     new: new.clone(),
                 },
-                summary: format!(
-                    "replace_file {} (+{added} −{removed} lines)",
-                    canonical.display()
-                ),
-                diff: Some(diff_text),
-                grant_id: Some(grant_id),
-                canonical_path: Some(canonical),
-            })
+                summary,
+                Some(diff_text),
+                grant_id,
+                canonical,
+            ))
         }
         ToolAction::RunCommand { cmd, cwd_in_grant } => {
             if !store.tools_allow_run_command {
                 return Err(Rejection::new(
                     "disabled",
-                    "run_command is experimental and disabled — enable it in Tools settings",
+                    "run_command is disabled; the user can enable it in Settings",
                 ));
             }
             if cmd.trim().is_empty() {
@@ -381,18 +453,191 @@ pub fn validate_action(
             }
             let (grant_id, canonical) =
                 grants::resolve_under_grant(store, profile_id, cwd_in_grant)?;
-            Ok(Validated {
-                action: ToolAction::RunCommand {
+            Ok(Validated::single(
+                ToolAction::RunCommand {
                     cmd: cmd.clone(),
                     cwd_in_grant: canonical.display().to_string(),
                 },
-                summary: format!("run_command \"{cmd}\" in {}", canonical.display()),
-                diff: None,
-                grant_id: Some(grant_id),
-                canonical_path: Some(canonical),
-            })
+                format!("run_command \"{cmd}\" in {}", canonical.display()),
+                None,
+                grant_id,
+                canonical,
+            ))
+        }
+        ToolAction::MovePath {
+            from,
+            to,
+            overwrite,
+        } => validate_move(store, profile_id, from, to, *overwrite),
+        ToolAction::DeletePath { path } => validate_delete(store, profile_id, path),
+    }
+}
+
+/// Refuse a raw (model-supplied) path whose LEAF is a symlink: deleting or
+/// moving it would act on the link target that canonicalization resolved
+/// to, not on the link the model named. Call after `resolve_under_grant`
+/// (which already rejected relative and `..` paths).
+fn reject_symlink_leaf(raw: &str) -> Result<(), Rejection> {
+    match std::fs::symlink_metadata(Path::new(raw.trim())) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(Rejection::new(
+            "symlink",
+            format!(
+                "{} is a symbolic link; refusing to move or delete it",
+                raw.trim()
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Existing entry at `canonical`, or a `not_found` rejection.
+fn existing_meta(canonical: &Path) -> Result<std::fs::Metadata, Rejection> {
+    std::fs::symlink_metadata(canonical).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            Rejection::new(
+                "not_found",
+                format!("{} does not exist", canonical.display()),
+            )
+        } else {
+            io_rejection("cannot stat path", err)
+        }
+    })
+}
+
+fn validate_move(
+    store: &GrantsStore,
+    profile_id: &str,
+    from: &str,
+    to: &str,
+    overwrite: bool,
+) -> Result<Validated, Rejection> {
+    let (grant_id, source) = grants::resolve_under_grant(store, profile_id, from)?;
+    reject_symlink_leaf(from)?;
+    let source_meta = existing_meta(&source)?;
+    let (dest_grant_id, dest) = grants::resolve_under_grant(store, profile_id, to)?;
+    reject_symlink_leaf(to)?;
+    if dest == source {
+        return Err(Rejection::new(
+            "protocol",
+            "source and destination are the same path",
+        ));
+    }
+    if grants::is_under(&source, &dest) {
+        return Err(Rejection::new(
+            "protocol",
+            "cannot move a folder inside itself",
+        ));
+    }
+    if !dest.parent().is_some_and(|parent| parent.is_dir()) {
+        return Err(Rejection::new(
+            "not_found",
+            "the destination folder does not exist",
+        ));
+    }
+    let replaces = match std::fs::symlink_metadata(&dest) {
+        Ok(meta) => {
+            if !overwrite {
+                return Err(Rejection::new(
+                    "exists",
+                    format!(
+                        "{} already exists; pass overwrite: true to replace it",
+                        dest.display()
+                    ),
+                ));
+            }
+            if meta.is_dir() || source_meta.is_dir() {
+                return Err(Rejection::new(
+                    "protocol",
+                    "only a file can replace an existing file; folders are never overwritten",
+                ));
+            }
+            true
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(io_rejection("cannot stat destination", err)),
+    };
+    let summary = format!(
+        "move_path {} to {}{}",
+        source.display(),
+        dest.display(),
+        if replaces {
+            " (replaces the existing file)"
+        } else {
+            ""
+        }
+    );
+    Ok(Validated {
+        action: ToolAction::MovePath {
+            from: source.display().to_string(),
+            to: dest.display().to_string(),
+            overwrite,
+        },
+        summary,
+        diff: None,
+        grant_id: Some(grant_id),
+        canonical_path: Some(source),
+        dest_grant_id: Some(dest_grant_id),
+        dest_path: Some(dest),
+        permanent_delete: false,
+    })
+}
+
+/// Bounded recursive entry count for a delete summary (never follows
+/// symlinks; stops at `MAX_LIST_SCAN`).
+fn count_entries_bounded(dir: &Path, budget: &mut usize) -> usize {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in read.flatten() {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
+        count += 1;
+        let is_real_dir = entry
+            .file_type()
+            .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink());
+        if is_real_dir {
+            count += count_entries_bounded(&entry.path(), budget);
         }
     }
+    count
+}
+
+fn validate_delete(
+    store: &GrantsStore,
+    profile_id: &str,
+    path: &str,
+) -> Result<Validated, Rejection> {
+    let (grant_id, canonical) = grants::resolve_under_grant(store, profile_id, path)?;
+    reject_symlink_leaf(path)?;
+    let meta = existing_meta(&canonical)?;
+    let what = if meta.is_dir() {
+        let mut budget = MAX_LIST_SCAN;
+        let count = count_entries_bounded(&canonical, &mut budget);
+        let more = if budget == 0 { "+" } else { "" };
+        format!("folder with {count}{more} entries")
+    } else {
+        format!("file, {} bytes", meta.len())
+    };
+    let permanent = !trash::available_for(trash::trash_home().as_deref(), &canonical);
+    let fate = if permanent {
+        "PERMANENT, no trash available on this volume"
+    } else {
+        "moved to the trash"
+    };
+    let mut validated = Validated::single(
+        ToolAction::DeletePath {
+            path: canonical.display().to_string(),
+        },
+        format!("delete_path {} ({what}; {fate})", canonical.display()),
+        None,
+        grant_id,
+        canonical,
+    );
+    validated.permanent_delete = permanent;
+    Ok(validated)
 }
 
 /// Audit a propose-time rejection: escape attempts are the most valuable
@@ -420,30 +665,74 @@ fn audit_rejection(
 
 /// The app data dir (`dir`) is never a valid target, whatever the grant:
 /// a computer-wide grant is rooted at `$HOME`, which contains it.
-fn reject_protected(dir: &Path, validated: Validated) -> Result<Validated, Rejection> {
-    if validated
-        .canonical_path
-        .as_deref()
-        .is_some_and(|path| grants::is_protected(dir, path))
-    {
-        return Err(Rejection::new(
-            "scope",
-            "the app's own data folder is off limits to tool actions",
-        ));
-    }
-    if let Some(path) = validated.canonical_path.as_deref() {
-        reject_sensitive_write(&validated.action, path)?;
-    }
+fn reject_protected(
+    dir: &Path,
+    store: &GrantsStore,
+    validated: Validated,
+) -> Result<Validated, Rejection> {
+    check_protected_paths(
+        dir,
+        store,
+        &validated.action,
+        validated.canonical_path.as_deref(),
+        validated.dest_path.as_deref(),
+    )?;
     Ok(validated)
 }
 
+/// The always-refused checks shared by propose AND execute, independent of
+/// grant mode and user approval: the app data dir, the sensitive write
+/// deny-list (for every mutating action, both ends of a move) and the
+/// protected removal targets (delete, and the source of a move).
+fn check_protected_paths(
+    dir: &Path,
+    store: &GrantsStore,
+    action: &ToolAction,
+    canonical: Option<&Path>,
+    dest: Option<&Path>,
+) -> Result<(), Rejection> {
+    for path in canonical.into_iter().chain(dest) {
+        if grants::is_protected(dir, path) {
+            return Err(Rejection::new(
+                "scope",
+                "the app's own data folder is off limits to tool actions",
+            ));
+        }
+        reject_sensitive_write(action, path)?;
+    }
+    if matches!(
+        action,
+        ToolAction::MovePath { .. } | ToolAction::DeletePath { .. }
+    ) && let Some(path) = canonical
+    {
+        let home = std::env::home_dir();
+        let roots: Vec<&Path> = store
+            .grants
+            .iter()
+            .map(|grant| grant.canonical_path.as_path())
+            .collect();
+        if grants::is_protected_removal_target(home.as_deref(), dir, &roots, path) {
+            return Err(Rejection::new(
+                "scope",
+                "this folder or file is protected and can never be moved away or deleted",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Writes into credential stores, login items, shell startup files and key
-/// files are refused outright — under any grant scope, even computer-wide,
-/// and regardless of user approval (see `grants::is_sensitive_write_target`).
+/// files are refused outright, under any grant scope (even computer-wide),
+/// any approval mode, and regardless of user approval (see
+/// `grants::is_sensitive_write_target`). Moving and deleting count as
+/// writes.
 fn reject_sensitive_write(action: &ToolAction, canonical: &Path) -> Result<(), Rejection> {
     let is_write = matches!(
         action,
-        ToolAction::WriteFile { .. } | ToolAction::ReplaceFile { .. }
+        ToolAction::WriteFile { .. }
+            | ToolAction::ReplaceFile { .. }
+            | ToolAction::MovePath { .. }
+            | ToolAction::DeletePath { .. }
     );
     let home = std::env::home_dir();
     if is_write && grants::is_sensitive_write_target(home.as_deref(), canonical) {
@@ -470,7 +759,7 @@ pub fn propose(
     }
     let store = load_store(dir)?;
     let validated = match validate_action(&store, profile_id, action)
-        .and_then(|validated| reject_protected(dir, validated))
+        .and_then(|validated| reject_protected(dir, &store, validated))
     {
         Ok(validated) => validated,
         Err(rejection) => {
@@ -493,6 +782,9 @@ pub fn propose(
         diff: validated.diff,
         grant_id: validated.grant_id,
         canonical_path: validated.canonical_path,
+        dest_grant_id: validated.dest_grant_id,
+        dest_path: validated.dest_path,
+        permanent_delete: validated.permanent_delete,
         created_at: Instant::now(),
     };
     map.insert(id, proposal.clone());
@@ -573,17 +865,19 @@ pub fn execute_proposal(dir: &Path, proposal: &PendingProposal) -> Result<ToolOu
         .canonical_path
         .as_deref()
         .ok_or_else(|| Rejection::new("protocol", "proposal has no canonical path"))?;
-    if grants::is_protected(dir, canonical) {
-        return Err(Rejection::new(
-            "scope",
-            "the app's own data folder is off limits to tool actions",
-        ));
-    }
-    reject_sensitive_write(&proposal.action, canonical)?;
+    check_protected_paths(
+        dir,
+        &store,
+        &proposal.action,
+        Some(canonical),
+        proposal.dest_path.as_deref(),
+    )?;
     // Re-verify the exact stored paths against the CURRENT filesystem and
     // the CURRENT grant set before touching anything.
     match &proposal.action {
-        ToolAction::ReadFile { .. } | ToolAction::ListFiles { .. } => {
+        ToolAction::ReadFile { .. }
+        | ToolAction::ListFiles { .. }
+        | ToolAction::DeletePath { .. } => {
             grants::verify_stable(&grant.canonical_path, canonical)?;
         }
         ToolAction::WriteFile { .. } | ToolAction::ReplaceFile { .. } => {
@@ -592,6 +886,25 @@ pub fn execute_proposal(dir: &Path, proposal: &PendingProposal) -> Result<ToolOu
         ToolAction::RunCommand { cwd_in_grant, .. } => {
             grants::verify_stable(&grant.canonical_path, Path::new(cwd_in_grant))?;
         }
+        ToolAction::MovePath { .. } => {
+            grants::verify_stable(&grant.canonical_path, canonical)?;
+            let dest_grant = proposal
+                .dest_grant_id
+                .as_deref()
+                .and_then(|id| store.grant_by_id(id))
+                .ok_or_else(|| {
+                    Rejection::new(
+                        "no_grant",
+                        "the folder grant behind the destination was revoked",
+                    )
+                })?;
+            let dest = proposal
+                .dest_path
+                .as_deref()
+                .ok_or_else(|| Rejection::new("protocol", "move proposal has no destination"))?;
+            // Symlink-component walk on the destination, like writes.
+            grants::verify_writable(&dest_grant.canonical_path, dest)?;
+        }
     }
     // Dispatch the EXACT stored action.
     match &proposal.action {
@@ -599,6 +912,14 @@ pub fn execute_proposal(dir: &Path, proposal: &PendingProposal) -> Result<ToolOu
         ToolAction::ListFiles { .. } => exec_list_files(canonical),
         ToolAction::WriteFile { content, .. } => exec_write_file(canonical, content),
         ToolAction::ReplaceFile { old, new, .. } => exec_replace_file(canonical, old, new),
+        ToolAction::MovePath { overwrite, .. } => {
+            let dest = proposal
+                .dest_path
+                .as_deref()
+                .ok_or_else(|| Rejection::new("protocol", "move proposal has no destination"))?;
+            exec_move_path(canonical, dest, *overwrite)
+        }
+        ToolAction::DeletePath { .. } => exec_delete_path(canonical, proposal.permanent_delete),
         ToolAction::RunCommand { cmd, .. } => {
             let output = run_captured(cmd, canonical, COMMAND_TIMEOUT)?;
             let truncated_note = if output.stdout_truncated || output.stderr_truncated {
@@ -609,7 +930,7 @@ pub fn execute_proposal(dir: &Path, proposal: &PendingProposal) -> Result<ToolOu
             Ok(ToolOutcome {
                 action: "run_command".into(),
                 summary: format!(
-                    "{} — exit {}{}{truncated_note}",
+                    "{}: exit {}{}{truncated_note}",
                     proposal.summary,
                     output
                         .exit_code
@@ -659,7 +980,7 @@ fn exec_list_files(root: &Path) -> Result<ToolOutcome, Rejection> {
     Ok(ToolOutcome {
         action: "list_files".into(),
         summary: format!(
-            "list_files {} — {} entries{}",
+            "list_files {}: {} entries{}",
             root.display(),
             entries.len(),
             note
@@ -768,6 +1089,77 @@ fn exec_replace_file(path: &Path, old: &str, new: &str) -> Result<ToolOutcome, R
             updated.len()
         ),
         bytes_written: Some(updated.len() as u64),
+        ..Default::default()
+    })
+}
+
+fn exec_move_path(source: &Path, dest: &Path, overwrite: bool) -> Result<ToolOutcome, Rejection> {
+    // Re-check the overwrite contract against the CURRENT destination:
+    // `rename` silently replaces files, so an entry that appeared after
+    // propose must not be clobbered without the explicit flag, and a
+    // folder is never replaced.
+    let replaced = match std::fs::symlink_metadata(dest) {
+        Ok(meta) => {
+            if !overwrite {
+                return Err(Rejection::new(
+                    "exists",
+                    "the destination appeared after the proposal; not replacing it",
+                ));
+            }
+            if meta.is_dir() || meta.file_type().is_symlink() {
+                return Err(Rejection::new(
+                    "protocol",
+                    "the destination is not a regular file; not replacing it",
+                ));
+            }
+            true
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(io_rejection("cannot stat destination", err)),
+    };
+    std::fs::rename(source, dest).map_err(|err| io_rejection("cannot move", err))?;
+    Ok(ToolOutcome {
+        action: "move_path".into(),
+        summary: format!(
+            "moved {} to {}{}",
+            source.display(),
+            dest.display(),
+            if replaced {
+                " (replaced the existing file)"
+            } else {
+                ""
+            }
+        ),
+        ..Default::default()
+    })
+}
+
+fn exec_delete_path(path: &Path, permanent: bool) -> Result<ToolOutcome, Rejection> {
+    if permanent {
+        let meta =
+            std::fs::symlink_metadata(path).map_err(|err| io_rejection("cannot stat path", err))?;
+        // remove_dir_all never follows symlinks inside the tree.
+        let removed = if meta.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        removed.map_err(|err| io_rejection("cannot delete", err))?;
+        return Ok(ToolOutcome {
+            action: "delete_path".into(),
+            summary: format!(
+                "deleted {} permanently (no trash available on this volume)",
+                path.display()
+            ),
+            ..Default::default()
+        });
+    }
+    // The approved semantic was "to the trash": if the trash fails now,
+    // fail closed instead of silently deleting permanently.
+    trash::move_to_trash(trash::trash_home().as_deref(), path)?;
+    Ok(ToolOutcome {
+        action: "delete_path".into(),
+        summary: format!("moved {} to the trash", path.display()),
         ..Default::default()
     })
 }
@@ -958,7 +1350,7 @@ pub fn execute(
             map.remove(proposal_id);
             return Err(Rejection::new(
                 "expired",
-                "proposal expired (TTL 5 minutes) — ask for a new one",
+                "proposal expired (TTL 5 minutes), ask for a new one",
             ));
         }
         map.remove(proposal_id)
@@ -1085,17 +1477,26 @@ fn native_confirm(app: &AppHandle, title: &str, text: String, ok: &str, cancel: 
 /// path never crosses the renderer, so a compromised renderer cannot add a
 /// grant by typing a path. Returns None when the user cancels the picker.
 ///
+/// `mode` (S13, optional, default `ask`) picks the approval mode at grant
+/// time; `allow` additionally requires the native confirmation of
+/// [`confirm_allow_mode`] and falls back to `ask` when declined.
+///
 /// `async` on purpose (P0-3): see the regression note above.
 #[tauri::command]
 pub async fn tools_grant_add(
     app: AppHandle,
     profile_id: String,
+    mode: Option<String>,
 ) -> Result<Option<grants::Grant>, Rejection> {
     use tauri_plugin_dialog::DialogExt;
     let dir = data_dir(&app).map_err(|err| Rejection::new("io", err))?;
     if !profile::is_known_profile_id(&profile_id) {
         return Err(Rejection::new("protocol", "unknown profile"));
     }
+    let requested_mode = match mode.as_deref() {
+        Some(raw) => ApprovalMode::parse(raw)?,
+        None => ApprovalMode::Ask,
+    };
     let picker_app = app.clone();
     let picked = off_main_thread(move || picker_app.dialog().file().blocking_pick_folder())
         .await
@@ -1147,7 +1548,127 @@ pub async fn tools_grant_add(
             detail: Some(format!("granted folder {}", canonical.display())),
         },
     )?;
+    if requested_mode == ApprovalMode::Allow {
+        return apply_mode(&app, &dir, &grant.id, ApprovalMode::Allow)
+            .await
+            .map(Some);
+    }
     Ok(Some(grant))
+}
+
+/// Native confirmation before a grant stops asking (S13). The renderer
+/// cannot fake it, so a compromised renderer cannot silently switch a
+/// folder to `allow`.
+async fn confirm_allow_mode(app: &AppHandle, folder: &Path) -> bool {
+    let dialog_app = app.clone();
+    let text = format!(
+        "El asistente podrá leer, crear, cambiar, mover y borrar archivos en esta \
+         carpeta SIN preguntarte cada vez:\n\n{}\n\nTambién podrá ejecutar órdenes \
+         dentro de ella sin preguntar, si tienes activadas las órdenes.\n\n\
+         Las carpetas protegidas y los archivos sensibles siguen bloqueados. \
+         Puedes volver a \"Preguntar siempre\" cuando quieras.",
+        folder.display()
+    );
+    off_main_thread(move || {
+        native_confirm(
+            &dialog_app,
+            "Permitir sin preguntar",
+            text,
+            "Permitir sin preguntar",
+            "Cancelar",
+        )
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Switch a grant's mode: `allow` only after the native confirmation
+/// (declined → the grant stays as it is). Audited as a settings event.
+async fn apply_mode(
+    app: &AppHandle,
+    dir: &Path,
+    grant_id: &str,
+    mode: ApprovalMode,
+) -> Result<grants::Grant, Rejection> {
+    let current = load_store(dir)?
+        .grant_by_id(grant_id)
+        .cloned()
+        .ok_or_else(|| Rejection::new("not_found", "no grant with this id"))?;
+    if mode == ApprovalMode::Allow {
+        if current.scope == GrantScope::ComputerWide {
+            return Err(Rejection::new(
+                "scope",
+                "computer-wide access always asks before every action",
+            ));
+        }
+        if current.mode != ApprovalMode::Allow
+            && !confirm_allow_mode(app, &current.canonical_path).await
+        {
+            audit_event(
+                dir,
+                AuditEntry {
+                    ts: audit::timestamp_now_rfc3339(),
+                    event: "settings".into(),
+                    action: "grant_mode".into(),
+                    outcome: "ignored".into(),
+                    grant_id: Some(grant_id.to_string()),
+                    profile_id: Some(current.profile_id.clone()),
+                    detail: Some("allow mode declined in the native dialog".into()),
+                },
+            )?;
+            return Ok(current);
+        }
+    }
+    // Reload after the (possibly long) dialog: never write back a stale store.
+    let mut store = load_store(dir)?;
+    let updated = store.set_mode(grant_id, mode)?;
+    grants::save(dir, &store).map_err(|err| Rejection::new("io", err))?;
+    audit_event(
+        dir,
+        AuditEntry {
+            ts: audit::timestamp_now_rfc3339(),
+            event: "settings".into(),
+            action: "grant_mode".into(),
+            outcome: "ok".into(),
+            grant_id: Some(grant_id.to_string()),
+            profile_id: Some(updated.profile_id.clone()),
+            detail: Some(format!(
+                "mode {} for {}",
+                match mode {
+                    ApprovalMode::Ask => "ask",
+                    ApprovalMode::Allow => "allow",
+                },
+                updated.canonical_path.display()
+            )),
+        },
+    )?;
+    Ok(updated)
+}
+
+/// The EFFECTIVE approval mode of a grant (computer-wide always `ask`).
+#[tauri::command]
+pub fn tools_grant_mode_get(app: AppHandle, grant_id: String) -> Result<ApprovalMode, Rejection> {
+    let dir = data_dir(&app).map_err(|err| Rejection::new("io", err))?;
+    load_store(&dir)?
+        .grant_by_id(&grant_id)
+        .map(grants::Grant::effective_mode)
+        .ok_or_else(|| Rejection::new("not_found", "no grant with this id"))
+}
+
+/// Switch a grant between `ask` and `allow` (Settings, S13). `allow`
+/// requires the native confirmation; computer-wide grants refuse `allow`.
+/// Returns the grant as stored afterwards (unchanged when declined).
+///
+/// `async` on purpose (P0-3): it may show a native dialog.
+#[tauri::command]
+pub async fn tools_grant_set_mode(
+    app: AppHandle,
+    grant_id: String,
+    mode: String,
+) -> Result<grants::Grant, Rejection> {
+    let mode = ApprovalMode::parse(&mode)?;
+    let dir = data_dir(&app).map_err(|err| Rejection::new("io", err))?;
+    apply_mode(&app, &dir, &grant_id, mode).await
 }
 
 /// Native warning shown before the computer-wide mode is enabled. Plain
@@ -1279,17 +1800,18 @@ pub fn tools_settings_get(app: AppHandle) -> Result<ToolsSettingsView, String> {
 #[tauri::command]
 pub async fn tools_set_run_command_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     if enabled {
-        // B1: enabling the experimental shell escape hatch must be
-        // confirmed by a NATIVE dialog the renderer cannot fake.
+        // B1: re-enabling the shell tool must be confirmed by a NATIVE
+        // dialog the renderer cannot fake (S15: ON by default, but a switch
+        // the user turned off is only turned back on by the user).
         let dialog_app = app.clone();
         let confirmed = off_main_thread(move || {
             native_confirm(
                 &dialog_app,
-                "Ejecutar órdenes (experimental)",
-                "El asistente podrá pedirte permiso para EJECUTAR ÓRDENES en tu equipo, \
-                 dentro de tus carpetas de trabajo.\n\nUna orden puede hacer cualquier cosa \
-                 que harías tú: leer archivos, usar internet o cambiar ajustes. Te pedirá \
-                 confirmación antes de cada una.\n\nDéjalo desactivado si no lo necesitas."
+                "Ejecutar órdenes",
+                "El asistente podrá EJECUTAR ÓRDENES en tu equipo, dentro de tus carpetas \
+                 de trabajo.\n\nUna orden puede hacer cualquier cosa que harías tú: leer \
+                 archivos, usar internet o cambiar ajustes. Te pedirá confirmación antes de \
+                 cada una, salvo en carpetas que tengas en \"Permitir sin preguntar\"."
                     .to_string(),
                 "Activar",
                 "Cancelar",
@@ -1417,14 +1939,256 @@ fn confirmation_base(action: &ToolAction, summary: &str) -> (String, String) {
                  ¿Se lo permites?"
             ),
         ),
+        ToolAction::MovePath {
+            from,
+            to,
+            overwrite,
+        } => (
+            "Mover o renombrar".into(),
+            format!(
+                "El asistente quiere MOVER o RENOMBRAR:\n\n{from}\n\na:\n\n{to}\n\n{}\
+                 ¿Se lo permites?",
+                if *overwrite && summary.contains("replaces the existing file") {
+                    "Ya existe un archivo con ese nombre y se SUSTITUIRÁ.\n\n"
+                } else {
+                    ""
+                }
+            ),
+        ),
+        ToolAction::DeletePath { path } => (
+            "Borrar".into(),
+            if summary.contains("PERMANENT") {
+                format!(
+                    "El asistente quiere BORRAR DEFINITIVAMENTE:\n\n{path}\n\n\
+                     No hay papelera disponible en este disco: NO se podrá recuperar. \
+                     ¿Se lo permites?"
+                )
+            } else {
+                format!(
+                    "El asistente quiere BORRAR:\n\n{path}\n\nSe moverá a la papelera, \
+                     desde donde podrás recuperarlo. ¿Se lo permites?"
+                )
+            },
+        ),
     }
 }
 
+// ------------------------------------------------------ approval route --
+
+/// How one proposal gets approved (S13/S14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRoute {
+    /// Every grant the action touches is in `allow` mode: no prompt.
+    Auto,
+    /// `ask` mode: an inline card in the chat stream.
+    Inline,
+    /// A computer-wide grant is involved: the native per-action dialog,
+    /// always, whatever the stored mode.
+    Native,
+}
+
+/// Decide the approval route from the CURRENT store. Every grant the
+/// proposal touches (the source/cwd grant and, for move_path, the
+/// destination grant) must be in effective `allow` mode for `Auto`; any
+/// computer-wide grant forces `Native`; a missing grant fails closed to
+/// `Inline` (execute rejects it anyway). run_command follows the same rule
+/// through its cwd grant: it asks in `ask` mode and runs without a prompt
+/// only when its cwd sits in an `allow`-mode grant. The always-refused
+/// deny-lists were applied at propose time and are applied again at
+/// execute time, so `Auto` never reaches them.
+pub fn approval_route(store: &GrantsStore, proposal: &PendingProposal) -> ApprovalRoute {
+    let Some(grant_id) = proposal.grant_id.as_deref() else {
+        return ApprovalRoute::Inline;
+    };
+    let mut all_allow = true;
+    for id in std::iter::once(grant_id).chain(proposal.dest_grant_id.as_deref()) {
+        let Some(grant) = store.grant_by_id(id) else {
+            return ApprovalRoute::Inline;
+        };
+        if grant.scope == GrantScope::ComputerWide {
+            return ApprovalRoute::Native;
+        }
+        if grant.effective_mode() != ApprovalMode::Allow {
+            all_allow = false;
+        }
+    }
+    if all_allow {
+        ApprovalRoute::Auto
+    } else {
+        ApprovalRoute::Inline
+    }
+}
+
+/// The approval request card for a stored proposal (built by the core).
+pub fn approval_request(proposal: &PendingProposal) -> ApprovalRequest {
+    let (title, text) = confirmation_text(
+        &proposal.action,
+        &proposal.summary,
+        proposal.diff.as_deref(),
+    );
+    let (path, dest_path, command) = match &proposal.action {
+        ToolAction::ReadFile { path }
+        | ToolAction::ListFiles { path }
+        | ToolAction::WriteFile { path, .. }
+        | ToolAction::ReplaceFile { path, .. }
+        | ToolAction::DeletePath { path } => (Some(path.clone()), None, None),
+        ToolAction::MovePath { from, to, .. } => (Some(from.clone()), Some(to.clone()), None),
+        ToolAction::RunCommand { cmd, cwd_in_grant } => {
+            (Some(cwd_in_grant.clone()), None, Some(cmd.clone()))
+        }
+    };
+    ApprovalRequest {
+        approval_id: String::new(),
+        conversation_id: proposal.conversation_id,
+        action: proposal.action.kind().to_string(),
+        title,
+        text,
+        summary: proposal.summary.clone(),
+        path,
+        dest_path,
+        command,
+        diff_preview: proposal
+            .diff
+            .as_deref()
+            .filter(|diff| !diff.trim().is_empty())
+            .map(diff_preview),
+        permanent: proposal.permanent_delete,
+        expires_in_secs: PROPOSAL_TTL.as_secs(),
+    }
+}
+
+/// The two user-facing approval affordances. Production: native dialog +
+/// inline card over IPC ([`AppApprover`]); tests: a recording fake.
+pub(crate) trait Approver {
+    /// Native per-action dialog (computer-wide).
+    fn native(&self, title: String, text: String) -> impl Future<Output = bool> + Send;
+    /// Inline card: `request.approval_id` is empty, the approver registers
+    /// the pending request and fills it in.
+    fn inline(&self, request: ApprovalRequest) -> impl Future<Output = bool> + Send;
+}
+
+/// Route and obtain approval for a stored proposal. `Auto` is audited as an
+/// approval by mode; a declined/expired prompt discards the proposal
+/// (audited deny) and returns `declined`.
+pub(crate) async fn approve_proposal<A: Approver>(
+    dir: &Path,
+    state: &ToolsState,
+    approver: &A,
+    proposal: &PendingProposal,
+) -> Result<ApprovalRoute, Rejection> {
+    let route = approval_route(&load_store(dir)?, proposal);
+    let approved = match route {
+        ApprovalRoute::Auto => {
+            audit_event(
+                dir,
+                AuditEntry {
+                    ts: audit::timestamp_now_rfc3339(),
+                    event: "approve".into(),
+                    action: proposal.action.kind().into(),
+                    outcome: "ok".into(),
+                    grant_id: proposal.grant_id.clone(),
+                    profile_id: Some(proposal.profile_id.clone()),
+                    detail: Some("approved by the grant's allow mode (no prompt)".into()),
+                },
+            )?;
+            true
+        }
+        ApprovalRoute::Native => {
+            let (title, text) = confirmation_text(
+                &proposal.action,
+                &proposal.summary,
+                proposal.diff.as_deref(),
+            );
+            approver.native(title, text).await
+        }
+        ApprovalRoute::Inline => approver.inline(approval_request(proposal)).await,
+    };
+    if !approved {
+        deny(dir, state, &proposal.id).map_err(|msg| Rejection::new("io", msg))?;
+        return Err(Rejection::new(
+            "declined",
+            "the user did not allow this action",
+        ));
+    }
+    Ok(route)
+}
+
+/// Production approver: native dialogs through the dialog plugin, inline
+/// cards through `tools://approval-request` / `tools_approval_respond`.
+pub(crate) struct AppApprover {
+    pub app: AppHandle,
+}
+
+impl Approver for AppApprover {
+    fn native(&self, title: String, text: String) -> impl Future<Output = bool> + Send {
+        let app = self.app.clone();
+        async move {
+            off_main_thread(move || native_confirm(&app, &title, text, "Permitir", "No permitir"))
+                .await
+                .unwrap_or(false)
+        }
+    }
+
+    fn inline(&self, mut request: ApprovalRequest) -> impl Future<Output = bool> + Send {
+        let app = self.app.clone();
+        async move {
+            let state = app.state::<ToolsState>();
+            let Ok(ticket) = state.approvals.register() else {
+                return false;
+            };
+            request.approval_id = ticket.id.clone();
+            let approval_id = ticket.id.clone();
+            if app.emit("tools://approval-request", &request).is_err() {
+                return false;
+            }
+            let granted = ticket.wait(PROPOSAL_TTL).await;
+            let _ = app.emit(
+                "tools://approval-resolved",
+                approvals::ApprovalResolved {
+                    approval_id,
+                    granted,
+                },
+            );
+            granted
+        }
+    }
+}
+
+/// Answer a pending inline approval (S14). The renderer can only answer a
+/// request the core created and is still waiting on; anything else is
+/// rejected (`unknown_approval`) and audited as a security signal.
+#[tauri::command]
+pub fn tools_approval_respond(
+    app: AppHandle,
+    approval_id: String,
+    granted: bool,
+) -> Result<(), Rejection> {
+    let state = app.state::<ToolsState>();
+    let result = state.approvals.respond(&approval_id, granted);
+    if let Err(rejection) = &result {
+        let dir = data_dir(&app).map_err(|err| Rejection::new("io", err))?;
+        audit_event(
+            &dir,
+            AuditEntry {
+                ts: audit::timestamp_now_rfc3339(),
+                event: "approve".into(),
+                action: "unknown".into(),
+                outcome: "rejected".into(),
+                grant_id: None,
+                profile_id: None,
+                detail: Some(format!("{}: {}", rejection.kind, rejection.message)),
+            },
+        )?;
+    }
+    result
+}
+
 /// The model asked for a tool action during a chat (chat.rs tool loop):
-/// propose (grant + scope validation, audit) → NATIVE confirmation for EVERY
-/// action, reads included (there is no renderer approval step any more) →
-/// execute the exact stored action. A declined dialog is audited as a deny
-/// and reported as `declined`.
+/// propose (grant + scope validation, audit) → approval by route (no
+/// prompt in `allow` mode, inline card in `ask` mode, native dialog for
+/// computer-wide) → execute the exact stored action. A declined or expired
+/// approval is audited as a deny and reported as `declined`.
 pub(crate) async fn run_model_action(
     app: &AppHandle,
     profile_id: &str,
@@ -1436,24 +2200,10 @@ pub(crate) async fn run_model_action(
         let state = app.state::<ToolsState>();
         propose(&dir, &state, profile_id, Some(conversation_id), &action)?
     };
-    let (title, text) = confirmation_text(
-        &proposal.action,
-        &proposal.summary,
-        proposal.diff.as_deref(),
-    );
-    let dialog_app = app.clone();
-    let approved = off_main_thread(move || {
-        native_confirm(&dialog_app, &title, text, "Permitir", "No permitir")
-    })
-    .await
-    .unwrap_or(false);
-    if !approved {
+    let approver = AppApprover { app: app.clone() };
+    {
         let state = app.state::<ToolsState>();
-        deny(&dir, &state, &proposal.id).map_err(|msg| Rejection::new("io", msg))?;
-        return Err(Rejection::new(
-            "declined",
-            "the user did not allow this action",
-        ));
+        approve_proposal(&dir, &state, &approver, &proposal).await?;
     }
     // Execution may run a command for up to 30 s: keep it off the runtime.
     let exec_app = app.clone();
@@ -1565,11 +2315,22 @@ mod tests {
                 r#"{"type":"run_command","cmd":"ls","cwd_in_grant":"/a"}"#,
                 "run_command",
             ),
+            (r#"{"type":"move_path","from":"/a","to":"/b"}"#, "move_path"),
+            (r#"{"type":"delete_path","path":"/a"}"#, "delete_path"),
         ];
         for (json, kind) in cases {
             let action = parse_action(json).expect("parse");
             assert_eq!(action.kind(), kind);
         }
+        // overwrite defaults to false: replacing is always explicit.
+        assert_eq!(
+            parse_action(r#"{"type":"move_path","from":"/a","to":"/b"}"#).expect("move"),
+            ToolAction::MovePath {
+                from: "/a".into(),
+                to: "/b".into(),
+                overwrite: false
+            }
+        );
     }
 
     #[test]
@@ -1758,6 +2519,9 @@ mod tests {
             diff: None,
             grant_id: Some("g1".into()),
             canonical_path: Some(target.clone()),
+            dest_grant_id: None,
+            dest_path: None,
+            permanent_delete: false,
             created_at: std::time::Instant::now(),
         };
         let err = execute_proposal(&dir, &proposal).expect_err("refused");
@@ -1986,6 +2750,7 @@ mod tests {
         let (dir, _guard2) = granted_dir(&folder);
         let st = ToolsState {
             inner: Mutex::new(HashMap::new()),
+            approvals: ApprovalBroker::default(),
             ttl: Duration::ZERO,
         };
         let proposal = propose_ok(
@@ -2022,11 +2787,17 @@ mod tests {
     // ------------------------------------------------------- run_command --
 
     #[test]
-    fn run_command_disabled_by_default() {
+    fn run_command_on_by_default_and_refused_when_switched_off() {
         let (folder, _guard) = tempdir();
         let (dir, _guard2) = granted_dir(&folder);
-        let store = grants::load_or_seed(&dir).expect("store");
-        assert!(!store.tools_allow_run_command, "default must be OFF");
+        let mut store = grants::load_or_seed(&dir).expect("store");
+        assert!(store.tools_allow_run_command, "S15: default ON");
+        let action = ToolAction::RunCommand {
+            cmd: "ls".into(),
+            cwd_in_grant: canon(&folder).display().to_string(),
+        };
+        validate_action(&store, "nan", &action).expect("default ON validates");
+        store.set_run_command_enabled(false);
         let err = validate_action(
             &store,
             "nan",
@@ -2536,5 +3307,623 @@ mod tests {
         assert!(ws.computer_wide);
         assert!(ws.run_command);
         assert_eq!(workspace_from_store(&store, "helmcode"), None);
+    }
+
+    // ------------------------------------- S13/S14 approval routing --
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Records every prompt; answers all of them with `answer`.
+    struct FakeApprover {
+        answer: bool,
+        native_calls: AtomicUsize,
+        inline_calls: Mutex<Vec<ApprovalRequest>>,
+    }
+
+    impl FakeApprover {
+        fn answering(answer: bool) -> Self {
+            FakeApprover {
+                answer,
+                native_calls: AtomicUsize::new(0),
+                inline_calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn prompts(&self) -> (usize, usize) {
+            (
+                self.native_calls.load(Ordering::SeqCst),
+                self.inline_calls.lock().expect("lock").len(),
+            )
+        }
+    }
+
+    impl Approver for FakeApprover {
+        fn native(&self, _title: String, _text: String) -> impl Future<Output = bool> + Send {
+            self.native_calls.fetch_add(1, Ordering::SeqCst);
+            let answer = self.answer;
+            async move { answer }
+        }
+        fn inline(&self, request: ApprovalRequest) -> impl Future<Output = bool> + Send {
+            self.inline_calls.lock().expect("lock").push(request);
+            let answer = self.answer;
+            async move { answer }
+        }
+    }
+
+    /// propose → approve (by route) → execute, like `run_model_action`.
+    fn run_with(
+        dir: &Path,
+        st: &ToolsState,
+        approver: &FakeApprover,
+        action: &ToolAction,
+    ) -> Result<(ApprovalRoute, ToolOutcome), Rejection> {
+        let proposal = propose(dir, st, "nan", Some(1), action)?;
+        let route = tauri::async_runtime::block_on(approve_proposal(dir, st, approver, &proposal))?;
+        let outcome = execute(dir, st, &proposal.id)?;
+        Ok((route, outcome))
+    }
+
+    fn set_grant_mode(dir: &Path, grant_id: &str, mode: ApprovalMode) {
+        let mut store = grants::load_or_seed(dir).expect("load");
+        store.set_mode(grant_id, mode).expect("set mode");
+        grants::save(dir, &store).expect("save");
+    }
+
+    fn path_str(path: &Path) -> String {
+        path.display().to_string()
+    }
+
+    #[test]
+    fn allow_mode_runs_every_covered_action_without_a_prompt() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let st = state();
+        // An approver that would DENY everything: allow mode must never ask.
+        let approver = FakeApprover::answering(false);
+        let actions = [
+            ToolAction::WriteFile {
+                path: path_str(&root.join("a.txt")),
+                content: "uno".into(),
+            },
+            ToolAction::ReadFile {
+                path: path_str(&root.join("a.txt")),
+            },
+            ToolAction::ListFiles {
+                path: path_str(&root),
+            },
+            ToolAction::ReplaceFile {
+                path: path_str(&root.join("a.txt")),
+                old: "uno".into(),
+                new: "dos".into(),
+            },
+            ToolAction::MovePath {
+                from: path_str(&root.join("a.txt")),
+                to: path_str(&root.join("b.txt")),
+                overwrite: false,
+            },
+            ToolAction::DeletePath {
+                path: path_str(&root.join("b.txt")),
+            },
+        ];
+        for action in &actions {
+            let (route, _) = run_with(&dir, &st, &approver, action)
+                .unwrap_or_else(|err| panic!("{} failed: {err:?}", action.kind()));
+            assert_eq!(
+                route,
+                ApprovalRoute::Auto,
+                "{} must not prompt",
+                action.kind()
+            );
+        }
+        assert_eq!(approver.prompts(), (0, 0), "no prompt of any kind");
+        assert!(!root.join("a.txt").exists() && !root.join("b.txt").exists());
+        // The auto approvals are audited as such.
+        let auto = audit::tail(&dir, 200)
+            .expect("audit")
+            .into_iter()
+            .filter(|e| {
+                e.event == "approve"
+                    && e.detail
+                        .as_deref()
+                        .is_some_and(|d| d.contains("allow mode"))
+            })
+            .count();
+        assert_eq!(auto, actions.len());
+    }
+
+    #[test]
+    fn ask_mode_prompts_inline_and_a_deny_executes_nothing() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        let st = state();
+        let approver = FakeApprover::answering(false);
+        let target = root.join("nuevo.txt");
+        let proposal = propose(
+            &dir,
+            &st,
+            "nan",
+            Some(7),
+            &ToolAction::WriteFile {
+                path: path_str(&target),
+                content: "hola".into(),
+            },
+        )
+        .expect("propose");
+        let err = tauri::async_runtime::block_on(approve_proposal(&dir, &st, &approver, &proposal))
+            .expect_err("declined");
+        assert_eq!(err.kind, "declined");
+        assert_eq!(
+            approver.prompts(),
+            (0, 1),
+            "one inline card, no native dialog"
+        );
+        let request = approver.inline_calls.lock().expect("lock")[0].clone();
+        assert_eq!(request.action, "write_file");
+        assert_eq!(request.conversation_id, Some(7));
+        assert_eq!(request.path.as_deref(), Some(path_str(&target).as_str()));
+        assert!(
+            request.diff_preview.is_some(),
+            "the card previews the change"
+        );
+        // The declined proposal is gone: it can never be executed later.
+        assert_eq!(
+            execute(&dir, &st, &proposal.id).expect_err("consumed").kind,
+            "unknown_proposal"
+        );
+        assert!(!target.exists());
+
+        // Granting in ask mode executes, still through the inline card.
+        let approver = FakeApprover::answering(true);
+        let (route, _) = run_with(
+            &dir,
+            &st,
+            &approver,
+            &ToolAction::WriteFile {
+                path: path_str(&target),
+                content: "hola".into(),
+            },
+        )
+        .expect("granted");
+        assert_eq!(route, ApprovalRoute::Inline);
+        assert_eq!(fs::read_to_string(&target).expect("written"), "hola");
+    }
+
+    #[test]
+    fn computer_wide_always_uses_the_native_dialog_whatever_the_mode() {
+        let (home, app_data, _guard) = computer_wide_layout();
+        fs::write(home.join("notes.txt"), "hola").expect("write");
+        // Even a hand-edited store claiming allow cannot skip the dialog.
+        let mut store = grants::load_or_seed(&app_data).expect("load");
+        store.grants[0].mode = ApprovalMode::Allow;
+        grants::save(&app_data, &store).expect("save");
+        let st = state();
+        let approver = FakeApprover::answering(true);
+        let (route, outcome) = run_with(
+            &app_data,
+            &st,
+            &approver,
+            &ToolAction::ReadFile {
+                path: path_str(&home.join("notes.txt")),
+            },
+        )
+        .expect("read");
+        assert_eq!(route, ApprovalRoute::Native);
+        assert_eq!(approver.prompts(), (1, 0));
+        assert_eq!(outcome.content.as_deref(), Some("hola"));
+    }
+
+    #[test]
+    fn allow_mode_never_unlocks_the_deny_list_or_protected_targets() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        fs::write(root.join(".zshrc"), "export X=1").expect("zshrc");
+        fs::write(root.join("server.pem"), "key").expect("pem");
+        let (dir, _guard2) = granted_dir(&folder);
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let st = state();
+        let approver = FakeApprover::answering(true);
+        for action in [
+            ToolAction::WriteFile {
+                path: path_str(&root.join("id.key")),
+                content: "x".into(),
+            },
+            ToolAction::DeletePath {
+                path: path_str(&root.join(".zshrc")),
+            },
+            ToolAction::MovePath {
+                from: path_str(&root.join("server.pem")),
+                to: path_str(&root.join("server.txt")),
+                overwrite: false,
+            },
+            ToolAction::MovePath {
+                from: path_str(&root.join("server.pem")),
+                to: path_str(&root.join(".bashrc")),
+                overwrite: false,
+            },
+            ToolAction::DeletePath {
+                path: path_str(&root),
+            },
+        ] {
+            let err = run_with(&dir, &st, &approver, &action).expect_err("refused");
+            assert_eq!(err.kind, "scope", "{}: {err:?}", action.kind());
+        }
+        assert_eq!(approver.prompts(), (0, 0), "refused before any prompt");
+        assert!(root.join(".zshrc").exists() && root.join("server.pem").exists());
+        assert!(!root.join("id.key").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_asks_unless_its_cwd_is_in_an_allow_grant() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        fs::create_dir_all(root.join("ask-sub")).expect("sub");
+        let (dir, _guard2) = granted_dir(&folder);
+        // A nested ask-mode grant inside the allow-mode one.
+        let mut store = grants::load_or_seed(&dir).expect("load");
+        store
+            .add_grant("g2".into(), "nan", root.join("ask-sub"), "t".into())
+            .expect("nested");
+        store.set_mode("g1", ApprovalMode::Allow).expect("allow");
+        grants::save(&dir, &store).expect("save");
+        let st = state();
+        let approver = FakeApprover::answering(true);
+        let (route, outcome) = run_with(
+            &dir,
+            &st,
+            &approver,
+            &ToolAction::RunCommand {
+                cmd: "echo hi".into(),
+                cwd_in_grant: path_str(&root),
+            },
+        )
+        .expect("allow cwd");
+        assert_eq!(route, ApprovalRoute::Auto);
+        assert_eq!(outcome.stdout.as_deref(), Some("hi\n"));
+        let (route, _) = run_with(
+            &dir,
+            &st,
+            &approver,
+            &ToolAction::RunCommand {
+                cmd: "echo hi".into(),
+                cwd_in_grant: path_str(&root.join("ask-sub")),
+            },
+        )
+        .expect("ask cwd");
+        assert_eq!(route, ApprovalRoute::Inline, "cwd in an ask grant asks");
+        let request = approver.inline_calls.lock().expect("lock")[0].clone();
+        assert_eq!(request.command.as_deref(), Some("echo hi"));
+    }
+
+    // ------------------------------------------------------- move_path --
+
+    #[test]
+    fn move_path_renames_and_overwrites_only_when_asked() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        fs::write(root.join("a.txt"), "A").expect("a");
+        fs::write(root.join("b.txt"), "B").expect("b");
+        fs::create_dir_all(root.join("dir/inner")).expect("dir");
+        let (dir, _guard2) = granted_dir(&folder);
+        let st = state();
+        let mv = |from: &Path, to: &Path, overwrite: bool| ToolAction::MovePath {
+            from: path_str(from),
+            to: path_str(to),
+            overwrite,
+        };
+        // Existing destination without the flag: refused, nothing changes.
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            None,
+            &mv(&root.join("a.txt"), &root.join("b.txt"), false),
+        )
+        .expect_err("exists");
+        assert_eq!(err.kind, "exists");
+        // With the flag: replaced, and the summary says so.
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &mv(&root.join("a.txt"), &root.join("b.txt"), true),
+        );
+        assert!(proposal.summary.contains("replaces the existing file"));
+        let (_, text) = confirmation_text(&proposal.action, &proposal.summary, None);
+        assert!(
+            text.contains("SUSTITUIRÁ"),
+            "the overwrite is explicit: {text}"
+        );
+        execute(&dir, &st, &proposal.id).expect("move");
+        assert!(!root.join("a.txt").exists());
+        assert_eq!(fs::read_to_string(root.join("b.txt")).expect("b"), "A");
+        // Plain rename into a subfolder.
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &mv(&root.join("b.txt"), &root.join("dir/c.txt"), false),
+        );
+        execute(&dir, &st, &proposal.id).expect("rename");
+        assert!(root.join("dir/c.txt").exists());
+        // A folder can never be moved inside itself, nor overwrite anything.
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            None,
+            &mv(&root.join("dir"), &root.join("dir/inner/x"), false),
+        )
+        .expect_err("into itself");
+        assert_eq!(err.kind, "protocol");
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            None,
+            &mv(&root.join("dir/c.txt"), &root.join("dir/inner"), true),
+        )
+        .expect_err("over a folder");
+        assert_eq!(err.kind, "protocol");
+        // Missing destination folder.
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            None,
+            &mv(&root.join("dir/c.txt"), &root.join("nope/c.txt"), false),
+        )
+        .expect_err("no parent");
+        assert_eq!(err.kind, "not_found");
+    }
+
+    #[test]
+    fn move_path_keeps_both_ends_inside_granted_scope() {
+        let (folder, _guard) = tempdir();
+        let (outside, _guard3) = tempdir();
+        let root = canon(&folder);
+        let outside = canon(&outside);
+        fs::write(root.join("a.txt"), "A").expect("a");
+        fs::write(outside.join("o.txt"), "O").expect("o");
+        let (dir, _guard2) = granted_dir(&folder);
+        let st = state();
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            None,
+            &ToolAction::MovePath {
+                from: path_str(&root.join("a.txt")),
+                to: path_str(&outside.join("a.txt")),
+                overwrite: false,
+            },
+        )
+        .expect_err("dest outside");
+        assert_eq!(err.kind, "escape");
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            None,
+            &ToolAction::MovePath {
+                from: path_str(&outside.join("o.txt")),
+                to: path_str(&root.join("o.txt")),
+                overwrite: false,
+            },
+        )
+        .expect_err("source outside");
+        assert_eq!(err.kind, "escape");
+        assert!(root.join("a.txt").exists() && outside.join("o.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_path_and_delete_path_are_symlink_safe() {
+        let (folder, _guard) = tempdir();
+        let (outside, _guard3) = tempdir();
+        let root = canon(&folder);
+        let outside = canon(&outside);
+        fs::write(root.join("real.txt"), "R").expect("real");
+        fs::write(outside.join("victim.txt"), "V").expect("victim");
+        std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).expect("link");
+        std::os::unix::fs::symlink(outside.join("later"), root.join("blink")).expect("dangling");
+        let (dir, _guard2) = granted_dir(&folder);
+        let st = state();
+        // A symlink leaf is never moved or deleted (its target would be).
+        for action in [
+            ToolAction::DeletePath {
+                path: path_str(&root.join("link.txt")),
+            },
+            ToolAction::MovePath {
+                from: path_str(&root.join("link.txt")),
+                to: path_str(&root.join("moved.txt")),
+                overwrite: false,
+            },
+        ] {
+            let err = propose(&dir, &st, "nan", None, &action).expect_err("symlink leaf");
+            assert_eq!(err.kind, "symlink", "{}", action.kind());
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("real.txt")).expect("intact"),
+            "R"
+        );
+        // A destination through a dangling intermediate symlink is refused
+        // and nothing materializes outside the grant.
+        let result = propose(
+            &dir,
+            &st,
+            "nan",
+            None,
+            &ToolAction::MovePath {
+                from: path_str(&root.join("real.txt")),
+                to: path_str(&root.join("blink").join("x.txt")),
+                overwrite: false,
+            },
+        )
+        .and_then(|proposal| execute(&dir, &st, &proposal.id));
+        assert!(result.is_err(), "dangling intermediate refused: {result:?}");
+        assert!(!outside.join("later").exists());
+        assert!(root.join("real.txt").exists());
+    }
+
+    // ----------------------------------------------------- delete_path --
+
+    #[test]
+    fn delete_path_removes_files_and_folders_and_states_permanence() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        fs::write(root.join("viejo.txt"), "x").expect("file");
+        fs::create_dir_all(root.join("build/deep")).expect("dir");
+        fs::write(root.join("build/deep/out.o"), "o").expect("nested");
+        let (dir, _guard2) = granted_dir(&folder);
+        let st = state();
+        // Tests have no trash (never the developer's real one): permanent,
+        // and the summary, the card and the dialog all say so.
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::DeletePath {
+                path: path_str(&root.join("viejo.txt")),
+            },
+        );
+        assert!(proposal.permanent_delete);
+        assert!(
+            proposal.summary.contains("PERMANENT"),
+            "{}",
+            proposal.summary
+        );
+        assert!(!proposal.summary.contains('—'), "no em-dash in UI copy");
+        let request = approval_request(&proposal);
+        assert!(request.permanent);
+        assert!(request.text.contains("DEFINITIVAMENTE"));
+        let outcome = execute(&dir, &st, &proposal.id).expect("delete file");
+        assert!(outcome.summary.contains("permanently"));
+        assert!(!root.join("viejo.txt").exists());
+
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::DeletePath {
+                path: path_str(&root.join("build")),
+            },
+        );
+        assert!(
+            proposal.summary.contains("folder with 2 entries"),
+            "{}",
+            proposal.summary
+        );
+        execute(&dir, &st, &proposal.id).expect("delete folder");
+        assert!(!root.join("build").exists());
+
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            None,
+            &ToolAction::DeletePath {
+                path: path_str(&root.join("missing.txt")),
+            },
+        )
+        .expect_err("missing");
+        assert_eq!(err.kind, "not_found");
+    }
+
+    #[test]
+    fn trash_delete_confirmation_promises_recovery() {
+        let action = ToolAction::DeletePath {
+            path: "/u/a.txt".into(),
+        };
+        let (_, text) = confirmation_text(
+            &action,
+            "delete_path /u/a.txt (file, 1 bytes; moved to the trash)",
+            None,
+        );
+        assert!(text.contains("papelera"));
+        assert!(!text.contains("DEFINITIVAMENTE"));
+    }
+
+    #[test]
+    fn delete_rechecks_protection_at_execute() {
+        // A stored proposal for a grant root (impossible through propose)
+        // is still refused at execute: defense in depth.
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        let proposal = PendingProposal {
+            id: "p-root".into(),
+            profile_id: "nan".into(),
+            conversation_id: None,
+            action: ToolAction::DeletePath {
+                path: path_str(&root),
+            },
+            summary: "delete_path".into(),
+            diff: None,
+            grant_id: Some("g1".into()),
+            canonical_path: Some(root.clone()),
+            dest_grant_id: None,
+            dest_path: None,
+            permanent_delete: true,
+            created_at: std::time::Instant::now(),
+        };
+        let err = execute_proposal(&dir, &proposal).expect_err("refused");
+        assert_eq!(err.kind, "scope");
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn approval_route_requires_allow_on_both_ends_of_a_move() {
+        let (folder, _guard) = tempdir();
+        let (other, _guard3) = tempdir();
+        let root = canon(&folder);
+        let other_root = canon(&other);
+        fs::write(root.join("a.txt"), "A").expect("a");
+        let (dir, _guard2) = granted_dir(&folder);
+        let mut store = grants::load_or_seed(&dir).expect("load");
+        store
+            .add_grant("g2".into(), "nan", other_root.clone(), "t".into())
+            .expect("g2");
+        store.set_mode("g1", ApprovalMode::Allow).expect("allow g1");
+        grants::save(&dir, &store).expect("save");
+        let st = state();
+        let proposal = propose_ok(
+            &dir,
+            &st,
+            &ToolAction::MovePath {
+                from: path_str(&root.join("a.txt")),
+                to: path_str(&other_root.join("a.txt")),
+                overwrite: false,
+            },
+        );
+        let store = grants::load_or_seed(&dir).expect("load");
+        assert_eq!(approval_route(&store, &proposal), ApprovalRoute::Inline);
+        let mut store = store;
+        store.set_mode("g2", ApprovalMode::Allow).expect("allow g2");
+        assert_eq!(approval_route(&store, &proposal), ApprovalRoute::Auto);
+        // A revoked grant fails closed to a prompt.
+        store.revoke("g2");
+        assert_eq!(approval_route(&store, &proposal), ApprovalRoute::Inline);
+    }
+
+    #[test]
+    fn approval_cards_and_confirmations_carry_no_em_dash() {
+        let cases = [
+            ToolAction::MovePath {
+                from: "/u/a".into(),
+                to: "/u/b".into(),
+                overwrite: true,
+            },
+            ToolAction::DeletePath {
+                path: "/u/a".into(),
+            },
+            ToolAction::RunCommand {
+                cmd: "ls".into(),
+                cwd_in_grant: "/u".into(),
+            },
+        ];
+        for action in &cases {
+            let (title, text) = confirmation_text(action, "s", None);
+            assert!(!title.contains('—') && !text.contains('—'), "{text}");
+        }
+        assert!(!COMPUTER_WIDE_WARNING.contains('—'));
     }
 }

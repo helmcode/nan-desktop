@@ -1,5 +1,6 @@
 //! Inline image generation (T5, S5): `qwen-image-2.1` through
-//! `POST {inference_base}/images/generations`.
+//! `POST {inference_base}/images/generations` (the base ends in `/v1`, so
+//! the wire path is `/v1/images/generations`; see [`generations_url`]).
 //!
 //! Architecture mirrors `chat.rs` (S4): the key is read from the OS keychain
 //! (account = profile id, derived from the conversation row — the renderer
@@ -107,6 +108,15 @@ pub fn validate_size(size: &str) -> Result<(u32, u32), chat::ErrorKind> {
     } else {
         Err(chat::ErrorKind::Protocol)
     }
+}
+
+/// Generation endpoint for an inference base. The compiled-in inference
+/// bases ALREADY end in `/v1` (`https://api.nan.builders/v1`, same root as
+/// `{base}/chat/completions`), so this yields `/v1/images/generations`;
+/// adding another `/v1` here would hit `/v1/v1/...` and 404. Debug mocks
+/// set `NAN_DESKTOP_MOCK_INFERENCE` to their `/v1` root as well.
+pub fn generations_url(base: &str) -> String {
+    format!("{}/images/generations", base.trim_end_matches('/'))
 }
 
 /// Build the OpenAI-compatible `/images/generations` JSON body.
@@ -410,7 +420,7 @@ async fn run_image_generation(
     // No overall request timeout: a ~1-minute generation must not be killed
     // mid-flight (same policy as the chat streams).
     let response = match client
-        .post(format!("{base}/images/generations"))
+        .post(generations_url(&base))
         .bearer_auth(&key)
         .json(&image_body(&prompt, &size))
         .send()
@@ -727,6 +737,24 @@ mod tests {
     }
 
     // ---- constants -----------------------------------------------------------------
+
+    #[test]
+    fn generation_url_is_exactly_v1_images_generations_on_both_tenants() {
+        for (id, expected) in [
+            ("nan", "https://api.nan.builders/v1/images/generations"),
+            ("helmcode", "https://api.helmcode.com/v1/images/generations"),
+        ] {
+            let base = crate::profile::inference_base_for(id).expect("tenant");
+            let url = generations_url(base);
+            assert_eq!(url, expected);
+            assert!(!url.contains("/v1/v1/"), "no doubled /v1 prefix");
+        }
+        // A mock root with a trailing slash still yields one separator.
+        assert_eq!(
+            generations_url("http://127.0.0.1:1/v1/"),
+            "http://127.0.0.1:1/v1/images/generations"
+        );
+    }
 
     #[test]
     fn image_model_is_the_locked_s5_model() {

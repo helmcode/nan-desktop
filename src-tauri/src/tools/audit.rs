@@ -257,6 +257,44 @@ mod tests {
                 profile_id: Some("nan".into()),
                 detail: Some("kind=disabled: run_command is disabled".into()),
             },
+            // Round 2 (S13/S14/S15): mode switch, auto-approval by allow
+            // mode, destructive tools, forged inline approval answer.
+            AuditEntry {
+                ts: timestamp_now_rfc3339(),
+                event: "settings".into(),
+                action: "grant_mode".into(),
+                outcome: "ok".into(),
+                grant_id: Some("g-fix".into()),
+                profile_id: Some("nan".into()),
+                detail: Some("mode allow for /tmp/grant".into()),
+            },
+            AuditEntry {
+                ts: timestamp_now_rfc3339(),
+                event: "approve".into(),
+                action: "move_path".into(),
+                outcome: "ok".into(),
+                grant_id: Some("g-fix".into()),
+                profile_id: Some("nan".into()),
+                detail: Some("approved by the grant's allow mode (no prompt)".into()),
+            },
+            AuditEntry {
+                ts: timestamp_now_rfc3339(),
+                event: "execute".into(),
+                action: "delete_path".into(),
+                outcome: "ok".into(),
+                grant_id: Some("g-fix".into()),
+                profile_id: Some("nan".into()),
+                detail: Some("moved /tmp/grant/old.txt to the trash".into()),
+            },
+            AuditEntry {
+                ts: timestamp_now_rfc3339(),
+                event: "approve".into(),
+                action: "unknown".into(),
+                outcome: "rejected".into(),
+                grant_id: None,
+                profile_id: None,
+                detail: Some("unknown_approval: no pending approval request with this id".into()),
+            },
         ];
         for entry in &entries {
             append(&fixtures, entry).expect("fixture append");
