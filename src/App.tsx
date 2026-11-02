@@ -13,6 +13,7 @@ import {
   type Nudge,
 } from "./chat/allowNudge";
 import { approvalsReducer, placeCards, type ApprovalCardState } from "./chat/approvals";
+import { lastProducedTarget } from "./chat/autoOpen";
 import { messageFiles } from "./chat/filePaths";
 import {
   adoptSelection,
@@ -25,6 +26,7 @@ import {
 import { stripToolMarkup } from "./chat/toolMarkup";
 import { AllowNudgeCard } from "./components/AllowNudgeCard";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
 import { UserMenu, type SettingsSection } from "./components/UserMenu";
@@ -60,9 +62,10 @@ import {
   IconStop,
   IconTrash,
   IconWarning,
+  IconX,
 } from "./icons";
 import { Markdown } from "./Markdown";
-import type { PreviewTarget } from "./preview/kind";
+import { targetKey, type PreviewTarget } from "./preview/kind";
 import { Settings } from "./Settings";
 import type { ChatMessageRow, ConversationView, ProfileOverview, ProfileView, WebSource } from "./types";
 import { useWorkspace } from "./workspace";
@@ -123,6 +126,13 @@ const RECORDING_MIME_CANDIDATES = ["audio/webm", "audio/mp4"];
 
 // Preview state key for a chat that has no conversation row yet.
 const NEW_CHAT_KEY = -1;
+
+/// A copy of `set` without `key` (state updates never mutate).
+function withoutKey(set: Set<number>, key: number): Set<number> {
+  const next = new Set(set);
+  next.delete(key);
+  return next;
+}
 
 type Screen = "loading" | "error" | "picker" | "authorizing" | "chat";
 type AuthPhase = "waiting" | "denied" | "expired" | "error";
@@ -452,8 +462,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   useEffect(() => saveShownNudges(nudges.shown), [nudges.shown]);
   const countedApprovals = useRef<Set<string>>(new Set());
 
-  // Image mode: the composer sends the prompt to `image_generate`.
-  const [imageMode, setImageMode] = useState(false);
+  // Image mode: the composer sends the prompt to `image_generate`. It is a
+  // per-conversation setting (round 4): switching chats shows that chat's
+  // own mode; the unsaved new chat uses NEW_CHAT_KEY until its row exists.
+  const [imageModes, setImageModes] = useState<Set<number>>(() => new Set());
+  const imageMode = imageModes.has(activeConvId ?? NEW_CHAT_KEY);
   const [imageSize, setImageSize] = useState(DEFAULT_IMAGE_SIZE);
   const [imageGeneratingIds, setImageGeneratingIds] = useState<Set<number>>(() => new Set());
 
@@ -501,6 +514,23 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     } catch {
       setMessages([]);
     }
+  }, []);
+
+  // A reply (or a composer image) just finished in `conversationId`: reload
+  // its rows and open what it produced in that conversation's preview pane
+  // (round 4 auto-open; see chat/autoOpen.ts). Works for a conversation the
+  // user is not looking at too: the pane is open when they come back.
+  const reloadAfterReply = useCallback(async (conversationId: number): Promise<void> => {
+    let rows: ChatMessageRow[];
+    try {
+      rows = await invoke<ChatMessageRow[]>("messages_list", { conversationId });
+    } catch {
+      if (activeConvRef.current === conversationId) setMessages([]);
+      return;
+    }
+    if (activeConvRef.current === conversationId) setMessages(rows);
+    const target = lastProducedTarget(rows);
+    if (target) setPreviews((prev) => new Map(prev).set(conversationId, { target, open: true }));
   }, []);
 
   // Account memory: reconcile with the account in the background. Silent
@@ -564,7 +594,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     const finish = (conversationId: number): void => {
       markStreaming(conversationId, false);
       clearDraft(conversationId);
-      if (activeConvRef.current === conversationId) void loadMessages(conversationId);
+      void reloadAfterReply(conversationId);
       void refreshConversations();
     };
     const unlistens: Promise<UnlistenFn>[] = [
@@ -610,7 +640,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         void promise.then((unlisten) => unlisten());
       });
     };
-  }, [loadMessages, refreshConversations, syncMemory]);
+  }, [reloadAfterReply, refreshConversations, syncMemory]);
 
   // Approval transport (S14): the core asks, the card answers in place.
   useEffect(() => {
@@ -713,7 +743,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       listen<ChatIdPayload>("images://done", (event) => {
         const conversationId = event.payload.conversation_id;
         markGenerating(conversationId, false);
-        if (activeConvRef.current === conversationId) void loadMessages(conversationId);
+        void reloadAfterReply(conversationId);
         void refreshConversations();
         void syncMemory();
       }),
@@ -736,7 +766,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         void promise.then((unlisten) => unlisten());
       });
     };
-  }, [loadMessages, refreshConversations, syncMemory]);
+  }, [reloadAfterReply, refreshConversations, syncMemory]);
 
   // Voice transport: one global playback.
   useEffect(() => {
@@ -882,12 +912,13 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       next.delete(NEW_CHAT_KEY);
       return next;
     });
-    // A new conversation starts with no folder selected.
+    // A new conversation starts with no folder selected and in text mode.
     setSelections((prev) => {
       const next = { ...prev };
       delete next[String(NEW_CHAT_KEY)];
       return next;
     });
+    setImageModes((prev) => withoutKey(prev, NEW_CHAT_KEY));
     composerRef.current?.focus();
   }, []);
 
@@ -915,6 +946,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         next.delete(conversationId);
         return next;
       });
+      setImageModes((prev) => withoutKey(prev, conversationId));
       await refreshConversations();
       void syncMemory();
     },
@@ -965,6 +997,15 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     });
   }, []);
   const closePreview = useCallback(() => setPreviewOpen(false), [setPreviewOpen]);
+
+  // Image mode toggles for the open conversation only.
+  const toggleImageMode = useCallback((): void => {
+    const key = activeConvRef.current ?? NEW_CHAT_KEY;
+    setImageModes((prev) => {
+      if (prev.has(key)) return withoutKey(prev, key);
+      return new Set(prev).add(key);
+    });
+  }, []);
 
   const fileRoots: string[] | "any" = workspace.computerWide
     ? "any"
@@ -1020,8 +1061,14 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       next.set(created, pending);
       return next;
     });
-    // ...and the folders picked on the blank chat.
+    // ...and the folders picked on the blank chat, and its image mode.
     setSelections((prev) => adoptSelection(prev, NEW_CHAT_KEY, created));
+    setImageModes((prev) => {
+      if (!prev.has(NEW_CHAT_KEY)) return prev;
+      const next = withoutKey(prev, NEW_CHAT_KEY);
+      next.add(created);
+      return next;
+    });
     return created;
   }, []);
 
@@ -1270,6 +1317,18 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           focusSection={settingsFocus}
         />
       ) : (
+        <ErrorBoundary
+          resetKey={previewKey}
+          fallback={
+            <div className="chat-area">
+              <section className="chat-main">
+                <p className="inline-error" role="alert">
+                  {t.preview.shellCrashed}
+                </p>
+              </section>
+            </div>
+          }
+        >
         <div className={`chat-area${preview?.open ? " with-preview" : ""}`}>
           <section className="chat-main">
             {sessionExpired && (
@@ -1319,7 +1378,16 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                 {nudgeSlot === 0 && messages.length > 0 && nudgeCard}
                 {messages.map((m, index) => (
                   <Fragment key={m.id}>
-                    {renderMessage(m)}
+                    <ErrorBoundary
+                      resetKey={m.id}
+                      fallback={
+                        <p className="inline-error" role="alert">
+                          {t.preview.messageCrashed}
+                        </p>
+                      }
+                    >
+                      {renderMessage(m)}
+                    </ErrorBoundary>
                     <ApprovalCards
                       cards={placed.after.get(index + 1)}
                       onRespond={(id, g) => void respondApproval(id, g)}
@@ -1429,7 +1497,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                       aria-pressed={imageMode}
                       aria-label={imageMode ? t.chat.imageModeOff : t.chat.imageModeOn}
                       title={imageMode ? t.chat.imageModeOff : t.chat.imageModeOn}
-                      onClick={() => setImageMode((value) => !value)}
+                      onClick={toggleImageMode}
                       disabled={composerBusy}
                     >
                       <IconImage size={18} />
@@ -1479,17 +1547,47 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             </footer>
           </section>
 
-          {preview?.open && overview.active_profile && (
-            <Suspense fallback={<aside className="preview-pane" aria-busy="true" />}>
-              <PreviewPane
-                target={preview.target}
-                profileId={overview.active_profile}
-                onClose={closePreview}
-                onOpenLink={openWebPreview}
-              />
-            </Suspense>
-          )}
+          {/* Always mounted, so a failure while the pane renders OR while it
+              unmounts (switching conversations) is caught here instead of
+              blanking the whole window (round 4 post-PDF freeze). */}
+          <ErrorBoundary
+            resetKey={`${previewKey}|${preview?.open ? targetKey(preview.target) : "closed"}`}
+            fallback={
+              preview?.open ? (
+                <aside className="preview-pane" aria-label={t.preview.title}>
+                  <header className="preview-header">
+                    <span className="preview-title">{t.preview.title}</span>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label={t.preview.close}
+                      title={t.preview.close}
+                      onClick={closePreview}
+                    >
+                      <IconX size={16} />
+                    </button>
+                  </header>
+                  <p className="preview-note" role="alert">
+                    {t.preview.crashed}
+                  </p>
+                </aside>
+              ) : null
+            }
+          >
+            {preview?.open && overview.active_profile && (
+              <Suspense fallback={<aside className="preview-pane" aria-busy="true" />}>
+                <PreviewPane
+                  key={previewKey}
+                  target={preview.target}
+                  profileId={overview.active_profile}
+                  onClose={closePreview}
+                  onOpenLink={openWebPreview}
+                />
+              </Suspense>
+            )}
+          </ErrorBoundary>
         </div>
+        </ErrorBoundary>
       )}
 
       {askComputerWide && (

@@ -18,10 +18,11 @@
 //      `x-nan-test-429` header (the tenant's monthly image quota) and via
 //      model "trigger-429", 500 via "trigger-500" (what the Rust core maps
 //      to unauthorized / rate_limited / server).
-//   4. No `url` replies — the mock serves b64_json only. A `url` reply
-//      would point at an arbitrary remote host and is rejected with kind
-//      `protocol` (S12: no third-party endpoints); that rejection is pinned
-//      by Rust unit tests, run at the end.
+//   4. `url` replies — b64_json is the default; with `x-nan-test-shape:
+//      url` the mock answers the LIVE community shape (a presigned storage
+//      URL) whose download needs NO credentials. The Rust core downloads it
+//      https-only without any Authorization header (pinned by the loopback
+//      E2E tests in images.rs, run at the end).
 //   5. cargo test — the full Rust suite (all previous tasks' tests included)
 //      must stay green.
 //
@@ -90,7 +91,7 @@ async function expectGenerationContract() {
   assert(typeof b64 === "string" && b64.length > 0, "generations: expected a b64_json string");
   assert(
     body.data[0].url === undefined,
-    "generations: the mock must never serve a url reply (S12 — the app rejects it)",
+    "generations: the default mock shape is b64_json (the url shape is opt-in)",
   );
   const png = Buffer.from(b64, "base64");
   assert(png.length > 8, `generations: PNG too short (${png.length} bytes)`);
@@ -119,6 +120,26 @@ async function expectGenerationContract() {
     "record: the key must never be recorded",
   );
   console.log("generation record OK: model/prompt/size preserved, key never recorded");
+
+  // url shape (live community): presigned storage URL, fetched WITHOUT auth.
+  const urlRes = await fetch(GENERATIONS_URL, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${MOCK_KEY}`,
+      "content-type": "application/json",
+      "x-nan-test-shape": "url",
+    },
+    body: JSON.stringify({ model: "qwen-image-2.1", prompt: "a fox", size: "1024x1024" }),
+  });
+  assert(urlRes.status === 200, `url shape: expected 200, got ${urlRes.status}`);
+  const urlBody = await urlRes.json();
+  const imageUrl = urlBody.data?.[0]?.url;
+  assert(typeof imageUrl === "string" && urlBody.data[0].b64_json === undefined, "url shape: expected only a url");
+  const stored = Buffer.from(await (await fetch(imageUrl)).arrayBuffer());
+  assert(stored.subarray(0, 8).equals(PNG_SIGNATURE), "url shape: storage did not serve a PNG");
+  const afterUrl = await (await fetch(`${BASE}/record`)).json();
+  assert(afterUrl.storage && afterUrl.storage.authorization_present === false, "url shape: storage saw auth");
+  console.log("url shape OK: presigned storage URL served a PNG without credentials");
 }
 
 // --- 2. Size guard ------------------------------------------------------------

@@ -12,7 +12,11 @@ export type PreviewKind =
   | "unsupported";
 
 export interface PreviewTarget {
-  kind: "file" | "web";
+  /// `file`: a file inside the user's folders (read by the core, grant-checked).
+  /// `web`: an https page. `media`: an image the app generated under
+  /// `app_data/images`, shown through the asset protocol (the same scoped
+  /// path the inline chat image uses; never read through the grant API).
+  kind: "file" | "web" | "media";
   /// Absolute local path or https URL.
   ref: string;
 }
@@ -51,6 +55,7 @@ export function extensionOf(path: string): string {
 
 export function previewKind(target: PreviewTarget): PreviewKind {
   if (target.kind === "web") return /^https?:\/\//i.test(target.ref) ? "web" : "unsupported";
+  if (target.kind === "media") return "image";
   const ext = extensionOf(target.ref);
   if (EXTENSIONS[ext]) return EXTENSIONS[ext];
   if (TEXT_EXTENSIONS.has(ext)) return "text";

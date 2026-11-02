@@ -95,6 +95,21 @@ const REQUIRED_TESTS = [
   "chat_store::tests::artifacts_roundtrip_clear_and_tolerate_corrupt_json",
   "images::tests::generate_image_args_default_the_size_and_reject_an_empty_prompt",
   "images::tests::generate_image_results_tell_the_model_it_is_shown_and_quota_is_final",
+  // Round 4: the live url reply shape, credential-free download, E2E wire
+  "images::tests::the_production_request_path_uses_the_compiled_in_base_unchanged",
+  "images::tests::https_url_reply_is_the_live_community_shape",
+  "images::tests::non_https_url_replies_are_protocol_and_never_fetched",
+  "images::tests::download_returns_the_exact_bytes_on_200",
+  "images::tests::download_non_200_is_protocol",
+  "images::tests::download_over_20_mib_is_decode_with_or_without_content_length",
+  "images::tests::production_download_refuses_plain_http_without_any_connection",
+  "images::tests::download_follows_at_most_three_redirects",
+  "images::tests::e2e_url_reply_is_downloaded_and_no_authorization_reaches_the_storage_host",
+  "images::tests::e2e_no_authorization_reaches_the_storage_host_across_redirects",
+  "images::tests::e2e_generate_image_tool_call_lands_as_an_inline_image_artifact",
+  "images::tests::e2e_b64_reply_still_works_and_errors_classify",
+  "images::tests::e2e_production_mode_refuses_a_plain_http_url_reply",
+  "chat_store::tests::memory_sync_overwrite_keeps_the_artifacts_of_replies_still_present",
 ];
 // Unix-only acceptance tests (symlinks / sh): required where they can run.
 if (process.platform !== "win32") {

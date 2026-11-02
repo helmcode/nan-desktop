@@ -77,3 +77,15 @@ jobs:
       - name: Rust tests
         working-directory: src-tauri
         run: cargo test
+
+      - name: Frontend tests (vitest)
+        run: pnpm test
+
+      # Acceptance checks: assert the pinned tests actually RAN and passed
+      # (a renamed/filtered test must not silently drop coverage), plus the
+      # round-4 image/auto-open end-to-end flows over mocks.
+      - name: Wire check (t8)
+        run: node test/t8-check.mjs
+
+      - name: Round-4 E2E check (t14)
+        run: node test/t14-check.mjs

@@ -23,13 +23,13 @@
 //! the only image-specific use of the audio-introduced kind: a `b64_json`
 //! payload that fails to base64-decode (or decodes to zero bytes).
 //!
-//! **The `url` reply variant is deliberately REJECTED with kind `protocol`
-//! (S12).** The OpenAI images API may answer `{"data":[{"url": …}]}` where
-//! the URL points at an arbitrary remote host; downloading it would turn the
-//! app into a fetcher for third-party endpoints, which S12 forbids ("the app
-//! binary refuses any endpoint outside the two owned tenants"). Both tenants
-//! serve `b64_json`; if a future backend flips to `url`-only replies the app
-//! fails closed instead of opening an exfiltration/fetch channel.
+//! **Reply shapes.** `b64_json` is decoded inline. The LIVE community
+//! tenant answers `{"data":[{"url": "https://…r2.cloudflarestorage.com/…"}]}`
+//! (a presigned URL the tenant itself issues in its authenticated reply;
+//! verified 2026-11-02). That URL is downloaded https-only (every redirect
+//! hop too), with NO credentials attached — the bearer key only ever goes
+//! to the tenant's own inference host — at most 3 redirects and a 20 MiB
+//! streaming cap. A non-https URL fails closed with kind `protocol`.
 //!
 //! Generation takes ~1 minute per image, so `image_generate` is a managed
 //! task (same cancel-safe registry pattern as the chat streams): exactly one
@@ -48,8 +48,9 @@
 //! Scope note (L13): v1 is GENERATION ONLY — no image editing surface
 //! (`flux-2-klein` / `/v1/images/edits`) is exposed.
 //!
-//! Zero telemetry (S8): the only host contacted is the conversation
-//! profile's own inference base — a compiled-in constant (S2); in debug
+//! Zero telemetry (S8): the only hosts contacted are the conversation
+//! profile's own inference base — a compiled-in constant (S2) — and, for the
+//! `url` reply shape, the presigned storage URL that base returned; in debug
 //! builds the `NAN_DESKTOP_MOCK_INFERENCE` environment variable may point it
 //! at a local mock (`test/mock-images.mjs`), exactly like the chat surface.
 //! Release builds ignore the variable entirely (S12).
@@ -115,8 +116,17 @@ pub fn validate_size(size: &str) -> Result<(u32, u32), chat::ErrorKind> {
 /// `{base}/chat/completions`), so this yields `/v1/images/generations`;
 /// adding another `/v1` here would hit `/v1/v1/...` and 404. Debug mocks
 /// set `NAN_DESKTOP_MOCK_INFERENCE` to their `/v1` root as well.
+///
+/// A base given WITHOUT the `/v1` suffix (a bare host root) still yields the
+/// `/v1/images/generations` path, so the wire path can never silently lose
+/// its version prefix.
 pub fn generations_url(base: &str) -> String {
-    format!("{}/images/generations", base.trim_end_matches('/'))
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/images/generations")
+    } else {
+        format!("{base}/v1/images/generations")
+    }
 }
 
 /// Build the OpenAI-compatible `/images/generations` JSON body.
@@ -128,17 +138,46 @@ pub fn image_body(prompt: &str, size: &str) -> serde_json::Value {
     })
 }
 
-/// Parse the OpenAI images response body and return the decoded PNG bytes.
+/// What the tenant's images endpoint returned for one generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageReply {
+    /// Inline bytes (`b64_json`).
+    Bytes(Vec<u8>),
+    /// A tenant-issued presigned https URL to download (community shape).
+    Url(String),
+}
+
+/// Parse the OpenAI images response body.
 ///
-/// - `{"data":[{"b64_json": "…"}]}` → base64-decoded bytes (both tenants'
-///   shape). An undecodable payload or a zero-byte result is
-///   [`chat::ErrorKind::Decode`].
-/// - `{"data":[{"url": "…"}]}` (with no usable `b64_json`) →
-///   [`chat::ErrorKind::Protocol`] — S12: a URL would point at an arbitrary
-///   remote host, and the app only ever talks to the two locked tenants.
+/// - `{"data":[{"b64_json": "…"}]}` → [`ImageReply::Bytes`]. An undecodable
+///   payload or a zero-byte result is [`chat::ErrorKind::Decode`].
+/// - `{"data":[{"url": "https://…"}]}` → [`ImageReply::Url`]: the LIVE
+///   community shape (verified 2026-11-02: a presigned R2 URL issued by the
+///   tenant itself). The caller downloads it WITHOUT credentials (it is
+///   presigned), https-only, with a size cap — see [`download_image_url`].
+///   The URL comes from the locked tenant's authenticated response, so this
+///   is tenant-issued content, not an arbitrary remote host. A non-https
+///   URL is [`chat::ErrorKind::Protocol`] (never fetched).
 /// - Anything else (malformed JSON, empty `data`, neither field) →
 ///   [`chat::ErrorKind::Protocol`].
-pub fn parse_images_response(body: &str) -> Result<Vec<u8>, chat::ErrorKind> {
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn parse_images_response(body: &str) -> Result<ImageReply, chat::ErrorKind> {
+    parse_reply(body, false)
+}
+
+/// Whether a reply/download URL may be fetched: https always; plain http
+/// ONLY to the loopback mock host, and only when `allow_loopback_http`
+/// (debug builds whose inference base is the local mock — never release).
+fn url_allowed(url: &str, allow_loopback_http: bool) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    allow_loopback_http
+        && (url.starts_with("http://127.0.0.1:") || url.starts_with("http://127.0.0.1/"))
+}
+
+/// [`parse_images_response`] with the loopback-mock allowance.
+fn parse_reply(body: &str, allow_loopback_http: bool) -> Result<ImageReply, chat::ErrorKind> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|_| chat::ErrorKind::Protocol)?;
     let item = value
@@ -146,8 +185,8 @@ pub fn parse_images_response(body: &str) -> Result<Vec<u8>, chat::ErrorKind> {
         .and_then(|d| d.as_array())
         .and_then(|data| data.first())
         .ok_or(chat::ErrorKind::Protocol)?;
-    // Only the first item is consumed (n=1 in this app). `b64_json` is the
-    // only accepted shape; a `url` reply is rejected below (S12).
+    // Only the first item is consumed (n=1 in this app). `b64_json` wins
+    // when both fields are present; a `url` must be https.
     if let Some(b64) = item.get("b64_json").and_then(|b| b.as_str()) {
         let bytes = BASE64_STANDARD
             .decode(b64)
@@ -155,14 +194,112 @@ pub fn parse_images_response(body: &str) -> Result<Vec<u8>, chat::ErrorKind> {
         if bytes.is_empty() {
             return Err(chat::ErrorKind::Decode);
         }
-        return Ok(bytes);
+        return Ok(ImageReply::Bytes(bytes));
     }
-    if item.get("url").and_then(|u| u.as_str()).is_some() {
-        // S12: a url reply points at an arbitrary remote host. The app only
-        // ever talks to the two locked tenants — fail closed, never fetch.
+    if let Some(url) = item.get("url").and_then(|u| u.as_str()) {
+        if url_allowed(url, allow_loopback_http) {
+            return Ok(ImageReply::Url(url.to_string()));
+        }
         return Err(chat::ErrorKind::Protocol);
     }
     Err(chat::ErrorKind::Protocol)
+}
+
+/// The largest image the tenant-side presigned URL may yield (PNG at the
+/// model's sizes stays far below this; the cap bounds a hostile reply).
+pub const IMAGE_DOWNLOAD_CAP: u64 = 20 << 20;
+
+/// Maximum redirect hops followed while downloading a presigned image URL.
+pub const IMAGE_DOWNLOAD_MAX_REDIRECTS: usize = 3;
+
+/// Overall timeout of one image download (the bytes already exist on the
+/// tenant's storage; only the ~1-minute GENERATION is unbounded).
+pub const IMAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 60;
+
+/// Download a tenant-issued presigned image URL: https-only (including every
+/// redirect hop), NO credentials attached (the URL is presigned; the key
+/// must never reach another host), at most [`IMAGE_DOWNLOAD_MAX_REDIRECTS`]
+/// hops, size-capped while streaming, bounded timeout. Returns the bytes.
+#[cfg_attr(not(test), allow(dead_code))]
+pub async fn download_image_url(url: &str) -> Result<Vec<u8>, chat::ErrorKind> {
+    download_with(url, false).await
+}
+
+/// [`download_image_url`] with the loopback-mock allowance (see
+/// [`url_allowed`]): the debug mock serves its "presigned" URL over plain
+/// http on 127.0.0.1. Production always passes `false`.
+async fn download_with(url: &str, allow_loopback_http: bool) -> Result<Vec<u8>, chat::ErrorKind> {
+    if !url_allowed(url, allow_loopback_http) {
+        return Err(chat::ErrorKind::Protocol);
+    }
+    let client = reqwest::Client::builder()
+        .https_only(!allow_loopback_http)
+        .connect_timeout(std::time::Duration::from_secs(chat::CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(IMAGE_DOWNLOAD_TIMEOUT_SECS))
+        .redirect(download_redirect_policy(allow_loopback_http))
+        .build()
+        .map_err(|_| chat::ErrorKind::Protocol)?;
+    fetch_image(&client, url, IMAGE_DOWNLOAD_CAP).await
+}
+
+/// Redirect policy for presigned downloads: ≤ 3 hops, every hop allowed by
+/// [`url_allowed`] (https in production).
+fn download_redirect_policy(allow_loopback_http: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > IMAGE_DOWNLOAD_MAX_REDIRECTS {
+            attempt.error("too many redirects")
+        } else if !url_allowed(attempt.url().as_str(), allow_loopback_http) {
+            attempt.error("redirect to a disallowed scheme/host")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// Debug builds whose inference base is the local mock
+/// (`NAN_DESKTOP_MOCK_INFERENCE`) may fetch the mock's loopback http image
+/// URL. Always `false` in release builds (S12).
+fn mock_inference_active() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("NAN_DESKTOP_MOCK_INFERENCE").is_ok_and(|mock| !mock.trim().is_empty())
+}
+
+/// GET `url` with `client` (which carries NO default headers — never a
+/// bearer key) and stream the body, failing with
+/// [`chat::ErrorKind::Decode`] the moment it exceeds `cap` bytes (a hostile
+/// endless body is never buffered whole). Non-2xx → Protocol; an empty body
+/// → Decode. The transport split from [`download_image_url`] exists so the
+/// cap, status and no-credentials invariants are tested over loopback.
+async fn fetch_image(
+    client: &reqwest::Client,
+    url: &str,
+    cap: u64,
+) -> Result<Vec<u8>, chat::ErrorKind> {
+    use futures_util::StreamExt as _;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| chat::classify_transport(err.is_timeout()))?;
+    if !response.status().is_success() {
+        return Err(chat::ErrorKind::Protocol);
+    }
+    if response.content_length().is_some_and(|len| len > cap) {
+        return Err(chat::ErrorKind::Decode);
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| chat::classify_transport(err.is_timeout()))?;
+        if bytes.len() as u64 + chunk.len() as u64 > cap {
+            return Err(chat::ErrorKind::Decode);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err(chat::ErrorKind::Decode);
+    }
+    Ok(bytes)
 }
 
 /// The directory generated images are saved under: `<app data>/images`.
@@ -452,7 +589,33 @@ pub async fn request_image(
     size: &str,
 ) -> Result<Vec<u8>, chat::ErrorKind> {
     let key = chat::read_profile_key(profile_id)?;
+    request_image_with_key(profile_id, &key, prompt, size).await
+}
+
+/// [`request_image`] after the keychain read: resolve the profile's
+/// inference base, POST the generation, then decode (`b64_json`) or
+/// download (presigned `url`). Split out so the live smoke test exercises
+/// the exact production path with a key supplied from the environment.
+pub async fn request_image_with_key(
+    profile_id: &str,
+    key: &str,
+    prompt: &str,
+    size: &str,
+) -> Result<Vec<u8>, chat::ErrorKind> {
     let base = chat::inference_base(profile_id).ok_or(chat::ErrorKind::Protocol)?;
+    generate_at(&base, key, prompt, size, mock_inference_active()).await
+}
+
+/// The wire flow against one inference base: POST the generation with the
+/// bearer key (to `base` ONLY), then decode the `b64_json` or download the
+/// presigned `url` WITHOUT credentials.
+async fn generate_at(
+    base: &str,
+    key: &str,
+    prompt: &str,
+    size: &str,
+    allow_loopback_http: bool,
+) -> Result<Vec<u8>, chat::ErrorKind> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(chat::CONNECT_TIMEOUT_SECS))
         .build()
@@ -460,8 +623,8 @@ pub async fn request_image(
     // No overall request timeout: a ~1-minute generation must not be killed
     // mid-flight (same policy as the chat streams).
     let response = client
-        .post(generations_url(&base))
-        .bearer_auth(&key)
+        .post(generations_url(base))
+        .bearer_auth(key)
         .json(&image_body(prompt, size))
         .send()
         .await
@@ -474,7 +637,10 @@ pub async fn request_image(
         .text()
         .await
         .map_err(|err| chat::classify_transport(err.is_timeout()))?;
-    parse_images_response(&body)
+    match parse_reply(&body, allow_loopback_http)? {
+        ImageReply::Bytes(bytes) => Ok(bytes),
+        ImageReply::Url(url) => download_with(&url, allow_loopback_http).await,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -653,46 +819,76 @@ mod tests {
     /// A tiny valid PNG (1x1 pixel) — the same fixture the mock serves.
     const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
+    /// Unwrap a `Bytes` reply (panics with the actual variant otherwise).
+    fn expect_bytes(reply: Result<ImageReply, chat::ErrorKind>) -> Vec<u8> {
+        match reply {
+            Ok(ImageReply::Bytes(bytes)) => bytes,
+            other => panic!("expected ImageReply::Bytes, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_b64_json_reply_into_exact_bytes() {
         // "aGVsbG8gcG5n" is base64 for b"hello png" — known raw bytes keep
         // the assertion independent of the decoder under test.
-        let bytes =
-            parse_images_response(r#"{"data":[{"b64_json":"aGVsbG8gcG5n"}]}"#).expect("parse");
-        assert_eq!(bytes, b"hello png".to_vec());
+        assert_eq!(
+            parse_images_response(r#"{"data":[{"b64_json":"aGVsbG8gcG5n"}]}"#),
+            Ok(ImageReply::Bytes(b"hello png".to_vec()))
+        );
     }
 
     #[test]
     fn parses_a_real_png_payload_with_the_png_magic() {
         // The exact 1x1 PNG fixture the mock serves (TINY_PNG_B64): the
         // decoded bytes must carry the 8-byte PNG signature.
-        let bytes =
-            parse_images_response(&format!(r#"{{"data":[{{"b64_json":"{TINY_PNG_B64}"}}]}}"#))
-                .expect("parse");
+        let bytes = expect_bytes(parse_images_response(&format!(
+            r#"{{"data":[{{"b64_json":"{TINY_PNG_B64}"}}]}}"#
+        )));
         assert_eq!(
             &bytes[..8],
             &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
         );
-        assert!(!bytes.is_empty());
     }
 
     #[test]
-    fn url_only_reply_is_rejected_as_protocol_s12() {
-        let body = r#"{"created":1730000000,"data":[{"url":"https://cdn.example.com/img.png"}]}"#;
+    fn https_url_reply_is_the_live_community_shape() {
+        // Exactly the live shape (2026-11-02): keys ['url'] only, a presigned
+        // R2 URL with a query string that must survive verbatim.
+        let url = "https://abc123.r2.cloudflarestorage.com/images/x.png?X-Amz-Signature=deadbeef&X-Amz-Expires=3600";
+        let body = format!(r#"{{"created":1730000000,"data":[{{"url":"{url}"}}]}}"#);
         assert_eq!(
-            parse_images_response(body),
-            Err(chat::ErrorKind::Protocol),
-            "a url reply would point at an arbitrary host — S12 forbids it"
+            parse_images_response(&body),
+            Ok(ImageReply::Url(url.to_string()))
         );
+    }
+
+    #[test]
+    fn non_https_url_replies_are_protocol_and_never_fetched() {
+        for url in [
+            "http://abc.r2.cloudflarestorage.com/x.png",
+            "file:///etc/passwd",
+            "ftp://example.com/x.png",
+            "//example.com/x.png",
+            "HTTPS-ish://x",
+            "",
+        ] {
+            let body = serde_json::json!({ "data": [{ "url": url }] }).to_string();
+            assert_eq!(
+                parse_images_response(&body),
+                Err(chat::ErrorKind::Protocol),
+                "{url:?} must be rejected"
+            );
+        }
     }
 
     #[test]
     fn b64_json_wins_when_both_fields_are_present() {
-        let body = format!(
-            r#"{{"data":[{{"url":"https://cdn.example.com/img.png","b64_json":"{TINY_PNG_B64}"}}]}}"#
+        let body =
+            r#"{"data":[{"url":"https://cdn.example.com/img.png","b64_json":"aGVsbG8gcG5n"}]}"#;
+        assert_eq!(
+            parse_images_response(body),
+            Ok(ImageReply::Bytes(b"hello png".to_vec()))
         );
-        let parsed = parse_images_response(&body);
-        assert!(parsed.is_ok(), "b64_json must be used when present");
     }
 
     #[test]
@@ -823,6 +1019,581 @@ mod tests {
             generations_url("http://127.0.0.1:1/v1/"),
             "http://127.0.0.1:1/v1/images/generations"
         );
+        // A bare host root (no /v1) can never lose the version prefix: this
+        // exact path regression (`{base}/images/generations` on a non-/v1
+        // root, or `/v1/v1/`) is what 404'd image generation for 4 rounds.
+        assert_eq!(
+            generations_url("https://api.nan.builders"),
+            "https://api.nan.builders/v1/images/generations"
+        );
+        assert_eq!(
+            generations_url("https://api.nan.builders/"),
+            "https://api.nan.builders/v1/images/generations"
+        );
+        for base in [
+            "https://api.nan.builders/v1",
+            "https://api.nan.builders",
+            "http://127.0.0.1:9/v1",
+        ] {
+            let url = generations_url(base);
+            assert!(url.ends_with("/v1/images/generations"), "{url}");
+            assert_eq!(url.matches("/v1/").count(), 1, "{url}");
+        }
+    }
+
+    #[test]
+    fn the_production_request_path_uses_the_compiled_in_base_unchanged() {
+        // `request_image_with_key` resolves the base through
+        // `chat::inference_base`; without the debug mock variable it is the
+        // compiled-in constant, so the wire URL is pinned end to end.
+        if std::env::var("NAN_DESKTOP_MOCK_INFERENCE").is_err() {
+            let base = chat::inference_base("nan").expect("nan base");
+            assert_eq!(
+                generations_url(&base),
+                "https://api.nan.builders/v1/images/generations"
+            );
+        }
+    }
+
+    // ---- loopback HTTP harness (download + E2E wire tests) ------------------------
+
+    use std::io::{Read as _, Write as _};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    /// One recorded request: lowercase header block + body.
+    #[derive(Debug, Clone)]
+    struct Recorded {
+        head: String,
+        body: Vec<u8>,
+    }
+
+    impl Recorded {
+        fn has_header(&self, name: &str) -> bool {
+            self.head
+                .lines()
+                .any(|line| line.starts_with(&format!("{name}:")))
+        }
+    }
+
+    /// A dependency-free HTTP/1.1 server on 127.0.0.1 (one request per
+    /// connection, `Connection: close`). `respond(path, request)` returns
+    /// the raw response bytes. Every request is recorded. The request head
+    /// is lowercased (header-name checks are case-insensitive).
+    struct Loopback {
+        origin: String,
+        requests: Arc<StdMutex<Vec<(String, Recorded)>>>,
+    }
+
+    impl Loopback {
+        fn start<F>(respond: F) -> Self
+        where
+            F: Fn(&str, &Recorded) -> Vec<u8> + Send + 'static,
+        {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let origin = format!("http://{}", listener.local_addr().expect("addr"));
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let log = Arc::clone(&requests);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let mut raw = Vec::new();
+                    let mut buf = [0u8; 8192];
+                    let head_end = loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break None,
+                            Ok(n) => raw.extend_from_slice(&buf[..n]),
+                        }
+                        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break Some(pos + 4);
+                        }
+                    };
+                    let Some(head_end) = head_end else { continue };
+                    let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while raw.len() < head_end + length {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => raw.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let request_line = head.lines().next().unwrap_or_default().to_string();
+                    let path = request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
+                    let recorded = Recorded {
+                        head,
+                        body: raw[head_end..].to_vec(),
+                    };
+                    let response = respond(path.as_str(), &recorded);
+                    log.lock().expect("log").push((path, recorded));
+                    let _ = stream.write_all(&response);
+                    let _ = stream.flush();
+                }
+            });
+            Loopback { origin, requests }
+        }
+
+        fn requests(&self) -> Vec<(String, Recorded)> {
+            self.requests.lock().expect("log").clone()
+        }
+    }
+
+    fn http_response(status: &str, headers: &[(&str, String)], body: &[u8]) -> Vec<u8> {
+        let mut out = format!("HTTP/1.1 {status}\r\nconnection: close\r\n");
+        for (name, value) in headers {
+            out.push_str(&format!("{name}: {value}\r\n"));
+        }
+        out.push_str("\r\n");
+        let mut bytes = out.into_bytes();
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    fn ok_bytes(body: &[u8]) -> Vec<u8> {
+        http_response(
+            "200 OK",
+            &[
+                ("content-type", "image/png".into()),
+                ("content-length", body.len().to_string()),
+            ],
+            body,
+        )
+    }
+
+    fn tiny_png() -> Vec<u8> {
+        BASE64_STANDARD.decode(TINY_PNG_B64).expect("fixture")
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tauri::async_runtime::block_on(future)
+    }
+
+    // ---- download_image_url / download_with ----------------------------------------
+
+    #[test]
+    fn download_returns_the_exact_bytes_on_200() {
+        let png = tiny_png();
+        let served = png.clone();
+        let server = Loopback::start(move |_, _| ok_bytes(&served));
+        let url = format!("{}/bucket/img.png?X-Amz-Signature=abc", server.origin);
+        assert_eq!(block_on(download_with(&url, true)), Ok(png));
+        // The presigned query string reached the storage host verbatim.
+        assert_eq!(
+            server.requests()[0].0,
+            "/bucket/img.png?x-amz-signature=abc"
+        );
+    }
+
+    #[test]
+    fn download_non_200_is_protocol() {
+        for status in [
+            "403 Forbidden",
+            "404 Not Found",
+            "500 Internal Server Error",
+        ] {
+            let server = Loopback::start(move |_, _| http_response(status, &[], b"nope"));
+            let url = format!("{}/img.png", server.origin);
+            assert_eq!(
+                block_on(download_with(&url, true)),
+                Err(chat::ErrorKind::Protocol),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn download_over_20_mib_is_decode_with_or_without_content_length() {
+        // Declared too large: refused before reading the body.
+        let server = Loopback::start(|_, _| {
+            http_response(
+                "200 OK",
+                &[("content-length", (IMAGE_DOWNLOAD_CAP + 1).to_string())],
+                b"",
+            )
+        });
+        assert_eq!(
+            block_on(download_with(&format!("{}/a.png", server.origin), true)),
+            Err(chat::ErrorKind::Decode)
+        );
+        // No length declared: the streaming cap trips at cap + 1 bytes.
+        let body = vec![0u8; IMAGE_DOWNLOAD_CAP as usize + 1];
+        let server = Loopback::start(move |_, _| http_response("200 OK", &[], &body));
+        assert_eq!(
+            block_on(download_with(&format!("{}/b.png", server.origin), true)),
+            Err(chat::ErrorKind::Decode)
+        );
+        // Exactly at the cap is accepted (the bound is inclusive).
+        let body = vec![7u8; 4096];
+        let server = Loopback::start(move |_, _| http_response("200 OK", &[], &body));
+        let client = reqwest::Client::new();
+        assert_eq!(
+            block_on(fetch_image(
+                &client,
+                &format!("{}/c.png", server.origin),
+                4096
+            ))
+            .map(|b| b.len()),
+            Ok(4096)
+        );
+        assert_eq!(
+            block_on(fetch_image(
+                &client,
+                &format!("{}/c.png", server.origin),
+                4095
+            )),
+            Err(chat::ErrorKind::Decode)
+        );
+    }
+
+    #[test]
+    fn download_empty_body_is_decode() {
+        let server = Loopback::start(|_, _| ok_bytes(b""));
+        assert_eq!(
+            block_on(download_with(&format!("{}/e.png", server.origin), true)),
+            Err(chat::ErrorKind::Decode)
+        );
+    }
+
+    #[test]
+    fn production_download_refuses_plain_http_without_any_connection() {
+        let server = Loopback::start(|_, _| ok_bytes(b"x"));
+        let url = format!("{}/img.png", server.origin);
+        assert_eq!(
+            block_on(download_image_url(&url)),
+            Err(chat::ErrorKind::Protocol)
+        );
+        for url in [
+            "file:///etc/passwd",
+            "ftp://x/y.png",
+            "http://example.com/a.png",
+        ] {
+            assert_eq!(
+                block_on(download_image_url(url)),
+                Err(chat::ErrorKind::Protocol),
+                "{url}"
+            );
+        }
+        // The loopback allowance is ONLY for 127.0.0.1 even in mock mode.
+        assert_eq!(
+            block_on(download_with("http://example.com/a.png", true)),
+            Err(chat::ErrorKind::Protocol)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(server.requests().is_empty(), "nothing was ever requested");
+    }
+
+    #[test]
+    fn download_follows_at_most_three_redirects() {
+        // /r/N redirects to /r/N-1 … /r/0 serves the image.
+        let png = tiny_png();
+        let server = Loopback::start(move |path, _| {
+            let n: u32 = path
+                .strip_prefix("/r/")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            if n == 0 {
+                ok_bytes(&png)
+            } else {
+                http_response(
+                    "302 Found",
+                    &[
+                        ("location", format!("/r/{}", n - 1)),
+                        ("content-length", "0".into()),
+                    ],
+                    b"",
+                )
+            }
+        });
+        assert!(block_on(download_with(&format!("{}/r/3", server.origin), true)).is_ok());
+        assert!(block_on(download_with(&format!("{}/r/4", server.origin), true)).is_err());
+    }
+
+    // ---- end-to-end wire flow (mock tenant → presigned url → download) -------------
+
+    const E2E_KEY: &str = "sk-e2e-key-0123456789";
+
+    /// The mock tenant: answers the generation with the LIVE url shape,
+    /// pointing at a SEPARATE storage host (another loopback port).
+    fn start_tenant(storage_origin: String) -> Loopback {
+        Loopback::start(move |path, request| {
+            if path != "/v1/images/generations" {
+                return http_response("404 Not Found", &[], b"{}");
+            }
+            if !request
+                .head
+                .contains(&format!("authorization: bearer {}", E2E_KEY.to_lowercase()))
+            {
+                return http_response("401 Unauthorized", &[], b"{}");
+            }
+            let body = serde_json::json!({ "created": 1, "data": [{
+                "url": format!("{storage_origin}/bucket/gen.png?X-Amz-Signature=s1g")
+            }] })
+            .to_string();
+            http_response(
+                "200 OK",
+                &[
+                    ("content-type", "application/json".into()),
+                    ("content-length", body.len().to_string()),
+                ],
+                body.as_bytes(),
+            )
+        })
+    }
+
+    #[test]
+    fn e2e_url_reply_is_downloaded_and_no_authorization_reaches_the_storage_host() {
+        let png = tiny_png();
+        let served = png.clone();
+        let storage = Loopback::start(move |_, _| ok_bytes(&served));
+        let tenant = start_tenant(storage.origin.clone());
+
+        let bytes = block_on(generate_at(
+            &format!("{}/v1", tenant.origin),
+            E2E_KEY,
+            "un gato astronauta",
+            "1024x1024",
+            true,
+        ))
+        .expect("generation through the url shape");
+        assert_eq!(bytes, png, "the downloaded bytes are the stored image");
+
+        // Tenant: exactly one POST to /v1/images/generations WITH the key.
+        let tenant_requests = tenant.requests();
+        assert_eq!(tenant_requests.len(), 1);
+        assert_eq!(tenant_requests[0].0, "/v1/images/generations");
+        assert!(tenant_requests[0].1.head.starts_with("post "));
+        let body: serde_json::Value =
+            serde_json::from_slice(&tenant_requests[0].1.body).expect("json body");
+        assert_eq!(body, image_body("un gato astronauta", "1024x1024"));
+
+        // Storage: one GET, and the key NEVER reached it in any form.
+        let storage_requests = storage.requests();
+        assert_eq!(storage_requests.len(), 1);
+        let (path, request) = &storage_requests[0];
+        assert!(request.head.starts_with("get "));
+        assert_eq!(path, "/bucket/gen.png?x-amz-signature=s1g");
+        assert!(!request.has_header("authorization"));
+        assert!(!request.has_header("proxy-authorization"));
+        assert!(!request.has_header("cookie"));
+        assert!(
+            !request.head.contains(&E2E_KEY.to_lowercase()),
+            "the bearer key leaked to the storage host"
+        );
+    }
+
+    #[test]
+    fn e2e_generate_image_tool_call_lands_as_an_inline_image_artifact() {
+        // The model's tool call → the wire flow (url shape) → saved under
+        // app_data/images exactly like `run_tool` → persisted as an `image`
+        // artifact on the reply → the row JSON the renderer reads.
+        let png = tiny_png();
+        let served = png.clone();
+        let storage = Loopback::start(move |_, _| ok_bytes(&served));
+        let tenant = start_tenant(storage.origin.clone());
+        let app_data = TempDir::new().expect("app data");
+
+        let (prompt, size) =
+            parse_tool_args(r#"{"prompt":"un zorro en la nieve","size":"768x512"}"#)
+                .expect("valid tool call");
+        let bytes = block_on(generate_at(
+            &format!("{}/v1", tenant.origin),
+            E2E_KEY,
+            &prompt,
+            &size,
+            true,
+        ))
+        .expect("generation");
+        let saved = save_png(&images_dir(app_data.path()), &bytes);
+        let model_reply: serde_json::Value =
+            serde_json::from_str(&tool_result_for_model(&saved)).expect("tool json");
+        assert_eq!(model_reply["ok"], true);
+        let path = saved.expect("saved");
+        assert!(path.starts_with(images_dir(app_data.path())));
+        assert_eq!(std::fs::read(&path).expect("read"), png);
+
+        let conn = chat_store::open_db(app_data.path()).expect("db");
+        let conv = chat_store::insert_conversation(&conn, "nan", "t").expect("conv");
+        let reply = chat_store::insert_message(&conn, conv, "assistant", "Aquí está.", Some("m"))
+            .expect("reply");
+        chat_store::set_message_artifacts(
+            &conn,
+            reply,
+            &[chat_store::Artifact {
+                path: path.display().to_string(),
+                kind: chat_store::ArtifactKind::Image,
+            }],
+        )
+        .expect("artifacts");
+        let rows = chat_store::list_messages(&conn, conv).expect("list");
+        let wire = serde_json::to_value(&rows[0]).expect("row json");
+        assert_eq!(
+            wire["artifacts"],
+            serde_json::json!([{ "path": path.display().to_string(), "kind": "image" }])
+        );
+    }
+
+    #[test]
+    fn e2e_no_authorization_reaches_the_storage_host_across_redirects() {
+        let png = tiny_png();
+        let final_host = Loopback::start(move |_, _| ok_bytes(&png));
+        let final_origin = final_host.origin.clone();
+        let hop = Loopback::start(move |_, _| {
+            http_response(
+                "307 Temporary Redirect",
+                &[
+                    ("location", format!("{final_origin}/final.png")),
+                    ("content-length", "0".into()),
+                ],
+                b"",
+            )
+        });
+        let tenant = start_tenant(hop.origin.clone());
+        block_on(generate_at(
+            &format!("{}/v1", tenant.origin),
+            E2E_KEY,
+            "p",
+            "512x512",
+            true,
+        ))
+        .expect("generation across a redirect");
+        for (host, server) in [("hop", &hop), ("final", &final_host)] {
+            let requests = server.requests();
+            assert_eq!(requests.len(), 1, "{host}");
+            assert!(!requests[0].1.has_header("authorization"), "{host}");
+        }
+    }
+
+    #[test]
+    fn e2e_b64_reply_still_works_and_errors_classify() {
+        // b64_json shape (the enterprise tenant) end to end.
+        let tenant = Loopback::start(|_, _| {
+            let body = format!(r#"{{"data":[{{"b64_json":"{TINY_PNG_B64}"}}]}}"#);
+            http_response("200 OK", &[], body.as_bytes())
+        });
+        assert_eq!(
+            block_on(generate_at(
+                &format!("{}/v1", tenant.origin),
+                E2E_KEY,
+                "p",
+                "512x512",
+                false
+            )),
+            Ok(tiny_png())
+        );
+        // 429 is the monthly quota; 404 (a wrong path) is NOT silently ok.
+        for (status, kind) in [
+            ("429 Too Many Requests", chat::ErrorKind::RateLimited),
+            ("401 Unauthorized", chat::classify_chat_status(401)),
+            ("404 Not Found", chat::classify_chat_status(404)),
+        ] {
+            let tenant = Loopback::start(move |_, _| http_response(status, &[], b"{}"));
+            assert_eq!(
+                block_on(generate_at(
+                    &format!("{}/v1", tenant.origin),
+                    E2E_KEY,
+                    "p",
+                    "512x512",
+                    false
+                )),
+                Err(kind),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_production_mode_refuses_a_plain_http_url_reply() {
+        // Without the mock allowance a non-https url is never fetched.
+        let storage = Loopback::start(|_, _| ok_bytes(b"x"));
+        let tenant = start_tenant(storage.origin.clone());
+        assert_eq!(
+            block_on(generate_at(
+                &format!("{}/v1", tenant.origin),
+                E2E_KEY,
+                "p",
+                "512x512",
+                false
+            )),
+            Err(chat::ErrorKind::Protocol)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(storage.requests().is_empty());
+    }
+
+    // ---- LIVE smoke (manual: real community tenant, real key) ----------------------
+
+    /// Real generation through the app's own path against
+    /// `https://api.nan.builders/v1`. Ignored by default (needs the network
+    /// and a member key). Run:
+    ///
+    /// ```sh
+    /// NAN_SMOKE_MODELS_JSON=/path/to/models.json \   # or NAN_SMOKE_KEY=…
+    ///   cargo test live_smoke -- --ignored --nocapture
+    /// ```
+    ///
+    /// The key is read from `NAN_SMOKE_KEY`, else from
+    /// `providers.nan.apiKey` in the JSON file at `NAN_SMOKE_MODELS_JSON`.
+    /// It is never printed. The image is written to `NAN_SMOKE_OUT`
+    /// (default `/tmp/nan-desktop-live-smoke.png`).
+    #[test]
+    #[ignore = "live network smoke: needs a member key (see doc comment)"]
+    fn live_smoke_community_generation() {
+        assert!(
+            std::env::var("NAN_DESKTOP_MOCK_INFERENCE").is_err(),
+            "unset NAN_DESKTOP_MOCK_INFERENCE: the smoke must hit the real tenant"
+        );
+        let key = std::env::var("NAN_SMOKE_KEY").ok().or_else(|| {
+            let path = std::env::var("NAN_SMOKE_MODELS_JSON").ok()?;
+            let raw = std::fs::read_to_string(path).ok()?;
+            let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+            json["providers"]["nan"]["apiKey"]
+                .as_str()
+                .map(str::to_string)
+        });
+        let key = key.expect("set NAN_SMOKE_KEY or NAN_SMOKE_MODELS_JSON");
+        assert!(!key.is_empty());
+        let out = std::env::var("NAN_SMOKE_OUT")
+            .unwrap_or_else(|_| "/tmp/nan-desktop-live-smoke.png".to_string());
+
+        let base = chat::inference_base("nan").expect("nan base");
+        println!("live smoke: POST {}", generations_url(&base));
+        let started = std::time::Instant::now();
+        let result = block_on(request_image_with_key(
+            "nan",
+            &key,
+            "A small red fox sitting in fresh snow, soft morning light, photographic",
+            DEFAULT_SIZE,
+        ));
+        let elapsed = started.elapsed();
+        let bytes = match result {
+            Ok(bytes) => bytes,
+            Err(kind) => panic!("live generation failed after {elapsed:?}: {kind:?}"),
+        };
+        std::fs::write(&out, &bytes).expect("write smoke image");
+        let png = bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        let jpeg = bytes.starts_with(&[0xFF, 0xD8, 0xFF]);
+        let webp = bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP";
+        println!(
+            "live smoke: OK bytes={} elapsed_ms={} format={} out={out}",
+            bytes.len(),
+            elapsed.as_millis(),
+            if png {
+                "png"
+            } else if jpeg {
+                "jpeg"
+            } else if webp {
+                "webp"
+            } else {
+                "unknown"
+            }
+        );
+        assert!(png || jpeg || webp, "the downloaded bytes are not an image");
     }
 
     #[test]

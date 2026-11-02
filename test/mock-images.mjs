@@ -17,12 +17,22 @@
 //                                 model "trigger-429" → 429 (the monthly
 //                                 image quota), "trigger-500" → 500,
 //                                 header `x-nan-test-429: 1` → 429.
-//                                 The `url` reply variant is NEVER served —
-//                                 the app rejects it with kind `protocol`
-//                                 (S12: no third-party endpoints), and that
-//                                 behavior is pinned by Rust unit tests.
+//                                 Reply shape: `b64_json` by default; the
+//                                 LIVE community shape `{"data":[{"url"}]}`
+//                                 (a presigned storage URL) when started
+//                                 with MOCK_IMAGES_SHAPE=url or when the
+//                                 request carries `x-nan-test-shape: url`.
+//                                 The url points at /storage/<id>.png on
+//                                 this server (plain http on 127.0.0.1 —
+//                                 debug builds with NAN_DESKTOP_MOCK_INFERENCE
+//                                 accept loopback http; release: https only).
+//   GET  /storage/<id>.png      → the PNG bytes, NO auth required (it is
+//                                 "presigned"). Records whether any
+//                                 Authorization header arrived — the app
+//                                 must never send one there.
 //   GET  /record                → the last recorded generation request
-//                                 (metadata only — never the key).
+//                                 (metadata only — never the key) and the
+//                                 last storage download.
 //   GET  /reset                 → clears the recorded state.
 //   GET  /__probe__             → 200, readiness probe for the checks.
 //
@@ -49,11 +59,13 @@ const TINY_PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 // The last recorded request (metadata only — never the key).
-let recorded = { generation: null };
+let recorded = { generation: null, storage: null };
 
 function reset() {
-  recorded = { generation: null };
+  recorded = { generation: null, storage: null };
 }
+
+const DEFAULT_SHAPE = process.env.MOCK_IMAGES_SHAPE === "url" ? "url" : "b64";
 
 function authorized(req) {
   const header = req.headers.authorization ?? "";
@@ -104,8 +116,23 @@ function handleGenerations(req, res, body) {
     return sendJson(res, 400, { error: "empty prompt" });
   }
   if (!validSize(size)) return sendJson(res, 400, { error: "invalid size" });
-  recorded.generation = { model, prompt, size };
+  const shape = req.headers["x-nan-test-shape"] === "url" ? "url" : DEFAULT_SHAPE;
+  recorded.generation = { model, prompt, size, shape };
+  if (shape === "url") {
+    const id = `${Date.now()}`;
+    return sendJson(res, 200, {
+      created: 1730000000,
+      data: [{ url: `${BASE}/storage/${id}.png?X-Amz-Signature=mock` }],
+    });
+  }
   sendJson(res, 200, { created: 1730000000, data: [{ b64_json: TINY_PNG_B64 }] });
+}
+
+function handleStorage(req, res, pathname) {
+  recorded.storage = { path: pathname, authorization_present: req.headers.authorization !== undefined };
+  const png = Buffer.from(TINY_PNG_B64, "base64");
+  res.writeHead(200, { "content-type": "image/png", "content-length": png.length });
+  res.end(png);
 }
 
 const server = createServer((req, res) => {
@@ -119,6 +146,9 @@ const server = createServer((req, res) => {
   }
   if (req.method === "GET" && url.pathname === "/record") {
     return sendJson(res, 200, recorded);
+  }
+  if (req.method === "GET" && /^\/storage\/[0-9]+\.png$/.test(url.pathname)) {
+    return handleStorage(req, res, url.pathname);
   }
   if (req.method === "POST" && url.pathname === "/v1/images/generations") {
     return void readBody(req).then((body) => handleGenerations(req, res, body));

@@ -4,7 +4,9 @@
 // wrapper, with a branded open-in-browser card as the fallback.
 
 import { lazy, Suspense, useEffect, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { fetchWebPreview, readFileForPreview, type WebPreview } from "../core";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { folderName, hostOf } from "../copy";
 import { useT } from "../i18n";
 import { IconExternal, IconGlobe, IconX } from "../icons";
@@ -125,6 +127,7 @@ export default function PreviewPane({
   const t = useT();
   const isWeb = target.kind === "web";
   const title = isWeb ? hostOf(target.ref) : folderName(target.ref);
+  const key = targetKey(target);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -156,18 +159,22 @@ export default function PreviewPane({
           <IconX size={16} />
         </button>
       </header>
-      <div className="preview-body" key={targetKey(target)}>
-        <Suspense fallback={<p className="preview-note">{t.preview.loading}</p>}>
-          {isWeb ? (
-            previewKind(target) === "web" ? (
-              <WebBody profileId={profileId} url={target.ref} onOpenLink={onOpenLink} />
+      <div className="preview-body" key={key}>
+        <ErrorBoundary resetKey={key} fallback={<p className="preview-note">{t.preview.crashed}</p>}>
+          <Suspense fallback={<p className="preview-note">{t.preview.loading}</p>}>
+            {target.kind === "media" ? (
+              <img className="preview-image" src={convertFileSrc(target.ref)} alt={title} />
+            ) : isWeb ? (
+              previewKind(target) === "web" ? (
+                <WebBody profileId={profileId} url={target.ref} onOpenLink={onOpenLink} />
+              ) : (
+                <p className="preview-note">{t.preview.unsupported}</p>
+              )
             ) : (
-              <p className="preview-note">{t.preview.unsupported}</p>
-            )
-          ) : (
-            <FileBody profileId={profileId} path={target.ref} onOpenLink={onOpenLink} />
-          )}
-        </Suspense>
+              <FileBody profileId={profileId} path={target.ref} onOpenLink={onOpenLink} />
+            )}
+          </Suspense>
+        </ErrorBoundary>
       </div>
     </aside>
   );

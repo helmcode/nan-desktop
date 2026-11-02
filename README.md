@@ -456,13 +456,42 @@ node test/t5-check.mjs
 ```
 
 Proves the wire contract (b64 → PNG signature, size guard, 401/429/500
-classification, no `url` replies, key never recorded) and then runs the
-full Rust suite. The Rust unit tests pin the pure surface: size validation
-(bounds, multiples of 16, malformed strings), response parsing (`b64_json`
-accepted, `url` rejected as protocol, undecidable payloads as `decode`),
-path handling (uuid `.png` names under the images dir), the
-per-conversation cancel-safe registry, and the store round-trip with
-`media_path` plus the legacy-schema migration.
+classification, the opt-in `url` shape served without credentials, key
+never recorded) and then runs the full Rust suite. The Rust unit tests pin
+the pure surface: size validation (bounds, multiples of 16, malformed
+strings), the `/v1/images/generations` path, response parsing (`b64_json`
+→ bytes, https `url` → download, any other `url` rejected as protocol,
+undecodable payloads as `decode`), path handling (uuid `.png` names under
+the images dir), the per-conversation cancel-safe registry, and the store
+round-trip with `media_path` plus the legacy-schema migration.
+
+**Reply shapes.** The live community tenant answers
+`{"data":[{"url":"https://…r2.cloudflarestorage.com/…"}]}` — a presigned
+URL it issues itself. The core downloads it https-only (every redirect hop
+too, at most 3), with NO Authorization header (the key only ever goes to
+the tenant's inference host) and a 20 MiB streaming cap. To exercise that
+path in a debug build, start the mock with `MOCK_IMAGES_SHAPE=url`; debug
+builds pointed at the mock via `NAN_DESKTOP_MOCK_INFERENCE` accept its
+loopback `http://127.0.0.1` storage URL (release builds: https only).
+
+**End-to-end check (CI):** `node test/t14-check.mjs` runs the loopback
+E2E (mock tenant → presigned url → credential-free download → saved →
+`image` artifact row) and the UI flows (generate_image tool → inline image
++ auto-opened preview, per-conversation image mode, the post-PDF switch),
+and fails if any pinned test was renamed or skipped.
+
+**Live smoke (manual, real tenant, needs a member key):**
+
+```sh
+cd src-tauri
+NAN_SMOKE_MODELS_JSON=~/.pi/agent/models.json \
+  cargo test live_smoke -- --ignored --nocapture
+```
+
+It runs `request_image_with_key("nan", …)` — the app's own path after the
+keychain read — against `https://api.nan.builders/v1`, writes the image to
+`/tmp/nan-desktop-live-smoke.png` and prints its byte size and elapsed
+time (never the key).
 
 ### What is NOT in the image MVP
 

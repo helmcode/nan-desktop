@@ -267,6 +267,9 @@ export const en = {
     page: (n: number, total: number) => `Page ${n} of ${total}`,
     previous: "Previous",
     next: "Next",
+    crashed: "This preview stopped working. Close it and open the file again.",
+    messageCrashed: "This message could not be shown.",
+    shellCrashed: "This conversation could not be shown. Pick another one or start a new chat.",
   },
 };
 

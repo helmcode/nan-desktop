@@ -709,8 +709,30 @@ pub fn write_remote_conversation(
     messages: &[MessageRecord],
 ) -> Result<i64, rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
+    // Artifacts (produced files / generated images) are device-local paths
+    // that never travel to the account; remember them per text row so the
+    // overwrite below does not silently drop the chips/inline images of
+    // replies that are still present in the remote copy (round 4).
+    let mut kept_artifacts: Vec<(String, String, String, String)> = Vec::new();
     let id = match local_id {
         Some(id) => {
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT role, content, created_at, artifacts FROM messages
+                     WHERE conversation_id = ?1 AND media_path IS NULL AND artifacts IS NOT NULL",
+                )?;
+                let rows = stmt.query_map([id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        normalize_timestamp(&row.get::<_, String>(2)?),
+                        row.get::<_, String>(3)?,
+                    ))
+                })?;
+                for row in rows {
+                    kept_artifacts.push(row?);
+                }
+            }
             tx.execute(
                 "UPDATE conversations SET title = ?1, updated_at = ?2, synced_at = ?2 WHERE id = ?3",
                 rusqlite::params![title, updated_at, id],
@@ -736,9 +758,16 @@ pub fn write_remote_conversation(
         } else {
             serde_json::to_string(&message.sources).ok()
         };
+        let created = normalize_timestamp(&message.created_at);
+        let matched = kept_artifacts
+            .iter()
+            .position(|(role, content, created_at, _)| {
+                *role == message.role && *content == message.content && *created_at == created
+            });
+        let artifacts: Option<String> = matched.map(|index| kept_artifacts.swap_remove(index).3);
         tx.execute(
-            "INSERT INTO messages (conversation_id, role, content, model, created_at, status, sources)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages (conversation_id, role, content, model, created_at, status, sources, artifacts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 id,
                 message.role,
@@ -746,7 +775,8 @@ pub fn write_remote_conversation(
                 message.model,
                 message.created_at,
                 STATUS_COMPLETE,
-                sources
+                sources,
+                artifacts
             ],
         )?;
     }
@@ -1422,6 +1452,89 @@ mod tests {
             1
         );
         assert_eq!(messages.last().expect("last").sources.len(), 1);
+    }
+
+    #[test]
+    fn memory_sync_overwrite_keeps_the_artifacts_of_replies_still_present() {
+        // Round 4: a reply that produced a PDF (+ a generated image) is
+        // exported to the account WITHOUT its device-local artifacts; when
+        // the remote copy comes back and overwrites the text rows, the
+        // chips/inline image of that reply must survive.
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        insert_message(&conn, conv, "user", "hazme un pdf", None).expect("user");
+        let reply =
+            insert_message(&conn, conv, "assistant", "PDF listo.", Some("m")).expect("reply");
+        let artifacts = vec![
+            Artifact {
+                path: "/Users/ana/Proyecto/informe.pdf".into(),
+                kind: ArtifactKind::File,
+            },
+            Artifact {
+                path: "/data/images/portada.png".into(),
+                kind: ArtifactKind::Image,
+            },
+        ];
+        set_message_artifacts(&conn, reply, &artifacts).expect("set");
+
+        // Exactly what the sync uploads, plus one new remote message, with
+        // a timestamp spelled differently (no millis) to prove the match
+        // is on the normalized instant.
+        let mut remote = export_messages(&conn, conv).expect("export");
+        assert!(remote.iter().all(|m| !m.content.contains("informe.pdf")));
+        let reply_created = remote[1].created_at.clone();
+        if let Some(stripped) = reply_created.strip_suffix(".000Z") {
+            remote[1].created_at = format!("{stripped}Z");
+        }
+        remote.push(MessageRecord {
+            role: "user".into(),
+            content: "gracias".into(),
+            model: None,
+            created_at: "2099-01-01T00:00:00.000Z".into(),
+            sources: vec![],
+        });
+        write_remote_conversation(
+            &conn,
+            Some(conv),
+            "nan",
+            "rid-art",
+            "t",
+            "2026-10-01T00:00:00.000Z",
+            "2099-01-01T00:00:00.000Z",
+            &remote,
+        )
+        .expect("overwrite");
+
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 3);
+        let kept = messages
+            .iter()
+            .find(|m| m.content == "PDF listo.")
+            .expect("reply row");
+        assert_eq!(kept.artifacts, artifacts, "artifacts survived the sync");
+        assert!(
+            messages
+                .iter()
+                .filter(|m| m.content != "PDF listo.")
+                .all(|m| m.artifacts.is_empty())
+        );
+
+        // A reply the remote copy no longer has takes its artifacts with it.
+        write_remote_conversation(
+            &conn,
+            Some(conv),
+            "nan",
+            "rid-art",
+            "t",
+            "2026-10-01T00:00:00.000Z",
+            "2099-01-02T00:00:00.000Z",
+            &remote[..1],
+        )
+        .expect("overwrite 2");
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].artifacts.is_empty());
     }
 
     #[test]
