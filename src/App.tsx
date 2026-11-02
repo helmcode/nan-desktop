@@ -1,61 +1,66 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import "./App.css";
+import { BrandLogo, BrandMark } from "./brand";
+import { approvalsReducer, placeCards, type ApprovalCardState } from "./chat/approvals";
+import { extractFilePaths } from "./chat/filePaths";
+import { stripToolMarkup } from "./chat/toolMarkup";
+import { ApprovalCard } from "./components/ApprovalCard";
+import { LanguageScreen } from "./components/LanguageScreen";
+import { UserMenu, type SettingsSection } from "./components/UserMenu";
 import {
   DEFAULT_IMAGE_SIZE,
   IMAGE_SIZES,
-  PROFILE_COPY,
   VOICE_STORAGE_KEY,
   chatErrorLabel,
   commandErrorLabel,
   folderName,
+  grantErrorLabel,
   hostOf,
   imageErrorLabel,
+  profileDescription,
   profileTitle,
   signInErrorLabel,
   storedVoice,
 } from "./copy";
+import { onApprovalRequest, onApprovalResolved, respondToApproval } from "./core";
+import { VOICE_UI } from "./flags";
+import { useI18n, useT } from "./i18n";
 import {
-  BrandMark,
   IconArrowUp,
   IconCheck,
   IconChevronDown,
   IconComputer,
-  IconCopy,
+  IconFile,
   IconFolder,
-  IconGear,
   IconGlobe,
   IconImage,
   IconMic,
+  IconPanel,
   IconPlus,
   IconSpeaker,
   IconStop,
   IconTrash,
   IconWarning,
-  Wordmark,
+  IconGear,
 } from "./icons";
+import { Markdown } from "./Markdown";
+import type { PreviewTarget } from "./preview/kind";
 import { Settings } from "./Settings";
-import type {
-  ChatMessageRow,
-  ConversationView,
-  ProfileOverview,
-  ProfileView,
-  WebSource,
-} from "./types";
+import type { ChatMessageRow, ConversationView, ProfileOverview, ProfileView, WebSource } from "./types";
 import { useWorkspace, type Workspace } from "./workspace";
+
+// The preview pane and its renderers load on first use (S21).
+const PreviewPane = lazy(() => import("./preview/PreviewPane"));
 
 // The renderer never sees profile URLs, API keys or session tokens (S4/S12):
 // profiles arrive as {id, name, has_key, key_mask} from the Rust core, and
-// all HTTP — sign-in, chat streaming, web search, memory sync — happens in
-// Rust. Chat arrives as delta/done/error/activity events only.
+// all HTTP (sign-in, chat streaming, web search, memory sync, web preview)
+// happens in Rust. Chat arrives as delta/done/error/activity events only.
 
-// Device-flow payloads (Rust core → renderer): only non-secret fields.
+// Device-flow payloads (Rust core -> renderer): only non-secret fields.
 interface DeviceStarted {
   user_code: string;
 }
@@ -101,160 +106,59 @@ const MAX_STT_BYTES = 25 * 1024 * 1024;
 // Recorder MIME types in preference order (webm/opus, then mp4/AAC).
 const RECORDING_MIME_CANDIDATES = ["audio/webm", "audio/mp4"];
 
-const ACTIVITY_COPY: Record<string, string> = {
-  searching: "Buscando en internet…",
-  working: "Esperando tu permiso para usar tus archivos…",
-};
+// Preview state key for a chat that has no conversation row yet.
+const NEW_CHAT_KEY = -1;
 
 type Screen = "loading" | "error" | "picker" | "authorizing" | "chat";
 type AuthPhase = "waiting" | "denied" | "expired" | "error";
 
-// ---------------------------------------------------------------------------
-// Markdown rendering (S3): GFM + highlight + sanitize. NEVER raw HTML.
-//
-// rehype-highlight keeps the pipeline synchronous (streaming-friendly);
-// rehype-sanitize runs AFTER highlighting so its output is the last pass.
-// ---------------------------------------------------------------------------
-
-interface HastNode {
-  type?: string;
-  value?: string;
-  tagName?: string;
-  properties?: { className?: unknown };
-  children?: HastNode[];
+interface PreviewState {
+  target: PreviewTarget;
+  open: boolean;
 }
 
-function hastText(node: HastNode | undefined): string {
-  if (!node) return "";
-  if (node.type === "text") return node.value ?? "";
-  return (node.children ?? []).map(hastText).join("");
-}
-
-const sanitizeSchema = {
-  ...defaultSchema,
-  // Security review R1 (defense in depth with the app CSP): model markdown
-  // may not load remote images — an <img> to an attacker host would be a
-  // conversation-content exfiltration channel.
-  tagNames: (defaultSchema.tagNames ?? []).filter(
-    (t) => t !== "img" && t !== "picture" && t !== "source",
-  ),
-  attributes: {
-    ...defaultSchema.attributes,
-    code: [...(defaultSchema.attributes?.code ?? []), ["className", /^language-./, /^hljs$/]],
-    span: [...(defaultSchema.attributes?.span ?? []), ["className", /^hljs-./]],
-  },
-};
-
-function CodeBlock({ node, children }: { node?: HastNode; children?: ReactNode }) {
-  const [copied, setCopied] = useState(false);
-  const codeEl = node?.children?.find((child) => child.tagName === "code");
-  const classes = Array.isArray(codeEl?.properties?.className)
-    ? (codeEl?.properties?.className as unknown[]).filter(
-        (cls): cls is string => typeof cls === "string",
-      )
-    : [];
-  const language = classes.find((cls) => cls.startsWith("language-"))?.slice("language-".length);
-  const raw = hastText(codeEl);
-
-  const copy = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(raw);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard unavailable (rare in the Tauri secure context): keep silent.
-    }
-  };
-
-  return (
-    <div className="codeblock">
-      <div className="codeblock-bar">
-        <span className="codeblock-lang">{language ?? "texto"}</span>
-        <button type="button" className="codeblock-copy" onClick={() => void copy()}>
-          {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-          {copied ? "Copiado" : "Copiar"}
-        </button>
-      </div>
-      <pre>{children}</pre>
-    </div>
-  );
-}
-
-function nodeToText(node: ReactNode): string {
-  if (node == null || typeof node === "boolean") return "";
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(nodeToText).join("");
-  if (typeof node === "object" && "props" in (node as unknown as Record<string, unknown>)) {
-    const props = (node as unknown as { props?: { children?: ReactNode } }).props;
-    return nodeToText(props?.children);
-  }
-  return "";
-}
-
-/// Ask the Rust core to open a URL in the system browser (https-only
-/// validation happens there). Invalid URLs are rejected silently.
-function openExternal(url: string): void {
-  if (url) {
-    void invoke("open_external", { url }).catch(() => {});
-  }
-}
-
-/// Model-supplied links never navigate the main window (external review
-/// B3): a neutral element with no href; clicking asks the Rust core to open
-/// the URL in the system browser. The URL stays visible so the target is
-/// never hidden. The Rust-side navigation allowlist is a second layer.
-function SafeLink({ href, children }: { href?: string; children?: ReactNode }) {
-  const url = typeof href === "string" ? href : "";
-  const label = nodeToText(children);
-  return (
-    <span
-      className="safe-link"
-      role="link"
-      tabIndex={0}
-      title={url}
-      onClick={() => openExternal(url)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") openExternal(url);
-      }}
-    >
-      {children}
-      {url && !label.includes(url) ? <span className="safe-link-url"> ({url})</span> : null}
-    </span>
-  );
-}
-
-function Markdown({ text }: { text: string }) {
-  return (
-    <div className="md">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight, [rehypeSanitize, sanitizeSchema]]}
-        components={{ pre: CodeBlock, a: SafeLink }}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-/// Citation chips under an answer that used the built-in web search.
-function SourceChips({ sources }: { sources: WebSource[] }) {
+/// Citation chips under an answer that used the built-in web search. They
+/// open the preview pane; the pane links out to the browser.
+function SourceChips({ sources, onOpen }: { sources: WebSource[]; onOpen: (url: string) => void }) {
+  const t = useT();
   if (sources.length === 0) return null;
   return (
-    <div className="sources" aria-label="Fuentes">
-      <span className="sources-label">Fuentes</span>
+    <div className="sources" aria-label={t.chat.sources}>
+      <span className="sources-label">{t.chat.sources}</span>
       <ul>
         {sources.map((source, index) => (
           <li key={source.url}>
-            <button
-              type="button"
-              className="source-chip"
-              title={source.url}
-              onClick={() => openExternal(source.url)}
-            >
+            <button type="button" className="source-chip" title={source.url} onClick={() => onOpen(source.url)}>
               <span className="source-index">{index + 1}</span>
               <span className="source-title">{source.title}</span>
               <span className="source-host">{hostOf(source.url)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/// Chips for local files the assistant mentions (inside working folders).
+function FileChips({ paths, onOpen }: { paths: string[]; onOpen: (path: string) => void }) {
+  const t = useT();
+  if (paths.length === 0) return null;
+  return (
+    <div className="sources" aria-label={t.chat.files}>
+      <span className="sources-label">{t.chat.files}</span>
+      <ul>
+        {paths.map((path) => (
+          <li key={path}>
+            <button
+              type="button"
+              className="source-chip file-chip"
+              title={path}
+              aria-label={`${t.preview.open}: ${folderName(path)}`}
+              onClick={() => onOpen(path)}
+            >
+              <IconFile size={13} />
+              <span className="source-title">{folderName(path)}</span>
             </button>
           </li>
         ))}
@@ -276,15 +180,15 @@ function CenterScreen({ children }: { children: ReactNode }) {
 }
 
 function BrandHero() {
+  const t = useT();
   return (
     <div className="brand-hero">
-      <BrandMark variant="tile" size={56} />
-      <Wordmark />
+      <BrandLogo label={t.app.name} />
     </div>
   );
 }
 
-function ProfilePicker({
+export function ProfilePicker({
   overview,
   busy,
   error,
@@ -295,27 +199,19 @@ function ProfilePicker({
   error: string;
   onPick: (id: string) => void;
 }) {
+  const t = useT();
   return (
     <CenterScreen>
       <BrandHero />
-      <h1>Te damos la bienvenida</h1>
-      <p className="lede">
-        Elige cómo quieres entrar. Confirmarás el acceso en tu navegador: no tienes que copiar
-        ninguna clave.
-      </p>
+      <h1>{t.login.title}</h1>
+      <p className="lede">{t.login.choose}</p>
       <div className="profile-cards">
         {overview.profiles.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            className="profile-card"
-            onClick={() => onPick(p.id)}
-            disabled={busy}
-          >
+          <button key={p.id} type="button" className="profile-card" onClick={() => onPick(p.id)} disabled={busy}>
             <span className="profile-card-text">
-              <strong>{profileTitle(p.id, p.name)}</strong>
-              <span>{PROFILE_COPY[p.id]?.description ?? ""}</span>
-              {p.has_key && <span className="profile-card-meta">Ya has entrado antes en este equipo</span>}
+              <strong>{profileTitle(t, p.id, p.name)}</strong>
+              <span>{profileDescription(t, p.id)}</span>
+              {p.has_key && <span className="profile-card-meta">{t.login.signedInBefore}</span>}
             </span>
             <span className="profile-card-arrow" aria-hidden="true">
               →
@@ -323,6 +219,7 @@ function ProfilePicker({
           </button>
         ))}
       </div>
+      <p className="hint">{t.login.hint}</p>
       {error && (
         <p className="inline-error" role="alert">
           {error}
@@ -349,15 +246,16 @@ function Authorizing({
   onPickAnother: () => void;
   onCancel: () => void;
 }) {
+  const t = useT();
   const waiting = phase === "waiting";
   const headline =
     phase === "denied"
-      ? "Acceso rechazado"
+      ? t.login.deniedTitle
       : phase === "expired"
-        ? "El código ha caducado"
+        ? t.login.expiredTitle
         : phase === "error"
-          ? "No hemos podido completar el acceso"
-          : "Confirma el acceso en tu navegador";
+          ? t.login.failedTitle
+          : t.login.confirmTitle;
 
   return (
     <CenterScreen>
@@ -366,37 +264,33 @@ function Authorizing({
       <h1>{headline}</h1>
       {waiting ? (
         <>
-          <p className="lede">
-            Hemos abierto una ventana en tu navegador. Comprueba que muestra este mismo código y
-            confirma el acceso.
-          </p>
-          <div className="device-code" aria-label="Código de acceso">
+          <p className="lede">{t.login.confirmBody}</p>
+          <div className="device-code" aria-label={t.login.codeLabel}>
             {userCode || "····-····"}
           </div>
           <p className="status-line" role="status">
             <span className="pulse-dot" aria-hidden="true" />
-            Esperando tu confirmación…
+            {t.login.waiting}
           </p>
           <div className="actions">
             <button type="button" className="btn btn-ghost" onClick={onCancel}>
-              Cancelar
+              {t.app.cancel}
             </button>
           </div>
         </>
       ) : (
         <>
           <p className="lede">
-            {phase === "denied" &&
-              "Se ha rechazado el acceso desde el navegador. No se ha guardado nada en este equipo."}
-            {phase === "expired" && "Ha pasado demasiado tiempo. Empieza de nuevo para obtener un código nuevo."}
-            {phase === "error" && signInErrorLabel(errorKind)}
+            {phase === "denied" && t.login.deniedBody}
+            {phase === "expired" && t.login.expiredBody}
+            {phase === "error" && signInErrorLabel(t, errorKind)}
           </p>
           <div className="actions">
             <button type="button" className="btn btn-primary" onClick={onTryAgain}>
-              Volver a intentarlo
+              {t.app.tryAgain}
             </button>
             <button type="button" className="btn btn-ghost" onClick={onPickAnother}>
-              Elegir otra cuenta
+              {t.login.pickAnother}
             </button>
           </div>
         </>
@@ -409,14 +303,6 @@ function Authorizing({
 // Workspace chip + whole-computer confirmation (composer)
 // ---------------------------------------------------------------------------
 
-function workspaceLabel(workspace: Workspace): string {
-  if (workspace.computerWide) return "Todo el equipo — bajo tu responsabilidad";
-  const [first, ...rest] = workspace.folders;
-  if (!first) return "Elegir carpeta de trabajo";
-  const extra = rest.length > 0 ? ` +${rest.length}` : "";
-  return `Carpeta privada: ${folderName(first.canonical_path)}${extra}`;
-}
-
 function WorkspaceChip({
   workspace,
   onAskComputerWide,
@@ -426,10 +312,17 @@ function WorkspaceChip({
   onAskComputerWide: () => void;
   onOpenSettings: () => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const wide = workspace.computerWide !== null;
   const empty = !wide && workspace.folders.length === 0;
+  const [first, ...rest] = workspace.folders;
+  const label = wide
+    ? t.workspace.computerWide
+    : first
+      ? t.workspace.folderLabel(folderName(first.canonical_path), rest.length)
+      : t.workspace.pickFolder;
 
   useEffect(() => {
     if (!open) return;
@@ -459,7 +352,7 @@ function WorkspaceChip({
         className={`ws-chip${wide ? " ws-chip-wide" : ""}${empty ? " ws-chip-empty" : ""}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        title="Dónde puede trabajar el asistente"
+        title={t.workspace.chipTitle}
         onClick={() => {
           if (empty) {
             void workspace.addFolder();
@@ -470,12 +363,12 @@ function WorkspaceChip({
         disabled={workspace.busy}
       >
         {wide ? <IconWarning size={15} /> : empty ? <IconPlus size={15} /> : <IconFolder size={15} />}
-        <span className="ws-chip-label">{workspaceLabel(workspace)}</span>
+        <span className="ws-chip-label">{label}</span>
         {!empty && <IconChevronDown size={14} />}
       </button>
       {open && (
-        <div className="ws-menu" role="menu" aria-label="Dónde trabaja el asistente">
-          <p className="ws-menu-heading">Carpeta privada</p>
+        <div className="ws-menu" role="menu" aria-label={t.workspace.menuLabel}>
+          <p className="ws-menu-heading">{t.workspace.privateFolder}</p>
           {workspace.folders.map((grant) => (
             <button
               key={grant.id}
@@ -490,14 +383,9 @@ function WorkspaceChip({
               {!wide && <IconCheck size={14} />}
             </button>
           ))}
-          <button
-            type="button"
-            role="menuitem"
-            className="ws-menu-item"
-            onClick={() => void pick(() => workspace.addFolder())}
-          >
+          <button type="button" role="menuitem" className="ws-menu-item" onClick={() => void pick(() => workspace.addFolder())}>
             <IconPlus size={15} />
-            <span className="ws-menu-text">Añadir carpeta…</span>
+            <span className="ws-menu-text">{t.workspace.addFolder}</span>
           </button>
           <div className="ws-menu-sep" role="separator" />
           <button
@@ -508,18 +396,13 @@ function WorkspaceChip({
             onClick={() => void pick(() => (wide ? undefined : onAskComputerWide()))}
           >
             <IconComputer size={15} />
-            <span className="ws-menu-text">Todo el equipo — bajo tu responsabilidad</span>
+            <span className="ws-menu-text">{t.workspace.computerWide}</span>
             {wide && <IconCheck size={14} />}
           </button>
           <div className="ws-menu-sep" role="separator" />
-          <button
-            type="button"
-            role="menuitem"
-            className="ws-menu-item ws-menu-item-muted"
-            onClick={() => void pick(onOpenSettings)}
-          >
+          <button type="button" role="menuitem" className="ws-menu-item ws-menu-item-muted" onClick={() => void pick(onOpenSettings)}>
             <IconGear size={15} />
-            <span className="ws-menu-text">Gestionar carpetas</span>
+            <span className="ws-menu-text">{t.workspace.manage}</span>
           </button>
         </div>
       )}
@@ -528,18 +411,16 @@ function WorkspaceChip({
 }
 
 /// Plain-language warning before the whole-computer mode. Continuing asks
-/// the Rust core, which shows its own native confirmation — this dialog
+/// the Rust core, which shows its own native confirmation: this dialog
 /// explains, the native one decides (the renderer cannot grant anything).
-function ComputerWideDialog({
-  onCancel,
-  onContinue,
-}: {
-  onCancel: () => void;
-  onContinue: () => void;
-}) {
+function ComputerWideDialog({ onCancel, onContinue }: { onCancel: () => void; onContinue: () => void }) {
+  const t = useT();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  // Focus once on open; re-renders of the shell must not steal focus back.
   useEffect(() => {
     cancelRef.current?.focus();
+  }, []);
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
     };
@@ -560,28 +441,22 @@ function ComputerWideDialog({
         <span className="modal-icon">
           <IconWarning size={22} />
         </span>
-        <h2 id="cw-title">¿Dar acceso a todo tu equipo?</h2>
+        <h2 id="cw-title">{t.computerWide.title}</h2>
         <div id="cw-body">
           <ul className="modal-points">
-            <li>
-              El asistente podrá pedirte permiso para leer, crear o cambiar <strong>cualquier
-              archivo de tu usuario</strong>: documentos, fotos, descargas…
-            </li>
-            <li>
-              Te pedirá confirmación antes de cada acción. Pero si aceptas algo por error, podría
-              borrar o estropear archivos importantes.
-            </li>
-            <li>Los datos de esta aplicación siempre quedan protegidos.</li>
-            <li>Puedes volver a una carpeta privada cuando quieras.</li>
+            <li>{t.computerWide.point1}</li>
+            <li>{t.computerWide.point2}</li>
+            <li>{t.computerWide.point3}</li>
+            <li>{t.computerWide.point4}</li>
           </ul>
-          <p className="modal-note">A continuación tu equipo te pedirá una última confirmación.</p>
+          <p className="modal-note">{t.computerWide.note}</p>
         </div>
         <div className="modal-actions">
           <button ref={cancelRef} type="button" className="btn btn-ghost" onClick={onCancel}>
-            Cancelar
+            {t.app.cancel}
           </button>
           <button type="button" className="btn btn-warn-solid" onClick={onContinue}>
-            Continuar bajo mi responsabilidad
+            {t.computerWide.continue}
           </button>
         </div>
       </div>
@@ -589,25 +464,34 @@ function ComputerWideDialog({
   );
 }
 
+function ApprovalCards({
+  cards,
+  onRespond,
+}: {
+  cards: ApprovalCardState[] | undefined;
+  onRespond: (id: string, granted: boolean) => void;
+}) {
+  if (!cards || cards.length === 0) return null;
+  return (
+    <>
+      {cards.map((card) => (
+        <ApprovalCard key={card.id} card={card} onRespond={onRespond} />
+      ))}
+    </>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Chat shell
 // ---------------------------------------------------------------------------
 
-function ChatShell({
-  overview,
-  busy,
-  onSignOut,
-}: {
-  overview: ProfileOverview;
-  busy: boolean;
-  onSignOut: () => void;
-}) {
-  const activeProfile: ProfileView | undefined = overview.profiles.find(
-    (p) => p.id === overview.active_profile,
-  );
+function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; busy: boolean; onSignOut: () => void }) {
+  const t = useT();
+  const activeProfile: ProfileView | undefined = overview.profiles.find((p) => p.id === overview.active_profile);
   const workspace = useWorkspace(overview.active_profile);
 
   const [view, setView] = useState<"chat" | "settings">("chat");
+  const [settingsFocus, setSettingsFocus] = useState<SettingsSection>(null);
   const [askComputerWide, setAskComputerWide] = useState(false);
 
   const [conversations, setConversations] = useState<ConversationView[]>([]);
@@ -622,12 +506,16 @@ function ChatShell({
   const [sessionExpired, setSessionExpired] = useState(false);
   const [inlineError, setInlineError] = useState("");
 
+  // Inline approval cards (S14) and per-conversation preview pane (S21).
+  const [approvals, dispatchApproval] = useReducer(approvalsReducer, [] as ApprovalCardState[]);
+  const [previews, setPreviews] = useState<Map<number, PreviewState>>(() => new Map());
+
   // Image mode: the composer sends the prompt to `image_generate`.
   const [imageMode, setImageMode] = useState(false);
   const [imageSize, setImageSize] = useState(DEFAULT_IMAGE_SIZE);
   const [imageGeneratingIds, setImageGeneratingIds] = useState<Set<number>>(() => new Set());
 
-  // Voice: read-aloud + dictation. The voice is chosen in Settings.
+  // Voice: read-aloud + dictation (hidden this round, S24).
   const [voice, setVoice] = useState<string>(storedVoice);
   const [speakingMsgId, setSpeakingMsgId] = useState<number | null>(null);
   const [ttsHint, setTtsHint] = useState("");
@@ -644,6 +532,10 @@ function ChatShell({
   useEffect(() => {
     activeConvRef.current = activeConvId;
   }, [activeConvId]);
+  const messageCountRef = useRef(0);
+  useEffect(() => {
+    messageCountRef.current = messages.length;
+  }, [messages]);
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -670,7 +562,7 @@ function ChatShell({
   }, []);
 
   // Account memory: reconcile with the account in the background. Silent
-  // by design — any failure keeps the local copy; nothing is ever shown.
+  // by design: any failure keeps the local copy; nothing is ever shown.
   const syncMemory = useCallback(async (): Promise<void> => {
     const profileId = activeProfileRef.current;
     if (!profileId) return;
@@ -766,7 +658,7 @@ function ChatShell({
         if (kind === "unauthorized") {
           setSessionExpired(true);
         } else if (activeConvRef.current === conversation_id) {
-          setInlineError(chatErrorLabel(kind));
+          setInlineError(kind);
         }
         void refreshConversations();
       }),
@@ -777,6 +669,34 @@ function ChatShell({
       });
     };
   }, [loadMessages, refreshConversations, syncMemory]);
+
+  // Approval transport (S14): the core asks, the card answers in place.
+  useEffect(() => {
+    const unlistens: Promise<UnlistenFn>[] = [
+      onApprovalRequest((request) => {
+        const anchorIndex = activeConvRef.current === request.conversation_id ? messageCountRef.current : null;
+        dispatchApproval({ type: "request", request, anchorIndex });
+      }),
+      onApprovalResolved((resolved) => {
+        dispatchApproval({ type: "resolved", id: resolved.id, granted: resolved.granted });
+      }),
+    ];
+    return () => {
+      unlistens.forEach((promise) => {
+        void promise.then((unlisten) => unlisten());
+      });
+    };
+  }, []);
+
+  const respondApproval = useCallback(async (id: string, granted: boolean): Promise<void> => {
+    dispatchApproval({ type: "sending", id });
+    try {
+      await respondToApproval(id, granted);
+      dispatchApproval({ type: "resolved", id, granted });
+    } catch {
+      dispatchApproval({ type: "failed", id });
+    }
+  }, []);
 
   // Image event transport: the core persists the row before `done`.
   useEffect(() => {
@@ -805,7 +725,7 @@ function ChatShell({
         if (kind === "unauthorized") {
           setSessionExpired(true);
         } else if (activeConvRef.current === conversation_id) {
-          setInlineError(imageErrorLabel(kind));
+          setInlineError(`image:${kind}`);
         }
         void refreshConversations();
       }),
@@ -826,7 +746,7 @@ function ChatShell({
       listen("tts://ended", () => setSpeakingMsgId(null)),
       listen<TtsError>("tts://error", (event) => {
         setSpeakingMsgId(null);
-        setTtsHint(chatErrorLabel(event.payload.kind));
+        setTtsHint(`chat:${event.payload.kind}`);
       }),
     ];
     return () => {
@@ -868,7 +788,7 @@ function ChatShell({
           await invoke("tts_stop");
         } catch (err) {
           setSpeakingMsgId(null);
-          setTtsHint(commandErrorLabel(err));
+          setTtsHint(`cmd:${String(err)}`);
         }
         return;
       }
@@ -879,44 +799,47 @@ function ChatShell({
         await invoke("tts_speak", { profileId, voice, input: message.content });
       } catch (err) {
         setSpeakingMsgId(null);
-        setTtsHint(commandErrorLabel(err));
+        setTtsHint(`cmd:${String(err)}`);
       }
     },
     [speakingMsgId, voice],
   );
 
-  const finishRecording = useCallback(async (chunks: Blob[], mimeType: string): Promise<void> => {
-    const profileId = activeProfileRef.current;
-    if (!profileId) return;
-    const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
-    if (blob.size === 0) {
-      setSttHint("No se ha grabado nada. Vuelve a intentarlo.");
-      return;
-    }
-    if (blob.size > MAX_STT_BYTES) {
-      setSttHint("La grabación es demasiado larga. Prueba con un mensaje más corto.");
-      return;
-    }
-    setSttBusy(true);
-    try {
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      const { text } = await invoke<{ text: string }>("stt_transcribe", {
-        profileId,
-        audioBytes: bytes,
-        mime: blob.type,
-      });
-      if (text.trim().length > 0) {
-        setComposer((prev) => (prev.trim().length > 0 ? `${prev} ${text}` : text));
-        composerRef.current?.focus();
-      } else {
-        setSttHint("No hemos entendido nada. Prueba a hablar un poco más cerca del micrófono.");
+  const finishRecording = useCallback(
+    async (chunks: Blob[], mimeType: string): Promise<void> => {
+      const profileId = activeProfileRef.current;
+      if (!profileId) return;
+      const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
+      if (blob.size === 0) {
+        setSttHint(t.chat.sttEmpty);
+        return;
       }
-    } catch (err) {
-      setSttHint(commandErrorLabel(err));
-    } finally {
-      setSttBusy(false);
-    }
-  }, []);
+      if (blob.size > MAX_STT_BYTES) {
+        setSttHint(t.chat.sttTooLong);
+        return;
+      }
+      setSttBusy(true);
+      try {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const { text } = await invoke<{ text: string }>("stt_transcribe", {
+          profileId,
+          audioBytes: bytes,
+          mime: blob.type,
+        });
+        if (text.trim().length > 0) {
+          setComposer((prev) => (prev.trim().length > 0 ? `${prev} ${text}` : text));
+          composerRef.current?.focus();
+        } else {
+          setSttHint(t.chat.sttNotUnderstood);
+        }
+      } catch (err) {
+        setSttHint(commandErrorLabel(t, err));
+      } finally {
+        setSttBusy(false);
+      }
+    },
+    [t],
+  );
 
   const toggleRecording = useCallback(async (): Promise<void> => {
     setSttHint("");
@@ -927,12 +850,12 @@ function ChatShell({
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia || typeof window.MediaRecorder === "undefined") {
-      setSttHint("El dictado por voz no está disponible en este equipo.");
+      setSttHint(t.chat.sttUnavailable);
       return;
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mimeType = RECORDING_MIME_CANDIDATES.find((t) => MediaRecorder.isTypeSupported(t));
+      const mimeType = RECORDING_MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type));
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       const chunks: Blob[] = [];
       recorder.ondataavailable = (event) => {
@@ -946,9 +869,9 @@ function ChatShell({
       recorder.start();
       setRecording(true);
     } catch {
-      setSttHint("No tenemos permiso para usar el micrófono.");
+      setSttHint(t.chat.sttNoPermission);
     }
-  }, [recording, finishRecording]);
+  }, [recording, finishRecording, t]);
 
   const newChat = useCallback((): void => {
     setView("chat");
@@ -956,6 +879,11 @@ function ChatShell({
     setMessages([]);
     setInlineError("");
     setSessionExpired(false);
+    setPreviews((prev) => {
+      const next = new Map(prev);
+      next.delete(NEW_CHAT_KEY);
+      return next;
+    });
     composerRef.current?.focus();
   }, []);
 
@@ -971,6 +899,12 @@ function ChatShell({
         setActiveConvId(null);
         setMessages([]);
       }
+      dispatchApproval({ type: "clearConversation", conversationId });
+      setPreviews((prev) => {
+        const next = new Map(prev);
+        next.delete(conversationId);
+        return next;
+      });
       await refreshConversations();
       void syncMemory();
     },
@@ -998,9 +932,33 @@ function ChatShell({
 
   const streamingActive = activeConvId !== null && streamingIds.has(activeConvId);
   const activeDraft = activeConvId !== null ? drafts.get(activeConvId) : undefined;
+  const visibleDraft = activeDraft !== undefined ? stripToolMarkup(activeDraft, { streaming: true }) : undefined;
   const activeActivity = activeConvId !== null ? activities.get(activeConvId) : undefined;
   const imageGeneratingActive = activeConvId !== null && imageGeneratingIds.has(activeConvId);
   const composerBusy = streamingActive || imageGeneratingActive;
+
+  // Preview pane (S21): one state per conversation.
+  const previewKey = activeConvId ?? NEW_CHAT_KEY;
+  const preview = previews.get(previewKey);
+  const openPreview = useCallback((target: PreviewTarget): void => {
+    const key = activeConvRef.current ?? NEW_CHAT_KEY;
+    setPreviews((prev) => new Map(prev).set(key, { target, open: true }));
+  }, []);
+  const openWebPreview = useCallback((url: string) => openPreview({ kind: "web", ref: url }), [openPreview]);
+  const openFilePreview = useCallback((path: string) => openPreview({ kind: "file", ref: path }), [openPreview]);
+  const setPreviewOpen = useCallback((open: boolean): void => {
+    const key = activeConvRef.current ?? NEW_CHAT_KEY;
+    setPreviews((prev) => {
+      const current = prev.get(key);
+      if (!current) return prev;
+      return new Map(prev).set(key, { ...current, open });
+    });
+  }, []);
+  const closePreview = useCallback(() => setPreviewOpen(false), [setPreviewOpen]);
+
+  const fileRoots: string[] | "any" = workspace.computerWide
+    ? "any"
+    : workspace.folders.map((grant) => grant.canonical_path);
 
   // Stop: abort the stream; what already arrived stays persisted.
   const stopGenerating = useCallback(async (): Promise<void> => {
@@ -1009,7 +967,7 @@ function ChatShell({
     try {
       await invoke("chat_stop", { conversationId });
     } catch (err) {
-      setInlineError(commandErrorLabel(err));
+      setInlineError(`cmd:${String(err)}`);
     }
   }, []);
 
@@ -1019,7 +977,7 @@ function ChatShell({
     try {
       await invoke("image_cancel", { conversationId });
     } catch (err) {
-      setInlineError(commandErrorLabel(err));
+      setInlineError(`cmd:${String(err)}`);
       return;
     }
     setImageGeneratingIds((prev) => {
@@ -1036,6 +994,15 @@ function ChatShell({
     const created = await invoke<number>("conversation_create", { profileId });
     activeConvRef.current = created;
     setActiveConvId(created);
+    // Carry a preview opened on the blank chat over to the new row.
+    setPreviews((prev) => {
+      const pending = prev.get(NEW_CHAT_KEY);
+      if (!pending) return prev;
+      const next = new Map(prev);
+      next.delete(NEW_CHAT_KEY);
+      next.set(created, pending);
+      return next;
+    });
     return created;
   }, []);
 
@@ -1082,7 +1049,7 @@ function ChatShell({
           return next;
         });
       }
-      setInlineError("No se ha podido enviar el mensaje. Vuelve a intentarlo.");
+      setInlineError("send");
       void refreshConversations();
     }
   }, [composer, streamingActive, ensureConversation, model, refreshConversations]);
@@ -1109,7 +1076,7 @@ function ChatShell({
           return next;
         });
       }
-      setInlineError(commandErrorLabel(err));
+      setInlineError(`image:${String(err)}`);
       void refreshConversations();
     }
   }, [composer, imageGeneratingActive, ensureConversation, imageSize, refreshConversations]);
@@ -1118,41 +1085,101 @@ function ChatShell({
   useEffect(() => {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, activeDraft, activeActivity, streamingActive, imageGeneratingActive]);
+  }, [messages, activeDraft, activeActivity, streamingActive, imageGeneratingActive, approvals]);
 
   const confirmComputerWide = useCallback(async (): Promise<void> => {
     setAskComputerWide(false);
     await workspace.enableComputerWide();
   }, [workspace]);
 
+  const openSettings = useCallback((section: SettingsSection): void => {
+    setSettingsFocus(section);
+    setView("settings");
+  }, []);
+
   const submit = (): void => {
     void (imageMode ? sendImage() : send());
   };
 
+  // Errors are stored as kinds and localized here, so a language switch
+  // re-renders them in the new language.
+  const errorText = (code: string): string => {
+    if (!code) return "";
+    if (code === "send") return t.chat.sendFailed;
+    if (code.startsWith("image:")) return imageErrorLabel(t, code.slice("image:".length));
+    if (code.startsWith("cmd:")) return commandErrorLabel(t, code.slice("cmd:".length));
+    if (code.startsWith("chat:")) return chatErrorLabel(t, code.slice("chat:".length));
+    return chatErrorLabel(t, code);
+  };
+
+  const accountName = activeProfile ? profileTitle(t, activeProfile.id, activeProfile.name) : t.sidebar.noAccount;
+  const placed = placeCards(approvals, activeConvId, messages.length);
+  const workspaceError = grantErrorLabel(t, workspace.error);
+
+  const renderMessage = (m: ChatMessageRow): ReactNode => {
+    if (m.role !== "assistant") {
+      return (
+        <article className="msg msg-user">
+          <p className="msg-user-text">{m.content}</p>
+        </article>
+      );
+    }
+    if (m.media_path) {
+      return (
+        <article className="msg msg-assistant">
+          <img className="msg-image" src={convertFileSrc(m.media_path)} alt={m.content} />
+          <p className="image-caption">{m.content}</p>
+        </article>
+      );
+    }
+    const visible = stripToolMarkup(m.content);
+    // A row that was only tool markup has nothing to show (S16).
+    if (visible.trim().length === 0 && !m.partial && (m.sources ?? []).length === 0) return null;
+    return (
+      <article className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}>
+        <Markdown text={visible} onOpenLink={openWebPreview} />
+        {m.partial && (
+          <p className="partial-note" role="note">
+            {t.chat.interrupted}
+          </p>
+        )}
+        <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
+        <FileChips paths={extractFilePaths(visible, fileRoots)} onOpen={openFilePreview} />
+        {VOICE_UI && visible.trim().length > 0 && (
+          <div className="msg-actions">
+            <button
+              type="button"
+              className={`msg-action${speakingMsgId === m.id ? " active" : ""}`}
+              onClick={() => void toggleSpeak(m)}
+            >
+              {speakingMsgId === m.id ? <IconStop size={14} /> : <IconSpeaker size={14} />}
+              {speakingMsgId === m.id ? t.chat.stop : t.chat.listen}
+            </button>
+          </div>
+        )}
+      </article>
+    );
+  };
+
   return (
     <main className="shell">
-      <aside className="sidebar" aria-label="Conversaciones">
+      <aside className="sidebar" aria-label={t.sidebar.conversations}>
         <div className="sidebar-top">
           <div className="sidebar-brand">
             <BrandMark size={22} />
-            <Wordmark />
+            <span className="sidebar-name">{t.app.name}</span>
           </div>
           <button type="button" className="btn btn-primary new-chat-btn" onClick={newChat}>
             <IconPlus size={16} />
-            Nueva conversación
+            {t.sidebar.newChat}
           </button>
         </div>
-        <nav className="conv-list" aria-label="Historial">
-          {conversations.length === 0 && (
-            <p className="conv-empty">Tus conversaciones aparecerán aquí.</p>
-          )}
+        <nav className="conv-list" aria-label={t.sidebar.history}>
+          {conversations.length === 0 && <p className="conv-empty">{t.sidebar.empty}</p>}
           {conversations.map((c) => {
             const armed = pendingDeleteId === c.id;
             return (
-              <div
-                key={c.id}
-                className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}`}
-              >
+              <div key={c.id} className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}`}>
                 <button
                   type="button"
                   className="conv-main"
@@ -1165,25 +1192,24 @@ function ChatShell({
                 <button
                   type="button"
                   className={`conv-delete${armed ? " armed" : ""}`}
-                  aria-label={
-                    armed
-                      ? `Pulsa otra vez para borrar «${c.title}» para siempre`
-                      : `Borrar la conversación «${c.title}»`
-                  }
-                  title={armed ? "Pulsa otra vez para borrar" : "Borrar"}
+                  aria-label={armed ? t.sidebar.deleteArmedLabel(c.title) : t.sidebar.deleteLabel(c.title)}
+                  title={armed ? t.sidebar.deleteArmedTitle : t.sidebar.deleteTitle}
                   onClick={() => confirmDeleteConversation(c.id)}
                 >
-                  {armed ? "¿Borrar?" : <IconTrash size={15} />}
+                  {armed ? t.sidebar.deleteArmed : <IconTrash size={15} />}
                 </button>
               </div>
             );
           })}
         </nav>
         <div className="sidebar-bottom">
-          <span className="account-dot" aria-hidden="true" />
-          <span className="account-name">
-            {activeProfile ? profileTitle(activeProfile.id, activeProfile.name) : "Sin cuenta"}
-          </span>
+          <UserMenu
+            accountName={accountName}
+            accountDetail={activeProfile ? profileDescription(t, activeProfile.id) : ""}
+            onOpenSettings={openSettings}
+            onSignOut={onSignOut}
+            signingOut={busy}
+          />
         </div>
       </aside>
 
@@ -1197,240 +1223,218 @@ function ChatShell({
           onBack={() => setView("chat")}
           onSignOut={onSignOut}
           signingOut={busy}
+          focusSection={settingsFocus}
         />
       ) : (
-        <section className="chat-main">
-          {sessionExpired && (
-            <div className="banner" role="alert">
-              <span>Tu sesión ha caducado. Vuelve a entrar para seguir.</span>
-              <button type="button" className="btn btn-ghost btn-sm" onClick={onSignOut}>
-                Volver a entrar
-              </button>
-            </div>
-          )}
-          <header className="chat-header">
-            <label className="model-picker">
-              <span className="visually-hidden">Modelo</span>
-              <select
-                value={model}
-                onChange={(e) => setModel(e.currentTarget.value)}
-                aria-label="Modelo del asistente"
-              >
-                {(models.length > 0 ? models : [model]).map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
+        <div className={`chat-area${preview?.open ? " with-preview" : ""}`}>
+          <section className="chat-main">
+            {sessionExpired && (
+              <div className="banner" role="alert">
+                <span>{t.chat.sessionExpired}</span>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={onSignOut}>
+                  {t.chat.signInAgain}
+                </button>
+              </div>
+            )}
+            <header className="chat-header">
+              <label className="model-picker">
+                <span className="visually-hidden">{t.chat.model}</span>
+                <select value={model} onChange={(e) => setModel(e.currentTarget.value)} aria-label={t.chat.modelLabel}>
+                  {(models.length > 0 ? models : [model]).map((id) => (
+                    <option key={id} value={id}>
+                      {id}
+                    </option>
+                  ))}
+                </select>
+                <IconChevronDown size={14} />
+              </label>
+              {preview && (
+                <button
+                  type="button"
+                  className={`icon-btn${preview.open ? " active" : ""}`}
+                  aria-pressed={preview.open}
+                  aria-label={preview.open ? t.preview.close : t.preview.open}
+                  title={preview.open ? t.preview.close : t.preview.open}
+                  onClick={() => setPreviewOpen(!preview.open)}
+                >
+                  <IconPanel size={18} />
+                </button>
+              )}
+            </header>
+
+            <div className="messages" ref={messagesRef}>
+              <div className="messages-inner">
+                {messages.length === 0 && activeDraft === undefined && placed.tail.length === 0 && (
+                  <div className="empty-state">
+                    <BrandMark size={40} />
+                    <p className="empty-title">{t.chat.emptyTitle}</p>
+                    <p className="empty-hint">{t.chat.emptyHint}</p>
+                  </div>
+                )}
+                <ApprovalCards cards={placed.after.get(0)} onRespond={(id, g) => void respondApproval(id, g)} />
+                {messages.map((m, index) => (
+                  <Fragment key={m.id}>
+                    {renderMessage(m)}
+                    <ApprovalCards
+                      cards={placed.after.get(index + 1)}
+                      onRespond={(id, g) => void respondApproval(id, g)}
+                    />
+                  </Fragment>
                 ))}
-              </select>
-              <IconChevronDown size={14} />
-            </label>
-            <button
-              type="button"
-              className="icon-btn"
-              aria-label="Ajustes"
-              title="Ajustes"
-              onClick={() => setView("settings")}
-            >
-              <IconGear size={19} />
-            </button>
-          </header>
-
-          <div className="messages" ref={messagesRef}>
-            <div className="messages-inner">
-              {messages.length === 0 && activeDraft === undefined && (
-                <div className="empty-state">
-                  <BrandMark size={40} />
-                  <p className="empty-title">¿En qué puedo ayudarte?</p>
-                  <p className="empty-hint">
-                    Escribe tu mensaje abajo. Intro envía; Mayús + Intro añade una línea.
-                  </p>
-                </div>
-              )}
-              {messages.map((m) =>
-                m.role === "assistant" ? (
-                  m.media_path ? (
-                    <article key={m.id} className="msg msg-assistant">
-                      <img className="msg-image" src={convertFileSrc(m.media_path)} alt={m.content} />
-                      <p className="image-caption">{m.content}</p>
-                    </article>
-                  ) : (
-                    <article
-                      key={m.id}
-                      className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}
-                    >
-                      <Markdown text={m.content} />
-                      {m.partial && (
-                        <p className="partial-note" role="note">
-                          La respuesta se interrumpió.
-                        </p>
-                      )}
-                      <SourceChips sources={m.sources ?? []} />
-                      {m.content.trim().length > 0 && (
-                        <div className="msg-actions">
-                          <button
-                            type="button"
-                            className={`msg-action${speakingMsgId === m.id ? " active" : ""}`}
-                            onClick={() => void toggleSpeak(m)}
-                          >
-                            {speakingMsgId === m.id ? <IconStop size={14} /> : <IconSpeaker size={14} />}
-                            {speakingMsgId === m.id ? "Detener" : "Escuchar"}
-                          </button>
-                        </div>
-                      )}
-                    </article>
-                  )
-                ) : (
-                  <article key={m.id} className="msg msg-user">
-                    <p className="msg-user-text">{m.content}</p>
+                <ApprovalCards cards={placed.tail} onRespond={(id, g) => void respondApproval(id, g)} />
+                {streamingActive && visibleDraft !== undefined && (
+                  <article className="msg msg-assistant streaming" aria-live="polite">
+                    {visibleDraft.length > 0 && <Markdown text={visibleDraft} onOpenLink={openWebPreview} />}
+                    {activeActivity ? (
+                      <p className="activity" role="status">
+                        {activeActivity === "searching" ? <IconGlobe size={15} /> : <IconFolder size={15} />}
+                        {activeActivity === "searching" ? t.chat.searching : t.chat.working}
+                      </p>
+                    ) : visibleDraft.length === 0 ? (
+                      <p className="activity" role="status">
+                        <span className="pulse-dot" aria-hidden="true" />
+                        {t.chat.thinking}
+                      </p>
+                    ) : (
+                      <span className="caret" aria-hidden="true" />
+                    )}
                   </article>
-                ),
-              )}
-              {streamingActive && activeDraft !== undefined && (
-                <article className="msg msg-assistant streaming" aria-live="polite">
-                  {activeDraft.length > 0 && <Markdown text={activeDraft} />}
-                  {activeActivity ? (
-                    <p className="activity" role="status">
-                      {activeActivity === "searching" ? <IconGlobe size={15} /> : <IconFolder size={15} />}
-                      {ACTIVITY_COPY[activeActivity] ?? ""}
-                    </p>
-                  ) : activeDraft.length === 0 ? (
-                    <p className="activity" role="status">
+                )}
+                {imageGeneratingActive && (
+                  <article className="msg msg-assistant" role="status">
+                    <p className="activity">
                       <span className="pulse-dot" aria-hidden="true" />
-                      Pensando…
+                      {t.chat.generatingImage}
                     </p>
-                  ) : (
-                    <span className="caret" aria-hidden="true" />
-                  )}
-                </article>
-              )}
-              {imageGeneratingActive && (
-                <article className="msg msg-assistant" role="status">
-                  <p className="activity">
-                    <span className="pulse-dot" aria-hidden="true" />
-                    Creando la imagen… suele tardar alrededor de un minuto.
+                  </article>
+                )}
+                {ttsHint && (
+                  <p className="inline-error" role="status">
+                    {errorText(ttsHint)}
                   </p>
-                </article>
-              )}
-              {ttsHint && (
-                <p className="inline-error" role="status">
-                  {ttsHint}
-                </p>
-              )}
-              {inlineError && (
-                <p className="inline-error" role="alert">
-                  {inlineError}
-                </p>
-              )}
-            </div>
-          </div>
-
-          <footer className="composer">
-            <div className={`composer-box${imageMode ? " image-mode" : ""}`}>
-              <textarea
-                ref={composerRef}
-                className="composer-input"
-                value={composer}
-                onChange={(e) => setComposer(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                    e.preventDefault();
-                    submit();
-                  }
-                }}
-                placeholder={
-                  sttBusy
-                    ? "Transcribiendo…"
-                    : imageMode
-                      ? "Describe la imagen que quieres crear"
-                      : "Escribe tu mensaje"
-                }
-                aria-label={imageMode ? "Descripción de la imagen" : "Mensaje"}
-                rows={2}
-                disabled={composerBusy}
-              />
-              <div className="composer-bar">
-                <WorkspaceChip
-                  workspace={workspace}
-                  onAskComputerWide={() => setAskComputerWide(true)}
-                  onOpenSettings={() => setView("settings")}
-                />
-                <div className="composer-tools">
-                  {imageMode && (
-                    <label className="size-picker">
-                      <span className="visually-hidden">Formato de la imagen</span>
-                      <select
-                        value={imageSize}
-                        onChange={(e) => setImageSize(e.currentTarget.value)}
-                        aria-label="Formato de la imagen"
-                      >
-                        {IMAGE_SIZES.map((size) => (
-                          <option key={size.id} value={size.id}>
-                            {size.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
-                  <button
-                    type="button"
-                    className={`icon-btn${imageMode ? " active" : ""}`}
-                    aria-pressed={imageMode}
-                    aria-label={imageMode ? "Volver a escribir mensajes" : "Crear una imagen"}
-                    title={imageMode ? "Volver a escribir mensajes" : "Crear una imagen"}
-                    onClick={() => setImageMode((value) => !value)}
-                    disabled={composerBusy}
-                  >
-                    <IconImage size={18} />
-                  </button>
-                  <button
-                    type="button"
-                    className={`icon-btn${recording ? " recording" : ""}`}
-                    aria-label={recording ? "Terminar el dictado" : "Dictar por voz"}
-                    title={recording ? "Terminar el dictado" : "Dictar por voz"}
-                    onClick={() => void toggleRecording()}
-                    disabled={sttBusy || composerBusy}
-                  >
-                    {recording ? <IconStop size={18} /> : <IconMic size={18} />}
-                  </button>
-                  {imageGeneratingActive ? (
-                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => void cancelImage()}>
-                      <IconStop size={14} />
-                      Cancelar
-                    </button>
-                  ) : streamingActive ? (
-                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => void stopGenerating()}>
-                      <IconStop size={14} />
-                      Detener
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="send-btn"
-                      onClick={submit}
-                      disabled={composer.trim().length === 0}
-                      aria-label={imageMode ? "Crear imagen" : "Enviar"}
-                      title={imageMode ? "Crear imagen" : "Enviar"}
-                    >
-                      <IconArrowUp size={18} />
-                    </button>
-                  )}
-                </div>
+                )}
+                {inlineError && (
+                  <p className="inline-error" role="alert">
+                    {errorText(inlineError)}
+                  </p>
+                )}
               </div>
             </div>
-            {(sttHint || workspace.error) && (
-              <p className="composer-hint" role="status">
-                {sttHint || workspace.error}
-              </p>
-            )}
-          </footer>
-        </section>
+
+            <footer className="composer">
+              <div className={`composer-box${imageMode ? " image-mode" : ""}`}>
+                <textarea
+                  ref={composerRef}
+                  className="composer-input"
+                  value={composer}
+                  onChange={(e) => setComposer(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      submit();
+                    }
+                  }}
+                  placeholder={
+                    sttBusy ? t.chat.placeholderTranscribing : imageMode ? t.chat.placeholderImage : t.chat.placeholder
+                  }
+                  aria-label={imageMode ? t.chat.imagePromptLabel : t.chat.messageLabel}
+                  rows={2}
+                  disabled={composerBusy}
+                />
+                <div className="composer-bar">
+                  <WorkspaceChip
+                    workspace={workspace}
+                    onAskComputerWide={() => setAskComputerWide(true)}
+                    onOpenSettings={() => openSettings("folders")}
+                  />
+                  <div className="composer-tools">
+                    {imageMode && (
+                      <label className="size-picker">
+                        <span className="visually-hidden">{t.chat.imageSizeLabel}</span>
+                        <select
+                          value={imageSize}
+                          onChange={(e) => setImageSize(e.currentTarget.value)}
+                          aria-label={t.chat.imageSizeLabel}
+                        >
+                          {IMAGE_SIZES.map((size) => (
+                            <option key={size} value={size}>
+                              {t.imageSizes[size] ?? size}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    <button
+                      type="button"
+                      className={`icon-btn${imageMode ? " active" : ""}`}
+                      aria-pressed={imageMode}
+                      aria-label={imageMode ? t.chat.imageModeOff : t.chat.imageModeOn}
+                      title={imageMode ? t.chat.imageModeOff : t.chat.imageModeOn}
+                      onClick={() => setImageMode((value) => !value)}
+                      disabled={composerBusy}
+                    >
+                      <IconImage size={18} />
+                    </button>
+                    {VOICE_UI && (
+                      <button
+                        type="button"
+                        className={`icon-btn${recording ? " recording" : ""}`}
+                        aria-label={recording ? t.chat.stopDictation : t.chat.dictate}
+                        title={recording ? t.chat.stopDictation : t.chat.dictate}
+                        onClick={() => void toggleRecording()}
+                        disabled={sttBusy || composerBusy}
+                      >
+                        {recording ? <IconStop size={18} /> : <IconMic size={18} />}
+                      </button>
+                    )}
+                    {imageGeneratingActive ? (
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => void cancelImage()}>
+                        <IconStop size={14} />
+                        {t.chat.cancel}
+                      </button>
+                    ) : streamingActive ? (
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => void stopGenerating()}>
+                        <IconStop size={14} />
+                        {t.chat.stop}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="send-btn"
+                        onClick={submit}
+                        disabled={composer.trim().length === 0}
+                        aria-label={imageMode ? t.chat.createImage : t.chat.send}
+                        title={imageMode ? t.chat.createImage : t.chat.send}
+                      >
+                        <IconArrowUp size={18} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+              {(sttHint || workspaceError) && (
+                <p className="composer-hint" role="status">
+                  {sttHint || workspaceError}
+                </p>
+              )}
+            </footer>
+          </section>
+
+          {preview?.open && overview.active_profile && (
+            <Suspense fallback={<aside className="preview-pane" aria-busy="true" />}>
+              <PreviewPane
+                target={preview.target}
+                profileId={overview.active_profile}
+                onClose={closePreview}
+                onOpenLink={openWebPreview}
+              />
+            </Suspense>
+          )}
+        </div>
       )}
 
       {askComputerWide && (
-        <ComputerWideDialog
-          onCancel={() => setAskComputerWide(false)}
-          onContinue={() => void confirmComputerWide()}
-        />
+        <ComputerWideDialog onCancel={() => setAskComputerWide(false)} onContinue={() => void confirmComputerWide()} />
       )}
     </main>
   );
@@ -1441,9 +1445,10 @@ function ChatShell({
 // ---------------------------------------------------------------------------
 
 function App() {
+  const { t, firstRun } = useI18n();
   const [screen, setScreen] = useState<Screen>("loading");
   const [overview, setOverview] = useState<ProfileOverview | null>(null);
-  const [pickerError, setPickerError] = useState("");
+  const [pickerError, setPickerError] = useState(false);
   const [busy, setBusy] = useState(false);
 
   // Device-flow login state.
@@ -1456,10 +1461,7 @@ function App() {
     authProfileRef.current = authProfileId;
   }, [authProfileId]);
 
-  const refreshOverview = useCallback(
-    async (): Promise<ProfileOverview> => invoke<ProfileOverview>("profiles_load"),
-    [],
-  );
+  const refreshOverview = useCallback(async (): Promise<ProfileOverview> => invoke<ProfileOverview>("profiles_load"), []);
 
   const boot = useCallback(async (): Promise<void> => {
     setScreen("loading");
@@ -1477,7 +1479,7 @@ function App() {
     void boot();
   }, [boot]);
 
-  // Rust → frontend sign-in events. Registered once; cleanup on unmount.
+  // Rust -> frontend sign-in events. Registered once; cleanup on unmount.
   useEffect(() => {
     const unlistens: Promise<UnlistenFn>[] = [
       listen<DeviceStarted>("device://started", (event) => {
@@ -1510,7 +1512,7 @@ function App() {
 
   const startLogin = useCallback(async (profileId: string): Promise<void> => {
     setBusy(true);
-    setPickerError("");
+    setPickerError(false);
     // Track the flow from before the request so no early event is missed.
     setAuthProfileId(profileId);
     setAuthPhase("waiting");
@@ -1521,7 +1523,7 @@ function App() {
       setScreen("authorizing");
     } catch {
       setAuthProfileId(null);
-      setPickerError("No hemos podido iniciar el acceso. Revisa tu conexión y vuelve a intentarlo.");
+      setPickerError(true);
     } finally {
       setBusy(false);
     }
@@ -1553,13 +1555,18 @@ function App() {
     }
   }, [overview, refreshOverview]);
 
+  // S19: the language comes first, before any tenant choice.
+  if (firstRun) {
+    return <LanguageScreen />;
+  }
+
   if (screen === "loading") {
     return (
       <CenterScreen>
         <BrandHero />
         <p className="status-line" role="status">
           <span className="pulse-dot" aria-hidden="true" />
-          Cargando…
+          {t.app.loading}
         </p>
       </CenterScreen>
     );
@@ -1569,11 +1576,11 @@ function App() {
     return (
       <CenterScreen>
         <BrandHero />
-        <h1>Algo no ha ido bien</h1>
-        <p className="lede">No hemos podido abrir tu cuenta en este equipo. Vuelve a intentarlo.</p>
+        <h1>{t.app.errorTitle}</h1>
+        <p className="lede">{t.app.errorBody}</p>
         <div className="actions">
           <button type="button" className="btn btn-primary" onClick={() => void boot()}>
-            Volver a intentarlo
+            {t.app.tryAgain}
           </button>
         </div>
       </CenterScreen>
@@ -1584,7 +1591,7 @@ function App() {
     const profile = overview?.profiles.find((p) => p.id === authProfileId);
     return (
       <Authorizing
-        profileName={profileTitle(authProfileId, profile?.name ?? authProfileId)}
+        profileName={profileTitle(t, authProfileId, profile?.name ?? authProfileId)}
         userCode={userCode}
         phase={authPhase}
         errorKind={errorKind}
@@ -1600,7 +1607,7 @@ function App() {
       <ProfilePicker
         overview={overview}
         busy={busy}
-        error={pickerError}
+        error={pickerError ? t.login.startError : ""}
         onPick={(id) => void startLogin(id)}
       />
     );

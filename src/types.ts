@@ -33,7 +33,7 @@ export interface ChatMessageRow {
   content: string;
   model: string | null;
   created_at: string;
-  // Crash leftovers of a mid-stream kill — the reply never finished.
+  // Crash leftovers of a mid-stream kill: the reply never finished.
   partial: boolean;
   // Absolute path of a generated image (assistant image rows only).
   media_path: string | null;
@@ -49,6 +49,9 @@ export interface GrantView {
   granted_at: string;
   profile_id: string;
   scope: GrantScope;
+  /// S13 approval mode; when the core does not include it in the list the
+  /// renderer asks per grant (tools_grant_mode_get).
+  mode?: "ask" | "allow";
 }
 
 export interface ToolsSettingsView {
