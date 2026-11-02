@@ -8,17 +8,17 @@ import { isOpen } from "../chat/approvals";
 import { useT } from "../i18n";
 import { IconCheck, IconFile, IconFolder, IconMove, IconTerminal, IconTrash, IconX } from "../icons";
 
+// Action kinds are the core's ToolAction::kind() values.
 function actionIcon(action: string): ReactNode {
   switch (action) {
-    case "delete":
+    case "delete_path":
       return <IconTrash size={16} />;
     case "run_command":
       return <IconTerminal size={16} />;
-    case "move":
-    case "rename":
+    case "move_path":
       return <IconMove size={16} />;
-    case "read":
-    case "list":
+    case "read_file":
+    case "list_files":
       return <IconFolder size={16} />;
     default:
       return <IconFile size={16} />;
@@ -34,7 +34,7 @@ export function ApprovalCard({
 }) {
   const t = useT();
   const summary = t.approval.actions[card.action] ?? t.approval.actions.unknown;
-  const danger = card.action === "delete" || card.action === "run_command";
+  const danger = card.action === "delete_path" || card.action === "run_command";
 
   if (!isOpen(card)) {
     const granted = card.status === "granted";
@@ -66,6 +66,18 @@ export function ApprovalCard({
           <span className="approval-destination">
             {t.approval.to} <code title={card.destination}>{card.destination}</code>
           </span>
+        )}
+        {card.cwd && (
+          <span className="approval-destination">
+            {t.approval.inFolder} <code title={card.cwd}>{card.cwd}</code>
+          </span>
+        )}
+        {card.permanent && <span className="approval-permanent">{t.approval.permanent}</span>}
+        {card.diffPreview && (
+          <details className="approval-diff">
+            <summary>{t.approval.changes}</summary>
+            <pre>{card.diffPreview}</pre>
+          </details>
         )}
         {card.failed && (
           <span className="approval-error" role="alert">

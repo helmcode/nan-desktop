@@ -1,12 +1,61 @@
 import { describe, expect, it } from "vitest";
 import type { ApprovalRequest } from "../core";
-import { approvalsReducer, isOpen, placeCards, type ApprovalCardState } from "./approvals";
+import { approvalsReducer, cardFromRequest, isOpen, placeCards, type ApprovalCardState } from "./approvals";
 
-const req = (id: string, conversation_id = 1): ApprovalRequest => ({
-  id,
+// The exact `tools://approval-request` payload the core serializes
+// (src-tauri/src/tools/approvals.rs ApprovalRequest, snake_case).
+const req = (approval_id: string, conversation_id: number | null = 1): ApprovalRequest => ({
+  approval_id,
   conversation_id,
-  action: "delete",
-  target: "/Users/ana/Proyecto/old.txt",
+  action: "delete_path",
+  title: "Borrar",
+  text: "¿Borrar old.txt?",
+  summary: "delete_path /Users/ana/Proyecto/old.txt (to trash)",
+  path: "/Users/ana/Proyecto/old.txt",
+  dest_path: null,
+  command: null,
+  diff_preview: null,
+  permanent: false,
+  expires_in_secs: 300,
+});
+
+describe("cardFromRequest (real core payload)", () => {
+  it("maps approval_id, path and the delete flags", () => {
+    const card = cardFromRequest({ ...req("a"), permanent: true }, 2);
+    expect(card).toMatchObject({
+      id: "a",
+      conversationId: 1,
+      action: "delete_path",
+      target: "/Users/ana/Proyecto/old.txt",
+      destination: null,
+      cwd: null,
+      permanent: true,
+      diffPreview: null,
+      anchorIndex: 2,
+    });
+  });
+
+  it("names the command line for run_command and shows its folder separately", () => {
+    const card = cardFromRequest(
+      { ...req("c"), action: "run_command", path: "/Users/ana/Proyecto", command: "ls -la" },
+      null,
+    );
+    expect(card.target).toBe("ls -la");
+    expect(card.cwd).toBe("/Users/ana/Proyecto");
+  });
+
+  it("keeps the diff preview of a write and falls back to the summary without a path", () => {
+    const card = cardFromRequest(
+      { ...req("w"), action: "write_file", path: null, diff_preview: "+hello", summary: "write_file x" },
+      0,
+    );
+    expect(card.diffPreview).toBe("+hello");
+    expect(card.target).toBe("write_file x");
+  });
+
+  it("keeps a null conversation as null", () => {
+    expect(cardFromRequest(req("n", null), null).conversationId).toBeNull();
+  });
 });
 
 function withCard(id = "a", anchor: number | null = 2): ApprovalCardState[] {
@@ -28,7 +77,7 @@ describe("approvalsReducer (S14)", () => {
   it("keeps the move destination", () => {
     const [card] = approvalsReducer([], {
       type: "request",
-      request: { ...req("m"), action: "move", destination: "/Users/ana/Proyecto/new.txt" },
+      request: { ...req("m"), action: "move_path", dest_path: "/Users/ana/Proyecto/new.txt" },
       anchorIndex: 0,
     });
     expect(card.destination).toBe("/Users/ana/Proyecto/new.txt");

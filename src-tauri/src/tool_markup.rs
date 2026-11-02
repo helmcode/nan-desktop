@@ -289,20 +289,20 @@ fn parse_block(block: &str) -> Vec<MarkupCall> {
                     .is_some_and(|flag| flag.trim().eq_ignore_ascii_case("false"));
                 (name.trim().to_string(), is_string, tag.end)
             });
-        } else if tag.is("parameter") && tag.closing {
-            if let (Some((name, is_string, start)), Some((_, args))) =
+        } else if tag.is("parameter")
+            && tag.closing
+            && let (Some((name, is_string, start)), Some((_, args))) =
                 (param.take(), invoke.as_mut())
-                && start <= index
-            {
-                let raw = &block[start..index];
-                let value = if is_string {
-                    serde_json::Value::String(raw.to_string())
-                } else {
-                    serde_json::from_str(raw.trim())
-                        .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
-                };
-                args.insert(name, value);
-            }
+            && start <= index
+        {
+            let raw = &block[start..index];
+            let value = if is_string {
+                serde_json::Value::String(raw.to_string())
+            } else {
+                serde_json::from_str(raw.trim())
+                    .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+            };
+            args.insert(name, value);
         }
     }
     calls

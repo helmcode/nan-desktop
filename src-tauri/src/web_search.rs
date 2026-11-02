@@ -171,6 +171,16 @@ pub fn host_of(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_string())
 }
 
+/// HTTP client for short platform calls (search, page preview): bounded
+/// connect and request timeouts. Shared with `preview::fetch_preview`.
+pub(crate) fn platform_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .ok()
+}
+
 /// Run one search through the platform API. Never fails: every problem
 /// degrades to "no results" (see module docs).
 pub async fn search(profile_id: &str, query: &str) -> Vec<SearchResult> {
@@ -180,11 +190,7 @@ pub async fn search(profile_id: &str, query: &str) -> Vec<SearchResult> {
     let Some(base) = crate::device_flow::platform_base(profile_id) else {
         return Vec::new();
     };
-    let Ok(client) = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-    else {
+    let Some(client) = platform_client() else {
         return Vec::new();
     };
     let Ok(response) = client

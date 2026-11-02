@@ -74,6 +74,17 @@ const REQUIRED_TESTS = [
   "chat::tests::openai_tool_call_deltas_still_win_over_content_markup",
   // S24 voice parked
   "tests::voice_ui_is_parked_by_default",
+  // S21 preview pane backends
+  "preview::tests::reads_a_file_inside_the_grant_as_exact_base64",
+  "preview::tests::refuses_files_outside_every_grant_and_profiles_without_grants",
+  "preview::tests::refuses_the_sensitive_deny_list_even_inside_a_grant",
+  "preview::tests::refuses_the_protected_app_data_folder",
+  "preview::tests::refuses_files_over_the_8_mib_cap",
+  "preview::tests::success_returns_the_page_and_speaks_the_wire_contract",
+  "preview::tests::failures_map_to_typed_kinds",
+  "preview::tests::no_key_material_or_page_content_leaks_into_errors_or_replies",
+  // Image endpoint path (base already ends in /v1)
+  "images::tests::generation_url_is_exactly_v1_images_generations_on_both_tenants",
 ];
 // Unix-only acceptance tests (symlinks / sh): required where they can run.
 if (process.platform !== "win32") {
@@ -81,6 +92,7 @@ if (process.platform !== "win32") {
     "tools::tests::move_path_and_delete_path_are_symlink_safe",
     "tools::tests::run_command_asks_unless_its_cwd_is_in_an_allow_grant",
     "tools::trash::tests::files_and_folders_land_in_the_trash_and_nothing_is_lost",
+    "preview::tests::never_follows_symlinks",
   );
 }
 const ALLOWED_KEYS = new Set(["ts", "event", "action", "outcome", "grant_id", "profile_id", "detail"]);

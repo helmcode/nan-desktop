@@ -18,6 +18,8 @@ mod images;
 mod links;
 // Conversation memory: account-synced (default) or this-device-only.
 mod memory;
+// Preview pane backends (S21): granted-file reads + platform page fetch.
+mod preview;
 mod profile;
 // Incremental SSE parser shared by the streaming chat surface.
 mod sse;
@@ -125,19 +127,6 @@ fn app_info(app: AppHandle) -> AppInfo {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn voice_ui_is_parked_by_default() {
-        // S24: default builds hide the voice UI; `--features voice-ui`
-        // turns it back on.
-        #[cfg(not(feature = "voice-ui"))]
-        assert!(!super::voice_ui_enabled());
-        #[cfg(feature = "voice-ui")]
-        assert!(super::voice_ui_enabled());
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Debug and release builds expose exactly the same IPC surface: the
@@ -198,8 +187,22 @@ pub fn run() {
             tools::tools_approval_respond,
             tools::tools_settings_get,
             tools::tools_set_run_command_enabled,
+            preview::preview_read_file,
+            preview::web_preview_fetch,
             links::open_external
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn voice_ui_is_parked_by_default() {
+        // S24: default builds hide the voice UI; `--features voice-ui`
+        // turns it back on.
+        #[cfg(not(feature = "voice-ui"))]
+        assert!(!super::voice_ui_enabled());
+        #[cfg(feature = "voice-ui")]
+        assert!(super::voice_ui_enabled());
+    }
 }

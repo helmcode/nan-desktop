@@ -49,9 +49,9 @@ export interface GrantView {
   granted_at: string;
   profile_id: string;
   scope: GrantScope;
-  /// S13 approval mode; when the core does not include it in the list the
-  /// renderer asks per grant (tools_grant_mode_get).
-  mode?: "ask" | "allow";
+  /// S13 stored approval mode (`Grant.mode`, serde snake_case). The
+  /// effective mode of a computer-wide grant is always "ask".
+  mode: "ask" | "allow";
 }
 
 export interface ToolsSettingsView {
@@ -66,4 +66,6 @@ export interface MemorySettingsView {
 
 export interface AppInfo {
   version: string;
+  /// S24: true only in builds with the core's `voice-ui` cargo feature.
+  voice_ui: boolean;
 }

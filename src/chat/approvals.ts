@@ -12,11 +12,19 @@ import type { ApprovalRequest } from "../core";
 export type ApprovalStatus = "pending" | "sending" | "granted" | "denied";
 
 export interface ApprovalCardState {
+  /// The core's `approval_id`.
   id: string;
-  conversationId: number;
+  /// Null when the core did not tie the request to a conversation.
+  conversationId: number | null;
   action: string;
+  /// What the card names: the command line for run_command, else the path,
+  /// else the core's summary.
   target: string;
   destination: string | null;
+  /// run_command working folder (shown under the command).
+  cwd: string | null;
+  diffPreview: string | null;
+  permanent: boolean;
   /// Messages before the card; null when unknown (renders at the end).
   anchorIndex: number | null;
   status: ApprovalStatus;
@@ -30,23 +38,29 @@ export type ApprovalEvent =
   | { type: "failed"; id: string }
   | { type: "clearConversation"; conversationId: number };
 
+/// Card state from the core's `tools://approval-request` payload.
+export function cardFromRequest(request: ApprovalRequest, anchorIndex: number | null): ApprovalCardState {
+  const isCommand = request.command !== null && request.command !== undefined;
+  return {
+    id: request.approval_id,
+    conversationId: request.conversation_id ?? null,
+    action: request.action,
+    target: (isCommand ? request.command : request.path) ?? request.summary,
+    destination: request.dest_path ?? null,
+    cwd: isCommand ? (request.path ?? null) : null,
+    diffPreview: request.diff_preview ?? null,
+    permanent: request.permanent === true,
+    anchorIndex,
+    status: "pending",
+    failed: false,
+  };
+}
+
 export function approvalsReducer(state: ApprovalCardState[], event: ApprovalEvent): ApprovalCardState[] {
   switch (event.type) {
     case "request": {
-      if (state.some((card) => card.id === event.request.id)) return state;
-      return [
-        ...state,
-        {
-          id: event.request.id,
-          conversationId: event.request.conversation_id,
-          action: event.request.action,
-          target: event.request.target,
-          destination: event.request.destination ?? null,
-          anchorIndex: event.anchorIndex,
-          status: "pending",
-          failed: false,
-        },
-      ];
+      if (state.some((card) => card.id === event.request.approval_id)) return state;
+      return [...state, cardFromRequest(event.request, event.anchorIndex)];
     }
     case "sending":
       return state.map((card) =>

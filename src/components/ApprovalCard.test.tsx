@@ -10,9 +10,12 @@ afterEach(cleanup);
 const base: ApprovalCardState = {
   id: "act-1",
   conversationId: 1,
-  action: "delete",
+  action: "delete_path",
   target: "/Users/ana/Proyecto/old.txt",
   destination: null,
+  cwd: null,
+  diffPreview: null,
+  permanent: false,
   anchorIndex: 1,
   status: "pending",
   failed: false,
@@ -47,9 +50,35 @@ describe("ApprovalCard (S14)", () => {
   });
 
   it("shows the destination of a move", () => {
-    renderCard({ action: "move", destination: "/Users/ana/Proyecto/new.txt" });
+    renderCard({ action: "move_path", destination: "/Users/ana/Proyecto/new.txt" });
     expect(screen.getByText("Move a file")).toBeTruthy();
     expect(screen.getByText("/Users/ana/Proyecto/new.txt")).toBeTruthy();
+  });
+
+  it("labels every core action kind", () => {
+    for (const [action, label] of [
+      ["read_file", "Read a file"],
+      ["list_files", "List a folder"],
+      ["write_file", "Write a file"],
+      ["replace_file", "Change a file"],
+      ["run_command", "Run a command"],
+    ]) {
+      cleanup();
+      renderCard({ action });
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+  });
+
+  it("shows the command folder, the permanent-delete warning and the diff", () => {
+    renderCard({ action: "run_command", target: "ls", cwd: "/Users/ana/Proyecto" });
+    expect(screen.getByText("/Users/ana/Proyecto")).toBeTruthy();
+    cleanup();
+    renderCard({ permanent: true });
+    expect(screen.getByText(/cannot be undone/)).toBeTruthy();
+    cleanup();
+    renderCard({ action: "write_file", diffPreview: "+new line" });
+    expect(screen.getByText("See the changes")).toBeTruthy();
+    expect(screen.getByText("+new line")).toBeTruthy();
   });
 
   it("hides the buttons while the answer is being sent", () => {

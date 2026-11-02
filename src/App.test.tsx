@@ -9,7 +9,7 @@ vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).
 import App from "./App";
 import { I18nProvider, type Locale } from "./i18n";
 import { LOCALE_STORAGE_KEY } from "./i18n/locale";
-import { APPROVAL_REQUEST_EVENT, APPROVAL_RESOLVED_EVENT } from "./core";
+import { APPROVAL_REQUEST_EVENT, APPROVAL_RESOLVED_EVENT, type ApprovalRequest } from "./core";
 import type { ChatMessageRow } from "./types";
 
 const PROFILES = {
@@ -58,6 +58,25 @@ function chatHandlers(messages: ChatMessageRow[]) {
     ],
     tools_approval_respond: () => undefined,
     tts_stop: () => undefined,
+  };
+}
+
+/// The exact `tools://approval-request` payload the core emits.
+function approvalPayload(overrides: Partial<ApprovalRequest> = {}): ApprovalRequest {
+  return {
+    approval_id: "pa-0",
+    conversation_id: 7,
+    action: "delete_path",
+    title: "Borrar",
+    text: "¿Borrar old.txt?",
+    summary: "delete_path /Users/ana/Proyecto/old.txt (to trash)",
+    path: "/Users/ana/Proyecto/old.txt",
+    dest_path: null,
+    command: null,
+    diff_preview: null,
+    permanent: false,
+    expires_in_secs: 300,
+    ...overrides,
   };
 }
 
@@ -128,16 +147,14 @@ describe("chat shell", () => {
     renderApp("en");
     await screen.findByText("Delete old.txt");
     act(() => {
-      emit(APPROVAL_REQUEST_EVENT, {
-        id: "pa-1",
-        conversation_id: 7,
-        action: "delete",
-        target: "/Users/ana/Proyecto/old.txt",
-      });
+      emit(APPROVAL_REQUEST_EVENT, approvalPayload({ approval_id: "pa-1" }));
     });
     expect(screen.queryByRole("dialog")).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: "Allow" }));
-    await waitFor(() => expect(invokedWith("tools_approval_respond")).toEqual([{ id: "pa-1", granted: true }]));
+    // Tauri command args are camelCase: Rust `approval_id` is `approvalId`.
+    await waitFor(() =>
+      expect(invokedWith("tools_approval_respond")).toEqual([{ approvalId: "pa-1", granted: true }]),
+    );
     await waitFor(() => expect(screen.queryByRole("button", { name: "Allow" })).toBeNull());
     expect(screen.getByText(/Allowed: Delete a file/)).toBeTruthy();
   });
@@ -147,13 +164,26 @@ describe("chat shell", () => {
     renderApp("en");
     await screen.findByText("Rename it");
     act(() => {
-      emit(APPROVAL_REQUEST_EVENT, { id: "pa-2", conversation_id: 7, action: "rename", target: "/a/b.txt" });
+      emit(
+        APPROVAL_REQUEST_EVENT,
+        approvalPayload({ approval_id: "pa-2", action: "move_path", path: "/a/b.txt", dest_path: "/a/c.txt" }),
+      );
     });
     await screen.findByRole("button", { name: "Deny" });
     act(() => {
-      emit(APPROVAL_RESOLVED_EVENT, { id: "pa-2", conversation_id: 7, granted: false });
+      emit(APPROVAL_RESOLVED_EVENT, { approval_id: "pa-2", granted: false });
     });
-    expect(await screen.findByText(/Denied: Rename a file/)).toBeTruthy();
+    expect(await screen.findByText(/Denied: Move a file/)).toBeTruthy();
+  });
+
+  it("shows a request without a conversation in the open conversation", async () => {
+    resetTauri(chatHandlers([row(1, "user", "List it")]));
+    renderApp("en");
+    await screen.findByText("List it");
+    act(() => {
+      emit(APPROVAL_REQUEST_EVENT, approvalPayload({ approval_id: "pa-3", conversation_id: null, action: "list_files" }));
+    });
+    expect(await screen.findByText("List a folder")).toBeTruthy();
   });
 
   it("hides voice controls this round (S24)", async () => {

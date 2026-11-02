@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { grantErrorKind, isComputerWide, type GrantErrorKind } from "./copy";
-import { DEFAULT_GRANT_MODE, getGrantMode, normalizeGrantMode, setGrantMode, type GrantMode } from "./core";
+import { addGrant, DEFAULT_GRANT_MODE, normalizeGrantMode, setGrantMode, type GrantMode } from "./core";
 import type { GrantView } from "./types";
 
 export interface Workspace {
@@ -38,24 +38,20 @@ export interface Workspace {
   removeGrant: (grantId: string) => Promise<void>;
 }
 
-/// Grants of one profile, with modes resolved (list field first, then the
-/// per-grant command, then the safe default).
+/// The mode that actually applies (core `Grant::effective_mode`):
+/// computer-wide grants always ask, whatever is stored.
+export function effectiveMode(grant: GrantView): GrantMode {
+  return isComputerWide(grant) ? DEFAULT_GRANT_MODE : normalizeGrantMode(grant.mode);
+}
+
+/// Grants of one profile with their effective modes. Every grant in
+/// `tools_grant_list` carries its `mode`, so no per-grant round trip.
 export async function loadGrants(
   profileId: string | null,
 ): Promise<{ grants: GrantView[]; modes: Record<string, GrantMode> }> {
   const list = await invoke<GrantView[]>("tools_grant_list");
   const grants = list.filter((g) => g.profile_id === profileId);
-  const entries = await Promise.all(
-    grants.map(async (g): Promise<[string, GrantMode]> => {
-      if (g.mode !== undefined) return [g.id, normalizeGrantMode(g.mode)];
-      try {
-        return [g.id, await getGrantMode(g.id)];
-      } catch {
-        return [g.id, DEFAULT_GRANT_MODE];
-      }
-    }),
-  );
-  return { grants, modes: Object.fromEntries(entries) };
+  return { grants, modes: Object.fromEntries(grants.map((g) => [g.id, effectiveMode(g)])) };
 }
 
 export function useWorkspace(profileId: string | null): Workspace {
@@ -100,12 +96,8 @@ export function useWorkspace(profileId: string | null): Workspace {
   const addFolder = useCallback(
     async (mode: GrantMode = DEFAULT_GRANT_MODE): Promise<boolean> => {
       if (!profileId) return false;
-      return run(async () => {
-        const grant = await invoke<GrantView | null>("tools_grant_add", { profileId });
-        if (grant === null) return false;
-        if (mode !== DEFAULT_GRANT_MODE) await setGrantMode(grant.id, mode);
-        return true;
-      }, false);
+      // One call: the core applies `mode` (and confirms allow natively).
+      return run(async () => (await addGrant(profileId, mode)) !== null, false);
     },
     [profileId, run],
   );
@@ -115,12 +107,9 @@ export function useWorkspace(profileId: string | null): Workspace {
       if (!profileId) return false;
       const previousMode = modes[grantId] ?? DEFAULT_GRANT_MODE;
       return run(async () => {
-        const grant = await invoke<GrantView | null>("tools_grant_add", { profileId });
+        const grant = await addGrant(profileId, previousMode);
         if (grant === null) return false;
-        if (grant.id !== grantId) {
-          if (previousMode !== DEFAULT_GRANT_MODE) await setGrantMode(grant.id, previousMode);
-          await invoke("tools_grant_revoke", { grantId });
-        }
+        if (grant.id !== grantId) await invoke("tools_grant_revoke", { grantId });
         return true;
       }, false);
     },
@@ -129,8 +118,11 @@ export function useWorkspace(profileId: string | null): Workspace {
 
   const setMode = useCallback(
     async (grantId: string, mode: GrantMode): Promise<void> => {
+      // The core returns the grant as stored: a declined native
+      // confirmation leaves it unchanged, and the refresh in `run` shows that.
       await run(async () => {
-        await setGrantMode(grantId, mode);
+        const updated = await setGrantMode(grantId, mode);
+        setModes((current) => ({ ...current, [updated.id]: effectiveMode(updated) }));
       }, undefined);
     },
     [run],

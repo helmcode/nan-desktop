@@ -749,9 +749,24 @@ button:disabled {
   color: var(--text-2);
 }
 
-.approval-error {
+.approval-error,
+.approval-permanent {
   color: var(--error);
   font-size: 0.82rem;
+}
+
+.approval-diff summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--text-2);
+}
+
+.approval-diff pre {
+  max-height: 14rem;
+  overflow: auto;
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  white-space: pre;
 }
 
 .approval-actions {

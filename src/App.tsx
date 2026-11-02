@@ -673,12 +673,16 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // Approval transport (S14): the core asks, the card answers in place.
   useEffect(() => {
     const unlistens: Promise<UnlistenFn>[] = [
-      onApprovalRequest((request) => {
+      onApprovalRequest((incoming) => {
+        // A request the core did not tie to a conversation belongs to the
+        // one on screen (otherwise its card would never render and the
+        // request would silently expire as a deny).
+        const request = { ...incoming, conversation_id: incoming.conversation_id ?? activeConvRef.current };
         const anchorIndex = activeConvRef.current === request.conversation_id ? messageCountRef.current : null;
         dispatchApproval({ type: "request", request, anchorIndex });
       }),
       onApprovalResolved((resolved) => {
-        dispatchApproval({ type: "resolved", id: resolved.id, granted: resolved.granted });
+        dispatchApproval({ type: "resolved", id: resolved.approval_id, granted: resolved.granted });
       }),
     ];
     return () => {
