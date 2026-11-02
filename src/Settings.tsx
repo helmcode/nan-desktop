@@ -325,7 +325,7 @@ export function Settings({
         <section className="settings-section" aria-labelledby="about-title">
           <h2 id="about-title">{t.settings.about.title}</h2>
           <div className="about-product">
-            <BrandMark size={28} />
+            <BrandMark size="md" />
             <strong>{t.settings.about.product}</strong>
           </div>
           <dl className="about-list">

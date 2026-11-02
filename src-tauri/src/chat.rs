@@ -2,7 +2,7 @@
 //! OpenAI-compatible inference APIs.
 //!
 //! Architecture: HTTP lives entirely in the Rust core (S4) — the key is read
-//! from the OS keychain (account = profile id), `POST {inference_base}
+//! from the credential vault (account = profile id), `POST {inference_base}
 //! /chat/completions` is sent with `stream: true`, the SSE byte stream is
 //! decoded incrementally (multi-byte safe) and parsed with the shared
 //! `sse.rs` parser, and only delta text crosses the IPC boundary as Tauri
@@ -34,7 +34,7 @@
 //!
 //! Error kinds: `missing_key` / `unauthorized` (401 → the session must
 //! re-login) / `rate_limited` (429) / `server` (other non-2xx) / `network`
-//! (transport) / `protocol` (local failures: keychain, store, malformed
+//! (transport) / `protocol` (local failures: credential vault, store, malformed
 //! payloads) / `decode` (audio-only: the TTS reply could not be decoded —
 //! chat never produces this kind).
 //!
@@ -67,7 +67,7 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Window};
 
 use crate::chat_store::{self, ChatMessageRow, ConversationView, WebSource};
-use crate::profile::{self, KEYRING_SERVICE};
+use crate::profile;
 use crate::sse::{flush_sse_buffer, parse_sse_buffer};
 use crate::tool_markup::{self, MarkupFilter};
 use crate::{images, tools, web_search};
@@ -89,7 +89,7 @@ pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
-    /// No inference key in the OS keychain for the profile.
+    /// No inference key in the credential vault for the profile.
     MissingKey,
     /// 401 — the stored key/session is no longer valid; re-login needed.
     Unauthorized,
@@ -99,7 +99,7 @@ pub enum ErrorKind {
     Server,
     /// Transport failure (DNS, connect, reset, mid-stream read error).
     Network,
-    /// A local failure: keychain error, store error, malformed payload,
+    /// A local failure: credential vault error, store error, malformed payload,
     /// no audio output device.
     Protocol,
     /// Audio-only (T6): the reply bytes could not be decoded as the
@@ -778,28 +778,29 @@ fn abort_stream(state: &ChatState, conversation_id: i64) -> Result<bool, String>
 // Commands
 // ---------------------------------------------------------------------------
 
-/// Read a profile's inference key from the OS keychain (never rendered,
-/// logged, or echoed — S4). Shared with the audio surfaces (`tts.rs` /
-/// `stt.rs`, T6) so classification and keychain access stay identical.
+/// Read a profile's inference key from the credential vault (never
+/// rendered, logged, or echoed — S4). Shared with the audio/image surfaces
+/// so classification and credential access stay identical. An unreadable
+/// vault reads as "no key" (logged out); only a real storage failure (e.g.
+/// the master key could not be loaded) is a local `Protocol` error.
 pub(crate) fn read_profile_key(profile_id: &str) -> Result<String, ErrorKind> {
-    match keyring::Entry::new(KEYRING_SERVICE, &profile::key_account(profile_id))
-        .and_then(|entry| entry.get_password())
+    match crate::credentials::store().and_then(|store| store.get(&profile::key_account(profile_id)))
     {
-        Ok(key) if !key.is_empty() => Ok(key),
+        Ok(Some(key)) if !key.is_empty() => Ok(key),
         Ok(_) => Err(ErrorKind::MissingKey),
-        Err(keyring::Error::NoEntry) => Err(ErrorKind::MissingKey),
         Err(_) => Err(ErrorKind::Protocol),
     }
 }
 
-/// Read a profile's login session JWT from the OS keychain (account
+/// Read a profile's login session JWT from the credential vault (account
 /// `<profile-id>.session`). Used for platform calls (web search, memory
 /// sync). Missing, empty or unreadable → None: callers degrade silently.
 /// Never rendered, logged or echoed (S4).
 pub(crate) fn read_session_token(profile_id: &str) -> Option<String> {
-    keyring::Entry::new(KEYRING_SERVICE, &profile::session_account(profile_id))
-        .and_then(|entry| entry.get_password())
+    crate::credentials::store()
+        .and_then(|store| store.get(&profile::session_account(profile_id)))
         .ok()
+        .flatten()
         .filter(|token| !token.is_empty())
 }
 
@@ -1451,7 +1452,7 @@ pub fn messages_list(app: AppHandle, conversation_id: i64) -> Result<Vec<ChatMes
 }
 
 /// Chat-capable models for the active profile: `GET {inference_base}/models`
-/// with the keychain Bearer, filtered and sorted by [`filter_chat_models`].
+/// with the vault-stored Bearer, filtered and sorted by [`filter_chat_models`].
 /// The renderer receives model ids only — never the key, never a URL (S4).
 #[tauri::command]
 pub async fn models_list(app: AppHandle) -> Result<Vec<String>, ErrorKind> {

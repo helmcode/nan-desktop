@@ -8,19 +8,32 @@ import symbolUrl from "./assets/brand/helmcode-symbol-color.svg";
 
 export const BRAND_ASSETS = { logo: logoUrl, symbol: symbolUrl } as const;
 
-/// The Helmcode symbol. Decorative by default (the product name is always
-/// next to it); pass a label when it stands alone.
-export function BrandMark({ size = 28, label }: { size?: number; label?: string }) {
+/// Named tile sizes (px) for the symbol. Surfaces pick a variant, never an
+/// ad-hoc pixel size, so the mark stays consistent everywhere:
+/// - `sm`: sidebar, next to body text (text height).
+/// - `md`: Settings "About" row.
+/// - `lg`: preview link-out card.
+/// - `xl`: chat empty state.
+/// The pixel values live in App.css (`.brand-mark--<size>`); this map mirrors
+/// them for tests and for anyone sizing neighbouring elements.
+export const BRAND_MARK_SIZES = { sm: 20, md: 28, lg: 32, xl: 40 } as const;
+export type BrandMarkSize = keyof typeof BRAND_MARK_SIZES;
+
+/// The Helmcode symbol inside a rounded tile (one corner-radius ratio at
+/// every size, like the avatar and the chips). The official symbol is tall
+/// (115x157), so the tile is square and the glyph keeps its aspect ratio
+/// inside it. Decorative by default (the product name is always next to it);
+/// pass a label when it stands alone.
+export function BrandMark({ size = "sm", label }: { size?: BrandMarkSize; label?: string }) {
   return (
-    <img
-      className="brand-mark"
-      src={symbolUrl}
-      height={size}
-      width={size * (115 / 157)}
-      alt={label ?? ""}
+    <span
+      className={`brand-mark brand-mark--${size}`}
+      role={label ? "img" : undefined}
+      aria-label={label}
       aria-hidden={label ? undefined : true}
-      draggable={false}
-    />
+    >
+      <img src={symbolUrl} alt="" draggable={false} />
+    </span>
   );
 }
 

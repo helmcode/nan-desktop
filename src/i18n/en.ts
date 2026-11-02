@@ -79,6 +79,8 @@ export const en = {
     deleteTitle: "Delete",
     deleteArmed: "Delete?",
     noAccount: "No account",
+    /** Screen-reader text on a chat whose reply is still streaming. */
+    replying: "Replying",
   },
   userMenu: {
     open: "Account menu",

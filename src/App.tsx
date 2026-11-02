@@ -14,6 +14,7 @@ import {
 } from "./chat/allowNudge";
 import { approvalsReducer, placeCards, type ApprovalCardState } from "./chat/approvals";
 import { lastProducedTarget } from "./chat/autoOpen";
+import { rowsForDisplay, titleFromFirstMessage, withConversation } from "./chat/conversationList";
 import { messageFiles } from "./chat/filePaths";
 import {
   adoptSelection,
@@ -491,6 +492,10 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   useEffect(() => {
     messageCountRef.current = messages.length;
   }, [messages]);
+  const streamingIdsRef = useRef(streamingIds);
+  useEffect(() => {
+    streamingIdsRef.current = streamingIds;
+  }, [streamingIds]);
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -510,7 +515,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const loadMessages = useCallback(async (conversationId: number): Promise<void> => {
     try {
       const rows = await invoke<ChatMessageRow[]>("messages_list", { conversationId });
-      setMessages(rows);
+      // A conversation still streaming (the user switched away and back)
+      // shows its live draft, not the core's in-progress copy of it.
+      setMessages(rowsForDisplay(rows, streamingIdsRef.current.has(conversationId)));
     } catch {
       setMessages([]);
     }
@@ -1102,7 +1109,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       setComposer("");
       setStreamingIds((prev) => new Set(prev).add(id));
       setDrafts((prev) => new Map(prev).set(id, ""));
+      // Round 5: a new chat is listed (streaming) right away, so switching
+      // away mid-reply never hides it; the refresh after `chat_send` swaps
+      // in the core's stored title and ordering.
+      setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(text)));
       await sendChat({ conversationId: id, model, content: text, grantIds });
+      void refreshConversations();
     } catch {
       if (conversationId !== null) {
         const id = conversationId;
@@ -1134,7 +1146,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       const id = conversationId;
       setImageGeneratingIds((prev) => new Set(prev).add(id));
       setComposer("");
+      setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(prompt)));
       await invoke("image_generate", { conversationId: id, prompt, size: imageSize });
+      void refreshConversations();
     } catch (err) {
       if (conversationId !== null) {
         const id = conversationId;
@@ -1257,7 +1271,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       <aside className="sidebar" aria-label={t.sidebar.conversations}>
         <div className="sidebar-top">
           <div className="sidebar-brand">
-            <BrandMark size={22} />
+            <BrandMark size="sm" />
             <span className="sidebar-name">{t.app.name}</span>
           </div>
           <button type="button" className="btn btn-primary new-chat-btn" onClick={newChat}>
@@ -1269,8 +1283,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           {conversations.length === 0 && <p className="conv-empty">{t.sidebar.empty}</p>}
           {conversations.map((c) => {
             const armed = pendingDeleteId === c.id;
+            const live = streamingIds.has(c.id) || imageGeneratingIds.has(c.id);
             return (
-              <div key={c.id} className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}`}>
+              <div
+                key={c.id}
+                className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}${live ? " streaming" : ""}`}
+              >
                 <button
                   type="button"
                   className="conv-main"
@@ -1279,6 +1297,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   aria-current={c.id === activeConvId ? "page" : undefined}
                 >
                   <span className="conv-title">{c.title}</span>
+                  {live && (
+                    <>
+                      <span className="pulse-dot" aria-hidden="true" />
+                      <span className="visually-hidden">{t.sidebar.replying}</span>
+                    </>
+                  )}
                 </button>
                 <button
                   type="button"
@@ -1369,7 +1393,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
               <div className="messages-inner">
                 {messages.length === 0 && activeDraft === undefined && placed.tail.length === 0 && (
                   <div className="empty-state">
-                    <BrandMark size={40} />
+                    <BrandMark size="xl" />
                     <p className="empty-title">{t.chat.emptyTitle}</p>
                     <p className="empty-hint">{t.chat.emptyHint}</p>
                   </div>

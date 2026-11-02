@@ -8,8 +8,9 @@
 //! returned `verification_url`, then polls `/api/auth/device/poll` at the
 //! advertised interval until the request is approved, denied, expired or
 //! fails. On approval the response carries `{session_token, api_key,
-//! key_alias}` exactly once: the API key is stored in the OS keychain under
-//! the profile id, the session JWT under `<profile-id>.session`, the profile
+//! key_alias}` exactly once: the API key is stored in the credential vault
+//! (`credentials.rs`) under the profile id, the session JWT under
+//! `<profile-id>.session` (one atomic write), the profile
 //! becomes active, and the renderer only learns the alias + profile id.
 //! Raw credentials never cross the IPC boundary (S4).
 //!
@@ -24,7 +25,7 @@
 //!
 //! Error classification for `device://error`: `network` / `timeout` /
 //! `rate_limited` / `server` / `protocol` (malformed payloads and local
-//! failures such as keychain or browser-open errors).
+//! failures such as credential-storage or browser-open errors).
 //!
 //! Zero telemetry (S8): the only host contacted is the profile's own
 //! platform base (a compiled-in constant; see [`platform_base`]).
@@ -67,8 +68,8 @@ pub enum ErrorKind {
     RateLimited,
     /// The server rejected the flow (4xx/5xx, key minting failed, …).
     Server,
-    /// A response did not match the contract, or a local step (keychain,
-    /// browser) failed.
+    /// A response did not match the contract, or a local step (credential
+    /// vault, browser) failed.
     Protocol,
 }
 
@@ -304,55 +305,42 @@ pub fn device_login_cancel(state: State<'_, DeviceLoginState>) -> Result<(), Str
     Ok(())
 }
 
-/// Sign out of `profile_id`: delete both keychain entries (inference key and
-/// session JWT; deleting a missing entry is a no-op) and clear the active
-/// profile.
+/// Sign out of `profile_id`: delete both vault entries (inference key and
+/// session JWT, in one atomic write; missing entries are a no-op) and clear
+/// the active profile.
 #[tauri::command]
 pub fn device_logout(app: AppHandle, profile_id: String) -> Result<(), String> {
     if profile::profile_by_id(&profile_id).is_none() {
         return Err(format!("unknown profile id: {profile_id:?}"));
     }
-    for account in [
-        profile::key_account(&profile_id),
-        profile::session_account(&profile_id),
-    ] {
-        match keyring::Entry::new(profile::KEYRING_SERVICE, &account)
-            .and_then(|entry| entry.delete_credential())
-        {
-            Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(err) => return Err(err.to_string()),
-        }
-    }
+    let key = profile::key_account(&profile_id);
+    let session = profile::session_account(&profile_id);
+    crate::credentials::store()
+        .and_then(|store| store.delete_many(&[key.as_str(), session.as_str()]))
+        .map_err(|err| err.to_string())?;
     let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
     let mut store = profile::load_or_seed(&dir)?;
     store.clear_active_profile();
     profile::save(&dir, &store)
 }
 
-/// Store the approved credentials: both secrets in the OS keychain (S4),
-/// then the profile as active. The keychain writes come first so a failure
-/// never leaves a profile marked active without its credentials; a failed
-/// session write rolls the key entry back.
+/// Store the approved credentials: both secrets in the credential vault in
+/// ONE atomic write (S4), then the profile as active. The vault write comes
+/// first so a failure never leaves a profile marked active without its
+/// credentials, and never leaves a half-stored key/session pair behind.
 fn store_credentials(
     app: &AppHandle,
     profile_id: &str,
     api_key: &str,
     session_token: &str,
 ) -> Result<(), ErrorKind> {
-    keyring::Entry::new(profile::KEYRING_SERVICE, &profile::key_account(profile_id))
-        .and_then(|entry| entry.set_password(api_key))
-        .map_err(|_| ErrorKind::Protocol)?;
-    if let Err(err) = keyring::Entry::new(
-        profile::KEYRING_SERVICE,
-        &profile::session_account(profile_id),
-    )
-    .and_then(|entry| entry.set_password(session_token))
-    {
-        // Compensate: do not leave a half-stored credential pair behind.
-        let _ = keyring::Entry::new(profile::KEYRING_SERVICE, &profile::key_account(profile_id))
-            .and_then(|entry| entry.delete_credential());
-        return Err(emit_keychain_error(err));
-    }
+    let key = profile::key_account(profile_id);
+    let session = profile::session_account(profile_id);
+    crate::credentials::store()
+        .and_then(|store| {
+            store.set_many(&[(key.as_str(), api_key), (session.as_str(), session_token)])
+        })
+        .map_err(credential_error)?;
 
     let dir = app.path().app_data_dir().map_err(|_| ErrorKind::Protocol)?;
     let mut store = profile::load_or_seed(&dir).map_err(|_| ErrorKind::Protocol)?;
@@ -363,8 +351,8 @@ fn store_credentials(
     Ok(())
 }
 
-/// Keychain failures are local device failures, not server errors.
-fn emit_keychain_error(_err: keyring::Error) -> ErrorKind {
+/// Credential-storage failures are local device failures, not server errors.
+fn credential_error(_err: crate::credentials::CredError) -> ErrorKind {
     ErrorKind::Protocol
 }
 

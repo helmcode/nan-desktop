@@ -2,7 +2,7 @@
 //! `POST {inference_base}/images/generations` (the base ends in `/v1`, so
 //! the wire path is `/v1/images/generations`; see [`generations_url`]).
 //!
-//! Architecture mirrors `chat.rs` (S4): the key is read from the OS keychain
+//! Architecture mirrors `chat.rs` (S4): the key is read from the credential vault
 //! (account = profile id, derived from the conversation row — the renderer
 //! never sends secrets or URLs), the request is sent from the Rust core with
 //! body `{model: "qwen-image-2.1", prompt, size}`, and the reply is decoded
@@ -508,7 +508,7 @@ pub fn image_generate(
     Ok(())
 }
 
-/// The managed generation task: read the keychain key, POST
+/// The managed generation task: read the vault key, POST
 /// `/images/generations`, parse + save the PNG, persist the assistant row
 /// (deleting the file if the insert fails) and emit the lifecycle events.
 /// `generation` identifies this task in the registry — a superseded task
@@ -579,7 +579,7 @@ async fn run_image_generation(
 }
 
 /// Generate one image for `profile_id` and return the decoded PNG bytes:
-/// keychain key + compiled-in inference base (Rust core only, S4), then
+/// vault key + compiled-in inference base (Rust core only, S4), then
 /// `POST {base}/images/generations`. Shared by the composer's image mode
 /// and the chat's `generate_image` tool. A 429 is the tenant's monthly
 /// image quota (shared 100/month pool) — classified `rate_limited`.
@@ -592,7 +592,7 @@ pub async fn request_image(
     request_image_with_key(profile_id, &key, prompt, size).await
 }
 
-/// [`request_image`] after the keychain read: resolve the profile's
+/// [`request_image`] after the vault read: resolve the profile's
 /// inference base, POST the generation, then decode (`b64_json`) or
 /// download (presigned `url`). Split out so the live smoke test exercises
 /// the exact production path with a key supplied from the environment.

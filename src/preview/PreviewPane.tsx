@@ -49,7 +49,7 @@ function LinkOutCard({ url, message }: { url: string; message: string }) {
   const t = useT();
   return (
     <div className="preview-linkout">
-      <BrandMark size={32} />
+      <BrandMark size="lg" />
       <p className="preview-linkout-host">{hostOf(url)}</p>
       <p className="preview-note">{message}</p>
       <button type="button" className="btn btn-primary btn-sm" onClick={() => openExternal(url)}>

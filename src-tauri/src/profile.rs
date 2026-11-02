@@ -11,21 +11,22 @@
 //! active id kept only when it is one of the two known ids.
 //!
 //! Secrets never live in this file (S4): the inference API key is stored in
-//! the OS keychain under [`KEYRING_SERVICE`] with account = profile id, and
-//! the login session JWT under account = `<profile-id>.session`.
+//! the encrypted credential vault (`credentials.rs`) with account = profile
+//! id, and the login session JWT under account = `<profile-id>.session`.
 //!
 //! Everything here is pure logic (seed / parse / migrate / validate / mutate)
 //! or path-injected file I/O, free of Tauri types, so it can be unit-tested
-//! against a temp dir. Tauri glue (resolving the app data dir, keyring
-//! access) lives in `lib.rs` / `device_flow.rs`.
+//! against a temp dir. Tauri glue (resolving the app data dir, credential
+//! access) lives in `lib.rs` / `device_flow.rs` / `credentials.rs`.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// Keychain service all profile credentials are stored under (S4). The
-/// account is the profile id for the inference key (see [`key_account`]) and
-/// `<profile-id>.session` for the login session JWT (see [`session_account`]).
+/// Keychain service of the app (S4). Since round 5 it holds a single item,
+/// the vault master key (release builds); before round 5 it held one item per
+/// secret (account = profile id for the inference key, `<profile-id>.session`
+/// for the session JWT), which `credentials.rs` migrates into the vault.
 pub const KEYRING_SERVICE: &str = "com.helmcode.nan.desktop";
 
 /// Config file name inside the app data dir.
@@ -201,12 +202,12 @@ pub fn save(dir: &Path, store: &ProfileStore) -> Result<(), String> {
     std::fs::write(dir.join(STORE_FILE), json).map_err(|err| err.to_string())
 }
 
-/// Keychain account for a profile's stored inference API key.
+/// Vault (and legacy keychain) account for a profile's inference API key.
 pub fn key_account(profile_id: &str) -> String {
     profile_id.to_string()
 }
 
-/// Keychain account for a profile's stored login session JWT.
+/// Vault (and legacy keychain) account for a profile's login session JWT.
 pub fn session_account(profile_id: &str) -> String {
     format!("{profile_id}.session")
 }

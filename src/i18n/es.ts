@@ -80,6 +80,7 @@ export const es: Strings = {
     deleteTitle: "Borrar",
     deleteArmed: "¿Borrar?",
     noAccount: "Sin cuenta",
+    replying: "Respondiendo",
   },
   userMenu: {
     open: "Menú de la cuenta",

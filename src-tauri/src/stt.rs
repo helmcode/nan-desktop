@@ -1,7 +1,7 @@
 //! Speech-to-text (T6, S5/S10): whisper dictation against the locked
 //! tenants' OpenAI-compatible inference APIs.
 //!
-//! Architecture mirrors `chat.rs` (S4): the key is read from the OS keychain
+//! Architecture mirrors `chat.rs` (S4): the key is read from the credential vault
 //! (account = profile id) and `POST {inference_base}/audio/transcriptions`
 //! is sent from the Rust core as multipart (`model=whisper`, `file=<bytes>`
 //! with the recording's MIME type). The reply `{text: "…"}` crosses the IPC

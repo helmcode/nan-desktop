@@ -2,7 +2,8 @@
 //
 // All HTTP, credentials and filesystem access live in this Rust core; the
 // renderer only invokes the commands registered below and listens to the
-// events they emit. Credentials stay in the OS keychain (S4).
+// events they emit. Credentials live in the encrypted vault (`credentials`):
+// one AES-256-GCM file whose master key is the app's only keychain item.
 //
 // Zero telemetry (S8): the app only talks to the two locked tenants' own
 // URLs (plus the debug-only mock overrides documented in `device_flow` and
@@ -11,6 +12,8 @@
 mod chat;
 mod chat_store;
 mod conn_test;
+// Credential vault: one encrypted file, one master key (round 5).
+mod credentials;
 mod device_flow;
 mod images;
 // Safe URL handling: open_external validation + main-window navigation
@@ -45,7 +48,7 @@ use profile::ProfileStore;
 // ids, names and masked key state. Secrets are written by the Rust core
 // (`device_flow.rs`), never by the renderer.
 
-/// A profile as seen by the UI: id, display name and keychain state. No
+/// A profile as seen by the UI: id, display name and credential state. No
 /// base URL — the renderer never receives one (S4/S12).
 #[derive(Clone, Serialize)]
 struct ProfileView {
@@ -65,21 +68,20 @@ fn profiles_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     app.path().app_data_dir().map_err(|err| err.to_string())
 }
 
-/// Probe the keychain for a profile's stored key without exposing it.
-fn key_status(profile_id: &str) -> Result<(bool, Option<String>), String> {
-    match keyring::Entry::new(profile::KEYRING_SERVICE, &profile::key_account(profile_id))
-        .and_then(|entry| entry.get_password())
-    {
-        Ok(value) => Ok((true, Some(profile::mask_key(&value)))),
-        Err(keyring::Error::NoEntry) => Ok((false, None)),
-        Err(err) => Err(err.to_string()),
+/// Probe the vault for a profile's stored key without exposing it. Any
+/// storage failure degrades to "no key" (logged out) so the profile list
+/// always renders and the user can simply sign in again.
+fn key_status(profile_id: &str) -> (bool, Option<String>) {
+    match credentials::store().and_then(|store| store.get(&profile::key_account(profile_id))) {
+        Ok(Some(value)) if !value.is_empty() => (true, Some(profile::mask_key(&value))),
+        _ => (false, None),
     }
 }
 
 fn store_overview(store: &ProfileStore) -> Result<ProfileOverview, String> {
     let mut profiles = Vec::with_capacity(store.profiles.len());
     for p in &store.profiles {
-        let (has_key, key_mask) = key_status(&p.id)?;
+        let (has_key, key_mask) = key_status(&p.id);
         profiles.push(ProfileView {
             id: p.id.clone(),
             name: p.name.clone(),
@@ -93,7 +95,7 @@ fn store_overview(store: &ProfileStore) -> Result<ProfileOverview, String> {
     })
 }
 
-/// List the two locked profiles with their keychain state (no key material,
+/// List the two locked profiles with their credential state (no key material,
 /// no URLs).
 #[tauri::command]
 fn profiles_load(app: AppHandle) -> Result<ProfileOverview, String> {
@@ -147,6 +149,13 @@ pub fn run() {
         // origin (in-window phishing). Markdown links go through
         // links::open_external instead.
         .setup(|app| {
+            // Install the credential vault. Lazy: no disk or keychain access
+            // happens until the first credential read. An unresolvable app
+            // data dir leaves it uninitialized → every profile reads as
+            // logged out (never a panic).
+            if let Ok(dir) = app.path().app_data_dir() {
+                credentials::init(&dir);
+            }
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                 // S18: window/about name is "Helmcode Desktop".
                 .title("Helmcode Desktop")

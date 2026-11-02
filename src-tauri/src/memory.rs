@@ -6,7 +6,7 @@
 //!   account through the profile's platform API, so they are available on
 //!   every device. `GET/PUT {platform_base}/api/memory/conversations`,
 //!   `DELETE {platform_base}/api/memory/conversations/{id}`, authenticated
-//!   with the login session JWT from the OS keychain
+//!   with the login session JWT from the credential vault
 //!   (`<profile-id>.session`). The JWT never leaves the Rust core.
 //! - [`LocalMemory`]: the SQLite chat store on this device (`chat.db`).
 //!
@@ -449,7 +449,7 @@ impl RemoteMemory {
     }
 
     /// Build the remote backend for a profile: platform base (compiled-in,
-    /// debug mock override honored) + session JWT from the keychain.
+    /// debug mock override honored) + session JWT from the credential vault.
     pub fn for_profile(profile_id: &str, device_id: String) -> Result<Self, MemoryError> {
         let base = crate::device_flow::platform_base(profile_id).ok_or(MemoryError::Unavailable)?;
         let token = crate::chat::read_session_token(profile_id).ok_or(MemoryError::Unavailable)?;

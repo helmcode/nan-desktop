@@ -705,7 +705,8 @@ node test/t8-check.mjs    # drives cargo test + audit JSONL schema
 
 Signing in is a browser-based device flow (RFC 8628-style, S11/S4): the user
 never pastes an API key — approval in the browser is what mints the
-credentials, and they land straight in the OS keychain.
+credentials, and they land straight in the encrypted credential vault
+(see [SECURITY.md → Credential storage](SECURITY.md#credential-storage)).
 
 ### Login flow
 
@@ -728,12 +729,13 @@ credentials, and they land straight in the OS keychain.
    - approved `{session_token, api_key, key_alias}` → stored **exactly once**
    - 4xx/5xx/malformed → `device://error {kind}` (`network`, `timeout`,
      `rate_limited`, `server`, `protocol`)
-4. **Approved** — the API key is stored in the OS keychain under the profile
-   id, the session JWT under `<profile-id>.session`, the profile becomes
+4. **Approved** — the API key is stored in the credential vault under the
+   profile id, the session JWT under `<profile-id>.session` (one atomic
+   write), the profile becomes
    active, and the renderer only learns `{key_alias, profile_id}`. The raw
    key/token never crosses the IPC boundary (S4). The UI lands on the chat
    placeholder (active profile + signed-in state + Sign out).
-5. **Sign out** — `device_logout(profile_id)` deletes both keychain entries
+5. **Sign out** — `device_logout(profile_id)` deletes both vault entries
    and clears the active profile.
 
 A second `device_login_start` cancels the first loop (same cancel-safe
@@ -753,9 +755,15 @@ anything but the two owned tenants:
 | `nan` | NaN community | `https://cloud-api.nan.builders` | `https://api.nan.builders/v1` |
 | `helmcode` | Helmcode enterprise | `https://api.helmcode.com` | `https://api.helmcode.com/v1` |
 
-Keychain (service `com.helmcode.nan.desktop`): account `<profile-id>` holds
-the inference API key, account `<profile-id>.session` holds the login session
-JWT. The stored active profile id is validated against the two ids on load.
+Credential vault (`vault.bin` in the app data dir, AES-256-GCM,
+`src-tauri/src/credentials.rs`): account `<profile-id>` holds the inference
+API key, account `<profile-id>.session` holds the login session JWT. The
+vault's master key is the app's only keychain item in release builds
+(service `com.helmcode.nan.desktop`, account `vault-master-key`) and a `0600`
+`vault.key` file in debug builds, so `pnpm tauri dev` never triggers keychain
+prompts. Pre-vault keychain items are migrated into the vault once and then
+deleted. The stored active profile id is validated against the two ids on
+load.
 
 **Migration**: pre-existing v1 `profiles.json` files (T3 era, with custom
 OpenAI-compatible profiles and `base_url` fields) are rewritten to v2 on
@@ -825,10 +833,12 @@ surface. The SSE parser keeps its unit tests in `sse.rs`.
 
 ### What remains untested (deferred per spec T1)
 
-- **Keyring automated test**: deliberately omitted — macOS may pop a
-  Keychain permission prompt in headless runs. The account-name conventions
-  (`<profile-id>` / `<profile-id>.session`) are unit-tested in
-  `profile.rs`.
+- **Keychain automated test**: deliberately omitted — macOS may pop a
+  Keychain permission prompt in headless runs. Only the release-build master
+  key provider (`KeychainMasterKey`) and the legacy migration source
+  (`KeyringStore`) touch the keychain; the vault itself (encryption, tamper →
+  logged out, migration, concurrent atomic writes) is fully unit-tested in
+  `credentials.rs` with a file key and an in-memory keychain fake.
 - **Updater**: config deferred to T2/T7 (signed updater needs release
   infrastructure).
 - **Linux WebKitGTK build**: deferred to CI (T2 matrix); validated on macOS

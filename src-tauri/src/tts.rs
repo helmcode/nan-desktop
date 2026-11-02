@@ -1,7 +1,7 @@
 //! Text-to-speech (T6, S5/S10): kokoro speech synthesis with NATIVE Rust
 //! playback.
 //!
-//! Architecture mirrors `chat.rs` (S4): the key is read from the OS keychain
+//! Architecture mirrors `chat.rs` (S4): the key is read from the credential vault
 //! (account = profile id), `POST {inference_base}/audio/speech` is sent from
 //! the Rust core with body `{model: "kokoro", voice, input,
 //! response_format: "wav"}`, and the WAV reply bytes are decoded IN MEMORY

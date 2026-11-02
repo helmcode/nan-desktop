@@ -2,8 +2,8 @@
 //! stored credential can reach its inference API.
 //!
 //! `GET {inference_base}/models` with `Authorization: Bearer <key>` — HTTP
-//! always happens in the Rust core (S4): the key is read from the OS keychain
-//! (written there by the device-flow login) and is never rendered, logged or
+//! always happens in the Rust core (S4): the key is read from the credential
+//! vault (`credentials.rs`, written there by the device-flow login) and is never rendered, logged or
 //! echoed back. The result carries only counts and a short error string —
 //! never the key, never the response body.
 //!
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::profile::{self, KEYRING_SERVICE};
+use crate::profile;
 
 /// Request timeout for the connection test.
 pub const TIMEOUT_SECS: u64 = 10;
@@ -124,7 +124,7 @@ fn short_error(message: &str) -> String {
 }
 
 /// Run the connection test for `profile_id`, reading the stored key from the
-/// OS keychain. Since T13 the renderer can no longer pass a key: credentials
+/// credential vault. Since T13 the renderer can no longer pass a key: credentials
 /// are created only by the device-flow login (S4). The key is used for this
 /// request only and never leaves this function (S4, S8: the only host
 /// contacted is the profile's own inference base).
@@ -136,13 +136,13 @@ pub async fn connection_test(profile_id: String) -> Result<ConnectionTestResult,
         return Err(format!("unknown profile id: {profile_id:?}"));
     };
 
-    // Resolve the stored keychain value. The key is used for this request
-    // only and never leaves this function (S4).
-    let key = match keyring::Entry::new(KEYRING_SERVICE, &profile_id)
-        .and_then(|entry| entry.get_password())
+    // Resolve the stored vault value. The key is used for this request only
+    // and never leaves this function (S4).
+    let key = match crate::credentials::store()
+        .and_then(|store| store.get(&profile::key_account(&profile_id)))
     {
-        Ok(stored) => stored,
-        Err(keyring::Error::NoEntry) => return Ok(missing_key_result()),
+        Ok(Some(stored)) if !stored.is_empty() => stored,
+        Ok(_) => return Ok(missing_key_result()),
         Err(err) => return Err(err.to_string()),
     };
 
