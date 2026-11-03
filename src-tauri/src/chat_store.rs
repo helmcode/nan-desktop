@@ -325,6 +325,22 @@ pub fn insert_image_message(
     Ok(conn.last_insert_rowid())
 }
 
+/// Whether any message still references a file by its name (round 6, the
+/// orphan-image sweep): the `media_path` of image rows, the `artifacts`
+/// JSON of tool replies, or the reply text itself (the model is told the
+/// path and may quote it). A plain substring match on the raw columns, so a
+/// row whose artifacts JSON no longer parses still keeps its files.
+pub fn references_file_name(conn: &Connection, file_name: &str) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages
+             WHERE instr(COALESCE(media_path, ''), ?1) > 0
+                OR instr(COALESCE(artifacts, ''), ?1) > 0
+                OR instr(content, ?1) > 0)",
+        [file_name],
+        |row| row.get::<_, bool>(0),
+    )
+}
+
 /// Create the in-progress assistant row for a stream (T4b): `status=
 /// 'in_progress'`, empty content, the generating model. Deltas overwrite
 /// this row as they arrive; a clean finish or a stop finalizes it, an

@@ -186,6 +186,19 @@ export async function readFileForPreview(profileId: string, path: string): Promi
   return base64ToBytes(payload.base64);
 }
 
+// ---------------------------------------------------------------------------
+// "Save as…" on a generated image (round 6) - src-tauri/src/images.rs
+//
+// The user's own action: the core opens the NATIVE save dialog and copies
+// the image there, so the destination never comes from the renderer. The
+// renderer only names which generated image (under app_data/images) to save.
+// Resolves to the saved path, or null when the user cancelled the dialog.
+// ---------------------------------------------------------------------------
+
+export function saveImageAs(sourcePath: string): Promise<string | null> {
+  return invoke<string | null>("image_save_as", { sourcePath });
+}
+
 export function base64ToBytes(base64: string): Uint8Array {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);

@@ -155,6 +155,10 @@ pub fn run() {
             // logged out (never a panic).
             if let Ok(dir) = app.path().app_data_dir() {
                 credentials::init(&dir);
+                // Round 6: best-effort cleanup of generated images no
+                // conversation references any more (background, never fails
+                // startup).
+                images::sweep_orphans_in_background(dir);
             }
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                 // S18: window/about name is "Helmcode Desktop".
@@ -187,6 +191,7 @@ pub fn run() {
             stt::stt_transcribe,
             images::image_generate,
             images::image_cancel,
+            images::image_save_as,
             tools::tools_grant_add,
             tools::tools_grant_computer_wide,
             tools::tools_grant_list,

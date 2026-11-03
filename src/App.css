@@ -1117,6 +1117,80 @@ button:disabled {
   border: 1px solid var(--border-strong);
 }
 
+/* A generated image inside a text reply, with its "Save as…" action. */
+.msg-figure {
+  margin: 0.6rem 0 0;
+}
+
+.msg-figure .msg-actions,
+.msg-image + .image-caption + .msg-actions {
+  margin-top: 0.4rem;
+}
+
+.msg-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ---- transient notice (round 6) ---------------------------------------- */
+
+.toast-region {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 40;
+  max-width: min(480px, calc(100vw - 2.5rem));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.6rem 0.7rem 0.6rem 0.85rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background-color: var(--surface-3);
+  color: var(--text);
+  font-size: 0.86rem;
+  pointer-events: auto;
+}
+
+.toast-success > svg {
+  color: var(--ok);
+  flex-shrink: 0;
+}
+
+.toast-error {
+  border-color: var(--error);
+  background-color: var(--surface-3);
+}
+
+.toast-error > svg {
+  color: var(--error);
+  flex-shrink: 0;
+}
+
+.toast-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  display: inline-flex;
+  padding: 0.25rem;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+}
+
+.toast-close:hover {
+  color: var(--text);
+  background-color: var(--surface-2);
+}
+
 .image-caption {
   margin-top: 0.5rem;
   color: var(--text-2);

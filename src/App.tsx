@@ -30,6 +30,8 @@ import { ApprovalCard } from "./components/ApprovalCard";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
+import { SaveImageButton, type SaveImageResult } from "./components/SaveImageButton";
+import { Toast, type ToastNotice } from "./components/Toast";
 import { UserMenu, type SettingsSection } from "./components/UserMenu";
 import {
   DEFAULT_IMAGE_SIZE,
@@ -474,6 +476,18 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // Voice: read-aloud + dictation (hidden this round, S24).
   const [voice, setVoice] = useState<string>(storedVoice);
   const [speakingMsgId, setSpeakingMsgId] = useState<number | null>(null);
+  // Round 6: transient notice (the outcome of "Save as…" on an image).
+  const [notice, setNotice] = useState<ToastNotice | null>(null);
+  const dismissNotice = useCallback((): void => setNotice(null), []);
+  const onImageSaved = useCallback(
+    (result: SaveImageResult): void =>
+      setNotice({
+        id: Date.now(),
+        kind: result.kind === "saved" ? "success" : "error",
+        text: result.kind === "saved" ? t.chat.imageSaved(result.path) : t.chat.imageSaveFailed,
+      }),
+    [t],
+  );
   const [ttsHint, setTtsHint] = useState("");
   const [recording, setRecording] = useState(false);
   const [sttBusy, setSttBusy] = useState(false);
@@ -1223,6 +1237,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         <article className="msg msg-assistant">
           <img className="msg-image" src={convertFileSrc(m.media_path)} alt={m.content} />
           <p className="image-caption">{m.content}</p>
+          <div className="msg-actions">
+            <SaveImageButton path={m.media_path} onResult={onImageSaved} />
+          </div>
         </article>
       );
     }
@@ -1241,7 +1258,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       <article className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}>
         <Markdown text={visible} onOpenLink={openWebPreview} />
         {files.images.map((path) => (
-          <img key={path} className="msg-image" src={convertFileSrc(path)} alt={t.chat.generatedImage} />
+          <figure key={path} className="msg-figure">
+            <img className="msg-image" src={convertFileSrc(path)} alt={t.chat.generatedImage} />
+            <div className="msg-actions">
+              <SaveImageButton path={path} onResult={onImageSaved} />
+            </div>
+          </figure>
         ))}
         {m.partial && (
           <p className="partial-note" role="note">
@@ -1617,6 +1639,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       {askComputerWide && (
         <ComputerWideDialog onCancel={() => setAskComputerWide(false)} onContinue={() => void confirmComputerWide()} />
       )}
+      <Toast notice={notice} onDismiss={dismissNotice} />
     </main>
   );
 }

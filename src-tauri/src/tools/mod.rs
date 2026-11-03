@@ -125,6 +125,17 @@ pub enum ToolAction {
     DeletePath {
         path: String,
     },
+    /// Copy an image the chat core generated (`source`, always directly
+    /// under `app_data/images`) to `path` in granted scope: the
+    /// `generate_image` tool's `save_path` (round 6). Same write rules as
+    /// write_file (grant scope, deny-list, symlink walk, the grant's mode).
+    /// NEVER deserialized: only the core builds it, from a file it just
+    /// generated, so the renderer cannot name an arbitrary `source`.
+    #[serde(skip_deserializing)]
+    SaveImage {
+        source: String,
+        path: String,
+    },
 }
 
 impl ToolAction {
@@ -137,6 +148,7 @@ impl ToolAction {
             ToolAction::RunCommand { .. } => "run_command",
             ToolAction::MovePath { .. } => "move_path",
             ToolAction::DeletePath { .. } => "delete_path",
+            ToolAction::SaveImage { .. } => "save_image",
         }
     }
 }
@@ -343,6 +355,27 @@ pub fn effective_store(
             .push(scratch_grant(profile_id, conversation_id, canonical));
     }
     Ok(scoped)
+}
+
+/// `only_scratch`: replace the store's grants with the conversation's
+/// session temp-folder grant ALONE (created on demand), so a fallback
+/// proposal can only ever land in that folder, whatever else is granted.
+/// Otherwise the store is returned unchanged.
+fn with_session_scratch(
+    mut store: GrantsStore,
+    state: &ToolsState,
+    profile_id: &str,
+    conversation_id: Option<i64>,
+    only_scratch: bool,
+) -> Result<GrantsStore, Rejection> {
+    if !only_scratch {
+        return Ok(store);
+    }
+    let conversation_id = conversation_id
+        .ok_or_else(|| Rejection::new("protocol", "a session temp folder needs a conversation"))?;
+    let canonical = ensure_scratch_dir(&state.scratch_dir(conversation_id))?;
+    store.grants = vec![scratch_grant(profile_id, conversation_id, canonical)];
+    Ok(store)
 }
 
 /// The session temp-folder grant behind a stored proposal, when it targets
@@ -609,7 +642,85 @@ pub fn validate_action(
             overwrite,
         } => validate_move(store, profile_id, from, to, *overwrite),
         ToolAction::DeletePath { path } => validate_delete(store, profile_id, path),
+        ToolAction::SaveImage { source, path } => {
+            validate_save_image(store, profile_id, source, path)
+        }
     }
+}
+
+/// `save_image`: `path` is a `.png` file (an extension-less name gets
+/// `.png`) or an existing folder (the image keeps its generated file name).
+/// The destination folder must exist; an existing regular file is replaced
+/// (stated in the summary and on the approval card, like write_file). The
+/// source is verified against the app's images folder by
+/// [`check_protected_paths`], which knows the app data dir.
+fn validate_save_image(
+    store: &GrantsStore,
+    profile_id: &str,
+    source: &str,
+    path: &str,
+) -> Result<Validated, Rejection> {
+    let (grant_id, mut canonical) = grants::resolve_under_grant(store, profile_id, path)?;
+    if canonical.is_dir() {
+        let name = Path::new(source)
+            .file_name()
+            .ok_or_else(|| Rejection::new("protocol", "the generated image has no file name"))?;
+        canonical = canonical.join(name);
+    }
+    let is_png = canonical
+        .extension()
+        .map(|ext| ext.eq_ignore_ascii_case("png"));
+    match is_png {
+        None => {
+            canonical.set_extension("png");
+        }
+        Some(true) => {}
+        Some(false) => {
+            return Err(Rejection::new(
+                "protocol",
+                "save_path must be a .png file or a folder",
+            ));
+        }
+    }
+    if !canonical.parent().is_some_and(|parent| parent.is_dir()) {
+        return Err(Rejection::new(
+            "not_found",
+            "the destination folder does not exist",
+        ));
+    }
+    let replaces = match std::fs::symlink_metadata(&canonical) {
+        Ok(meta) if meta.file_type().is_file() => true,
+        Ok(_) => {
+            return Err(Rejection::new(
+                "protocol",
+                "the destination exists and is not a regular file",
+            ));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(io_rejection("cannot stat destination", err)),
+    };
+    let bytes = std::fs::metadata(source)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let summary = format!(
+        "save_image {} ({bytes} bytes PNG){}",
+        canonical.display(),
+        if replaces {
+            " (replaces the existing file)"
+        } else {
+            ""
+        }
+    );
+    Ok(Validated::single(
+        ToolAction::SaveImage {
+            source: source.to_string(),
+            path: canonical.display().to_string(),
+        },
+        summary,
+        None,
+        grant_id,
+        canonical,
+    ))
 }
 
 /// Refuse a raw (model-supplied) path whose LEAF is a symlink: deleting or
@@ -830,6 +941,10 @@ fn check_protected_paths(
     canonical: Option<&Path>,
     dest: Option<&Path>,
 ) -> Result<(), Rejection> {
+    if let ToolAction::SaveImage { source, .. } = action {
+        crate::images::verify_generated_image(dir, Path::new(source))
+            .map_err(|message| Rejection::new("scope", message))?;
+    }
     for path in canonical.into_iter().chain(dest) {
         if grants::is_protected(dir, path) {
             return Err(Rejection::new(
@@ -872,6 +987,7 @@ fn reject_sensitive_write(action: &ToolAction, canonical: &Path) -> Result<(), R
             | ToolAction::ReplaceFile { .. }
             | ToolAction::MovePath { .. }
             | ToolAction::DeletePath { .. }
+            | ToolAction::SaveImage { .. }
     );
     let home = std::env::home_dir();
     if is_write && grants::is_sensitive_write_target(home.as_deref(), canonical) {
@@ -891,6 +1007,20 @@ pub fn propose(
     conversation_id: Option<i64>,
     action: &ToolAction,
 ) -> Result<PendingProposal, Rejection> {
+    propose_in(dir, state, profile_id, conversation_id, action, false)
+}
+
+/// [`propose`], optionally validating against the conversation's session
+/// temp-folder grant even when folders ARE selected (`with_scratch`): the
+/// `save_path` fallback for a destination outside every grant (round 6).
+fn propose_in(
+    dir: &Path,
+    state: &ToolsState,
+    profile_id: &str,
+    conversation_id: Option<i64>,
+    action: &ToolAction,
+    with_scratch: bool,
+) -> Result<PendingProposal, Rejection> {
     if !profile::is_known_profile_id(profile_id) {
         let rejection = Rejection::new("protocol", format!("unknown profile {profile_id}"));
         audit_rejection(dir, action, profile_id, &rejection)?;
@@ -900,7 +1030,9 @@ pub fn propose(
     // Validate against the conversation's selected grants only; the
     // protected-removal roots stay the FULL set (an unselected grant root is
     // still never deletable) plus the session temp folder.
-    let store = match effective_store(&full, state, profile_id, conversation_id) {
+    let store = match effective_store(&full, state, profile_id, conversation_id).and_then(|store| {
+        with_session_scratch(store, state, profile_id, conversation_id, with_scratch)
+    }) {
         Ok(store) => store,
         Err(rejection) => {
             audit_rejection(dir, action, profile_id, &rejection)?;
@@ -1049,7 +1181,9 @@ fn execute_proposal_with(
         | ToolAction::DeletePath { .. } => {
             grants::verify_stable(&grant.canonical_path, canonical)?;
         }
-        ToolAction::WriteFile { .. } | ToolAction::ReplaceFile { .. } => {
+        ToolAction::WriteFile { .. }
+        | ToolAction::ReplaceFile { .. }
+        | ToolAction::SaveImage { .. } => {
             grants::verify_writable(&grant.canonical_path, canonical)?;
         }
         ToolAction::RunCommand { cwd_in_grant, .. } => {
@@ -1089,6 +1223,7 @@ fn execute_proposal_with(
             exec_move_path(canonical, dest, *overwrite)
         }
         ToolAction::DeletePath { .. } => exec_delete_path(canonical, proposal.permanent_delete),
+        ToolAction::SaveImage { source, .. } => exec_save_image(Path::new(source), canonical),
         ToolAction::RunCommand { cmd, .. } => {
             let started = SystemTime::now();
             let output = run_captured(cmd, canonical, COMMAND_TIMEOUT)?;
@@ -1358,6 +1493,30 @@ fn exec_write_file(path: &Path, content: &str) -> Result<ToolOutcome, Rejection>
         action: "write_file".into(),
         summary: format!("wrote {} bytes to {}", content.len(), path.display()),
         bytes_written: Some(content.len() as u64),
+        produced: vec![path.display().to_string()],
+        ..Default::default()
+    })
+}
+
+fn exec_save_image(source: &Path, path: &Path) -> Result<ToolOutcome, Rejection> {
+    // A folder or symlink that appeared at the destination after propose is
+    // never written through (verify_writable already refused a symlink leaf).
+    if std::fs::symlink_metadata(path).is_ok_and(|meta| !meta.file_type().is_file()) {
+        return Err(Rejection::new(
+            "protocol",
+            "the destination is not a regular file; not replacing it",
+        ));
+    }
+    let bytes = std::fs::read(source).map_err(|err| io_rejection("cannot read the image", err))?;
+    std::fs::write(path, &bytes).map_err(|err| io_rejection("cannot save the image", err))?;
+    Ok(ToolOutcome {
+        action: "save_image".into(),
+        summary: format!(
+            "saved the image ({} bytes) to {}",
+            bytes.len(),
+            path.display()
+        ),
+        bytes_written: Some(bytes.len() as u64),
         produced: vec![path.display().to_string()],
         ..Default::default()
     })
@@ -2269,6 +2428,18 @@ fn confirmation_base(action: &ToolAction, summary: &str) -> (String, String) {
                 }
             ),
         ),
+        ToolAction::SaveImage { path, .. } => (
+            "Guardar una imagen".into(),
+            format!(
+                "El asistente quiere GUARDAR la imagen que ha creado en:\n\n{path}\n\n{}\
+                 ¿Se lo permites?",
+                if summary.contains("replaces the existing file") {
+                    "Ya existe un archivo con ese nombre y se SUSTITUIRÁ.\n\n"
+                } else {
+                    ""
+                }
+            ),
+        ),
         ToolAction::DeletePath { path } => (
             "Borrar".into(),
             if summary.contains("PERMANENT") {
@@ -2346,7 +2517,8 @@ pub fn approval_request(proposal: &PendingProposal) -> ApprovalRequest {
         | ToolAction::ListFiles { path }
         | ToolAction::WriteFile { path, .. }
         | ToolAction::ReplaceFile { path, .. }
-        | ToolAction::DeletePath { path } => (Some(path.clone()), None, None),
+        | ToolAction::DeletePath { path }
+        | ToolAction::SaveImage { path, .. } => (Some(path.clone()), None, None),
         ToolAction::MovePath { from, to, .. } => (Some(from.clone()), Some(to.clone()), None),
         ToolAction::RunCommand { cmd, cwd_in_grant } => {
             (Some(cwd_in_grant.clone()), None, Some(cmd.clone()))
@@ -2555,6 +2727,207 @@ pub(crate) async fn run_model_action(
     })
     .await
     .unwrap_or_else(|| Err(Rejection::new("io", "tool execution was interrupted")))
+}
+
+// ------------------------------------------- generate_image save_path --
+
+/// Outcome of a `generate_image` `save_path` copy (round 6).
+#[derive(Debug)]
+pub enum ImageSave {
+    /// Copied to `save_path`, inside a grant, approved by the grant's mode.
+    Saved(ToolOutcome),
+    /// `save_path` is outside every grant of the conversation: the copy
+    /// went to the session temp folder instead (always with the inline
+    /// approval) and the model is told to ask the user for the folder.
+    SavedToTemp {
+        requested: String,
+        outcome: ToolOutcome,
+    },
+    /// Not saved anywhere (declined, deny-list, missing folder, …).
+    /// `outside`: the requested path was outside every grant.
+    Failed {
+        requested: String,
+        outside: bool,
+        rejection: Rejection,
+    },
+}
+
+impl ImageSave {
+    /// The file the image was copied to, when the copy happened.
+    pub fn saved_path(&self) -> Option<&str> {
+        match self {
+            ImageSave::Saved(outcome) | ImageSave::SavedToTemp { outcome, .. } => {
+                outcome.produced.first().map(String::as_str)
+            }
+            ImageSave::Failed { .. } => None,
+        }
+    }
+}
+
+/// Whether `save_path` is outside every grant the conversation may use
+/// (the only case that falls back to the session temp folder; any other
+/// rejection — deny-list, traversal, bad extension — is reported as is).
+fn outside_every_grant(
+    dir: &Path,
+    state: &ToolsState,
+    profile_id: &str,
+    conversation_id: i64,
+    save_path: &str,
+) -> Result<bool, Rejection> {
+    let store = effective_store(&load_store(dir)?, state, profile_id, Some(conversation_id))?;
+    Ok(matches!(
+        grants::resolve_under_grant(&store, profile_id, save_path),
+        Err(rejection) if rejection.kind == "escape" || rejection.kind == "no_grant"
+    ))
+}
+
+/// Copy a just-generated image (`source`, under `app_data/images`) to the
+/// model's `save_path`: propose a [`ToolAction::SaveImage`] (write_file's
+/// rules: grant scope, deny-list, symlink walk), approve it by the grant's
+/// route, execute. A `save_path` outside every grant targets the session
+/// temp folder instead (inline approval, the card shows that destination).
+pub(crate) async fn save_generated_image<A: Approver>(
+    dir: &Path,
+    state: &ToolsState,
+    approver: &A,
+    profile_id: &str,
+    conversation_id: i64,
+    source: &Path,
+    save_path: &str,
+) -> ImageSave {
+    let requested = save_path.trim().to_string();
+    let outside = match outside_every_grant(dir, state, profile_id, conversation_id, &requested) {
+        Ok(outside) => outside,
+        Err(rejection) => {
+            return ImageSave::Failed {
+                requested,
+                outside: false,
+                rejection,
+            };
+        }
+    };
+    let target = if outside {
+        // Keep the requested file name when it is a .png, else the
+        // generated one; never any of the requested folders.
+        let requested_name = Path::new(&requested)
+            .file_name()
+            .filter(|name| {
+                Path::new(name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+            })
+            .or_else(|| source.file_name())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("image.png"));
+        state
+            .scratch_dir(conversation_id)
+            .join(requested_name)
+            .display()
+            .to_string()
+    } else {
+        requested.clone()
+    };
+    let action = ToolAction::SaveImage {
+        source: source.display().to_string(),
+        path: target,
+    };
+    let result: Result<ToolOutcome, Rejection> = async {
+        let proposal = propose_in(
+            dir,
+            state,
+            profile_id,
+            Some(conversation_id),
+            &action,
+            outside,
+        )?;
+        approve_proposal(dir, state, approver, &proposal).await?;
+        execute(dir, state, &proposal.id)
+    }
+    .await;
+    match result {
+        Ok(outcome) if outside => ImageSave::SavedToTemp { requested, outcome },
+        Ok(outcome) => ImageSave::Saved(outcome),
+        Err(rejection) => ImageSave::Failed {
+            requested,
+            outside,
+            rejection,
+        },
+    }
+}
+
+/// [`save_generated_image`] against the running app (inline cards over
+/// IPC, native dialog for computer-wide).
+pub(crate) async fn save_model_image(
+    app: &AppHandle,
+    profile_id: &str,
+    conversation_id: i64,
+    source: &Path,
+    save_path: &str,
+) -> ImageSave {
+    let dir = match data_dir(app) {
+        Ok(dir) => dir,
+        Err(err) => {
+            return ImageSave::Failed {
+                requested: save_path.to_string(),
+                outside: false,
+                rejection: Rejection::new("io", err),
+            };
+        }
+    };
+    let approver = AppApprover { app: app.clone() };
+    let state = app.state::<ToolsState>();
+    save_generated_image(
+        &dir,
+        &state,
+        &approver,
+        profile_id,
+        conversation_id,
+        source,
+        save_path,
+    )
+    .await
+}
+
+/// The `save` field of the `generate_image` tool result.
+pub fn image_save_for_model(save: &ImageSave) -> serde_json::Value {
+    const ASK_FOR_FOLDER: &str = "It is outside the user's working folders. Tell the user and \
+         ask them to add that folder in the folder picker; once it is a working folder you can \
+         save there.";
+    match save {
+        ImageSave::Saved(outcome) => serde_json::json!({
+            "saved": true,
+            "saved_to": outcome.produced.first(),
+        }),
+        ImageSave::SavedToTemp { requested, outcome } => serde_json::json!({
+            "saved": true,
+            "saved_to": outcome.produced.first(),
+            "requested_path": requested,
+            "message": format!(
+                "NOT saved at the requested path: {ASK_FOR_FOLDER} Meanwhile it was saved \
+                 to this session's temporary folder (saved_to)."
+            ),
+        }),
+        ImageSave::Failed {
+            requested,
+            outside,
+            rejection,
+        } => {
+            let message = if *outside {
+                format!("NOT saved: {ASK_FOR_FOLDER}")
+            } else {
+                format!(
+                    "NOT saved at save_path ({}). Tell the user; if they declined, do not retry.",
+                    rejection.message
+                )
+            };
+            serde_json::json!({
+                "saved": false,
+                "requested_path": requested,
+                "error": rejection.kind,
+                "message": message,
+            })
+        }
+    }
 }
 
 /// Where the assistant may work for one profile.
@@ -4091,6 +4464,241 @@ mod tests {
         assert_eq!(approver.prompts(), (0, 0), "refused before any prompt");
         assert!(root.join(".zshrc").exists() && root.join("server.pem").exists());
         assert!(!root.join("id.key").exists());
+    }
+
+    // ------------------------ round 6: generate_image save_path --
+
+    const FAKE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nround6";
+
+    /// A file exactly where the image tool saves: `<app data>/images/<uuid>.png`.
+    fn generated_image(dir: &Path) -> PathBuf {
+        let images = crate::images::images_dir(dir);
+        fs::create_dir_all(&images).expect("images dir");
+        let path = images.join(format!("{}.png", uuid::Uuid::new_v4()));
+        fs::write(&path, FAKE_PNG).expect("png");
+        canon(&path)
+    }
+
+    /// A state whose session temp folders live in a test tempdir.
+    fn state_with_scratch(base: &Path) -> ToolsState {
+        let mut st = state();
+        st.scratch_base = base.to_path_buf();
+        st
+    }
+
+    fn save_image(
+        dir: &Path,
+        st: &ToolsState,
+        approver: &FakeApprover,
+        source: &Path,
+        save_path: &str,
+    ) -> ImageSave {
+        tauri::async_runtime::block_on(save_generated_image(
+            dir, st, approver, "nan", 1, source, save_path,
+        ))
+    }
+
+    #[test]
+    fn save_image_inside_an_allow_grant_copies_without_a_prompt() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        fs::create_dir_all(root.join("art")).expect("art");
+        let (dir, _guard2) = granted_dir(&folder);
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let (scratch, _guard3) = tempdir();
+        let st = state_with_scratch(&scratch);
+        let source = generated_image(&dir);
+        // An approver that would deny: allow mode must never ask.
+        let approver = FakeApprover::answering(false);
+        let dest = root.join("art").join("zorro.png");
+        let save = save_image(&dir, &st, &approver, &source, &path_str(&dest));
+        let ImageSave::Saved(outcome) = &save else {
+            panic!("expected Saved, got {save:?}");
+        };
+        assert_eq!(outcome.produced, vec![path_str(&dest)]);
+        assert_eq!(save.saved_path(), Some(path_str(&dest).as_str()));
+        assert_eq!(fs::read(&dest).expect("saved"), FAKE_PNG);
+        assert!(source.exists(), "the chat keeps its inline copy");
+        assert_eq!(approver.prompts(), (0, 0));
+        let report = image_save_for_model(&save);
+        assert_eq!(report["saved"], true);
+        assert_eq!(report["saved_to"], path_str(&dest));
+        // A folder save_path keeps the generated file name; an extension-less
+        // name gets `.png`.
+        let save = save_image(&dir, &st, &approver, &source, &path_str(&root));
+        let into_folder = root.join(source.file_name().expect("name"));
+        assert_eq!(save.saved_path(), Some(path_str(&into_folder).as_str()));
+        let save = save_image(&dir, &st, &approver, &source, &path_str(&root.join("logo")));
+        assert_eq!(
+            save.saved_path(),
+            Some(path_str(&root.join("logo.png")).as_str())
+        );
+    }
+
+    #[test]
+    fn save_image_in_ask_mode_shows_the_destination_and_a_deny_saves_nothing() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        let (scratch, _guard3) = tempdir();
+        let st = state_with_scratch(&scratch);
+        let source = generated_image(&dir);
+        let approver = FakeApprover::answering(false);
+        let dest = root.join("zorro.png");
+        let save = save_image(&dir, &st, &approver, &source, &path_str(&dest));
+        let ImageSave::Failed {
+            outside, rejection, ..
+        } = &save
+        else {
+            panic!("expected Failed, got {save:?}");
+        };
+        assert!(!outside);
+        assert_eq!(rejection.kind, "declined");
+        assert!(!dest.exists(), "a declined save writes nothing");
+        let requests = approver.inline_calls.lock().expect("lock");
+        assert_eq!(requests.len(), 1, "ask mode shows the inline card");
+        assert_eq!(requests[0].action, "save_image");
+        assert_eq!(requests[0].path.as_deref(), Some(path_str(&dest).as_str()));
+        assert!(requests[0].text.contains(&path_str(&dest)));
+        drop(requests);
+        assert_eq!(image_save_for_model(&save)["saved"], false);
+        // Approved: the copy lands.
+        let approver = FakeApprover::answering(true);
+        let save = save_image(&dir, &st, &approver, &source, &path_str(&dest));
+        assert!(matches!(save, ImageSave::Saved(_)), "{save:?}");
+        assert_eq!(fs::read(&dest).expect("saved"), FAKE_PNG);
+        // Replacing an existing file is stated on the card.
+        let _ = save_image(&dir, &st, &approver, &source, &path_str(&dest));
+        let requests = approver.inline_calls.lock().expect("lock");
+        assert!(requests[1].summary.contains("replaces the existing file"));
+        assert!(requests[1].text.contains("SUSTITUIRÁ"));
+    }
+
+    #[test]
+    fn save_image_honors_the_deny_list_and_protected_targets_in_allow_mode() {
+        // The sensitive write deny-list covers save_image like write_file.
+        if let Some(home) = std::env::home_dir() {
+            let action = ToolAction::SaveImage {
+                source: "/x.png".into(),
+                path: path_str(&home.join(".ssh").join("x.png")),
+            };
+            let err = reject_sensitive_write(&action, &home.join(".ssh").join("x.png"))
+                .expect_err("deny-listed");
+            assert_eq!(err.kind, "scope");
+        }
+        // The app's own data stays off limits even under a computer-wide
+        // grant that covers it, before any prompt.
+        let (home, app_data, _guard) = computer_wide_layout();
+        let (scratch, _guard2) = tempdir();
+        let st = state_with_scratch(&scratch);
+        let source = generated_image(&app_data);
+        let approver = FakeApprover::answering(true);
+        let target = app_data.join("images").join("copy.png");
+        let save = save_image(&app_data, &st, &approver, &source, &path_str(&target));
+        let ImageSave::Failed { rejection, .. } = &save else {
+            panic!("expected Failed, got {save:?}");
+        };
+        assert_eq!(rejection.kind, "scope");
+        assert!(!target.exists());
+        assert_eq!(approver.prompts(), (0, 0), "refused before any prompt");
+        // A non-png name is refused rather than silently renamed.
+        let save = save_image(
+            &app_data,
+            &st,
+            &approver,
+            &source,
+            &path_str(&home.join("a.jpg")),
+        );
+        let ImageSave::Failed { rejection, .. } = &save else {
+            panic!("expected Failed, got {save:?}");
+        };
+        assert_eq!(rejection.kind, "protocol");
+    }
+
+    #[test]
+    fn save_image_outside_every_grant_falls_back_to_the_session_temp_folder_with_an_approval() {
+        let (folder, _guard) = tempdir();
+        let (dir, _guard2) = granted_dir(&folder);
+        // Even an allow-mode grant elsewhere never auto-approves the fallback.
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let (scratch, _guard3) = tempdir();
+        let st = state_with_scratch(&scratch);
+        let source = generated_image(&dir);
+        let (elsewhere, _guard4) = tempdir();
+        let requested = canon(&elsewhere).join("zorro.png");
+
+        let approver = FakeApprover::answering(true);
+        let save = save_image(&dir, &st, &approver, &source, &path_str(&requested));
+        let ImageSave::SavedToTemp {
+            requested: asked,
+            outcome,
+        } = &save
+        else {
+            panic!("expected SavedToTemp, got {save:?}");
+        };
+        let temp_target = canon(&st.scratch_dir(1)).join("zorro.png");
+        assert_eq!(asked, &path_str(&requested));
+        assert_eq!(outcome.produced, vec![path_str(&temp_target)]);
+        assert_eq!(fs::read(&temp_target).expect("temp copy"), FAKE_PNG);
+        assert!(!requested.exists(), "nothing lands outside the grants");
+        assert_eq!(
+            approver.prompts(),
+            (0, 1),
+            "the fallback always asks inline"
+        );
+        let card = approver.inline_calls.lock().expect("lock")[0].clone();
+        assert_eq!(card.path.as_deref(), Some(path_str(&temp_target).as_str()));
+        let report = image_save_for_model(&save);
+        assert_eq!(report["saved"], true);
+        assert_eq!(report["requested_path"], path_str(&requested));
+        assert!(
+            report["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("ask them to add that folder")),
+            "the model is told to ask for the folder: {report}"
+        );
+
+        // Declined: nothing is saved anywhere and the model still learns why.
+        fs::remove_file(&temp_target).expect("reset");
+        let approver = FakeApprover::answering(false);
+        let save = save_image(&dir, &st, &approver, &source, &path_str(&requested));
+        assert!(
+            matches!(&save, ImageSave::Failed { outside: true, .. }),
+            "{save:?}"
+        );
+        assert!(!temp_target.exists() && !requested.exists());
+        assert!(
+            image_save_for_model(&save)["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("ask them to add that folder"))
+        );
+    }
+
+    #[test]
+    fn save_image_is_core_built_only_and_copies_only_generated_images() {
+        // The renderer can never construct the action (no arbitrary source).
+        let err = parse_action(r#"{"type":"save_image","source":"/etc/passwd","path":"/a.png"}"#)
+            .expect_err("never deserialized");
+        assert_eq!(err.kind, "unknown_action");
+        // A source outside `app_data/images` is refused, even in a grant.
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        fs::write(root.join("secret.png"), "x").expect("secret");
+        let (dir, _guard2) = granted_dir(&folder);
+        let st = state();
+        let err = propose(
+            &dir,
+            &st,
+            "nan",
+            Some(1),
+            &ToolAction::SaveImage {
+                source: path_str(&root.join("secret.png")),
+                path: path_str(&root.join("copy.png")),
+            },
+        )
+        .expect_err("not a generated image");
+        assert_eq!(err.kind, "scope");
+        assert!(!root.join("copy.png").exists());
     }
 
     #[cfg(unix)]

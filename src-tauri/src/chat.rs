@@ -376,7 +376,9 @@ left and why.\n\
 - Only report actions whose tool result succeeded; if one failed, say so.\n\
 - When you created or changed files, end your reply with the absolute path of \
 every one of them, each on its own line, so the user can open them.\n\
-- To create an image, call generate_image: it appears in the chat by itself.";
+- To create an image, call generate_image: it appears in the chat by itself. \
+To also save it as a file, pass save_path: it only works inside the user's \
+working folders; for any other place, ask the user to add that folder first.";
 
 /// The system message for one reply: the working rules, plus the
 /// workspace description when the user set one up.
@@ -1373,14 +1375,30 @@ async fn run_tool_call(
             );
         };
         let result = images::run_tool(app_data, profile_id, &prompt, &size).await;
-        let produced = match &result {
+        let mut produced = match &result {
             Ok(path) => vec![chat_store::Artifact {
                 path: path.display().to_string(),
                 kind: chat_store::ArtifactKind::Image,
             }],
             Err(_) => Vec::new(),
         };
-        return (images::tool_result_for_model(&result), produced);
+        // Round 6: `save_path` copies the generated image into the user's
+        // folders through the core's write rules (or, outside every grant,
+        // into the session temp folder with an approval).
+        let save = match (&result, images::parse_save_path(&call.arguments)) {
+            (Ok(source), Some(save_path)) => Some(
+                tools::save_model_image(app, profile_id, conversation_id, source, &save_path).await,
+            ),
+            _ => None,
+        };
+        if let Some(saved) = save.as_ref().and_then(tools::ImageSave::saved_path) {
+            produced.push(chat_store::Artifact {
+                path: saved.to_string(),
+                kind: chat_store::ArtifactKind::File,
+            });
+        }
+        let save = save.as_ref().map(tools::image_save_for_model);
+        return (images::tool_result_with_save(&result, save), produced);
     }
     match action_from_call(&call.name, &call.arguments) {
         Ok(action) => {
@@ -2165,6 +2183,23 @@ mod tests {
             full.contains("it is created first"),
             "cwd may be a new folder"
         );
+    }
+
+    #[test]
+    fn system_prompt_mentions_save_path_only_works_in_working_folders() {
+        for prompt in [
+            system_prompt(None),
+            system_prompt(Some(&tools::Workspace {
+                roots: vec![std::path::PathBuf::from("/Users/me/Arte")],
+                computer_wide: false,
+                run_command: false,
+                scratch: None,
+            })),
+        ] {
+            assert!(prompt.contains("save_path"), "{prompt}");
+            assert!(prompt.contains("only works inside the user's working folders"));
+            assert!(prompt.contains("ask the user to add that folder"));
+        }
     }
 
     #[test]

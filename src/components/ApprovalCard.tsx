@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import type { ApprovalCardState } from "../chat/approvals";
 import { isOpen } from "../chat/approvals";
 import { useT } from "../i18n";
-import { IconCheck, IconFile, IconFolder, IconMove, IconTerminal, IconTrash, IconX } from "../icons";
+import { IconCheck, IconFile, IconFolder, IconImage, IconMove, IconTerminal, IconTrash, IconX } from "../icons";
 
 // Action kinds are the core's ToolAction::kind() values.
 function actionIcon(action: string): ReactNode {
@@ -17,6 +17,8 @@ function actionIcon(action: string): ReactNode {
       return <IconTerminal size={16} />;
     case "move_path":
       return <IconMove size={16} />;
+    case "save_image":
+      return <IconImage size={16} />;
     case "read_file":
     case "list_files":
       return <IconFolder size={16} />;

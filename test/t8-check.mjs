@@ -41,6 +41,7 @@ const ALLOWED_ACTIONS = new Set([
   "run_command",
   "move_path",
   "delete_path",
+  "save_image",
   "grant",
   "grant_mode",
   "unknown",
@@ -110,6 +111,19 @@ const REQUIRED_TESTS = [
   "images::tests::e2e_b64_reply_still_works_and_errors_classify",
   "images::tests::e2e_production_mode_refuses_a_plain_http_url_reply",
   "chat_store::tests::memory_sync_overwrite_keeps_the_artifacts_of_replies_still_present",
+  // Round 6: generate_image save_path, the user's Save as…, orphan sweep
+  "tools::tests::save_image_inside_an_allow_grant_copies_without_a_prompt",
+  "tools::tests::save_image_in_ask_mode_shows_the_destination_and_a_deny_saves_nothing",
+  "tools::tests::save_image_honors_the_deny_list_and_protected_targets_in_allow_mode",
+  "tools::tests::save_image_outside_every_grant_falls_back_to_the_session_temp_folder_with_an_approval",
+  "tools::tests::save_image_is_core_built_only_and_copies_only_generated_images",
+  "images::tests::generate_image_offers_an_optional_save_path",
+  "images::tests::no_save_path_keeps_the_tool_result_unchanged",
+  "images::tests::save_as_copies_only_images_this_app_generated",
+  "images::tests::sweep_deletes_old_orphans_and_keeps_referenced_and_fresh_images",
+  "images::tests::sweep_never_deletes_when_the_store_is_missing_or_corrupted",
+  "images::tests::sweep_survives_unparsable_artifacts_json",
+  "chat::tests::system_prompt_mentions_save_path_only_works_in_working_folders",
 ];
 // Unix-only acceptance tests (symlinks / sh): required where they can run.
 if (process.platform !== "win32") {
