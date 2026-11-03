@@ -89,3 +89,22 @@ jobs:
 
       - name: Round-4 E2E check (t14)
         run: node test/t14-check.mjs
+
+      # Release signing scripts: lint everywhere they can be linted, and run
+      # the macOS seal spec (reproduces the "damaged app" defect and proves
+      # the ad-hoc fallback repairs both the .app and the app inside the dmg).
+      - name: Lint signing scripts (shellcheck)
+        if: runner.os == 'Linux'
+        run: shellcheck scripts/macos-sign.sh test/macos-sign-test.sh
+
+      - name: Lint signing scripts (PowerShell parse)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD\scripts\windows-sign.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+
+      - name: macOS signing spec (ad-hoc seal + dmg repack)
+        if: runner.os == 'macOS'
+        run: bash test/macos-sign-test.sh

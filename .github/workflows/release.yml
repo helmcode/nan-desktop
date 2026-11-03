@@ -1,15 +1,24 @@
 name: Release
 
-# Builds installers for the 3 desktop OSes on a vX.Y.Z tag and opens a DRAFT
+# Builds installers for the 3 desktop OSes on a vX.Y.Z tag and fills a DRAFT
 # GitHub release with the artifacts (publishing stays a human decision).
 #
-#   macOS arm64  -> dmg + .app     (aarch64-apple-darwin)
-#   macOS x64    -> dmg + .app     (x86_64-apple-darwin, cross-compiled)
+#   macOS arm64  -> dmg + .app.tar.gz  (aarch64-apple-darwin)
+#   macOS x64    -> dmg + .app.tar.gz  (x86_64-apple-darwin, cross-compiled)
 #   Windows      -> msi + nsis exe
-#   Linux        -> AppImage + deb
+#   Linux        -> AppImage + deb + rpm
 #
-# Installers are NOT code-signed yet (macOS notarization + Windows
-# Authenticode are pending); the release body says so explicitly.
+# Code signing (see SIGNING.md) turns itself on when the secrets exist:
+#
+#   macOS    APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD + notary creds
+#            (APPLE_API_ISSUER/APPLE_API_KEY_ID/APPLE_API_KEY) -> Developer ID
+#            signature + hardened runtime + notarization + stapling.
+#            Without them: ad-hoc bundle seal (verifies, but Gatekeeper still
+#            blocks quarantined downloads).
+#   Windows  WINDOWS_CERTIFICATE + WINDOWS_CERTIFICATE_PASSWORD -> Authenticode
+#            on the app exe, the setup exe and the msi. Without: unsigned.
+#
+# The release body and each job summary state which path was taken.
 
 on:
   push:
@@ -23,7 +32,70 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    # Creates (or reuses, on re-runs) the draft release up front so the build
+    # jobs upload into ONE release, and writes an honest signing statement.
+    runs-on: ubuntu-latest
+    outputs:
+      release-id: ${{ steps.release.outputs.id }}
+    steps:
+      - name: Create or reuse draft release
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          MACOS_SIGNED: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && ((secrets.APPLE_API_ISSUER != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_KEY != '') || (secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '')) }}
+          WINDOWS_SIGNED: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/body.md"
+          {
+            echo "Installers for Windows (msi / setup exe), macOS (dmg, Apple Silicon and Intel) and Linux (AppImage / deb / rpm)."
+            echo
+            echo "### Code signing status"
+            echo
+            if [ "$MACOS_SIGNED" = "true" ]; then
+              echo "- **macOS:** signed with an Apple Developer ID and notarized by Apple. Open the dmg and drag the app to Applications."
+            else
+              echo "- **macOS:** NOT signed with an Apple Developer ID and NOT notarized yet (the bundle carries an ad-hoc signature only). macOS will say the app \"is damaged and can't be opened\" or \"cannot be verified\". After dragging it to Applications, run once in Terminal:"
+              echo
+              echo '  ```sh'
+              echo '  xattr -cr "/Applications/Helmcode Desktop.app"'
+              echo '  ```'
+              echo
+              echo "  This only removes the download quarantine flag from this app. Developer ID signing + notarization is in progress."
+            fi
+            if [ "$WINDOWS_SIGNED" = "true" ]; then
+              echo "- **Windows:** Authenticode-signed. SmartScreen may still warn on the first releases until the certificate builds reputation (\"More info\" -> \"Run anyway\")."
+            else
+              echo "- **Windows:** NOT code-signed yet. SmartScreen will show \"Windows protected your PC\": click \"More info\" -> \"Run anyway\"."
+            fi
+            echo "- **Linux:** packages are not signed (standard for AppImage/deb/rpm from GitHub releases)."
+            echo
+            echo "Verify the SHA-256 of your download against the value GitHub shows next to each asset before installing. See [SIGNING.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/SIGNING.md) and [SECURITY.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/SECURITY.md)."
+          } > "$body"
+
+          # /releases/tags/{tag} does not return drafts, so search the list.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+                 --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n1)
+          if [ -z "$id" ]; then
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+                   -f tag_name="$TAG" -f name="nan-desktop $TAG" \
+                   -F draft=true -F prerelease=false -F body=@"$body" --jq .id)
+            echo "created draft release $id"
+          else
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$id" -F body=@"$body" >/dev/null
+            echo "reusing release $id (body refreshed)"
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Signing plan for $TAG"
+            echo "- macOS: $([ "$MACOS_SIGNED" = true ] && echo 'Developer ID + notarization' || echo 'ad-hoc fallback (no Apple secrets)')"
+            echo "- Windows: $([ "$WINDOWS_SIGNED" = true ] && echo 'Authenticode' || echo 'unsigned (no certificate secret)')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -41,7 +113,7 @@ jobs:
             args: ''
             rust-target: ''
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - name: Checkout
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -76,48 +148,156 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev
 
-      - name: Build and draft release
+      # ------------------------------------------------------- Windows ----
+      # With a certificate secret, register scripts/windows-sign.ps1 as
+      # Tauri's signCommand so the app exe AND both installers get signed
+      # during bundling. Without it, the build is unsigned (same as before).
+      - name: Configure Authenticode signing (Windows)
+        id: winsign
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          HAS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+        run: |
+          if ($env:HAS_CERT -eq 'true') {
+            $script = Join-Path $env:GITHUB_WORKSPACE 'scripts\windows-sign.ps1'
+            $cfg = @{ bundle = @{ windows = @{ signCommand = @{ cmd = 'pwsh'; args = @('-NoProfile', '-File', $script, '%1') } } } }
+            $path = Join-Path $env:RUNNER_TEMP 'tauri.windows-sign.json'
+            $cfg | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 $path
+            "config-arg=--config `"$path`"" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+            "mode=authenticode" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } else {
+            "mode=unsigned" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          }
+
+      # ------------------------------------------- Windows + Linux build ----
+      - name: Build and upload to draft release (Windows / Linux)
+        if: runner.os != 'macOS'
         uses: tauri-apps/tauri-action@a6e90ddc4ba4721f294e52b856d3d50e645edc07
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WINDOWS_CERTIFICATE: ${{ runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || '' }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'nan-desktop ${{ github.ref_name }}'
-          releaseBody: |
-            Installers for Windows (msi / setup exe), macOS (dmg, arm64 and x64) and Linux (AppImage / deb).
+          releaseId: ${{ needs.prepare.outputs.release-id }}
+          args: ${{ matrix.args }} ${{ steps.winsign.outputs.config-arg }}
 
-            **Note:** these builds are not code-signed yet (macOS notarization and Windows Authenticode pending). Compare the SHA-256 of your download against the values in the release assets before installing. See SECURITY.md.
-          releaseDraft: true
-          prerelease: false
+      - name: Verify Authenticode signatures (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MODE: ${{ steps.winsign.outputs.mode }}
+        run: |
+          $files = @(Get-ChildItem -Path 'src-tauri\target\release\bundle' -Recurse -Include *.msi, *-setup.exe)
+          $files += @(Get-ChildItem -Path 'src-tauri\target\release' -Filter *.exe -File)
+          if (-not $files) { throw 'no Windows artifacts found' }
+          $bad = 0
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $f.FullName
+            Write-Host ("{0}: {1} {2}" -f $f.Name, $sig.Status, $sig.SignerCertificate.Subject)
+            if ($env:MODE -eq 'authenticode' -and $sig.Status -ne 'Valid') { $bad++ }
+          }
+          if ($bad -gt 0) { throw "$bad artifact(s) are not validly signed" }
+          if ($env:MODE -eq 'authenticode') {
+            "- Windows: **Authenticode-signed** (exe + setup exe + msi verified)." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          } else {
+            "- Windows: **unsigned fallback** (no WINDOWS_CERTIFICATE secret); SmartScreen will warn. See SIGNING.md." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+
+      # --------------------------------------------------------- macOS ----
+      # Build only (no upload): the dmg must be repacked with the signed app
+      # before it is published, so signing and upload happen in the next steps.
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        uses: tauri-apps/tauri-action@a6e90ddc4ba4721f294e52b856d3d50e645edc07
+        with:
           args: ${{ matrix.args }}
+
+      - name: Sign, notarize and verify (macOS)
+        id: macsign
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          bundle="src-tauri/target/${{ matrix.rust-target }}/release/bundle"
+          app="$bundle/macos/Helmcode Desktop.app"
+          shopt -s nullglob
+          dmgs=("$bundle"/dmg/*.dmg)
+          [ "${#dmgs[@]}" -eq 1 ] || { echo "expected exactly one dmg, found: ${dmgs[*]:-none}"; exit 1; }
+          bash scripts/macos-sign.sh "$app" "${dmgs[0]}"
+          echo "dmg=${dmgs[0]}" >> "$GITHUB_OUTPUT"
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to draft release (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
+          DMG: ${{ steps.macsign.outputs.dmg }}
+          APP: ${{ steps.macsign.outputs.app }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/upload"
+          mkdir -p "$out"
+          # GitHub turns spaces into dots in asset names; do it explicitly so
+          # the rename job sees predictable names.
+          dmg_name=$(basename "$DMG" | tr ' ' '.')
+          arch=$(echo "$dmg_name" | sed -E 's/.*_([^_]+)\.dmg$/\1/')
+          tar_name="Helmcode.Desktop_${arch}.app.tar.gz"
+          cp "$DMG" "$out/$dmg_name"
+          tar -czf "$out/$tar_name" -C "$(dirname "$APP")" "$(basename "$APP")"
+          for f in "$out/$dmg_name" "$out/$tar_name"; do
+            name=$(basename "$f")
+            # Re-runs: replace an asset with the same name.
+            old=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+                    --jq ".[] | select(.name == \"$name\") | .id")
+            if [ -n "$old" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"; fi
+            gh api -X POST -H 'Content-Type: application/octet-stream' \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name" \
+              --input "$f" --jq .name
+          done
 
   rename-assets:
     # Stable asset names: every release ships the SAME file names, so
     # https://github.com/helmcode/nan-desktop/releases/latest/download/<name>
     # is a permanent one-click URL for the latest stable build (the landings
-    # and the docs link these; do not add versions back). tauri-action
-    # uploads with versioned names; this job renames them via the API.
-    needs: build
+    # and the docs link these; do not add versions back). Uploads use
+    # versioned names; this job renames them via the API.
+    needs: [ prepare, build ]
     runs-on: ubuntu-latest
     steps:
       - name: Rename release assets to stable names
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
         run: |
           set -e
-          rid=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/${{ github.ref_name }}" --jq .id)
+          rid="$RELEASE_ID"
           rename_asset() { gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$1" -f name="$2" --jq .name; }
-          for id in $(gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --jq '.[].id'); do
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --paginate --jq '.[].id'); do
             n=$(gh api "repos/$GITHUB_REPOSITORY/releases/assets/$id" --jq .name)
             case "$n" in
-              *aarch64*.dmg)    rename_asset "$id" "Helmcode.Desktop-macOS-AppleSilicon.dmg" ;;
-              *x64*.dmg)        rename_asset "$id" "Helmcode.Desktop-macOS-Intel.dmg" ;;
-              *x64_en-US.msi)   rename_asset "$id" "Helmcode.Desktop-Windows-x64.msi" ;;
-              *x64-setup.exe)   rename_asset "$id" "Helmcode.Desktop-Windows-x64-setup.exe" ;;
-              *amd64.deb)       rename_asset "$id" "Helmcode.Desktop-Linux-amd64.deb" ;;
-              *amd64.AppImage)  rename_asset "$id" "Helmcode.Desktop-Linux-amd64.AppImage" ;;
-              *x86_64.rpm)      rename_asset "$id" "Helmcode.Desktop-Linux-x86_64.rpm" ;;
+              *aarch64*.dmg)          rename_asset "$id" "Helmcode.Desktop-macOS-AppleSilicon.dmg" ;;
+              *x64*.dmg)              rename_asset "$id" "Helmcode.Desktop-macOS-Intel.dmg" ;;
+              *aarch64.app.tar.gz)    rename_asset "$id" "Helmcode.Desktop-macOS-AppleSilicon.app.tar.gz" ;;
+              *x64.app.tar.gz)        rename_asset "$id" "Helmcode.Desktop-macOS-Intel.app.tar.gz" ;;
+              *x64_en-US.msi)         rename_asset "$id" "Helmcode.Desktop-Windows-x64.msi" ;;
+              *x64-setup.exe)         rename_asset "$id" "Helmcode.Desktop-Windows-x64-setup.exe" ;;
+              *amd64.deb)             rename_asset "$id" "Helmcode.Desktop-Linux-amd64.deb" ;;
+              *amd64.AppImage)        rename_asset "$id" "Helmcode.Desktop-Linux-amd64.AppImage" ;;
+              *x86_64.rpm)            rename_asset "$id" "Helmcode.Desktop-Linux-x86_64.rpm" ;;
             esac
           done
           echo "final names:"
-          gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --jq '.[].name'
+          gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --paginate --jq '.[].name'

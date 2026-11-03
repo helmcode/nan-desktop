@@ -101,6 +101,10 @@ platform needs it.
 
 ## Known limitations
 
-- CI/nightly installers are **not code-signed yet** (macOS notarization and
-  Windows Authenticode are on the roadmap — tracked in the repository).
-  Verify installer hashes against the GitHub release notes.
+- Installers are **not Developer ID / Authenticode signed yet**. macOS builds
+  carry a verified ad-hoc bundle seal only (not notarized); Windows builds are
+  unsigned. The release pipeline switches to Developer ID + notarization and
+  Authenticode automatically once the signing secrets are configured; each
+  release body states the actual signing status. Current state, user
+  workarounds and the owner setup checklist: [SIGNING.md](SIGNING.md).
+  Verify installer hashes against the values shown on the GitHub release.

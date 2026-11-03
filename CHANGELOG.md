@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Platform
+- macOS: fixed "Helmcode Desktop is damaged and can't be opened". 0.2.0
+  shipped an app that was only linker-signed (bundle resources not sealed).
+  Release builds now get a verified bundle signature, and the app inside the
+  dmg is checked before upload.
+- Release pipeline ready for Developer ID signing + notarization (macOS) and
+  Authenticode (Windows). It turns on automatically once the signing secrets
+  exist, and every release states its real signing status. See SIGNING.md.
+
 ## 0.2.0 — First public beta
 
 The first publicly announced build of Helmcode Desktop: a focused AI
@@ -40,6 +51,6 @@ workspace for the NaN and Helmcode inference platforms, locked to
 ### Platform
 - Device-flow login (RFC 8628) against both tenants with per-device
   credentials.
-- Signed release builds for macOS (Apple silicon + Intel), Windows and
-  Linux; CI runs unit, wire-acceptance and E2E checks on every pull
+- Release builds for macOS (Apple silicon + Intel), Windows and
+  Linux (not code-signed; see SIGNING.md); CI runs unit, wire-acceptance and E2E checks on every pull
   request.
