@@ -199,6 +199,27 @@ export function saveImageAs(sourcePath: string): Promise<string | null> {
   return invoke<string | null>("image_save_as", { sourcePath });
 }
 
+// ---------------------------------------------------------------------------
+// Auto-update (round 7) - src-tauri/src/updater.rs
+// ---------------------------------------------------------------------------
+
+/// A newer signed release the core found (and keeps ready to install).
+export interface UpdateInfo {
+  version: string;
+  current_version: string;
+}
+
+/// Asks the release feed for a newer version. Never downloads anything.
+export function checkForUpdate(): Promise<UpdateInfo | null> {
+  return invoke<UpdateInfo | null>("update_check");
+}
+
+/// Downloads, verifies (minisign) and installs the update found by the last
+/// check, then relaunches the app. Only ever called from the user's click.
+export function installUpdate(): Promise<void> {
+  return invoke<void>("update_install");
+}
+
 export function base64ToBytes(base64: string): Uint8Array {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);

@@ -90,12 +90,17 @@ jobs:
       - name: Round-4 E2E check (t14)
         run: node test/t14-check.mjs
 
+      # Round 7: signed auto-update wiring (real pubkey + endpoint, core-only
+      # plugin use, latest.json builder, release rename/sign/publish steps).
+      - name: Auto-update wiring check
+        run: node test/updater-check.mjs
+
       # Release signing scripts: lint everywhere they can be linted, and run
       # the macOS seal spec (reproduces the "damaged app" defect and proves
       # the ad-hoc fallback repairs both the .app and the app inside the dmg).
       - name: Lint signing scripts (shellcheck)
         if: runner.os == 'Linux'
-        run: shellcheck scripts/macos-sign.sh test/macos-sign-test.sh
+        run: shellcheck scripts/macos-sign.sh test/macos-sign-test.sh scripts/updater-keygen.sh
 
       - name: Lint signing scripts (PowerShell parse)
         if: runner.os == 'Windows'

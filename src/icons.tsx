@@ -100,7 +100,16 @@ export const IconImage = (p: IconProps) => (
   </Icon>
 );
 
-export const IconSpeaker = (p: IconProps) => (
+/// Round 7: the composer's "create an image" mode. A sparkle, NOT a picture
+/// frame: the frame read as "attach a file" (designer feedback).
+export const IconSparkles = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
+    <path d="M19 15l.7 1.8 1.8.7-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7zM5 2.5l.5 1.3 1.3.5-1.3.5L5 6.1l-.5-1.3-1.3-.5 1.3-.5z" />
+  </Icon>
+);
+
+export const IconSpeaker =(p: IconProps) => (
   <Icon {...p}>
     <path d="M11 5 6 9H3v6h3l5 4z" />
     <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />

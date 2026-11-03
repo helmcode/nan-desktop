@@ -11,15 +11,9 @@ import { IconDownload } from "../icons";
 
 export type SaveImageResult = { kind: "saved"; path: string } | { kind: "failed" };
 
-export function SaveImageButton({
-  path,
-  onResult,
-}: {
-  /// Absolute path of the generated image (under the app's images folder).
-  path: string;
-  onResult: (result: SaveImageResult) => void;
-}) {
-  const t = useT();
+/// The Save-as flow shared by the "Save as…" button and the round-7 hover
+/// download icon on the image itself: one native dialog at a time.
+export function useSaveImage(path: string, onResult: (result: SaveImageResult) => void) {
   const [busy, setBusy] = useState(false);
 
   const save = async (): Promise<void> => {
@@ -34,6 +28,20 @@ export function SaveImageButton({
       setBusy(false);
     }
   };
+
+  return { busy, save };
+}
+
+export function SaveImageButton({
+  path,
+  onResult,
+}: {
+  /// Absolute path of the generated image (under the app's images folder).
+  path: string;
+  onResult: (result: SaveImageResult) => void;
+}) {
+  const t = useT();
+  const { busy, save } = useSaveImage(path, onResult);
 
   return (
     <button

@@ -199,7 +199,7 @@ describe("generate_image tool end to end over the event wire (round 4)", () => {
     resetTauri(handlers());
     renderApp();
     await screen.findByText("hola");
-    fireEvent.click(screen.getByRole("button", { name: "Create an image" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create image" }));
     await sendMessage("a red fox", "Image description");
     await waitFor(() =>
       expect(invokedWith("image_generate")).toEqual([{ conversationId: 7, prompt: "a red fox", size: "1024x1024" }]),
@@ -219,13 +219,13 @@ describe("image mode is per conversation (round 4)", () => {
     resetTauri(handlers());
     renderApp();
     await screen.findByText("hola");
-    fireEvent.click(screen.getByRole("button", { name: "Create an image" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create image" }));
     expect(await screen.findByRole("textbox", { name: "Image description" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Other" }));
     await screen.findByText("other chat");
     expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Create an image" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Create image" }).getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(screen.getByRole("button", { name: "Report" }));
     await screen.findByText("hola");
@@ -236,11 +236,11 @@ describe("image mode is per conversation (round 4)", () => {
     resetTauri(handlers({ conversation_create: () => 9 }));
     renderApp();
     await screen.findByText("hola");
-    fireEvent.click(screen.getByRole("button", { name: "Create an image" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create image" }));
     fireEvent.click(screen.getByRole("button", { name: /New chat/ }));
     expect(await screen.findByRole("textbox", { name: "Message" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Create an image" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create image" }));
     store.set(9, []);
     await sendMessage("a boat", "Image description");
     await waitFor(() => expect(invokedWith("image_generate")[0]?.conversationId).toBe(9));

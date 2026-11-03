@@ -152,6 +152,75 @@ is still blocked by Gatekeeper and would only look fixed.
    `scripts/windows-sign.ps1` (SHA-256, RFC 3161 timestamp), and a verification
    step fails the job if any exe or msi is not validly signed.
 
+### Auto-update: updater signing key
+
+The in-app "update available" banner (round 7) installs only packages signed
+with the minisign key whose PUBLIC half is embedded in the app
+(`src-tauri/tauri.conf.json` > `plugins.updater.pubkey`). This key is
+independent of Apple/Windows code signing: both apply.
+
+1. Generate the keypair once (refuses to overwrite an existing key):
+
+   ```sh
+   bash scripts/updater-keygen.sh
+   ```
+
+   It writes `scripts/brand/updater.key` (private, gitignored),
+   `scripts/brand/updater.key.password` (gitignored) and
+   `scripts/brand/updater.key.pub`, and embeds the public key in
+   `tauri.conf.json`. Commit `tauri.conf.json`; never commit the private
+   key or its password. **Back up the private key**: lose it and every
+   installed app can never be updated again.
+2. Add two repository secrets:
+
+   | Secret | Value |
+   |---|---|
+   | `TAURI_SIGNING_PRIVATE_KEY` | contents of `scripts/brand/updater.key` |
+   | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | contents of `scripts/brand/updater.key.password` |
+
+3. CI (`node test/updater-check.mjs`) fails while the pubkey is still the
+   placeholder, so the wiring cannot ship half-configured.
+
+How the release pipeline uses it:
+
+- Windows/Linux: a build overlay turns on `bundle.createUpdaterArtifacts`,
+  so the bundler writes `<installer>.sig` next to the msi, the setup exe and
+  the AppImage (and deb/rpm on newer bundlers). tauri-action uploads them.
+- macOS: after the Apple signature/notarization, the re-packed
+  `.app.tar.gz` (the updater payload) is signed with `tauri signer sign`
+  and its `.sig` uploaded.
+- `rename-assets` renames the `.sig` files to the stable names, then builds
+  `latest.json` with `scripts/updater-manifest.mjs` (each platform: tag URL
+  + inlined signature) and uploads it. A missing required signature fails
+  the job instead of publishing a partial feed.
+
+Without the two secrets the release still builds; it just has no
+`latest.json` and installed apps see no update.
+
+**Going live.** Apps check
+`https://github.com/helmcode/nan-desktop/releases/latest/download/latest.json`
+on startup and every 6 hours (debug builds skip the check unless
+`HELMCODE_DESKTOP_UPDATER_IN_DEV=1`). That URL resolves only for the latest
+PUBLISHED release, so:
+
+- The first release that can be AUTO-installed is the second one after the
+  key exists: users must first install, by hand, a build that embeds the
+  pubkey (call it vN). When vN+1 is published with a signed `latest.json`,
+  vN shows the banner.
+- That first signed release (and every later one) must contain:
+  `latest.json`, the five stable installers
+  `Helmcode.Desktop-macOS-AppleSilicon.app.tar.gz`,
+  `Helmcode.Desktop-macOS-Intel.app.tar.gz`,
+  `Helmcode.Desktop-Windows-x64-setup.exe`, `Helmcode.Desktop-Windows-x64.msi`,
+  `Helmcode.Desktop-Linux-amd64.AppImage`, and the `.sig` of each.
+- Its version (tag `vX.Y.Z`, `tauri.conf.json`, `Cargo.toml`,
+  `package.json`) must be higher than the installed one: the updater only
+  offers newer semver versions.
+- End-to-end smoke test for vN+1: install vN, publish vN+1, start vN, see
+  the banner, click Update, the app relaunches as vN+1. A tampered or
+  wrongly-signed package is rejected by the updater (the install fails and
+  the banner says so).
+
 ## Where things live
 
 - `scripts/macos-sign.sh`: macOS seal, sign, notarize, staple, dmg repack and
@@ -159,8 +228,13 @@ is still blocked by Gatekeeper and would only look fixed.
   `MACOS_SIGN_FORCE_ADHOC=1 bash scripts/macos-sign.sh "<app>" "<dmg>"`.
 - `scripts/windows-sign.ps1`: Tauri `signCommand` hook (Authenticode).
 - `test/macos-sign-test.sh`: spec test (CI, macOS).
+- `scripts/updater-keygen.sh`: one-time updater keypair + pubkey embedding.
+- `scripts/updater-manifest.mjs`: builds the signed `latest.json`.
+- `test/updater-check.mjs`: auto-update wiring check (CI).
+- `src-tauri/src/updater.rs`: `update_check` / `update_install` commands.
 - `.github/workflows/release.yml`: `prepare` (draft release + honest body),
-  `build` (per-OS build and signing), `rename-assets` (stable download names).
+  `build` (per-OS build and signing), `rename-assets` (stable download names
+  + `latest.json`).
 
 Secrets are only exposed to the signing steps. The certificate lives in a
 throwaway keychain or temp file that is deleted when the step ends, and the

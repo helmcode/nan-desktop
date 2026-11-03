@@ -1,6 +1,6 @@
 import { Fragment, Suspense, lazy, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
 import { BrandLogo, BrandMark } from "./brand";
@@ -27,11 +27,13 @@ import {
 import { stripToolMarkup } from "./chat/toolMarkup";
 import { AllowNudgeCard } from "./components/AllowNudgeCard";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { ChatImage } from "./components/ChatImage";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
 import { SaveImageButton, type SaveImageResult } from "./components/SaveImageButton";
 import { Toast, type ToastNotice } from "./components/Toast";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { UserMenu, type SettingsSection } from "./components/UserMenu";
 import {
   DEFAULT_IMAGE_SIZE,
@@ -57,10 +59,10 @@ import {
   IconFile,
   IconFolder,
   IconGlobe,
-  IconImage,
   IconMic,
   IconPanel,
   IconPlus,
+  IconSparkles,
   IconSpeaker,
   IconStop,
   IconTrash,
@@ -1235,7 +1237,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     if (m.media_path) {
       return (
         <article className="msg msg-assistant">
-          <img className="msg-image" src={convertFileSrc(m.media_path)} alt={m.content} />
+          <ChatImage path={m.media_path} alt={m.content} onResult={onImageSaved} />
           <p className="image-caption">{m.content}</p>
           <div className="msg-actions">
             <SaveImageButton path={m.media_path} onResult={onImageSaved} />
@@ -1259,7 +1261,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         <Markdown text={visible} onOpenLink={openWebPreview} />
         {files.images.map((path) => (
           <figure key={path} className="msg-figure">
-            <img className="msg-image" src={convertFileSrc(path)} alt={t.chat.generatedImage} />
+            <ChatImage path={path} alt={t.chat.generatedImage} onResult={onImageSaved} />
             <div className="msg-actions">
               <SaveImageButton path={path} onResult={onImageSaved} />
             </div>
@@ -1410,6 +1412,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                 </button>
               )}
             </header>
+            <UpdateBanner />
 
             <div className="messages" ref={messagesRef}>
               <div className="messages-inner">
@@ -1539,14 +1542,14 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                     )}
                     <button
                       type="button"
-                      className={`icon-btn${imageMode ? " active" : ""}`}
+                      className={`icon-btn image-toggle${imageMode ? " active" : ""}`}
                       aria-pressed={imageMode}
                       aria-label={imageMode ? t.chat.imageModeOff : t.chat.imageModeOn}
                       title={imageMode ? t.chat.imageModeOff : t.chat.imageModeOn}
                       onClick={toggleImageMode}
                       disabled={composerBusy}
                     >
-                      <IconImage size={18} />
+                      <IconSparkles size={18} />
                     </button>
                     {VOICE_UI && (
                       <button

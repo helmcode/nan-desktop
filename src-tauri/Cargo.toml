@@ -30,6 +30,9 @@ tauri-plugin-opener = "2"
 # T8: native folder picker for tools folder grants (capability dialog:allow-open —
 # the picker is the only dialog use, so no broader dialog permission).
 tauri-plugin-dialog = "2"
+# Round 7: signed auto-update (minisign-verified against the pubkey in
+# tauri.conf.json). Driven only by the core's update_check/update_install.
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.13.5", features = ["json", "stream", "multipart"] }

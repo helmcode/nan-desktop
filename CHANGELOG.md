@@ -10,6 +10,18 @@
 - Release pipeline ready for Developer ID signing + notarization (macOS) and
   Authenticode (Windows). It turns on automatically once the signing secrets
   exist, and every release states its real signing status. See SIGNING.md.
+- Auto-update: the app checks for a new signed release on startup and every
+  6 hours and shows a small banner at the top of the chat with an Update
+  button (download, verify, install, relaunch). It never installs by itself.
+  Releases publish a signed `latest.json` once the updater key secrets exist.
+- Windows icon: icon.ico carries every frame size (16 to 256 px).
+
+### Chat
+- Images in the chat show a download icon in their corner on hover (same
+  native Save-as dialog as the "Save as…" button).
+- The composer's image button now uses a sparkle icon and the tooltip
+  "Create image"; when image mode is on, the placeholder asks for the image
+  to create and the button shows the accent state.
 
 ## 0.2.0 — First public beta
 

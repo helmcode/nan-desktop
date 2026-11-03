@@ -1117,6 +1117,77 @@ button:disabled {
   border: 1px solid var(--border-strong);
 }
 
+/* Round 7: download icon in the image's top-right corner, shown on hover or
+   keyboard focus only. Only the button takes pointer events. */
+.msg-image-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+}
+
+.msg-image-download {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background-color: rgba(10, 10, 14, 0.72);
+  color: var(--text);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.msg-image-wrap:hover .msg-image-download,
+.msg-image-download:focus-visible,
+.msg-image-download:disabled {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.msg-image-download:hover:not(:disabled) {
+  background-color: var(--surface-3);
+}
+
+.msg-image-download:disabled {
+  cursor: default;
+}
+
+/* ---- update available (round 7) --------------------------------------- */
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.6rem 1rem 0;
+  padding: 0.45rem 0.5rem 0.45rem 0.8rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background-color: var(--surface-2);
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.update-banner > svg {
+  color: var(--accent-text);
+  flex-shrink: 0;
+}
+
+.update-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.update-banner-error {
+  color: var(--error);
+}
+
 /* A generated image inside a text reply, with its "Save as…" action. */
 .msg-figure {
   margin: 0.6rem 0 0;
@@ -1332,6 +1403,14 @@ button:disabled {
 
 .composer-box.image-mode {
   border-style: dashed;
+  border-color: rgba(129, 140, 248, 0.55);
+}
+
+/* Round 7: image mode ON is unmistakable: accent icon on an accent wash. */
+.icon-btn.image-toggle.active {
+  color: var(--accent-text);
+  background-color: var(--accent-soft);
+  border-color: rgba(129, 140, 248, 0.55);
 }
 
 .composer-input {

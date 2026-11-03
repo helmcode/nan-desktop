@@ -28,6 +28,10 @@ dist-ssr
 .env.*
 *.key
 *.pem
+# Auto-update signing key (round 7): the private key is updater.key (covered
+# by *.key); its password sits next to it. Both live ONLY on the owner's
+# machine and in the GitHub secrets. The .pub is public and may be committed.
+scripts/brand/updater.key.password
 models.json
 vault.bin
 chat.db

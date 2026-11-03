@@ -34,6 +34,8 @@ mod tool_markup;
 // (auto, inline card or native dialog) / execute tool actions.
 mod tools;
 mod tts;
+// Auto-update (round 7): silent check, install only on the user's click.
+mod updater;
 // Built-in web search the model can call (proxied by the platform API).
 mod web_search;
 
@@ -141,6 +143,11 @@ pub fn run() {
         .manage(images::ImagesState::default())
         .manage(tools::ToolsState::default())
         .manage(memory::MemoryState::default())
+        .manage(updater::UpdaterState::default())
+        // Signed auto-update (round 7). Used only from the core's own
+        // update_check / update_install commands, so no updater permission
+        // is granted to the renderer.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Native folder picker + confirmation dialogs for tools (S7).
         .plugin(tauri_plugin_dialog::init())
         // External review B3: the main window is created PROGRAMMATICALLY
@@ -203,7 +210,9 @@ pub fn run() {
             tools::tools_set_run_command_enabled,
             preview::preview_read_file,
             preview::web_preview_fetch,
-            links::open_external
+            links::open_external,
+            updater::update_check,
+            updater::update_install
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

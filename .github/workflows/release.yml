@@ -17,6 +17,11 @@ name: Release
 #            blocks quarantined downloads).
 #   Windows  WINDOWS_CERTIFICATE + WINDOWS_CERTIFICATE_PASSWORD -> Authenticode
 #            on the app exe, the setup exe and the msi. Without: unsigned.
+#   Updater  TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#            (minisign key, see SIGNING.md "Auto-update") -> every updater
+#            artifact gets a .sig and rename-assets publishes a signed
+#            latest.json (the in-app "Update" banner feed). Without: no
+#            latest.json, installed apps simply see no update.
 #
 # The release body and each job summary state which path was taken.
 
@@ -38,12 +43,14 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release-id: ${{ steps.release.outputs.id }}
+      updater-signed: ${{ steps.release.outputs.updater-signed }}
     steps:
       - name: Create or reuse draft release
         id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
+          UPDATER_SIGNED: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD != '' }}
           MACOS_SIGNED: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && ((secrets.APPLE_API_ISSUER != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_KEY != '') || (secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '')) }}
           WINDOWS_SIGNED: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
         run: |
@@ -88,10 +95,12 @@ jobs:
             echo "reusing release $id (body refreshed)"
           fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "updater-signed=$UPDATER_SIGNED" >> "$GITHUB_OUTPUT"
           {
             echo "### Signing plan for $TAG"
             echo "- macOS: $([ "$MACOS_SIGNED" = true ] && echo 'Developer ID + notarization' || echo 'ad-hoc fallback (no Apple secrets)')"
             echo "- Windows: $([ "$WINDOWS_SIGNED" = true ] && echo 'Authenticode' || echo 'unsigned (no certificate secret)')"
+            echo "- Auto-update feed: $([ "$UPDATER_SIGNED" = true ] && echo 'signed latest.json' || echo 'OFF (no TAURI_SIGNING_PRIVATE_KEY secret): installed apps see no update')"
           } >> "$GITHUB_STEP_SUMMARY"
 
   build:
@@ -148,26 +157,40 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev
 
-      # ------------------------------------------------------- Windows ----
-      # With a certificate secret, register scripts/windows-sign.ps1 as
-      # Tauri's signCommand so the app exe AND both installers get signed
-      # during bundling. Without it, the build is unsigned (same as before).
-      - name: Configure Authenticode signing (Windows)
-        id: winsign
-        if: runner.os == 'Windows'
+      # ----------------------------------------------- Windows + Linux ----
+      # One build-config overlay for both:
+      # - Windows + certificate secret: register scripts/windows-sign.ps1 as
+      #   Tauri's signCommand so the app exe AND both installers get signed
+      #   during bundling. Without it, the build is unsigned.
+      # - Updater key secret: createUpdaterArtifacts, so the bundler writes a
+      #   minisign .sig next to every installer (uploaded with it). Kept out
+      #   of tauri.conf.json so local builds never need the private key.
+      #   (macOS signs its re-packed .app.tar.gz itself after the Apple
+      #   signature, see the macOS upload step.)
+      - name: Configure build overlay (Windows / Linux)
+        id: overlay
+        if: runner.os != 'macOS'
         shell: pwsh
         env:
           HAS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+          HAS_UPDATER_KEY: ${{ needs.prepare.outputs.updater-signed }}
         run: |
-          if ($env:HAS_CERT -eq 'true') {
-            $script = Join-Path $env:GITHUB_WORKSPACE 'scripts\windows-sign.ps1'
-            $cfg = @{ bundle = @{ windows = @{ signCommand = @{ cmd = 'pwsh'; args = @('-NoProfile', '-File', $script, '%1') } } } }
-            $path = Join-Path $env:RUNNER_TEMP 'tauri.windows-sign.json'
-            $cfg | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 $path
+          $bundle = @{}
+          if ($env:RUNNER_OS -eq 'Windows') {
+            if ($env:HAS_CERT -eq 'true') {
+              $script = Join-Path $env:GITHUB_WORKSPACE 'scripts\windows-sign.ps1'
+              $bundle.windows = @{ signCommand = @{ cmd = 'pwsh'; args = @('-NoProfile', '-File', $script, '%1') } }
+              "mode=authenticode" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+            } else {
+              "mode=unsigned" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+            }
+          }
+          if ($env:HAS_UPDATER_KEY -eq 'true') { $bundle.createUpdaterArtifacts = $true }
+          if ($bundle.Count -gt 0) {
+            $path = Join-Path $env:RUNNER_TEMP 'tauri.release-overlay.json'
+            @{ bundle = $bundle } | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 $path
+            Get-Content $path
             "config-arg=--config `"$path`"" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-            "mode=authenticode" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          } else {
-            "mode=unsigned" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           }
 
       # ------------------------------------------- Windows + Linux build ----
@@ -178,15 +201,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WINDOWS_CERTIFICATE: ${{ runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || '' }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+          # Updater signatures (.sig) when the overlay enabled them.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.prepare.outputs.release-id }}
-          args: ${{ matrix.args }} ${{ steps.winsign.outputs.config-arg }}
+          args: ${{ matrix.args }} ${{ steps.overlay.outputs.config-arg }}
+          # latest.json is built by rename-assets AFTER the stable rename
+          # (tauri-action's own one would point at the versioned names).
+          includeUpdaterJson: false
 
       - name: Verify Authenticode signatures (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          MODE: ${{ steps.winsign.outputs.mode }}
+          MODE: ${{ steps.overlay.outputs.mode }}
         run: |
           $files = @(Get-ChildItem -Path 'src-tauri\target\release\bundle' -Recurse -Include *.msi, *-setup.exe)
           $files += @(Get-ChildItem -Path 'src-tauri\target\release' -Filter *.exe -File)
@@ -246,6 +275,9 @@ jobs:
           RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
           DMG: ${{ steps.macsign.outputs.dmg }}
           APP: ${{ steps.macsign.outputs.app }}
+          UPDATER_SIGNED: ${{ needs.prepare.outputs.updater-signed }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/upload"
@@ -256,8 +288,17 @@ jobs:
           arch=$(echo "$dmg_name" | sed -E 's/.*_([^_]+)\.dmg$/\1/')
           tar_name="Helmcode.Desktop_${arch}.app.tar.gz"
           cp "$DMG" "$out/$dmg_name"
+          # The updater payload is the SIGNED (and notarized/stapled) app.
           tar -czf "$out/$tar_name" -C "$(dirname "$APP")" "$(basename "$APP")"
-          for f in "$out/$dmg_name" "$out/$tar_name"; do
+          files=("$out/$dmg_name" "$out/$tar_name")
+          if [ "$UPDATER_SIGNED" = "true" ]; then
+            # minisign signature for the auto-updater (reads the key and its
+            # password from TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]).
+            pnpm tauri signer sign "$out/$tar_name"
+            [ -s "$out/$tar_name.sig" ] || { echo "updater signature missing"; exit 1; }
+            files+=("$out/$tar_name.sig")
+          fi
+          for f in "${files[@]}"; do
             name=$(basename "$f")
             # Re-runs: replace an asset with the same name.
             old=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
@@ -288,6 +329,14 @@ jobs:
           for id in $(gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --paginate --jq '.[].id'); do
             n=$(gh api "repos/$GITHUB_REPOSITORY/releases/assets/$id" --jq .name)
             case "$n" in
+              # Updater signatures follow their installer's stable name.
+              *aarch64.app.tar.gz.sig) rename_asset "$id" "Helmcode.Desktop-macOS-AppleSilicon.app.tar.gz.sig" ;;
+              *x64.app.tar.gz.sig)    rename_asset "$id" "Helmcode.Desktop-macOS-Intel.app.tar.gz.sig" ;;
+              *x64_en-US.msi.sig)     rename_asset "$id" "Helmcode.Desktop-Windows-x64.msi.sig" ;;
+              *x64-setup.exe.sig)     rename_asset "$id" "Helmcode.Desktop-Windows-x64-setup.exe.sig" ;;
+              *amd64.deb.sig)         rename_asset "$id" "Helmcode.Desktop-Linux-amd64.deb.sig" ;;
+              *amd64.AppImage.sig)    rename_asset "$id" "Helmcode.Desktop-Linux-amd64.AppImage.sig" ;;
+              *x86_64.rpm.sig)        rename_asset "$id" "Helmcode.Desktop-Linux-x86_64.rpm.sig" ;;
               *aarch64*.dmg)          rename_asset "$id" "Helmcode.Desktop-macOS-AppleSilicon.dmg" ;;
               *x64*.dmg)              rename_asset "$id" "Helmcode.Desktop-macOS-Intel.dmg" ;;
               *aarch64.app.tar.gz)    rename_asset "$id" "Helmcode.Desktop-macOS-AppleSilicon.app.tar.gz" ;;
@@ -301,3 +350,42 @@ jobs:
           done
           echo "final names:"
           gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --paginate --jq '.[].name'
+
+      # Auto-update feed. Built AFTER the rename so every URL is a stable
+      # name under this tag; each platform entry inlines the minisign
+      # signature of its installer. Fails (instead of publishing a partial
+      # feed) when a required signature is missing. Goes live for installed
+      # apps when this draft is PUBLISHED (releases/latest/download/...).
+      - name: Checkout (updater manifest script)
+        if: needs.prepare.outputs.updater-signed == 'true'
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and upload latest.json
+        if: needs.prepare.outputs.updater-signed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          rid="$RELEASE_ID"
+          sigs="$RUNNER_TEMP/sigs"
+          mkdir -p "$sigs"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --paginate \
+            --jq '.[] | select(.name | endswith(".sig")) | "\(.id) \(.name)"' |
+          while read -r id name; do
+            gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$sigs/$name"
+          done
+          manifest="$RUNNER_TEMP/latest.json"
+          node scripts/updater-manifest.mjs --tag "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --sigs "$sigs" --out "$manifest" \
+            --notes "Helmcode Desktop $TAG: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          old=$(gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --paginate \
+                  --jq '.[] | select(.name == "latest.json") | .id')
+          if [ -n "$old" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"; fi
+          gh api -X POST -H 'Content-Type: application/json' \
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$rid/assets?name=latest.json" \
+            --input "$manifest" --jq .name
+          echo "- Auto-update: **signed latest.json** uploaded (live once the release is published)." >> "$GITHUB_STEP_SUMMARY"
