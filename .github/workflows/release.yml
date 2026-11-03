@@ -90,3 +90,34 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  rename-assets:
+    # Stable asset names: every release ships the SAME file names, so
+    # https://github.com/helmcode/nan-desktop/releases/latest/download/<name>
+    # is a permanent one-click URL for the latest stable build (the landings
+    # and the docs link these; do not add versions back). tauri-action
+    # uploads with versioned names; this job renames them via the API.
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rename release assets to stable names
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          rid=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/${{ github.ref_name }}" --jq .id)
+          rename_asset() { gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$1" -f name="$2" --jq .name; }
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --jq '.[].id'); do
+            n=$(gh api "repos/$GITHUB_REPOSITORY/releases/assets/$id" --jq .name)
+            case "$n" in
+              *aarch64*.dmg)    rename_asset "$id" "Helmcode.Desktop-macOS-AppleSilicon.dmg" ;;
+              *x64*.dmg)        rename_asset "$id" "Helmcode.Desktop-macOS-Intel.dmg" ;;
+              *x64_en-US.msi)   rename_asset "$id" "Helmcode.Desktop-Windows-x64.msi" ;;
+              *x64-setup.exe)   rename_asset "$id" "Helmcode.Desktop-Windows-x64-setup.exe" ;;
+              *amd64.deb)       rename_asset "$id" "Helmcode.Desktop-Linux-amd64.deb" ;;
+              *amd64.AppImage)  rename_asset "$id" "Helmcode.Desktop-Linux-amd64.AppImage" ;;
+              *x86_64.rpm)      rename_asset "$id" "Helmcode.Desktop-Linux-x86_64.rpm" ;;
+            esac
+          done
+          echo "final names:"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --jq '.[].name'
