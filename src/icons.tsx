@@ -41,6 +41,13 @@ export const IconDownload = (p: IconProps) => (
   </Icon>
 );
 
+export const IconPencil = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 20h4L19 9l-4-4L4 16v4z" />
+    <path d="M13.5 6.5l4 4" />
+  </Icon>
+);
+
 export const IconFolder = (p: IconProps) => (
   <Icon {...p}>
     <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />

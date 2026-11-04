@@ -26,6 +26,20 @@
 //                                 this server (plain http on 127.0.0.1 —
 //                                 debug builds with NAN_DESKTOP_MOCK_INFERENCE
 //                                 accept loopback http; release: https only).
+//   POST /v1/images/edits       → the desktop-only edit surface (served by
+//                                 the platform API in production). Checks
+//                                 `Authorization: Bearer fake-jwt` (the
+//                                 mock-device session token), then parses
+//                                 the multipart body: `instruction`
+//                                 (1..2000 chars), `image[]` (1..3 files,
+//                                 PNG/JPEG/WebP magic), `n` = 1. Answers
+//                                 ALWAYS {"created":…, "data":[{"b64_json"}]}.
+//                                 Errors mirror the platform: 400 generic,
+//                                 401, instruction "trigger-403" → 403
+//                                 tier_restricted, "trigger-404" → 404,
+//                                 "trigger-502" → 502. Point the app at it
+//                                 with NAN_DESKTOP_MOCK_IMAGE_EDITS=
+//                                 http://127.0.0.1:14325/v1 (debug builds).
 //   GET  /storage/<id>.png      → the PNG bytes, NO auth required (it is
 //                                 "presigned"). Records whether any
 //                                 Authorization header arrived — the app
@@ -58,11 +72,18 @@ const DIM_STEP = 16;
 const TINY_PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
+// Same fixture session token as test/mock-device.mjs.
+const MOCK_SESSION = "fake-jwt";
+
+// Edit contract caps (keep in sync with src-tauri/src/image_edit.rs).
+const MAX_EDIT_IMAGES = 3;
+const MAX_INSTRUCTION_CHARS = 2000;
+
 // The last recorded request (metadata only — never the key).
-let recorded = { generation: null, storage: null };
+let recorded = { generation: null, storage: null, edit: null };
 
 function reset() {
-  recorded = { generation: null, storage: null };
+  recorded = { generation: null, storage: null, edit: null };
 }
 
 const DEFAULT_SHAPE = process.env.MOCK_IMAGES_SHAPE === "url" ? "url" : "b64";
@@ -128,6 +149,70 @@ function handleGenerations(req, res, body) {
   sendJson(res, 200, { created: 1730000000, data: [{ b64_json: TINY_PNG_B64 }] });
 }
 
+// Minimal multipart/form-data parser: [{name, filename, type, data}].
+function parseMultipart(contentType, body) {
+  const match = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType ?? "");
+  if (!match) return null;
+  const delimiter = Buffer.from(`--${match[1] ?? match[2]}`);
+  const parts = [];
+  let start = body.indexOf(delimiter);
+  while (start !== -1) {
+    const next = body.indexOf(delimiter, start + delimiter.length);
+    if (next === -1) break;
+    // Skip the CRLF after the delimiter; drop the CRLF before the next one.
+    const chunk = body.subarray(start + delimiter.length + 2, next - 2);
+    const headEnd = chunk.indexOf("\r\n\r\n");
+    if (headEnd !== -1) {
+      const head = chunk.subarray(0, headEnd).toString("utf8");
+      const name = /name="([^"]*)"/i.exec(head)?.[1];
+      const filename = /filename="([^"]*)"/i.exec(head)?.[1] ?? null;
+      const type = /content-type:\s*([^\r\n]+)/i.exec(head)?.[1]?.trim() ?? null;
+      if (name !== undefined) parts.push({ name, filename, type, data: chunk.subarray(headEnd + 4) });
+    }
+    start = next;
+  }
+  return parts;
+}
+
+function isImage(data) {
+  const png = data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const jpeg = data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+  const webp = data.subarray(0, 4).toString("latin1") === "RIFF" && data.subarray(8, 12).toString("latin1") === "WEBP";
+  return png || jpeg || webp;
+}
+
+function handleEdits(req, res, body) {
+  if ((req.headers.authorization ?? "") !== `Bearer ${MOCK_SESSION}`) {
+    return sendJson(res, 401, { error: "unauthorized" });
+  }
+  const parts = parseMultipart(req.headers["content-type"], body);
+  if (!parts) return sendJson(res, 400, { error: "invalid request" });
+  const instruction = parts.find((p) => p.name === "instruction")?.data.toString("utf8") ?? "";
+  const images = parts.filter((p) => p.name === "image[]");
+  const n = parts.find((p) => p.name === "n")?.data.toString("utf8") ?? "1";
+  if (instruction === "trigger-403") return sendJson(res, 403, { error: "tier_restricted" });
+  if (instruction === "trigger-404") return sendJson(res, 404, { error: "not_found" });
+  if (instruction === "trigger-502") return sendJson(res, 502, { error: "upstream" });
+  const chars = [...instruction].length;
+  if (
+    chars === 0 ||
+    chars > MAX_INSTRUCTION_CHARS ||
+    images.length === 0 ||
+    images.length > MAX_EDIT_IMAGES ||
+    n !== "1" ||
+    !images.every((img) => isImage(img.data))
+  ) {
+    return sendJson(res, 400, { error: "invalid request" });
+  }
+  // Metadata only: the instruction LENGTH, never its text or the bytes.
+  recorded.edit = {
+    instruction_chars: chars,
+    images: images.map((img) => ({ filename: img.filename, type: img.type, bytes: img.data.length })),
+    n,
+  };
+  sendJson(res, 200, { created: 1730000000, data: [{ b64_json: TINY_PNG_B64 }] });
+}
+
 function handleStorage(req, res, pathname) {
   recorded.storage = { path: pathname, authorization_present: req.headers.authorization !== undefined };
   const png = Buffer.from(TINY_PNG_B64, "base64");
@@ -152,6 +237,9 @@ const server = createServer((req, res) => {
   }
   if (req.method === "POST" && url.pathname === "/v1/images/generations") {
     return void readBody(req).then((body) => handleGenerations(req, res, body));
+  }
+  if (req.method === "POST" && url.pathname === "/v1/images/edits") {
+    return void readBody(req).then((body) => handleEdits(req, res, body));
   }
   sendJson(res, 404, { error: "not found" });
 });

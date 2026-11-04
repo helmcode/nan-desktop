@@ -15,6 +15,8 @@ mod conn_test;
 // Credential vault: one encrypted file, one master key (round 5).
 mod credentials;
 mod device_flow;
+// Image editing (`/v1/images/edits`, desktop sessions only).
+mod image_edit;
 mod images;
 // Safe URL handling: open_external validation + main-window navigation
 // guard (external review B3).
@@ -199,6 +201,8 @@ pub fn run() {
             images::image_generate,
             images::image_cancel,
             images::image_save_as,
+            image_edit::edit_images,
+            image_edit::image_edit_pick,
             tools::tools_grant_add,
             tools::tools_grant_computer_wide,
             tools::tools_grant_list,

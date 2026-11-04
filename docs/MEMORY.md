@@ -38,7 +38,9 @@ chat never blocks and you are never signed out because of it.
 
 ## What NEVER leaves your device
 
-- **Images** you generate or view (local files, zero upload).
+- **Images** you generate or view (local files, never synced). The one
+  exception is an image you explicitly send to **Edit**: its bytes go to the
+  platform's edit endpoint for that request only (see below).
 - **Credentials** (the encrypted local vault, see SECURITY.md).
 - **Your prompts and responses**: the platform keeps a strict zero-logs
   policy — no prompt or response content is recorded anywhere.
@@ -50,6 +52,24 @@ chat never blocks and you are never signed out because of it.
   other desktop assistants make.
 - Credentials are stronger: AES-256-GCM in an encrypted vault whose master
   key lives in the OS keychain (release builds) — see SECURITY.md.
+
+## Image edits (lineage)
+
+Editing an image (NaN community, desktop sessions only) sends the 1 to 3
+selected images and your instruction to `POST /v1/images/edits` on the
+platform API, authenticated with your desktop login session (never the
+inference key). The Rust core reads the image bytes from disk itself; only
+this app's own images are accepted: chat images under `<app data>/images`
+and files you pick with the native dialog, which must sit inside one of
+your working folders and are never taken from credential, login-item,
+shell-startup or key-file locations (copied to `<app data>/images/staged`,
+removed after a successful edit or after 24 h). The result comes back
+inline (`b64_json`), is saved locally like a generated image and stored in
+`chat.db` as a new assistant row whose `parent_message_id` points at the
+message the source image came from; the chat shows it with an "Edited"
+badge and a link to the original. Image rows stay device-local: like every
+image, edits are never part of the cloud sync. The instruction text and
+image bytes are never logged.
 
 ## Chat model picker (allowlist)
 

@@ -25,6 +25,15 @@
 - The composer's image button now uses a sparkle icon and the tooltip
   "Create image"; when image mode is on, the placeholder asks for the image
   to create and the button shows the accent state.
+- Image editing (NaN community): every image in the chat has an Edit action
+  next to download. It opens the composer in edit mode with a tray of up to
+  3 reference images (add more from your working folders with "Add image",
+  remove any thumbnail) and an instruction box. The result appears as a new
+  image with an "Edited" badge and a link to its original. Sent from the
+  Rust core to `POST /v1/images/edits` with the desktop session; images are
+  read from disk by the core and checked (PNG/JPEG/WebP, 20 MB each,
+  instruction up to 2000 characters). Picked files go through the folder
+  grants and the sensitive-path deny-list.
 
 ## 0.2.0 — First public beta
 

@@ -15,6 +15,14 @@ import {
 import { approvalsReducer, placeCards, type ApprovalCardState } from "./chat/approvals";
 import { lastProducedTarget } from "./chat/autoOpen";
 import { rowsForDisplay, titleFromFirstMessage, withConversation } from "./chat/conversationList";
+import {
+  MAX_EDIT_INSTRUCTION,
+  addSource,
+  canSubmitEdit,
+  parentMessageId,
+  removeSource,
+  type EditSource,
+} from "./chat/editTray";
 import { messageFiles } from "./chat/filePaths";
 import {
   adoptSelection,
@@ -28,6 +36,7 @@ import { stripToolMarkup } from "./chat/toolMarkup";
 import { AllowNudgeCard } from "./components/AllowNudgeCard";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { ChatImage } from "./components/ChatImage";
+import { EditTray } from "./components/EditTray";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
@@ -41,6 +50,7 @@ import {
   VOICE_STORAGE_KEY,
   chatErrorLabel,
   commandErrorLabel,
+  editErrorLabel,
   folderName,
   grantErrorLabel,
   hostOf,
@@ -72,7 +82,14 @@ import {
 import { Markdown } from "./Markdown";
 import { targetKey, type PreviewTarget } from "./preview/kind";
 import { Settings } from "./Settings";
-import type { ChatMessageRow, ConversationView, ProfileOverview, ProfileView, WebSource } from "./types";
+import type {
+  ChatMessageRow,
+  ConversationView,
+  ProfileOverview,
+  ProfileView,
+  StagedEditSource,
+  WebSource,
+} from "./types";
 import { useWorkspace } from "./workspace";
 
 // The preview pane and its renderers load on first use (S21).
@@ -138,6 +155,16 @@ function withoutKey(set: Set<number>, key: number): Set<number> {
   next.delete(key);
   return next;
 }
+
+/// A copy of `map` without `key`.
+function withoutEntry<V>(map: Map<number, V>, key: number): Map<number, V> {
+  const next = new Map(map);
+  next.delete(key);
+  return next;
+}
+
+// Image editing is served to the NaN community's desktop sessions only.
+const IMAGE_EDIT_PROFILE = "nan";
 
 type Screen = "loading" | "error" | "picker" | "authorizing" | "chat";
 type AuthPhase = "waiting" | "denied" | "expired" | "error";
@@ -475,6 +502,26 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [imageSize, setImageSize] = useState(DEFAULT_IMAGE_SIZE);
   const [imageGeneratingIds, setImageGeneratingIds] = useState<Set<number>>(() => new Set());
 
+  // Image edits: per-conversation edit mode (the tray's sources; a key is
+  // present while edit mode is on, even with an empty tray), which running
+  // image jobs are edits, and whether the core's file picker is open.
+  const imageEditAvailable = overview.active_profile === IMAGE_EDIT_PROFILE;
+  const [edits, setEdits] = useState<Map<number, EditSource[]>>(() => new Map());
+  const editSources = edits.get(activeConvId ?? NEW_CHAT_KEY);
+  const editMode = editSources !== undefined;
+  const [editingIds, setEditingIds] = useState<Set<number>>(() => new Set());
+  // The ref is updated synchronously so the image event handlers always know
+  // whether the job that just ended was an edit.
+  const editingIdsRef = useRef(editingIds);
+  const markEditing = useCallback((conversationId: number, editing: boolean): void => {
+    const next = new Set(editingIdsRef.current);
+    if (editing) next.add(conversationId);
+    else next.delete(conversationId);
+    editingIdsRef.current = next;
+    setEditingIds(next);
+  }, []);
+  const [editPicking, setEditPicking] = useState(false);
+
   // Voice: read-aloud + dictation (hidden this round, S24).
   const [voice, setVoice] = useState<string>(storedVoice);
   const [speakingMsgId, setSpeakingMsgId] = useState<number | null>(null);
@@ -758,6 +805,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         else next.delete(conversationId);
         return next;
       });
+      if (!generating) markEditing(conversationId, false);
     };
     const unlistens: Promise<UnlistenFn>[] = [
       listen<ChatIdPayload>("images://started", (event) => {
@@ -772,11 +820,13 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       }),
       listen<ImagesError>("images://error", (event) => {
         const { conversation_id, kind } = event.payload;
+        // Read before markGenerating clears it: edits get their own copy.
+        const prefix = editingIdsRef.current.has(conversation_id) ? "edit" : "image";
         markGenerating(conversation_id, false);
         if (kind === "unauthorized") {
           setSessionExpired(true);
         } else if (activeConvRef.current === conversation_id) {
-          setInlineError(`image:${kind}`);
+          setInlineError(`${prefix}:${kind}`);
         }
         void refreshConversations();
       }),
@@ -789,7 +839,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         void promise.then((unlisten) => unlisten());
       });
     };
-  }, [reloadAfterReply, refreshConversations, syncMemory]);
+  }, [reloadAfterReply, refreshConversations, syncMemory, markEditing]);
 
   // Voice transport: one global playback.
   useEffect(() => {
@@ -942,6 +992,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       return next;
     });
     setImageModes((prev) => withoutKey(prev, NEW_CHAT_KEY));
+    setEdits((prev) => withoutEntry(prev, NEW_CHAT_KEY));
     composerRef.current?.focus();
   }, []);
 
@@ -970,6 +1021,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         return next;
       });
       setImageModes((prev) => withoutKey(prev, conversationId));
+      setEdits((prev) => withoutEntry(prev, conversationId));
       await refreshConversations();
       void syncMemory();
     },
@@ -1021,13 +1073,65 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   }, []);
   const closePreview = useCallback(() => setPreviewOpen(false), [setPreviewOpen]);
 
-  // Image mode toggles for the open conversation only.
+  // Image mode toggles for the open conversation only. Image mode and edit
+  // mode are exclusive: toggling image mode closes an open edit.
   const toggleImageMode = useCallback((): void => {
     const key = activeConvRef.current ?? NEW_CHAT_KEY;
     setImageModes((prev) => {
       if (prev.has(key)) return withoutKey(prev, key);
       return new Set(prev).add(key);
     });
+    setEdits((prev) => withoutEntry(prev, key));
+  }, []);
+
+  // Edit mode: the "Edit" action on a chat image opens it with that image in
+  // the tray (added to an already open tray, up to 3).
+  const startEdit = useCallback((messageId: number, path: string, label: string): void => {
+    const key = activeConvRef.current ?? NEW_CHAT_KEY;
+    setEdits((prev) => new Map(prev).set(key, addSource(prev.get(key) ?? [], { path, label, messageId })));
+    setImageModes((prev) => withoutKey(prev, key));
+    composerRef.current?.focus();
+  }, []);
+
+  const closeEdit = useCallback((): void => {
+    const key = activeConvRef.current ?? NEW_CHAT_KEY;
+    setEdits((prev) => withoutEntry(prev, key));
+  }, []);
+
+  const removeEditSource = useCallback((path: string): void => {
+    const key = activeConvRef.current ?? NEW_CHAT_KEY;
+    setEdits((prev) => {
+      const current = prev.get(key);
+      if (!current) return prev;
+      return new Map(prev).set(key, removeSource(current, path));
+    });
+  }, []);
+
+  // "Add image": the core opens the native file picker and validates the
+  // file against the folder grants and the sensitive-path deny-list.
+  const pickEditSource = useCallback(async (): Promise<void> => {
+    const profileId = activeProfileRef.current;
+    if (!profileId) return;
+    const key = activeConvRef.current ?? NEW_CHAT_KEY;
+    setEditPicking(true);
+    setInlineError("");
+    try {
+      const staged = await invoke<StagedEditSource | null>("image_edit_pick", { profileId });
+      if (staged) {
+        setEdits((prev) => {
+          const current = prev.get(key);
+          if (!current) return prev;
+          return new Map(prev).set(
+            key,
+            addSource(current, { path: staged.path, label: staged.name, messageId: null }),
+          );
+        });
+      }
+    } catch (err) {
+      setInlineError(`edit:${String(err)}`);
+    } finally {
+      setEditPicking(false);
+    }
   }, []);
 
   const fileRoots: string[] | "any" = workspace.computerWide
@@ -1066,7 +1170,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       next.delete(conversationId);
       return next;
     });
-  }, []);
+    markEditing(conversationId, false);
+  }, [markEditing]);
 
   const ensureConversation = useCallback(async (): Promise<number | null> => {
     const profileId = activeProfileRef.current;
@@ -1091,6 +1196,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       const next = withoutKey(prev, NEW_CHAT_KEY);
       next.add(created);
       return next;
+    });
+    // ...and an edit started there (picked files).
+    setEdits((prev) => {
+      const pending = prev.get(NEW_CHAT_KEY);
+      if (!pending) return prev;
+      return withoutEntry(prev, NEW_CHAT_KEY).set(created, pending);
     });
     return created;
   }, []);
@@ -1179,6 +1290,48 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     }
   }, [composer, imageGeneratingActive, ensureConversation, imageSize, refreshConversations]);
 
+  // Edit mode submit: the core reads the tray's images from disk, posts the
+  // edit and persists the result as a child of the first chat image.
+  const sendEdit = useCallback(async (): Promise<void> => {
+    const instruction = composer.trim();
+    const sources = editSources ?? [];
+    if (!canSubmitEdit(sources, instruction, composerBusy)) return;
+    setSessionExpired(false);
+    setInlineError("");
+    let conversationId: number | null = null;
+    try {
+      conversationId = await ensureConversation();
+      if (conversationId === null) return;
+      const id = conversationId;
+      setImageGeneratingIds((prev) => new Set(prev).add(id));
+      markEditing(id, true);
+      setComposer("");
+      setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(instruction)));
+      await invoke("edit_images", {
+        conversationId: id,
+        parentMessageId: parentMessageId(sources),
+        instruction,
+        sourcePaths: sources.map((source) => source.path),
+      });
+      setEdits((prev) => withoutEntry(prev, id));
+      void refreshConversations();
+    } catch (err) {
+      if (conversationId !== null) {
+        const id = conversationId;
+        setImageGeneratingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        markEditing(id, false);
+      }
+      // Keep the instruction and the tray so the user can fix and retry.
+      setComposer(instruction);
+      setInlineError(`edit:${String(err)}`);
+      void refreshConversations();
+    }
+  }, [composer, editSources, composerBusy, ensureConversation, markEditing, refreshConversations]);
+
   // Auto-scroll to the newest content.
   useEffect(() => {
     const el = messagesRef.current;
@@ -1196,7 +1349,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   }, []);
 
   const submit = (): void => {
-    void (imageMode ? sendImage() : send());
+    void (editMode ? sendEdit() : imageMode ? sendImage() : send());
   };
 
   // Errors are stored as kinds and localized here, so a language switch
@@ -1205,6 +1358,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     if (!code) return "";
     if (code === "send") return t.chat.sendFailed;
     if (code.startsWith("image:")) return imageErrorLabel(t, code.slice("image:".length));
+    if (code.startsWith("edit:")) return editErrorLabel(t, code.slice("edit:".length));
     if (code.startsWith("cmd:")) return commandErrorLabel(t, code.slice("cmd:".length));
     if (code.startsWith("chat:")) return chatErrorLabel(t, code.slice("chat:".length));
     return chatErrorLabel(t, code);
@@ -1226,6 +1380,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   ) : null;
   const workspaceError = grantErrorLabel(t, workspace.error);
 
+  // The lineage link of an edited image: bring its original into view.
+  const scrollToMessage = (messageId: number): void => {
+    const target = document.getElementById(`msg-${messageId}`);
+    target?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  };
+
   const renderMessage = (m: ChatMessageRow): ReactNode => {
     if (m.role !== "assistant") {
       return (
@@ -1235,9 +1395,27 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       );
     }
     if (m.media_path) {
+      const mediaPath = m.media_path;
+      const parentId = m.parent_message_id ?? null;
+      const parentShown = parentId !== null && messages.some((row) => row.id === parentId);
       return (
-        <article className="msg msg-assistant">
-          <ChatImage path={m.media_path} alt={m.content} onResult={onImageSaved} />
+        <article className="msg msg-assistant" id={`msg-${m.id}`}>
+          <ChatImage
+            path={mediaPath}
+            alt={m.content}
+            onResult={onImageSaved}
+            onEdit={imageEditAvailable ? () => startEdit(m.id, mediaPath, m.content) : undefined}
+          />
+          {parentId !== null && (
+            <p className="edit-lineage">
+              <span className="edit-badge">{t.chat.editedBadge}</span>
+              {parentShown && (
+                <button type="button" className="edit-parent-link" onClick={() => scrollToMessage(parentId)}>
+                  {t.chat.viewOriginal}
+                </button>
+              )}
+            </p>
+          )}
           <p className="image-caption">{m.content}</p>
           <div className="msg-actions">
             <SaveImageButton path={m.media_path} onResult={onImageSaved} />
@@ -1257,11 +1435,16 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     )
       return null;
     return (
-      <article className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}>
+      <article id={`msg-${m.id}`} className={`msg msg-assistant${speakingMsgId === m.id ? " speaking" : ""}`}>
         <Markdown text={visible} onOpenLink={openWebPreview} />
         {files.images.map((path) => (
           <figure key={path} className="msg-figure">
-            <ChatImage path={path} alt={t.chat.generatedImage} onResult={onImageSaved} />
+            <ChatImage
+              path={path}
+              alt={t.chat.generatedImage}
+              onResult={onImageSaved}
+              onEdit={imageEditAvailable ? () => startEdit(m.id, path, t.chat.generatedImage) : undefined}
+            />
             <div className="msg-actions">
               <SaveImageButton path={path} onResult={onImageSaved} />
             </div>
@@ -1478,7 +1661,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   <article className="msg msg-assistant" role="status">
                     <p className="activity">
                       <span className="pulse-dot" aria-hidden="true" />
-                      {t.chat.generatingImage}
+                      {activeConvId !== null && editingIds.has(activeConvId) ? t.chat.editingImage : t.chat.generatingImage}
                     </p>
                   </article>
                 )}
@@ -1496,7 +1679,17 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             </div>
 
             <footer className="composer">
-              <div className={`composer-box${imageMode ? " image-mode" : ""}`}>
+              <div className={`composer-box${editMode ? " edit-mode" : imageMode ? " image-mode" : ""}`}>
+                {editSources !== undefined && (
+                  <EditTray
+                    sources={editSources}
+                    adding={editPicking}
+                    disabled={composerBusy}
+                    onAdd={() => void pickEditSource()}
+                    onRemove={removeEditSource}
+                    onClose={closeEdit}
+                  />
+                )}
                 <textarea
                   ref={composerRef}
                   className="composer-input"
@@ -1509,9 +1702,18 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                     }
                   }}
                   placeholder={
-                    sttBusy ? t.chat.placeholderTranscribing : imageMode ? t.chat.placeholderImage : t.chat.placeholder
+                    sttBusy
+                      ? t.chat.placeholderTranscribing
+                      : editMode
+                        ? t.chat.placeholderEdit
+                        : imageMode
+                          ? t.chat.placeholderImage
+                          : t.chat.placeholder
                   }
-                  aria-label={imageMode ? t.chat.imagePromptLabel : t.chat.messageLabel}
+                  aria-label={
+                    editMode ? t.chat.editInstructionLabel : imageMode ? t.chat.imagePromptLabel : t.chat.messageLabel
+                  }
+                  maxLength={editMode ? MAX_EDIT_INSTRUCTION : undefined}
                   rows={2}
                   disabled={composerBusy}
                 />
@@ -1578,9 +1780,13 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                         type="button"
                         className="send-btn"
                         onClick={submit}
-                        disabled={composer.trim().length === 0}
-                        aria-label={imageMode ? t.chat.createImage : t.chat.send}
-                        title={imageMode ? t.chat.createImage : t.chat.send}
+                        disabled={
+                          editMode
+                            ? !canSubmitEdit(editSources ?? [], composer, composerBusy)
+                            : composer.trim().length === 0
+                        }
+                        aria-label={editMode ? t.chat.applyEdit : imageMode ? t.chat.createImage : t.chat.send}
+                        title={editMode ? t.chat.applyEdit : imageMode ? t.chat.createImage : t.chat.send}
                       >
                         <IconArrowUp size={18} />
                       </button>

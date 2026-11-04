@@ -54,8 +54,8 @@
 //! that fails in between leaves an orphan: [`sweep_orphan_images`] removes
 //! unreferenced images older than 24 h at startup (best effort).
 //!
-//! Scope note (L13): v1 is GENERATION ONLY — no image editing surface
-//! (`flux-2-klein` / `/v1/images/edits`) is exposed.
+//! Image EDITING (`POST /v1/images/edits`, desktop-session only) lives in
+//! `image_edit.rs`; it reuses this module's save path, registry and events.
 //!
 //! Zero telemetry (S8): the only hosts contacted are the conversation
 //! profile's own inference base — a compiled-in constant (S2) — and, for the
@@ -135,6 +135,20 @@ pub fn generations_url(base: &str) -> String {
         format!("{base}/images/generations")
     } else {
         format!("{base}/v1/images/generations")
+    }
+}
+
+/// Image EDIT endpoint for a base, alongside [`generations_url`] and with
+/// the same `/v1` rule: a base ending in `/v1` gets `/images/edits`, a bare
+/// host root gets `/v1/images/edits`. The edit surface is served by the
+/// community platform API (desktop sessions only), so the base passed here
+/// is the profile's PLATFORM base (see `image_edit::edits_base`).
+pub fn edits_url(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/images/edits")
+    } else {
+        format!("{base}/v1/images/edits")
     }
 }
 
@@ -468,8 +482,9 @@ pub fn sweep_orphans_in_background(app_data: PathBuf) {
     let _ = std::thread::Builder::new()
         .name("orphan-image-sweep".into())
         .spawn(move || {
-            let deleted =
-                sweep_orphan_images(&app_data, ORPHAN_MIN_AGE, std::time::SystemTime::now());
+            let now = std::time::SystemTime::now();
+            let deleted = sweep_orphan_images(&app_data, ORPHAN_MIN_AGE, now)
+                + crate::image_edit::sweep_staged_sources(&app_data, ORPHAN_MIN_AGE, now);
             if deleted > 0 {
                 eprintln!("helmcode-desktop: removed {deleted} orphaned generated image(s)");
             }
@@ -534,7 +549,7 @@ pub struct ImagesState(Mutex<HashMap<String, ActiveImage>>);
 
 /// Atomically abort the previous generation for `conversation_id` (if any)
 /// and reserve the next generation. No handle yet — `attach_image` adds it.
-fn reserve_image(state: &ImagesState, conversation_id: i64) -> Result<u64, String> {
+pub(crate) fn reserve_image(state: &ImagesState, conversation_id: i64) -> Result<u64, String> {
     let mut guard = state
         .0
         .lock()
@@ -564,7 +579,7 @@ fn reserve_image(state: &ImagesState, conversation_id: i64) -> Result<u64, Strin
 /// Attach the freshly spawned handle to its reserved generation. If another
 /// generate already superseded this one (a higher generation is registered),
 /// the handle is aborted immediately — the superseded task never emits.
-fn attach_image(
+pub(crate) fn attach_image(
     state: &ImagesState,
     conversation_id: i64,
     generation: u64,
@@ -591,7 +606,7 @@ fn attach_image(
 
 /// Remove this task's registry entry — but only if it is still the newest
 /// (a superseding task must not be evicted by the task it replaced).
-fn release_image(state: &ImagesState, conversation_id: i64, generation: u64) {
+pub(crate) fn release_image(state: &ImagesState, conversation_id: i64, generation: u64) {
     if let Ok(mut guard) = state.0.lock() {
         let map_key = conversation_id.to_string();
         if guard.get(&map_key).map(|entry| entry.generation) == Some(generation) {

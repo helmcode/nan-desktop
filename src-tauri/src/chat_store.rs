@@ -98,6 +98,10 @@ pub struct ChatMessageRow {
     /// Round 3: files the reply's tool actions produced (preview chips) and
     /// images it generated (shown inline). Empty for every other row.
     pub artifacts: Vec<Artifact>,
+    /// Image edit lineage: the message whose image was the edit's source
+    /// (an image row or a tool reply carrying an image artifact). `None` for
+    /// every other row, and for edits made only from picked local files.
+    pub parent_message_id: Option<i64>,
 }
 
 /// What a produced artifact is: a file inside the user's folders (opened in
@@ -150,6 +154,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_media_path_column(conn)?;
     ensure_column(conn, "messages", "sources", "TEXT")?;
     ensure_column(conn, "messages", "artifacts", "TEXT")?;
+    ensure_column(conn, "messages", "parent_message_id", "INTEGER")?;
     ensure_column(conn, "conversations", "remote_id", "TEXT")?;
     ensure_column(conn, "conversations", "synced_at", "TEXT")?;
     conn.execute_batch(
@@ -325,6 +330,53 @@ pub fn insert_image_message(
     Ok(conn.last_insert_rowid())
 }
 
+/// Insert an assistant image row produced by an image EDIT: like
+/// [`insert_image_message`] (`content` = the edit instruction, `model` = the
+/// edit model, `media_path` = the saved result) plus the lineage link to the
+/// message the source image came from. A `parent_message_id` that is not a
+/// row of `conversation_id` is refused (`QueryReturnedNoRows`): lineage
+/// never crosses conversations.
+pub fn insert_edited_image_message(
+    conn: &Connection,
+    conversation_id: i64,
+    content: &str,
+    model: &str,
+    media_path: &str,
+    parent_message_id: Option<i64>,
+) -> Result<i64, rusqlite::Error> {
+    if let Some(parent) = parent_message_id
+        && !message_in_conversation(conn, conversation_id, parent)?
+    {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    conn.execute(
+        "INSERT INTO messages (conversation_id, role, content, model, media_path, created_at, status, parent_message_id)
+         VALUES (?1, 'assistant', ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?5, ?6)",
+        rusqlite::params![
+            conversation_id,
+            content,
+            model,
+            media_path,
+            STATUS_COMPLETE,
+            parent_message_id
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Whether `message_id` is a row of `conversation_id`.
+pub fn message_in_conversation(
+    conn: &Connection,
+    conversation_id: i64,
+    message_id: i64,
+) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1 AND conversation_id = ?2)",
+        rusqlite::params![message_id, conversation_id],
+        |row| row.get::<_, bool>(0),
+    )
+}
+
 /// Whether any message still references a file by its name (round 6, the
 /// orphan-image sweep): the `media_path` of image rows, the `artifacts`
 /// JSON of tool replies, or the reply text itself (the model is told the
@@ -481,8 +533,7 @@ pub fn list_conversations(
 }
 
 /// Column list read by [`map_message_row`] (order matters).
-const MESSAGE_COLUMNS: &str =
-    "id, conversation_id, role, content, model, media_path, created_at, status, sources, artifacts";
+const MESSAGE_COLUMNS: &str = "id, conversation_id, role, content, model, media_path, created_at, status, sources, artifacts, parent_message_id";
 
 fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::Error> {
     let status: String = row.get(7)?;
@@ -500,6 +551,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::
             .get::<_, Option<String>>(9)?
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default(),
+        parent_message_id: row.get(10)?,
     })
 }
 
@@ -1147,6 +1199,77 @@ mod tests {
             Some("/data/images/abc.png")
         );
         assert!(!messages[0].partial, "image rows are written complete");
+    }
+
+    // ---- image edits: child rows linked to their source message --------------
+
+    #[test]
+    fn edited_image_is_a_child_row_linked_to_its_parent() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let parent = insert_image_message(&conn, conv, "a fox", "qwen-image-2.1", "/d/a.png")
+            .expect("parent");
+
+        let child = insert_edited_image_message(
+            &conn,
+            conv,
+            "make it snowy",
+            "qwen-image-3.0-pro",
+            "/d/b.png",
+            Some(parent),
+        )
+        .expect("child");
+
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].parent_message_id, None,
+            "originals have no parent"
+        );
+        assert_eq!(messages[1].id, child);
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content, "make it snowy");
+        assert_eq!(messages[1].model.as_deref(), Some("qwen-image-3.0-pro"));
+        assert_eq!(messages[1].media_path.as_deref(), Some("/d/b.png"));
+        assert_eq!(messages[1].parent_message_id, Some(parent));
+        assert!(!messages[1].partial);
+    }
+
+    #[test]
+    fn edited_image_without_a_parent_is_allowed_for_picked_files() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        insert_edited_image_message(&conn, conv, "brighter", "m", "/d/c.png", None)
+            .expect("insert");
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages[0].parent_message_id, None);
+        assert_eq!(messages[0].media_path.as_deref(), Some("/d/c.png"));
+    }
+
+    #[test]
+    fn edit_lineage_never_crosses_conversations() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let a = insert_conversation(&conn, "nan", "a").expect("a");
+        let b = insert_conversation(&conn, "nan", "b").expect("b");
+        let foreign = insert_image_message(&conn, a, "x", "m", "/d/x.png").expect("x");
+
+        assert!(message_in_conversation(&conn, a, foreign).expect("query"));
+        assert!(!message_in_conversation(&conn, b, foreign).expect("query"));
+        assert!(
+            insert_edited_image_message(&conn, b, "edit", "m", "/d/y.png", Some(foreign)).is_err(),
+            "a parent from another conversation is refused"
+        );
+        assert!(
+            insert_edited_image_message(&conn, b, "edit", "m", "/d/y.png", Some(9999)).is_err(),
+            "a missing parent is refused"
+        );
+        assert!(
+            list_messages(&conn, b).expect("list").is_empty(),
+            "nothing written"
+        );
     }
 
     #[test]

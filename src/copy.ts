@@ -28,6 +28,12 @@ export function imageErrorLabel(t: Strings, kind: string): string {
   return t.imageErrors[kind] ?? chatErrorLabel(t, kind);
 }
 
+/// Image EDIT errors (local validation + the platform's edit statuses);
+/// anything else falls back to the image/chat copy.
+export function editErrorLabel(t: Strings, kind: string): string {
+  return t.editErrors[kind] ?? imageErrorLabel(t, kind);
+}
+
 /// Command errors arrive either as a classified kind or a free-form message
 /// (never shown raw: free-form text is technical).
 export function commandErrorLabel(t: Strings, err: unknown): string {

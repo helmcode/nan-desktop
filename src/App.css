@@ -1126,7 +1126,8 @@ button:disabled {
   vertical-align: top;
 }
 
-.msg-image-download {
+.msg-image-download,
+.msg-image-edit {
   position: absolute;
   top: 0.5rem;
   right: 0.5rem;
@@ -1157,6 +1158,123 @@ button:disabled {
 
 .msg-image-download:disabled {
   cursor: default;
+}
+
+/* Image edits: the Edit icon sits just left of the download icon. */
+.msg-image-edit {
+  right: calc(0.5rem + 32px + 0.375rem);
+}
+
+.msg-image-wrap:hover .msg-image-edit,
+.msg-image-edit:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.msg-image-edit:hover {
+  background-color: var(--surface-3);
+}
+
+/* Lineage of an edited image: a quiet badge plus a link to the original. */
+.edit-lineage {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-2);
+}
+
+.edit-badge {
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--accent-text);
+  background-color: var(--accent-soft);
+}
+
+.edit-parent-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.edit-parent-link:hover,
+.edit-parent-link:focus-visible {
+  color: var(--text);
+}
+
+/* Composer edit mode: reference tray above the instruction. */
+.composer-box.edit-mode {
+  border-style: dashed;
+  border-color: rgba(129, 140, 248, 0.55);
+}
+
+.edit-tray {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem 0;
+}
+
+.edit-tray-list {
+  display: flex;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.edit-thumb {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background-color: var(--surface-2);
+}
+
+.edit-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.edit-thumb-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background-color: rgba(10, 10, 14, 0.8);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.edit-thumb-remove:hover:not(:disabled) {
+  background-color: var(--surface-3);
+}
+
+.edit-tray-count {
+  font-size: 0.75rem;
+  color: var(--text-3);
+}
+
+.edit-tray-close {
+  margin-left: auto;
 }
 
 /* ---- update available (round 7) --------------------------------------- */

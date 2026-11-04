@@ -70,6 +70,30 @@ describe("ChatImage hover download (round 7)", () => {
     expect(invokedWith("image_save_as")).toEqual([]);
   });
 
+  it("has no Edit action unless one is wired", () => {
+    renderImage();
+    expect(screen.queryByRole("button", { name: "Edit image" })).toBeNull();
+  });
+
+  it("offers Edit next to Download when wired, without reaching the image area", () => {
+    const onEdit = vi.fn();
+    const onContainerClick = vi.fn();
+    render(
+      <I18nProvider initial="en">
+        <div onClick={onContainerClick}>
+          <ChatImage path={IMAGE} alt="A red fox" onResult={vi.fn()} onEdit={onEdit} />
+        </div>
+      </I18nProvider>,
+    );
+    const edit = screen.getByRole("button", { name: "Edit image" });
+    expect(edit.className).toBe("msg-image-edit");
+    expect(edit.parentElement).toBe(download().parentElement);
+    fireEvent.click(edit);
+    expect(onEdit).toHaveBeenCalledTimes(1);
+    expect(onContainerClick).not.toHaveBeenCalled();
+    expect(invokedWith("image_save_as")).toEqual([]);
+  });
+
   it("reports a failure and ignores clicks while the dialog is open", async () => {
     let fail: (e: Error) => void = () => {};
     resetTauri({ image_save_as: () => new Promise((_, reject) => (fail = reject)) });

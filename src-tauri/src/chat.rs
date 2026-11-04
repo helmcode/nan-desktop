@@ -1761,7 +1761,10 @@ mod tests {
         let parsed = parse_chat_models_config(CHAT_MODELS_JSON)
             .expect("src-tauri/chat-models.json must be valid");
         assert_eq!(parsed.headliner, "deepseek-v4-flash");
-        assert_eq!(parsed.models, vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]);
+        assert_eq!(
+            parsed.models,
+            vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]
+        );
         assert_eq!(chat_models_config(), &parsed);
     }
 
@@ -1769,7 +1772,10 @@ mod tests {
     fn picker_shows_exactly_the_three_allowlisted_models_in_file_order() {
         let mut ids = prod_catalog();
         ids.reverse(); // server order must not matter
-        assert_eq!(filter_chat_models(ids), vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]);
+        assert_eq!(
+            filter_chat_models(ids),
+            vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]
+        );
     }
 
     #[test]
@@ -1789,7 +1795,10 @@ mod tests {
 
     #[test]
     fn mock_catalog_without_glm53_yields_the_served_subset() {
-        assert_eq!(filter_chat_models(full_catalog()), vec!["deepseek-v4-flash", "glm5.3-flash"]);
+        assert_eq!(
+            filter_chat_models(full_catalog()),
+            vec!["deepseek-v4-flash", "glm5.3-flash"]
+        );
     }
 
     #[test]
@@ -1800,7 +1809,8 @@ mod tests {
 
     #[test]
     fn order_follows_the_file_not_the_server() {
-        let config = parse_chat_models_config(r#"{"headliner":"a","models":["a","c","b"]}"#).unwrap();
+        let config =
+            parse_chat_models_config(r#"{"headliner":"a","models":["a","c","b"]}"#).unwrap();
         assert_eq!(
             filter_with_config(&strings(&["b", "x", "c", "a"]), &config),
             vec!["a", "c", "b"]
@@ -1811,7 +1821,10 @@ mod tests {
     fn headliner_is_first_even_when_listed_mid_file_or_omitted() {
         let mid = parse_chat_models_config(r#"{"headliner":"b","models":["a","b","c"]}"#).unwrap();
         assert_eq!(mid.models, vec!["b", "a", "c"]);
-        assert_eq!(filter_with_config(&strings(&["c", "b", "a"]), &mid), vec!["b", "a", "c"]);
+        assert_eq!(
+            filter_with_config(&strings(&["c", "b", "a"]), &mid),
+            vec!["b", "a", "c"]
+        );
         let omitted =
             parse_chat_models_config(r#"{"headliner":"h","models":["a","a",""]}"#).unwrap();
         assert_eq!(omitted.models, vec!["h", "a"]);
@@ -1833,7 +1846,10 @@ mod tests {
             assert_eq!(parse_chat_models_config(bad), None, "{bad:?}");
             let config = chat_models_config_or_fallback(bad);
             assert_eq!(config.headliner, DEFAULT_MODEL);
-            assert_eq!(config.models, vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]);
+            assert_eq!(
+                config.models,
+                vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]
+            );
         }
     }
 

@@ -42,6 +42,15 @@ export interface ChatMessageRow {
   // Files the reply's tool actions produced and images it generated.
   // Optional: older cores did not send it.
   artifacts?: Artifact[];
+  // Image edits: the message whose image the edit started from (null for
+  // every other row). Optional: older cores did not send it.
+  parent_message_id?: number | null;
+}
+
+/// A local file picked for an image edit, staged by the core.
+export interface StagedEditSource {
+  path: string;
+  name: string;
 }
 
 export interface Artifact {

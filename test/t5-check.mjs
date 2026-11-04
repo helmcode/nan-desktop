@@ -218,6 +218,66 @@ async function expectClassificationContract() {
   console.log("body guard OK: unknown model and empty prompt rejected 400");
 }
 
+// --- 4. Edit contract (POST /v1/images/edits, desktop session) -------------------
+
+const EDITS_URL = `${BASE}/v1/images/edits`;
+const MOCK_SESSION = "fake-jwt"; // must match mock-device.mjs / mock-images.mjs
+
+function editForm(instruction, imageCount, n = "1") {
+  const form = new FormData();
+  form.append("instruction", instruction);
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  for (let i = 0; i < imageCount; i += 1) {
+    form.append("image[]", new Blob([png], { type: "image/png" }), `image-${i + 1}.png`);
+  }
+  form.append("n", n);
+  return form;
+}
+
+async function postEdit(form, token = MOCK_SESSION) {
+  return fetch(EDITS_URL, {
+    method: "POST",
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+}
+
+async function expectEditContract() {
+  const ok = await postEdit(editForm("make it snowy", 2));
+  assert(ok.status === 200, `edits: expected 200, got ${ok.status}`);
+  const body = await ok.json();
+  const png = Buffer.from(body.data?.[0]?.b64_json ?? "", "base64");
+  assert(png.subarray(0, 8).equals(PNG_SIGNATURE), "edits: b64_json is not a PNG");
+  assert(body.data[0].url === undefined, "edits: the reply is always b64_json, never url");
+  const record = await (await fetch(`${BASE}/record`)).json();
+  assert(record.edit?.images?.length === 2, "edits: expected two recorded image[] parts");
+  assert(record.edit.instruction_chars === 13, "edits: instruction length not recorded");
+  assert(JSON.stringify(record).indexOf("snowy") === -1, "edits: the instruction text must never be recorded");
+  console.log("edit contract OK: multipart instruction + 2 x image[] + n=1 -> b64_json PNG");
+
+  const cases = [
+    ["4 images", editForm("x", 4), 400],
+    ["0 images", editForm("x", 0), 400],
+    ["2001 chars", editForm("a".repeat(2001), 1), 400],
+    ["n=2", editForm("x", 1, "2"), 400],
+    ["tier", editForm("trigger-403", 1), 403],
+    ["not found", editForm("trigger-404", 1), 404],
+    ["upstream", editForm("trigger-502", 1), 502],
+  ];
+  for (const [label, form, status] of cases) {
+    const res = await postEdit(form);
+    assert(res.status === status, `edits ${label}: expected ${status}, got ${res.status}`);
+  }
+  const noSession = await postEdit(editForm("x", 1), null);
+  assert(noSession.status === 401, `edits without session: expected 401, got ${noSession.status}`);
+  const inferenceKey = await postEdit(editForm("x", 1), MOCK_KEY);
+  assert(inferenceKey.status === 401, `edits with the inference key: expected 401, got ${inferenceKey.status}`);
+  console.log("edit guards OK: caps 400, 401 without the desktop session, 403/404/502 classified");
+}
+
 async function runCargoTest() {
   return new Promise((resolve) => {
     const child = spawn("cargo", ["test"], {
@@ -245,6 +305,8 @@ try {
   await fetch(RESET_URL); // isolate the guard assertions from the contract request
   await expectSizeGuardContract();
   await expectClassificationContract();
+  await fetch(RESET_URL);
+  await expectEditContract();
 
   console.log("running cargo test (image core + full Rust suite)...");
   const cargoCode = await runCargoTest();
