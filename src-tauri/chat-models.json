@@ -1,0 +1,4 @@
+{
+  "headliner": "deepseek-v4-flash",
+  "models": ["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]
+}

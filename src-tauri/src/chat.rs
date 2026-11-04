@@ -59,7 +59,7 @@
 //! Release builds ignore the variable entirely (S12).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -77,6 +77,8 @@ use crate::{images, tools, web_search};
 pub const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// Default chat model (first in the filtered list; see `filter_chat_models`).
+/// Must equal the `headliner` in `src-tauri/chat-models.json` (pinned by a
+/// unit test) and `DEFAULT_MODEL` in `src/App.tsx`.
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
 // ---------------------------------------------------------------------------
@@ -539,48 +541,81 @@ pub fn classify_transport(_is_timeout: bool) -> ErrorKind {
     ErrorKind::Network
 }
 
-/// Known non-chat model ids (NaN-Open-WebUI catalog reference).
-const NON_CHAT_EXACT: [&str; 6] = [
-    "kokoro",
-    "whisper",
-    "qwen3-embedding",
-    "rerank",
-    "qwen-image-2.1",
-    "flux-2-klein",
-];
+/// The editable chat-model allowlist (`src-tauri/chat-models.json`), embedded
+/// at compile time. Edit that file — not this code — to change the picker.
+const CHAT_MODELS_JSON: &str = include_str!("../chat-models.json");
 
-/// Any model id containing one of these substrings is not chat-capable
-/// (matched case-insensitively).
-const NON_CHAT_SUBSTRINGS: [&str; 7] = [
-    "embedding",
-    "rerank",
-    "whisper",
-    "kokoro",
-    "image",
-    "flux",
-    "audio",
-];
+/// Compile-time-safe fallback used when the embedded JSON is malformed.
+/// Mirrors the shipped `chat-models.json`.
+const FALLBACK_CHAT_MODELS: [&str; 3] = ["deepseek-v4-flash", "glm5.3", "glm5.3-flash"];
 
-/// Sort headliner: always first in the picker.
-const CHAT_MODEL_HEADLINER: &str = "deepseek-v4-flash";
+/// Parsed chat-model allowlist: the picker order, headliner first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatModelsConfig {
+    pub headliner: String,
+    /// Allowlisted ids in display order; `models[0] == headliner`, no dupes.
+    pub models: Vec<String>,
+}
 
-/// Filter a raw `/v1/models` id list down to chat-capable models and sort
-/// with [`CHAT_MODEL_HEADLINER`] first (remaining ids keep their original
-/// order). Pure and unit-tested.
-pub fn filter_chat_models(ids: Vec<String>) -> Vec<String> {
-    let mut kept: Vec<String> = ids
-        .into_iter()
-        .filter(|id| {
-            let lower = id.to_lowercase();
-            !NON_CHAT_EXACT.contains(&lower.as_str())
-                && !NON_CHAT_SUBSTRINGS.iter().any(|s| lower.contains(s))
-        })
-        .collect();
-    if let Some(pos) = kept.iter().position(|id| id == CHAT_MODEL_HEADLINER) {
-        let headliner = kept.remove(pos);
-        kept.insert(0, headliner);
+impl ChatModelsConfig {
+    fn fallback() -> Self {
+        Self {
+            headliner: DEFAULT_MODEL.to_string(),
+            models: FALLBACK_CHAT_MODELS.iter().map(|s| s.to_string()).collect(),
+        }
     }
-    kept
+}
+
+/// Parse a `chat-models.json` body. Returns `None` when it is malformed
+/// (invalid JSON, missing/empty `headliner`, `models` not a list of strings).
+/// The headliner is guaranteed first even when listed mid-file or omitted
+/// from `models`; duplicates and blank ids are dropped.
+pub fn parse_chat_models_config(json: &str) -> Option<ChatModelsConfig> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let headliner = value.get("headliner")?.as_str()?.trim().to_string();
+    if headliner.is_empty() {
+        return None;
+    }
+    let listed = value.get("models")?.as_array()?;
+    let mut models = vec![headliner.clone()];
+    for entry in listed {
+        let id = entry.as_str()?.trim();
+        if !id.is_empty() && !models.iter().any(|m| m == id) {
+            models.push(id.to_string());
+        }
+    }
+    Some(ChatModelsConfig { headliner, models })
+}
+
+/// Resolve a config body, falling back to [`FALLBACK_CHAT_MODELS`] instead of
+/// panicking when it is malformed.
+fn chat_models_config_or_fallback(json: &str) -> ChatModelsConfig {
+    parse_chat_models_config(json).unwrap_or_else(ChatModelsConfig::fallback)
+}
+
+/// The embedded allowlist, parsed once.
+pub fn chat_models_config() -> &'static ChatModelsConfig {
+    static CONFIG: OnceLock<ChatModelsConfig> = OnceLock::new();
+    CONFIG.get_or_init(|| chat_models_config_or_fallback(CHAT_MODELS_JSON))
+}
+
+/// Keep only the ids of a raw `/v1/models` list that are in `config`'s
+/// allowlist (exact match), ordered as the allowlist lists them (headliner
+/// first). Ids the server does not serve are omitted; no match yields an
+/// empty list (never an error). Pure and unit-tested.
+fn filter_with_config(ids: &[String], config: &ChatModelsConfig) -> Vec<String> {
+    config
+        .models
+        .iter()
+        .filter(|allowed| ids.iter().any(|id| id == *allowed))
+        .cloned()
+        .collect()
+}
+
+/// Filter a raw `/v1/models` id list down to the editable allowlist in
+/// `chat-models.json` (see [`filter_with_config`]).
+pub fn filter_chat_models(ids: Vec<String>) -> Vec<String> {
+    filter_with_config(&ids, chat_models_config())
 }
 
 /// Parse the JSON body of a `GET /v1/models` response into raw ids.
@@ -1685,7 +1720,8 @@ mod tests {
 
     // ---- filter_chat_models -------------------------------------------------
 
-    /// The exact catalog `test/mock-chat.mjs` serves (6 chat + 6 non-chat).
+    /// The exact raw catalog `test/mock-chat.mjs` serves (6 chat + 6 non-chat;
+    /// only 2 of them are in the `chat-models.json` allowlist).
     /// Keep in sync with the mock — the integration check asserts the wire
     /// payload matches this fixture.
     fn full_catalog() -> Vec<String> {
@@ -1708,59 +1744,105 @@ mod tests {
         .collect()
     }
 
+    fn strings(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The full prod-like catalog: the 3 allowlisted chat models plus extra
+    /// chat and non-chat ids that must never reach the picker.
+    fn prod_catalog() -> Vec<String> {
+        let mut ids = full_catalog();
+        ids.insert(3, "glm5.3".to_string());
+        ids
+    }
+
     #[test]
-    fn filters_full_catalog_to_six_chat_models_deepseek_first() {
-        let filtered = filter_chat_models(full_catalog());
+    fn embedded_chat_models_json_parses_without_fallback() {
+        let parsed = parse_chat_models_config(CHAT_MODELS_JSON)
+            .expect("src-tauri/chat-models.json must be valid");
+        assert_eq!(parsed.headliner, "deepseek-v4-flash");
+        assert_eq!(parsed.models, vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]);
+        assert_eq!(chat_models_config(), &parsed);
+    }
+
+    #[test]
+    fn picker_shows_exactly_the_three_allowlisted_models_in_file_order() {
+        let mut ids = prod_catalog();
+        ids.reverse(); // server order must not matter
+        assert_eq!(filter_chat_models(ids), vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]);
+    }
+
+    #[test]
+    fn extra_ids_are_dropped_including_case_variants() {
+        let ids = strings(&[
+            "mimo-v2.6-flash",
+            "qwen3.8-flash",
+            "qwen3-embedding",
+            "flux-2-klein",
+            "DeepSeek-V4-Flash",
+            "GLM5.3",
+            "glm5.3-flash",
+        ]);
+        // Exact match only: case variants are not the allowlisted ids.
+        assert_eq!(filter_chat_models(ids), vec!["glm5.3-flash"]);
+    }
+
+    #[test]
+    fn mock_catalog_without_glm53_yields_the_served_subset() {
+        assert_eq!(filter_chat_models(full_catalog()), vec!["deepseek-v4-flash", "glm5.3-flash"]);
+    }
+
+    #[test]
+    fn no_match_or_empty_list_yields_empty_vec() {
+        assert!(filter_chat_models(strings(&["zeta-model", "alpha-model"])).is_empty());
+        assert!(filter_chat_models(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn order_follows_the_file_not_the_server() {
+        let config = parse_chat_models_config(r#"{"headliner":"a","models":["a","c","b"]}"#).unwrap();
         assert_eq!(
-            filtered,
-            vec![
-                "deepseek-v4-flash",
-                "glm5.3-flash",
-                "mimo-v2.6-flash",
-                "qwen3.8-flash",
-                "gemma4",
-                "qwen3.6",
-            ]
+            filter_with_config(&strings(&["b", "x", "c", "a"]), &config),
+            vec!["a", "c", "b"]
         );
     }
 
     #[test]
-    fn headliner_is_moved_to_front_even_when_served_last() {
-        let mut ids = full_catalog();
-        ids.reverse();
-        let filtered = filter_chat_models(ids);
-        assert_eq!(filtered[0], "deepseek-v4-flash");
-        assert_eq!(filtered.len(), 6);
+    fn headliner_is_first_even_when_listed_mid_file_or_omitted() {
+        let mid = parse_chat_models_config(r#"{"headliner":"b","models":["a","b","c"]}"#).unwrap();
+        assert_eq!(mid.models, vec!["b", "a", "c"]);
+        assert_eq!(filter_with_config(&strings(&["c", "b", "a"]), &mid), vec!["b", "a", "c"]);
+        let omitted =
+            parse_chat_models_config(r#"{"headliner":"h","models":["a","a",""]}"#).unwrap();
+        assert_eq!(omitted.models, vec!["h", "a"]);
     }
 
     #[test]
-    fn substring_and_case_filters_exclude_audio_embedding_image_models() {
-        let ids: Vec<String> = [
-            "text-embedding-3-large",
-            "Embedding-XL",
-            "rerank-v2",
-            "RERANKER",
-            "whisper-large-v3",
-            "Kokoro-TTS",
-            "qwen-image-edit",
-            "FLUX.1-dev",
-            "gpt-4o-audio",
-            "qwen3.8-flash",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        assert_eq!(filter_chat_models(ids), vec!["qwen3.8-flash".to_string()]);
+    fn malformed_json_falls_back_to_the_default_three() {
+        for bad in [
+            "",
+            "not json",
+            "{",
+            "[]",
+            r#"{"models":["a"]}"#,
+            r#"{"headliner":"","models":["a"]}"#,
+            r#"{"headliner":"a"}"#,
+            r#"{"headliner":"a","models":"a"}"#,
+            r#"{"headliner":"a","models":["a",1]}"#,
+        ] {
+            assert_eq!(parse_chat_models_config(bad), None, "{bad:?}");
+            let config = chat_models_config_or_fallback(bad);
+            assert_eq!(config.headliner, DEFAULT_MODEL);
+            assert_eq!(config.models, vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]);
+        }
     }
 
     #[test]
-    fn unknown_chat_ids_are_kept_in_order() {
-        let ids: Vec<String> = ["zeta-model", "alpha-model"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(filter_chat_models(ids), vec!["zeta-model", "alpha-model"]);
-        assert!(filter_chat_models(Vec::new()).is_empty());
+    fn fallback_mirrors_the_shipped_json() {
+        assert_eq!(
+            chat_models_config_or_fallback("broken"),
+            parse_chat_models_config(CHAT_MODELS_JSON).unwrap()
+        );
     }
 
     // ---- parse_model_ids ------------------------------------------------------
@@ -2265,6 +2347,7 @@ mod tests {
     #[test]
     fn default_model_is_the_headliner() {
         assert_eq!(DEFAULT_MODEL, "deepseek-v4-flash");
+        assert_eq!(chat_models_config().headliner, DEFAULT_MODEL);
         let filtered = filter_chat_models(full_catalog());
         assert_eq!(filtered[0], DEFAULT_MODEL);
     }

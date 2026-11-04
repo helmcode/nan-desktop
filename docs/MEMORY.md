@@ -50,3 +50,14 @@ chat never blocks and you are never signed out because of it.
   other desktop assistants make.
 - Credentials are stronger: AES-256-GCM in an encrypted vault whose master
   key lives in the OS keychain (release builds) — see SECURITY.md.
+
+## Chat model picker (allowlist)
+
+The model picker is allowlist-driven, not a blocklist. `src-tauri/chat-models.json`
+lists the exact `/v1/models` ids to show (`models`, in display order) and the
+`headliner` that is always first and is the default model. Ids the server
+serves but the file does not list never appear; listed ids the server does not
+serve are omitted. To change the picker, edit only that file (keep `headliner`
+equal to `DEFAULT_MODEL` in `src-tauri/src/chat.rs` and `src/App.tsx` — a unit
+test pins it). The file is embedded at compile time; a malformed file falls
+back to the built-in default (`deepseek-v4-flash`, `glm5.3`, `glm5.3-flash`).

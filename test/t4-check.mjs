@@ -6,8 +6,9 @@
 //
 //   1. GET /v1/models — 401 without a Bearer; with the mock Bearer, exactly
 //      the 12-model fixture (6 chat + 6 non-chat). The Rust-side filtering of
-//      that same fixture (only 6 chat models, deepseek-v4-flash first) is
-//      pinned by `filter_chat_models` unit tests — run at the end.
+//      that same fixture (only the chat-models.json allowlist, in file order,
+//      deepseek-v4-flash first) is pinned by `filter_chat_models` unit tests —
+//      run at the end.
 //   2. POST /v1/chat/completions (stream:true) — the byte-level SSE
 //      reassembly + accumulation contract: role-only preamble ignored, 8
 //      content deltas accumulating to the exact full reply (including the
@@ -113,7 +114,7 @@ async function expectModelsContract() {
     assert(ids.includes(non), `models: non-chat model ${non} missing (needed to prove filtering)`);
   }
   console.log("models contract OK: 401 without Bearer; raw catalog = 6 chat + 6 non-chat fixture");
-  console.log("(filtering to the 6 chat models, deepseek first, is pinned by the Rust unit tests)");
+  console.log("(allowlist filtering via chat-models.json, deepseek first, is pinned by the Rust unit tests)");
 }
 
 // Read an SSE stream at the byte level: reassemble network chunks, split

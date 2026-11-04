@@ -17,6 +17,9 @@
 - Windows icon: icon.ico carries every frame size (16 to 256 px).
 
 ### Chat
+- The model picker is now an editable allowlist: it shows exactly the ids in
+  `src-tauri/chat-models.json` (deepseek-v4-flash, glm5.3, glm5.3-flash), in
+  file order with the headliner first. Edit that file to change the picker.
 - Images in the chat show a download icon in their corner on hover (same
   native Save-as dialog as the "Save as…" button).
 - The composer's image button now uses a sparkle icon and the tooltip
