@@ -203,6 +203,7 @@ pub fn run() {
             images::image_save_as,
             image_edit::edit_images,
             image_edit::image_edit_pick,
+            image_edit::image_edit_stage,
             tools::tools_grant_add,
             tools::tools_grant_computer_wide,
             tools::tools_grant_list,

@@ -206,3 +206,34 @@ export const IconPanel = (p: IconProps) => (
     <path d="M15 4v16" />
   </Icon>
 );
+
+/// Image Studio: the base image is locked as the first reference.
+export const IconLock = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="5" y="11" width="14" height="10" rx="2" />
+    <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+  </Icon>
+);
+
+/// Image Studio tool slot: mask brush (not available yet).
+export const IconBrush = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M14.5 4.5l5 5L11 18l-5-5z" />
+    <path d="M6 13c-2 0-3 1.5-3 3.5S2 20 2 20s3.5.5 5.5-1S8 15 6 13z" />
+  </Icon>
+);
+
+/// Image Studio tool slot: region select (not available yet).
+export const IconSelection = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" />
+    <path d="M11 4h2M11 20h2M4 11v2M20 11v2" />
+  </Icon>
+);
+
+/// Image Studio zoom: fit the image to the canvas.
+export const IconFit = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5" />
+  </Icon>
+);

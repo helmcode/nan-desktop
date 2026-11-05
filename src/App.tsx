@@ -15,14 +15,6 @@ import {
 import { approvalsReducer, placeCards, type ApprovalCardState } from "./chat/approvals";
 import { lastProducedTarget } from "./chat/autoOpen";
 import { rowsForDisplay, titleFromFirstMessage, withConversation } from "./chat/conversationList";
-import {
-  MAX_EDIT_INSTRUCTION,
-  addSource,
-  canSubmitEdit,
-  parentMessageId,
-  removeSource,
-  type EditSource,
-} from "./chat/editTray";
 import { messageFiles } from "./chat/filePaths";
 import {
   adoptSelection,
@@ -36,7 +28,6 @@ import { stripToolMarkup } from "./chat/toolMarkup";
 import { AllowNudgeCard } from "./components/AllowNudgeCard";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { ChatImage } from "./components/ChatImage";
-import { EditTray } from "./components/EditTray";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
@@ -71,6 +62,7 @@ import {
   IconGlobe,
   IconMic,
   IconPanel,
+  IconImage,
   IconPlus,
   IconSparkles,
   IconSpeaker,
@@ -87,13 +79,15 @@ import type {
   ConversationView,
   ProfileOverview,
   ProfileView,
-  StagedEditSource,
   WebSource,
 } from "./types";
+import type { StudioSeed } from "./studio/studio";
 import { useWorkspace } from "./workspace";
 
 // The preview pane and its renderers load on first use (S21).
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
+// So does the Image Studio (its own view).
+const ImageStudio = lazy(() => import("./studio/ImageStudio").then((m) => ({ default: m.ImageStudio })));
 
 // The renderer never sees profile URLs, API keys or session tokens (S4/S12):
 // profiles arrive as {id, name, has_key, key_mask} from the Rust core, and
@@ -152,13 +146,6 @@ const NEW_CHAT_KEY = -1;
 /// A copy of `set` without `key` (state updates never mutate).
 function withoutKey(set: Set<number>, key: number): Set<number> {
   const next = new Set(set);
-  next.delete(key);
-  return next;
-}
-
-/// A copy of `map` without `key`.
-function withoutEntry<V>(map: Map<number, V>, key: number): Map<number, V> {
-  const next = new Map(map);
   next.delete(key);
   return next;
 }
@@ -457,7 +444,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const activeProfile: ProfileView | undefined = overview.profiles.find((p) => p.id === overview.active_profile);
   const workspace = useWorkspace(overview.active_profile);
 
-  const [view, setView] = useState<"chat" | "settings">("chat");
+  const [view, setView] = useState<"chat" | "settings" | "studio">("chat");
+  const viewRef = useRef(view);
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
   const [settingsFocus, setSettingsFocus] = useState<SettingsSection>(null);
   const [askComputerWide, setAskComputerWide] = useState(false);
 
@@ -502,13 +493,26 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [imageSize, setImageSize] = useState(DEFAULT_IMAGE_SIZE);
   const [imageGeneratingIds, setImageGeneratingIds] = useState<Set<number>>(() => new Set());
 
-  // Image edits: per-conversation edit mode (the tray's sources; a key is
-  // present while edit mode is on, even with an empty tray), which running
-  // image jobs are edits, and whether the core's file picker is open.
+  // Image edits happen in the Image Studio, its own view. `studio` is the
+  // current session (null until first opened); the Studio stays mounted
+  // while hidden so an edit in flight still lands in its history. A new
+  // `key` starts a fresh session. `editingIds` tracks which running image
+  // jobs are edits (chat copy and error labels); `studioJobsRef` which of
+  // them the Studio reports itself (the chat does not repeat its errors).
+  // While a Studio edit runs (`studioBusy`), switching conversations or
+  // starting another Studio session is paused so the result and any error
+  // land in the open Studio session (no lost work).
   const imageEditAvailable = overview.active_profile === IMAGE_EDIT_PROFILE;
-  const [edits, setEdits] = useState<Map<number, EditSource[]>>(() => new Map());
-  const editSources = edits.get(activeConvId ?? NEW_CHAT_KEY);
-  const editMode = editSources !== undefined;
+  const [studio, setStudio] = useState<{ key: number; seed: StudioSeed } | null>(null);
+  const studioReturnRef = useRef<"chat" | "settings">("chat");
+  const studioJobsRef = useRef<Set<number>>(new Set());
+  const [studioBusy, setStudioBusy] = useState(false);
+  /// Forget a Studio job; true when it was one. Keeps `studioBusy` in sync.
+  const endStudioJob = useCallback((conversationId: number): boolean => {
+    const had = studioJobsRef.current.delete(conversationId);
+    setStudioBusy(studioJobsRef.current.size > 0);
+    return had;
+  }, []);
   const [editingIds, setEditingIds] = useState<Set<number>>(() => new Set());
   // The ref is updated synchronously so the image event handlers always know
   // whether the job that just ended was an edit.
@@ -520,7 +524,6 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     editingIdsRef.current = next;
     setEditingIds(next);
   }, []);
-  const [editPicking, setEditPicking] = useState(false);
 
   // Voice: read-aloud + dictation (hidden this round, S24).
   const [voice, setVoice] = useState<string>(storedVoice);
@@ -805,7 +808,10 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         else next.delete(conversationId);
         return next;
       });
-      if (!generating) markEditing(conversationId, false);
+      if (!generating) {
+        markEditing(conversationId, false);
+        endStudioJob(conversationId);
+      }
     };
     const unlistens: Promise<UnlistenFn>[] = [
       listen<ChatIdPayload>("images://started", (event) => {
@@ -822,10 +828,13 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         const { conversation_id, kind } = event.payload;
         // Read before markGenerating clears it: edits get their own copy.
         const prefix = editingIdsRef.current.has(conversation_id) ? "edit" : "image";
+        // Studio edits report their errors only in the Studio (it stays
+        // mounted, so the error is there when the user comes back).
+        const studioJob = endStudioJob(conversation_id);
         markGenerating(conversation_id, false);
         if (kind === "unauthorized") {
           setSessionExpired(true);
-        } else if (activeConvRef.current === conversation_id) {
+        } else if (!studioJob && activeConvRef.current === conversation_id) {
           setInlineError(`${prefix}:${kind}`);
         }
         void refreshConversations();
@@ -839,7 +848,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         void promise.then((unlisten) => unlisten());
       });
     };
-  }, [reloadAfterReply, refreshConversations, syncMemory, markEditing]);
+  }, [reloadAfterReply, refreshConversations, syncMemory, markEditing, endStudioJob]);
 
   // Voice transport: one global playback.
   useEffect(() => {
@@ -872,6 +881,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
 
   const selectConversation = useCallback(
     (conversationId: number): void => {
+      if (studioJobsRef.current.size > 0) return;
       setView("chat");
       setActiveConvId(conversationId);
       setInlineError("");
@@ -975,6 +985,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   }, [recording, finishRecording, t]);
 
   const newChat = useCallback((): void => {
+    if (studioJobsRef.current.size > 0) return;
     setView("chat");
     setActiveConvId(null);
     setMessages([]);
@@ -992,7 +1003,6 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       return next;
     });
     setImageModes((prev) => withoutKey(prev, NEW_CHAT_KEY));
-    setEdits((prev) => withoutEntry(prev, NEW_CHAT_KEY));
     composerRef.current?.focus();
   }, []);
 
@@ -1021,7 +1031,6 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         return next;
       });
       setImageModes((prev) => withoutKey(prev, conversationId));
-      setEdits((prev) => withoutEntry(prev, conversationId));
       await refreshConversations();
       void syncMemory();
     },
@@ -1034,6 +1043,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const deleteArmTimer = useRef<number | null>(null);
   const confirmDeleteConversation = useCallback(
     (conversationId: number): void => {
+      if (studioJobsRef.current.has(conversationId)) return;
       if (pendingDeleteId !== conversationId) {
         setPendingDeleteId(conversationId);
         if (deleteArmTimer.current !== null) window.clearTimeout(deleteArmTimer.current);
@@ -1073,66 +1083,87 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   }, []);
   const closePreview = useCallback(() => setPreviewOpen(false), [setPreviewOpen]);
 
-  // Image mode toggles for the open conversation only. Image mode and edit
-  // mode are exclusive: toggling image mode closes an open edit.
+  // Image mode toggles for the open conversation only.
   const toggleImageMode = useCallback((): void => {
     const key = activeConvRef.current ?? NEW_CHAT_KEY;
     setImageModes((prev) => {
       if (prev.has(key)) return withoutKey(prev, key);
       return new Set(prev).add(key);
     });
-    setEdits((prev) => withoutEntry(prev, key));
   }, []);
 
-  // Edit mode: the "Edit" action on a chat image opens it with that image in
-  // the tray (added to an already open tray, up to 3).
-  const startEdit = useCallback((messageId: number, path: string, label: string): void => {
-    const key = activeConvRef.current ?? NEW_CHAT_KEY;
-    setEdits((prev) => new Map(prev).set(key, addSource(prev.get(key) ?? [], { path, label, messageId })));
-    setImageModes((prev) => withoutKey(prev, key));
-    composerRef.current?.focus();
+  // Image Studio: every entry point starts a fresh session, except the
+  // sidebar entry, which resumes the current one (or opens an empty Studio).
+  // While a Studio edit runs, every entry point resumes the running session
+  // instead (a new session would drop the edit's result).
+  const openStudio = useCallback((seed: StudioSeed | null): void => {
+    if (viewRef.current !== "studio") studioReturnRef.current = viewRef.current === "settings" ? "settings" : "chat";
+    if (seed && studioJobsRef.current.size === 0) setStudio((prev) => ({ key: (prev?.key ?? 0) + 1, seed }));
+    else setStudio((prev) => prev ?? { key: 1, seed: { conversationId: null, base: null, stagePath: null } });
+    setView("studio");
   }, []);
+  const closeStudio = useCallback((): void => setView(studioReturnRef.current), []);
 
-  const closeEdit = useCallback((): void => {
-    const key = activeConvRef.current ?? NEW_CHAT_KEY;
-    setEdits((prev) => withoutEntry(prev, key));
-  }, []);
+  // "Edit image" on a chat image: the Studio opens on it; results land in
+  // the same conversation as children of that message.
+  const startEdit = useCallback(
+    (messageId: number, path: string, label: string): void => {
+      openStudio({
+        conversationId: activeConvRef.current,
+        base: { path, label, messageId, staged: false },
+        stagePath: null,
+      });
+    },
+    [openStudio],
+  );
 
-  const removeEditSource = useCallback((path: string): void => {
-    const key = activeConvRef.current ?? NEW_CHAT_KEY;
-    setEdits((prev) => {
-      const current = prev.get(key);
-      if (!current) return prev;
-      return new Map(prev).set(key, removeSource(current, path));
-    });
-  }, []);
-
-  // "Add image": the core opens the native file picker and validates the
-  // file against the folder grants and the sensitive-path deny-list.
-  const pickEditSource = useCallback(async (): Promise<void> => {
-    const profileId = activeProfileRef.current;
-    if (!profileId) return;
-    const key = activeConvRef.current ?? NEW_CHAT_KEY;
-    setEditPicking(true);
-    setInlineError("");
-    try {
-      const staged = await invoke<StagedEditSource | null>("image_edit_pick", { profileId });
-      if (staged) {
-        setEdits((prev) => {
-          const current = prev.get(key);
-          if (!current) return prev;
-          return new Map(prev).set(
-            key,
-            addSource(current, { path: staged.path, label: staged.name, messageId: null }),
-          );
+  // "Edit image" in the preview pane: an app image opens directly (linked
+  // to its chat message when it is one); a user file is staged first.
+  const editFromPreview = useCallback(
+    (target: PreviewTarget): void => {
+      if (target.kind === "media") {
+        const row = messages.find(
+          (m) => m.media_path === target.ref || (m.artifacts ?? []).some((a) => a.path === target.ref),
+        );
+        const label = row && row.media_path === target.ref ? row.content : folderName(target.ref);
+        openStudio({
+          conversationId: activeConvRef.current,
+          base: { path: target.ref, label, messageId: row?.id ?? null, staged: false },
+          stagePath: null,
         });
+      } else if (target.kind === "file") {
+        openStudio({ conversationId: activeConvRef.current, base: null, stagePath: target.ref });
       }
-    } catch (err) {
-      setInlineError(`edit:${String(err)}`);
-    } finally {
-      setEditPicking(false);
-    }
-  }, []);
+    },
+    [messages, openStudio],
+  );
+
+  // A Studio session without a conversation gets its own on the first edit.
+  const createStudioConversation = useCallback(
+    async (title: string): Promise<number | null> => {
+      const profileId = activeProfileRef.current;
+      if (!profileId) return null;
+      const created = await invoke<number>("conversation_create", { profileId });
+      setConversations((prev) => withConversation(prev, created, titleFromFirstMessage(title)));
+      return created;
+    },
+    [],
+  );
+
+  const onStudioJob = useCallback(
+    (conversationId: number, running: boolean): void => {
+      markEditing(conversationId, running);
+      if (running) {
+        studioJobsRef.current.add(conversationId);
+        setStudioBusy(true);
+        setImageGeneratingIds((prev) => new Set(prev).add(conversationId));
+      } else {
+        endStudioJob(conversationId);
+        setImageGeneratingIds((prev) => withoutKey(prev, conversationId));
+      }
+    },
+    [markEditing, endStudioJob],
+  );
 
   const fileRoots: string[] | "any" = workspace.computerWide
     ? "any"
@@ -1196,12 +1227,6 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       const next = withoutKey(prev, NEW_CHAT_KEY);
       next.add(created);
       return next;
-    });
-    // ...and an edit started there (picked files).
-    setEdits((prev) => {
-      const pending = prev.get(NEW_CHAT_KEY);
-      if (!pending) return prev;
-      return withoutEntry(prev, NEW_CHAT_KEY).set(created, pending);
     });
     return created;
   }, []);
@@ -1290,48 +1315,6 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     }
   }, [composer, imageGeneratingActive, ensureConversation, imageSize, refreshConversations]);
 
-  // Edit mode submit: the core reads the tray's images from disk, posts the
-  // edit and persists the result as a child of the first chat image.
-  const sendEdit = useCallback(async (): Promise<void> => {
-    const instruction = composer.trim();
-    const sources = editSources ?? [];
-    if (!canSubmitEdit(sources, instruction, composerBusy)) return;
-    setSessionExpired(false);
-    setInlineError("");
-    let conversationId: number | null = null;
-    try {
-      conversationId = await ensureConversation();
-      if (conversationId === null) return;
-      const id = conversationId;
-      setImageGeneratingIds((prev) => new Set(prev).add(id));
-      markEditing(id, true);
-      setComposer("");
-      setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(instruction)));
-      await invoke("edit_images", {
-        conversationId: id,
-        parentMessageId: parentMessageId(sources),
-        instruction,
-        sourcePaths: sources.map((source) => source.path),
-      });
-      setEdits((prev) => withoutEntry(prev, id));
-      void refreshConversations();
-    } catch (err) {
-      if (conversationId !== null) {
-        const id = conversationId;
-        setImageGeneratingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        });
-        markEditing(id, false);
-      }
-      // Keep the instruction and the tray so the user can fix and retry.
-      setComposer(instruction);
-      setInlineError(`edit:${String(err)}`);
-      void refreshConversations();
-    }
-  }, [composer, editSources, composerBusy, ensureConversation, markEditing, refreshConversations]);
-
   // Auto-scroll to the newest content.
   useEffect(() => {
     const el = messagesRef.current;
@@ -1349,7 +1332,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   }, []);
 
   const submit = (): void => {
-    void (editMode ? sendEdit() : imageMode ? sendImage() : send());
+    void (imageMode ? sendImage() : send());
   };
 
   // Errors are stored as kinds and localized here, so a language switch
@@ -1481,16 +1464,35 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             <BrandMark size="sm" />
             <span className="sidebar-name">{t.app.name}</span>
           </div>
-          <button type="button" className="btn btn-primary new-chat-btn" onClick={newChat}>
+          <button
+            type="button"
+            className="btn btn-primary new-chat-btn"
+            onClick={newChat}
+            aria-disabled={studioBusy ? "true" : undefined}
+            title={studioBusy ? t.sidebar.switchBlocked : undefined}
+          >
             <IconPlus size={16} />
             {t.sidebar.newChat}
           </button>
+          {imageEditAvailable && (
+            <button
+              type="button"
+              className={`sidebar-link${view === "studio" ? " active" : ""}`}
+              aria-current={view === "studio" ? "page" : undefined}
+              onClick={() => openStudio(null)}
+            >
+              <IconImage size={16} />
+              {t.sidebar.studio}
+            </button>
+          )}
         </div>
         <nav className="conv-list" aria-label={t.sidebar.history}>
           {conversations.length === 0 && <p className="conv-empty">{t.sidebar.empty}</p>}
           {conversations.map((c) => {
             const armed = pendingDeleteId === c.id;
             const live = streamingIds.has(c.id) || imageGeneratingIds.has(c.id);
+            // A Studio edit writing to this conversation also locks its delete.
+            const editLocked = studioBusy && studioJobsRef.current.has(c.id);
             return (
               <div
                 key={c.id}
@@ -1500,13 +1502,16 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   type="button"
                   className="conv-main"
                   onClick={() => selectConversation(c.id)}
-                  title={c.title}
+                  aria-disabled={studioBusy ? "true" : undefined}
+                  title={studioBusy ? t.sidebar.switchBlocked : c.title}
                   aria-current={c.id === activeConvId ? "page" : undefined}
                 >
                   <span className="conv-title">{c.title}</span>
                   {live && (
                     <>
                       <span className="pulse-dot" aria-hidden="true" />
+                      {/* Inline spans concatenate in the accessible name:
+                          the space keeps it "Fox Replying", not "FoxReplying". */}{" "}
                       <span className="visually-hidden">{t.sidebar.replying}</span>
                     </>
                   )}
@@ -1515,7 +1520,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   type="button"
                   className={`conv-delete${armed ? " armed" : ""}`}
                   aria-label={armed ? t.sidebar.deleteArmedLabel(c.title) : t.sidebar.deleteLabel(c.title)}
-                  title={armed ? t.sidebar.deleteArmedTitle : t.sidebar.deleteTitle}
+                  aria-disabled={editLocked ? "true" : undefined}
+                  title={editLocked ? t.sidebar.switchBlocked : armed ? t.sidebar.deleteArmedTitle : t.sidebar.deleteTitle}
                   onClick={() => confirmDeleteConversation(c.id)}
                 >
                   {armed ? t.sidebar.deleteArmed : <IconTrash size={15} />}
@@ -1535,7 +1541,34 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         </div>
       </aside>
 
-      {view === "settings" ? (
+      {studio && overview.active_profile && (
+        <ErrorBoundary
+          resetKey={studio.key}
+          fallback={
+            view === "studio" ? (
+              <section className="studio">
+                <p className="inline-error" role="alert">
+                  {t.studio.crashed}
+                </p>
+              </section>
+            ) : null
+          }
+        >
+          <Suspense fallback={view === "studio" ? <section className="studio" aria-busy="true" /> : null}>
+            <ImageStudio
+              key={studio.key}
+              seed={studio.seed}
+              profileId={overview.active_profile}
+              active={view === "studio"}
+              onClose={closeStudio}
+              onCreateConversation={createStudioConversation}
+              onJob={onStudioJob}
+              onSaveResult={onImageSaved}
+            />
+          </Suspense>
+        </ErrorBoundary>
+      )}
+      {view === "studio" ? null : view === "settings" ? (
         <Settings
           profile={activeProfile}
           workspace={workspace}
@@ -1679,17 +1712,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             </div>
 
             <footer className="composer">
-              <div className={`composer-box${editMode ? " edit-mode" : imageMode ? " image-mode" : ""}`}>
-                {editSources !== undefined && (
-                  <EditTray
-                    sources={editSources}
-                    adding={editPicking}
-                    disabled={composerBusy}
-                    onAdd={() => void pickEditSource()}
-                    onRemove={removeEditSource}
-                    onClose={closeEdit}
-                  />
-                )}
+              <div className={`composer-box${imageMode ? " image-mode" : ""}`}>
                 <textarea
                   ref={composerRef}
                   className="composer-input"
@@ -1702,18 +1725,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                     }
                   }}
                   placeholder={
-                    sttBusy
-                      ? t.chat.placeholderTranscribing
-                      : editMode
-                        ? t.chat.placeholderEdit
-                        : imageMode
-                          ? t.chat.placeholderImage
-                          : t.chat.placeholder
+                    sttBusy ? t.chat.placeholderTranscribing : imageMode ? t.chat.placeholderImage : t.chat.placeholder
                   }
-                  aria-label={
-                    editMode ? t.chat.editInstructionLabel : imageMode ? t.chat.imagePromptLabel : t.chat.messageLabel
-                  }
-                  maxLength={editMode ? MAX_EDIT_INSTRUCTION : undefined}
+                  aria-label={imageMode ? t.chat.imagePromptLabel : t.chat.messageLabel}
                   rows={2}
                   disabled={composerBusy}
                 />
@@ -1780,13 +1794,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                         type="button"
                         className="send-btn"
                         onClick={submit}
-                        disabled={
-                          editMode
-                            ? !canSubmitEdit(editSources ?? [], composer, composerBusy)
-                            : composer.trim().length === 0
-                        }
-                        aria-label={editMode ? t.chat.applyEdit : imageMode ? t.chat.createImage : t.chat.send}
-                        title={editMode ? t.chat.applyEdit : imageMode ? t.chat.createImage : t.chat.send}
+                        disabled={composer.trim().length === 0}
+                        aria-label={imageMode ? t.chat.createImage : t.chat.send}
+                        title={imageMode ? t.chat.createImage : t.chat.send}
                       >
                         <IconArrowUp size={18} />
                       </button>
@@ -1837,6 +1847,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   profileId={overview.active_profile}
                   onClose={closePreview}
                   onOpenLink={openWebPreview}
+                  onEditImage={imageEditAvailable ? editFromPreview : undefined}
                 />
               </Suspense>
             )}

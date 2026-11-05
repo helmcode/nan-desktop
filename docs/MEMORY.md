@@ -60,10 +60,15 @@ selected images and your instruction to `POST /v1/images/edits` on the
 platform API, authenticated with your desktop login session (never the
 inference key). The Rust core reads the image bytes from disk itself; only
 this app's own images are accepted: chat images under `<app data>/images`
-and files you pick with the native dialog, which must sit inside one of
-your working folders and are never taken from credential, login-item,
-shell-startup or key-file locations (copied to `<app data>/images/staged`,
-removed after a successful edit or after 24 h). The result comes back
+and files you pick with the native dialog (or open from the preview pane
+in the Image Studio), which must sit inside one of your working folders
+and are never taken from credential, login-item, shell-startup or key-file
+locations (copied to `<app data>/images/staged` and kept there so the
+Studio can reuse them across edits; the copies are removed at startup once
+they are older than 24 h).
+The Image Studio keeps its session (base, references, history) in memory
+only while the app runs; nothing about it is persisted beyond the chat
+rows each edit creates. The result comes back
 inline (`b64_json`), is saved locally like a generated image and stored in
 `chat.db` as a new assistant row whose `parent_message_id` points at the
 message the source image came from; the chat shows it with an "Edited"

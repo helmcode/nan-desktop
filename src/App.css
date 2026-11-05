@@ -507,6 +507,13 @@ button:disabled {
   width: 100%;
 }
 
+/* Paused while an Image Studio edit runs (aria-disabled keeps the tooltip). */
+.new-chat-btn[aria-disabled="true"],
+.conv-main[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .conv-list {
   flex: 1;
   min-height: 0;
@@ -1209,72 +1216,444 @@ button:disabled {
   color: var(--text);
 }
 
-/* Composer edit mode: reference tray above the instruction. */
-.composer-box.edit-mode {
-  border-style: dashed;
-  border-color: rgba(129, 140, 248, 0.55);
+/* ---- Image Studio ------------------------------------------------------- */
+/* Header / [toolbar + canvas | side panel] / history strip. The canvas is
+   the quiet center: a checkerboard-free dark well so edits read clearly. */
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.5rem 0.8rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
 }
 
-.edit-tray {
+.sidebar-link:hover,
+.sidebar-link.active {
+  background-color: var(--surface-3);
+  color: var(--text);
+}
+
+.preview-edit {
+  flex: none;
+}
+
+.studio {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background-color: var(--bg);
+}
+
+.studio[hidden] {
+  display: none;
+}
+
+.studio-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.studio-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.studio-header-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.studio-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  min-height: 0;
+}
+
+.studio-stage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.75rem;
+  gap: 0.6rem;
+}
+
+.studio-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.studio-segmented {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface);
+}
+
+.studio-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.studio-seg.active {
+  background-color: var(--surface-3);
+  color: var(--text);
+}
+
+.studio-toolbar-sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 0.35rem;
+  background-color: var(--border-strong);
+}
+
+/* Not available yet: visible, focusable for the tooltip, clearly inert. */
+.studio-tool.soon {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.studio-tool.soon:hover {
+  background: none;
+}
+
+.studio-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background-color: var(--surface);
+}
+
+.studio-canvas.actual {
+  display: block;
+  overflow: auto;
+}
+
+.studio-image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.studio-canvas.actual .studio-image {
+  max-width: none;
+  max-height: none;
+  margin: auto;
+}
+
+.studio-canvas.running .studio-image {
+  opacity: 0.55;
+  transition: opacity 0.2s ease;
+}
+
+.studio-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-2);
+}
+
+.studio-empty h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.studio-note {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-2);
+}
+
+.studio-progress {
+  position: absolute;
+  left: 50%;
+  bottom: 1rem;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  padding: 0.6rem 0.75rem 0;
+  max-width: calc(100% - 2rem);
+  padding: 0.55rem 0.9rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background-color: rgba(17, 17, 17, 0.92);
+  font-size: 0.85rem;
 }
 
-.edit-tray-list {
+.studio-progress strong {
+  display: block;
+  font-weight: 500;
+}
+
+.studio-progress-hint {
+  display: block;
+  color: var(--text-2);
+  font-size: 0.78rem;
+}
+
+.studio-panel {
   display: flex;
-  gap: 0.45rem;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.9rem 1rem;
+  border-left: 1px solid var(--border);
+  background-color: var(--surface);
+}
+
+.studio-panel h2,
+.studio-label {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.studio-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.studio-count,
+.studio-hint,
+.studio-meta {
+  font-size: 0.75rem;
+  color: var(--text-2);
+}
+
+.studio-hint {
+  margin: 0.25rem 0 0.6rem;
+}
+
+.studio-tray {
+  display: flex;
+  gap: 0.5rem;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.edit-thumb {
+.studio-thumb,
+.studio-thumb-add {
   position: relative;
-  width: 48px;
-  height: 48px;
+  width: 72px;
+  height: 72px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   overflow: hidden;
   background-color: var(--surface-2);
 }
 
-.edit-thumb img {
+.studio-thumb.base {
+  border-color: var(--accent-text);
+}
+
+.studio-thumb img {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  display: block;
 }
 
-.edit-thumb-remove {
+.studio-thumb-badge {
   position: absolute;
-  top: 2px;
-  right: 2px;
+  left: 3px;
+  bottom: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  background-color: rgba(10, 10, 14, 0.85);
+  font-size: 0.68rem;
+  color: var(--text);
+}
+
+.studio-thumb-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   padding: 0;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
-  background-color: rgba(10, 10, 14, 0.8);
+  background-color: rgba(10, 10, 14, 0.85);
   color: var(--text);
   cursor: pointer;
 }
 
-.edit-thumb-remove:hover:not(:disabled) {
+.studio-thumb-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.studio-thumb-add:hover:not(:disabled) {
+  color: var(--text);
   background-color: var(--surface-3);
 }
 
-.edit-tray-count {
-  font-size: 0.75rem;
-  color: var(--text-3);
+.studio-thumb-add:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
-.edit-tray-close {
-  margin-left: auto;
+.studio-instruction {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.studio-textarea {
+  width: 100%;
+  min-height: 7.5rem;
+  resize: vertical;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background-color: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.studio-textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.studio-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.studio-counter {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.studio-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.studio-apply {
+  flex: 1;
+}
+
+.studio-history {
+  padding: 0.6rem 1rem 0.8rem;
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.studio-history ol {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.studio-history li {
+  display: flex;
+  align-items: center;
+}
+
+.studio-history-link {
+  width: 18px;
+  height: 1px;
+  background-color: var(--border-strong);
+}
+
+.studio-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.studio-node img {
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.studio-node:hover:not(:disabled) {
+  background-color: var(--surface-2);
+  color: var(--text);
+}
+
+.studio-node.current {
+  border-color: var(--accent-text);
+  color: var(--text);
+}
+
+.studio-node:disabled {
+  cursor: default;
+}
+
+.studio-node-name {
+  white-space: nowrap;
 }
 
 /* ---- update available (round 7) --------------------------------------- */

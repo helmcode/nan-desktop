@@ -9,9 +9,10 @@ import { fetchWebPreview, readFileForPreview, type WebPreview } from "../core";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { folderName, hostOf } from "../copy";
 import { useT } from "../i18n";
-import { IconExternal, IconGlobe, IconX } from "../icons";
+import { IconExternal, IconGlobe, IconPencil, IconX } from "../icons";
 import { BrandMark } from "../brand";
 import { Markdown, openExternal } from "../Markdown";
+import { isEditableImagePath } from "../studio/studio";
 import { previewKind, targetKey, type PreviewTarget } from "./kind";
 
 const Renderers = {
@@ -118,14 +119,21 @@ export default function PreviewPane({
   profileId,
   onClose,
   onOpenLink,
+  onEditImage,
 }: {
   target: PreviewTarget;
   profileId: string;
   onClose: () => void;
   onOpenLink: (url: string) => void;
+  /// When set, an editable image (PNG/JPEG/WebP) shows a visible "Edit
+  /// image" button that opens the Image Studio on it.
+  onEditImage?: (target: PreviewTarget) => void;
 }) {
   const t = useT();
   const isWeb = target.kind === "web";
+  const editable =
+    onEditImage !== undefined &&
+    (target.kind === "media" || (target.kind === "file" && previewKind(target) === "image" && isEditableImagePath(target.ref)));
   const title = isWeb ? hostOf(target.ref) : folderName(target.ref);
   const key = targetKey(target);
 
@@ -153,6 +161,12 @@ export default function PreviewPane({
             onClick={() => openExternal(target.ref)}
           >
             <IconExternal size={16} />
+          </button>
+        )}
+        {editable && (
+          <button type="button" className="btn btn-secondary btn-sm preview-edit" onClick={() => onEditImage?.(target)}>
+            <IconPencil size={14} />
+            {t.chat.editImage}
           </button>
         )}
         <button type="button" className="icon-btn" aria-label={t.preview.close} title={t.preview.close} onClick={onClose}>

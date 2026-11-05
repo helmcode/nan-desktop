@@ -747,16 +747,9 @@ async fn run_image_edit(app: AppHandle, window: Window, job: EditJob) {
         Ok(path) => path,
         Err(kind) => return emit_error(kind),
     };
-    // The staged picks did their job (the result row is what stays).
-    let staged = std::fs::canonicalize(staged_dir(&app_data)).ok();
-    for source in &job.sources {
-        if staged
-            .as_deref()
-            .is_some_and(|dir| source.parent() == Some(dir))
-        {
-            let _ = std::fs::remove_file(source);
-        }
-    }
+    // Staged picks are NOT deleted here: the Image Studio keeps reusing them
+    // (history nodes, references) for the whole session. The startup sweep
+    // ([`sweep_staged_sources`], 24 h) is what removes them.
     images::release_image(&state, conversation_id, job.generation);
     let _ = window.emit(
         "images://done",
@@ -806,6 +799,47 @@ pub async fn image_edit_pick(
     let home = std::env::home_dir();
     stage_picked_source(&app_data, &store, &profile_id, home.as_deref(), &path)
         .map(Some)
+        .map_err(|kind| kind.as_str().to_string())
+}
+
+/// Stage a file the renderer names (Image Studio "Edit image" on a preview
+/// of a user file). The path must be absolute; everything else is
+/// [`stage_picked_source`]: it must resolve under one of `profile_id`'s
+/// grants, the deny-list and the app data folder are always refused, and
+/// size and magic bytes are checked. A renderer path therefore reaches
+/// exactly what `preview_read_file` can already read, only as a staged copy.
+pub fn stage_requested_source(
+    app_data: &Path,
+    store: &grants::GrantsStore,
+    profile_id: &str,
+    home: Option<&Path>,
+    raw: &str,
+) -> Result<StagedSource, EditErrorKind> {
+    let raw = raw.trim();
+    if raw.is_empty() || !Path::new(raw).is_absolute() {
+        return Err(EditErrorKind::SourceNotAllowed);
+    }
+    stage_picked_source(app_data, store, profile_id, home, Path::new(raw))
+}
+
+/// "Edit image" on an image shown in the preview pane: the file is already
+/// on screen through its grant, so no dialog is needed; it is validated and
+/// staged like a pick (see [`stage_requested_source`]). A refusal is the
+/// kind string.
+#[tauri::command]
+pub async fn image_edit_stage(
+    app: AppHandle,
+    profile_id: String,
+    path: String,
+) -> Result<StagedSource, String> {
+    if !crate::profile::is_known_profile_id(&profile_id) {
+        return Err(EditErrorKind::Protocol.as_str().to_string());
+    }
+    let app_data = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let store = grants::load_or_seed(&app_data)
+        .map_err(|_| EditErrorKind::Protocol.as_str().to_string())?;
+    let home = std::env::home_dir();
+    stage_requested_source(&app_data, &store, &profile_id, home.as_deref(), &path)
         .map_err(|kind| kind.as_str().to_string())
 }
 
@@ -1259,6 +1293,61 @@ mod tests {
     }
 
     #[test]
+    fn a_requested_path_is_staged_like_a_pick_and_only_when_absolute() {
+        let (tmp, app) = app_data();
+        let granted = tmp.path().join("Photos");
+        std::fs::create_dir_all(&granted).expect("dir");
+        let shown = granted.join("dog.png");
+        std::fs::write(&shown, png()).expect("write");
+        let store = store_with_grant("nan", &granted);
+
+        let shown_path = shown.display().to_string();
+        let staged =
+            stage_requested_source(&app, &store, "nan", None, &shown_path).expect("staged");
+        assert_eq!(staged.name, "dog.png");
+        assert!(PathBuf::from(&staged.path).starts_with(staged_dir(&app)));
+        assert!(validate_edit_request(&app, "x", &[staged.path]).is_ok());
+
+        for raw in ["", "   ", "dog.png", "Photos/dog.png"] {
+            assert_eq!(
+                stage_requested_source(&app, &store, "nan", None, raw),
+                Err(EditErrorKind::SourceNotAllowed),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_requested_path_gets_the_same_refusals_as_a_pick() {
+        let (tmp, app) = app_data();
+        let granted = tmp.path().join("Photos");
+        let other = tmp.path().join("Elsewhere");
+        std::fs::create_dir_all(&granted).expect("dir");
+        std::fs::create_dir_all(&other).expect("dir");
+        let outside = other.join("a.png");
+        std::fs::write(&outside, png()).expect("write");
+        let store = store_with_grant("nan", &granted);
+        assert_eq!(
+            stage_requested_source(&app, &store, "nan", None, &outside.display().to_string()),
+            Err(EditErrorKind::SourceNotAllowed)
+        );
+        // Climbing out of the grant is refused too.
+        let climb = format!("{}/../Elsewhere/a.png", granted.display());
+        assert_eq!(
+            stage_requested_source(&app, &store, "nan", None, &climb),
+            Err(EditErrorKind::SourceNotAllowed)
+        );
+        // App data (the chat's own images) never goes through this path.
+        let image = chat_image(&app, &png());
+        let wide = store_with_grant("nan", tmp.path());
+        assert_eq!(
+            stage_requested_source(&app, &wide, "nan", None, &image),
+            Err(EditErrorKind::SourceNotAllowed)
+        );
+        assert!(!staged_dir(&app).exists(), "nothing staged");
+    }
+
+    #[test]
     fn the_staged_sweep_removes_only_old_files() {
         let (_tmp, app) = app_data();
         std::fs::create_dir_all(staged_dir(&app)).expect("staged");
@@ -1273,6 +1362,36 @@ mod tests {
         // No staged folder at all: nothing to do.
         let (_tmp2, empty) = app_data();
         assert_eq!(sweep_staged_sources(&empty, day, now), 0);
+    }
+
+    #[test]
+    fn a_staged_source_survives_a_successful_edit_and_stays_reusable() {
+        let (tmp, app) = app_data();
+        let granted = tmp.path().join("Photos");
+        std::fs::create_dir_all(&granted).expect("dir");
+        let picked = granted.join("cat.png");
+        std::fs::write(&picked, png()).expect("write");
+        let store = store_with_grant("nan", &granted);
+        let staged = stage_picked_source(&app, &store, "nan", None, &picked).expect("staged");
+        let conn = chat_store::open_db(&app).expect("db");
+        let conv = chat_store::insert_conversation(&conn, "nan", "t").expect("conv");
+
+        // First edit succeeds and is persisted…
+        assert!(
+            validate_edit_request(&app, "add a hat", std::slice::from_ref(&staged.path)).is_ok()
+        );
+        persist_edit_result(&app, conv, None, "add a hat", &png()).expect("persisted");
+        // …and the staged copy is still there for the next one (Studio
+        // session); only the 24 h startup sweep removes it.
+        assert!(PathBuf::from(&staged.path).exists(), "staged copy kept");
+        assert!(
+            validate_edit_request(&app, "add a scarf", std::slice::from_ref(&staged.path)).is_ok()
+        );
+        let now = std::time::SystemTime::now();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        assert_eq!(sweep_staged_sources(&app, day, now), 0);
+        assert_eq!(sweep_staged_sources(&app, day, now + day * 2), 1);
+        assert!(!PathBuf::from(&staged.path).exists());
     }
 
     // ---- child-message linkage ----------------------------------------------------------

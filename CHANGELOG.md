@@ -25,15 +25,26 @@
 - The composer's image button now uses a sparkle icon and the tooltip
   "Create image"; when image mode is on, the placeholder asks for the image
   to create and the button shows the accent state.
-- Image editing (NaN community): every image in the chat has an Edit action
-  next to download. It opens the composer in edit mode with a tray of up to
-  3 reference images (add more from your working folders with "Add image",
-  remove any thumbnail) and an instruction box. The result appears as a new
+- Image editing (NaN community): edits happen in the new **Image Studio**,
+  a view of its own. Open it from the Edit action on any chat image, from
+  the visible "Edit image" button in the preview pane (chat images and
+  PNG/JPEG/WebP files from your working folders), or from "Image Studio" in
+  the sidebar to start from a file you pick. The Studio shows the image on
+  a canvas (fit to view or actual size), pins it as the locked base, takes
+  up to 2 more reference images, an instruction (up to 2000 characters,
+  with a counter) and one Apply button with progress and Cancel. Every
+  result joins a history strip (original, then each edit); click any step
+  to keep editing from it, and download the current image. Mask brush and
+  region select are shown as "coming soon" and do nothing yet. Esc goes
+  back, Cmd/Ctrl + Enter applies. Results also appear in the chat as a new
   image with an "Edited" badge and a link to its original. Sent from the
   Rust core to `POST /v1/images/edits` with the desktop session; images are
-  read from disk by the core and checked (PNG/JPEG/WebP, 20 MB each,
-  instruction up to 2000 characters). Picked files go through the folder
-  grants and the sensitive-path deny-list.
+  read from disk by the core and checked (PNG/JPEG/WebP, 20 MB each).
+  Picked or previewed files go through the folder grants and the
+  sensitive-path deny-list (new core command `image_edit_stage` for files
+  already shown in the preview pane). While an edit runs, switching to
+  another conversation is paused (the sidebar explains why) so the result
+  and any error land in the open Studio.
 
 ## 0.2.0 — First public beta
 

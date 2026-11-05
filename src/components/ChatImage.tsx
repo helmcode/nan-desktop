@@ -3,7 +3,7 @@
 // native Save-as dialog as the "Save as…" button below the image; the image
 // itself is left untouched so its own click behaviour does not change.
 // Image edits: an optional Edit icon sits just left of the download icon and
-// opens the composer in edit mode with this image in the tray.
+// opens the Image Studio with this image as the base.
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useT } from "../i18n";
