@@ -1344,6 +1344,19 @@ button:disabled {
   background: none;
 }
 
+/* Says "not yet" out loud next to the inert tools: no hover needed. */
+.studio-soon-chip {
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
+}
+
 .studio-canvas {
   position: relative;
   flex: 1;

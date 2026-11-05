@@ -306,6 +306,7 @@ export const es: Strings = {
     toolBrush: "Pincel de máscara",
     toolRegion: "Selección de zona",
     soon: (tool: string) => `${tool}: muy pronto`,
+    soonChip: "Próximamente",
     referencesTitle: "Imágenes",
     referencesHint: (max: number) => `La imagen base va primero. Añade hasta ${max} más como referencia.`,
     baseBadge: "Base",

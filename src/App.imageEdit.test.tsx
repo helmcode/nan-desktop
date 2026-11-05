@@ -613,6 +613,14 @@ describe("toolbar", () => {
       expect(tool.getAttribute("aria-disabled")).toBe("true");
       expect(tool.getAttribute("title")).toMatch(/coming soon$/);
     }
+    // The state is visible without hovering: a "Soon" chip sits next to the
+    // inert tools (hidden from AT — each tool's name already says it).
+    const chip = within(toolbar).getByText("Soon");
+    expect(chip.classList.contains("studio-soon-chip")).toBe(true);
+    expect(chip.getAttribute("aria-hidden")).toBe("true");
+    expect(chip.tagName).toBe("SPAN");
+    expect(brush.nextElementSibling).toBe(region);
+    expect(region.nextElementSibling).toBe(chip);
     const before = invoke.mock.calls.length;
     const canvas = screen.getByRole("region", { name: "Canvas" }).outerHTML;
     fireEvent.click(brush);
@@ -647,5 +655,8 @@ describe("Spanish", () => {
     expect(screen.getByRole("button", { name: "Aplicar edición" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Añadir referencia" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Historial de ediciones" })).toBeTruthy();
+    const toolbar = screen.getByRole("toolbar", { name: "Herramientas de edición" });
+    expect(within(toolbar).getByText("Próximamente").getAttribute("aria-hidden")).toBe("true");
+    expect(within(toolbar).getByRole("button", { name: "Pincel de máscara: muy pronto" })).toBeTruthy();
   });
 });

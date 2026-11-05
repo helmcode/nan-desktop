@@ -373,6 +373,11 @@ export function ImageStudio({
             <SoonTool name={t.studio.toolRegion}>
               <IconSelection size={16} />
             </SoonTool>
+            {/* Visible, so the inert state reads without hovering. Hidden
+                from assistive tech: each tool's name already says it. */}
+            <span className="studio-soon-chip" aria-hidden="true">
+              {t.studio.soonChip}
+            </span>
           </div>
 
           <div

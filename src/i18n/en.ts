@@ -307,6 +307,7 @@ export const en = {
     toolBrush: "Mask brush",
     toolRegion: "Region select",
     soon: (tool: string) => `${tool}: coming soon`,
+    soonChip: "Soon",
     referencesTitle: "Images",
     referencesHint: (max: number) => `The base image goes first. Add up to ${max} more as references.`,
     baseBadge: "Base",

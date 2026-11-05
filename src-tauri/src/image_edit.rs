@@ -4,7 +4,8 @@
 //! session JWT (vault account `<profile>.session`, the same credential web
 //! search and memory sync use), never the inference key.
 //!
-//! Contract (multipart/form-data): `instruction` (1..=2000 chars),
+//! Contract (multipart/form-data): `prompt` (the edit instruction,
+//! 1..=2000 chars; OpenAI field name — the platform reads `prompt`),
 //! `image[]` (1..=3 image files), `n=1`. The reply is ALWAYS
 //! `{"data":[{"b64_json": …}]}`; a `url` reply is a protocol error and is
 //! never fetched. Status mapping (UI kinds): 400 `invalid_request`, 401
@@ -445,11 +446,12 @@ pub enum EditPart {
     },
 }
 
-/// The edit request body, part by part: `instruction`, one `image[]` per
-/// source (`image-<n>.<ext>` with the sniffed MIME type), then `n=1`.
+/// The edit request body, part by part: `prompt` (the instruction — the
+/// OpenAI field name the platform reads), one `image[]` per source
+/// (`image-<n>.<ext>` with the sniffed MIME type), then `n=1`.
 pub fn edit_parts(instruction: &str, sources: Vec<EditSource>) -> Vec<EditPart> {
     let mut parts = vec![EditPart::Text {
-        name: "instruction",
+        name: "prompt",
         value: instruction.to_string(),
     }];
     for (index, source) in sources.into_iter().enumerate() {
@@ -922,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_parts_are_instruction_images_then_n_1() {
+    fn edit_parts_are_prompt_images_then_n_1() {
         let parts = edit_parts(
             "make it snowy",
             vec![
@@ -940,7 +942,7 @@ mod tests {
         assert_eq!(
             parts[0],
             EditPart::Text {
-                name: "instruction",
+                name: "prompt",
                 value: "make it snowy".into()
             }
         );
@@ -1517,7 +1519,8 @@ mod tests {
         );
         assert!(lower.contains("authorization: bearer fake-session-jwt"));
         assert!(lower.contains("content-type: multipart/form-data; boundary="));
-        assert!(lower.contains("name=\"instruction\"\r\n\r\nmake it snowy\r\n"));
+        assert!(lower.contains("name=\"prompt\"\r\n\r\nmake it snowy\r\n"));
+        assert!(!lower.contains("name=\"instruction\""));
         assert_eq!(lower.matches("name=\"image[]\"").count(), 2);
         assert!(lower.contains("filename=\"image-1.png\"\r\ncontent-type: image/png"));
         assert!(lower.contains("filename=\"image-2.webp\"\r\ncontent-type: image/webp"));

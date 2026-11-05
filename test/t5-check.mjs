@@ -225,7 +225,7 @@ const MOCK_SESSION = "fake-jwt"; // must match mock-device.mjs / mock-images.mjs
 
 function editForm(instruction, imageCount, n = "1") {
   const form = new FormData();
-  form.append("instruction", instruction);
+  form.append("prompt", instruction);
   const png = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
     "base64",
@@ -256,7 +256,7 @@ async function expectEditContract() {
   assert(record.edit?.images?.length === 2, "edits: expected two recorded image[] parts");
   assert(record.edit.instruction_chars === 13, "edits: instruction length not recorded");
   assert(JSON.stringify(record).indexOf("snowy") === -1, "edits: the instruction text must never be recorded");
-  console.log("edit contract OK: multipart instruction + 2 x image[] + n=1 -> b64_json PNG");
+  console.log("edit contract OK: multipart prompt + 2 x image[] + n=1 -> b64_json PNG");
 
   const cases = [
     ["4 images", editForm("x", 4), 400],

@@ -30,8 +30,10 @@
 //                                 the platform API in production). Checks
 //                                 `Authorization: Bearer fake-jwt` (the
 //                                 mock-device session token), then parses
-//                                 the multipart body: `instruction`
-//                                 (1..2000 chars), `image[]` (1..3 files,
+//                                 the multipart body: `prompt` (the
+//                                 instruction, 1..2000 chars — the OpenAI
+//                                 field name the platform reads),
+//                                 `image[]` (1..3 files,
 //                                 PNG/JPEG/WebP magic), `n` = 1. Answers
 //                                 ALWAYS {"created":…, "data":[{"b64_json"}]}.
 //                                 Errors mirror the platform: 400 generic,
@@ -187,7 +189,7 @@ function handleEdits(req, res, body) {
   }
   const parts = parseMultipart(req.headers["content-type"], body);
   if (!parts) return sendJson(res, 400, { error: "invalid request" });
-  const instruction = parts.find((p) => p.name === "instruction")?.data.toString("utf8") ?? "";
+  const instruction = parts.find((p) => p.name === "prompt")?.data.toString("utf8") ?? "";
   const images = parts.filter((p) => p.name === "image[]");
   const n = parts.find((p) => p.name === "n")?.data.toString("utf8") ?? "1";
   if (instruction === "trigger-403") return sendJson(res, 403, { error: "tier_restricted" });
