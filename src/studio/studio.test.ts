@@ -7,7 +7,9 @@ import {
   addReference,
   afterEdit,
   canSubmit,
+  clearedSession,
   editModelFor,
+  needsFolderGrant,
   editSources,
   instructionLength,
   isEditableImagePath,
@@ -140,6 +142,29 @@ describe("after an edit", () => {
     expect(next.refs.map((r) => r.path)).toEqual([staged("a").path]);
     expect(history).toHaveLength(1);
     expect(refs).toHaveLength(2);
+  });
+});
+
+describe("removing the base", () => {
+  it("starts a fresh, empty session with no conversation, base, references or history", () => {
+    expect(clearedSession()).toEqual({ conversationId: null, base: null, refs: [], history: [] });
+  });
+
+  it("returns a new session every time (no shared arrays)", () => {
+    const a = clearedSession();
+    const b = clearedSession();
+    expect(a).not.toBe(b);
+    expect(a.refs).not.toBe(b.refs);
+    expect(a.history).not.toBe(b.history);
+  });
+});
+
+describe("errors a folder grant fixes", () => {
+  it("only the grant refusal points to Settings", () => {
+    expect(needsFolderGrant("source_not_allowed")).toBe(true);
+    for (const kind of ["", "unsupported_image", "image_too_large", "protocol", "unauthorized", "server"]) {
+      expect(needsFolderGrant(kind)).toBe(false);
+    }
   });
 });
 

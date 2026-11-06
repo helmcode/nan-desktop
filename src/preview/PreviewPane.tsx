@@ -120,6 +120,7 @@ export default function PreviewPane({
   onClose,
   onOpenLink,
   onEditImage,
+  onRemove,
 }: {
   target: PreviewTarget;
   profileId: string;
@@ -128,9 +129,14 @@ export default function PreviewPane({
   /// When set, an editable image (PNG/JPEG/WebP) shows a visible "Edit
   /// image" button that opens the Image Studio on it.
   onEditImage?: (target: PreviewTarget) => void;
+  /// When set, an image gets a small X on it that takes it OUT of the
+  /// preview (the pane forgets it, so another image can be opened). It
+  /// never deletes the file itself.
+  onRemove?: () => void;
 }) {
   const t = useT();
   const isWeb = target.kind === "web";
+  const isImage = target.kind === "media" || (target.kind === "file" && previewKind(target) === "image");
   const editable =
     onEditImage !== undefined &&
     (target.kind === "media" || (target.kind === "file" && previewKind(target) === "image" && isEditableImagePath(target.ref)));
@@ -176,7 +182,25 @@ export default function PreviewPane({
       <div className="preview-body" key={key}>
         <ErrorBoundary resetKey={key} fallback={<p className="preview-note">{t.preview.crashed}</p>}>
           <Suspense fallback={<p className="preview-note">{t.preview.loading}</p>}>
-            {target.kind === "media" ? (
+            {isImage && onRemove ? (
+              // The X sits on the image's own corner (the frame shrinks to it).
+              <div className="preview-image-frame">
+                {target.kind === "media" ? (
+                  <img className="preview-image" src={convertFileSrc(target.ref)} alt={title} />
+                ) : (
+                  <FileBody profileId={profileId} path={target.ref} onOpenLink={onOpenLink} />
+                )}
+                <button
+                  type="button"
+                  className="preview-remove"
+                  aria-label={t.preview.removeFromPreview}
+                  title={t.preview.removeFromPreview}
+                  onClick={onRemove}
+                >
+                  <IconX size={12} />
+                </button>
+              </div>
+            ) : target.kind === "media" ? (
               <img className="preview-image" src={convertFileSrc(target.ref)} alt={title} />
             ) : isWeb ? (
               previewKind(target) === "web" ? (

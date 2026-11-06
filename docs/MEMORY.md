@@ -68,7 +68,11 @@ Studio can reuse them across edits; the copies are removed at startup once
 they are older than 24 h).
 The Image Studio keeps its session (base, references, history) in memory
 only while the app runs; nothing about it is persisted beyond the chat
-rows each edit creates. Region marks (brush strokes, the rectangle) stay
+rows each edit creates. Removing the base (the X on it) only drops that
+in-memory session (base, references, history, marks); it deletes nothing on
+disk or in `chat.db`, and the next edit starts a new conversation. Likewise
+"Remove from preview" only makes the preview pane forget the image; the
+file and its chat row are untouched. Region marks (brush strokes, the rectangle) stay
 on an overlay in memory and are never drawn into your image. An edit with
 marks paints them onto a copy of the base (PNG, written by the core to
 `<app data>/images/annotations`), sends that copy as the second image right

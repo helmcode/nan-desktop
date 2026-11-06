@@ -235,6 +235,7 @@ export const es: Strings = {
   settings: {
     title: "Ajustes",
     back: "Volver al chat",
+    backToStudio: "Volver al Estudio de imagen",
     folders: {
       title: "Carpetas de trabajo",
       lede: "El asistente solo trabaja con archivos de estas carpetas.",
@@ -297,8 +298,9 @@ export const es: Strings = {
     openImageLabel: "Empezar de nuevo con otra imagen",
     canvasLabel: "Lienzo",
     canvasAlt: (label: string) => `Imagen en edición: ${label}`,
-    emptyTitle: "Empieza con una imagen",
-    emptyHint: "Elige un PNG, JPEG o WebP de tus carpetas de trabajo.",
+    emptyTitle: "Empieza: añade una imagen o elige un fichero",
+    emptyHint:
+      "Un PNG, JPEG o WebP de tus carpetas de trabajo. También puedes elegir un chat en la barra lateral y usar Editar imagen en una de sus imágenes.",
     chooseImage: "Elegir imagen",
     preparing: "Preparando la imagen…",
     viewLabel: "Zoom",
@@ -322,6 +324,9 @@ export const es: Strings = {
     baseLocked: (label: string) => `Imagen base (fija): ${label}`,
     addReference: "Añadir referencia",
     removeReference: (label: string) => `Quitar la referencia ${label}`,
+    removeBase: (label: string) => `Quitar la imagen base ${label} y empezar de nuevo`,
+    openSettings: "Abrir Ajustes",
+    openSettingsLabel: "Abrir Ajustes para añadir una carpeta de trabajo",
     referenceCount: (n: number, max: number) => `${n} de ${max} referencias`,
     instructionLabel: "¿Qué quieres cambiar?",
     instructionPlaceholder: "Por ejemplo: convierte el cielo en un atardecer cálido",
@@ -345,6 +350,7 @@ export const es: Strings = {
     title: "Vista previa",
     close: "Cerrar la vista previa",
     open: "Abrir la vista previa",
+    removeFromPreview: "Quitar de la vista previa",
     openInBrowser: "Abrir en el navegador",
     loading: "Cargando la vista previa…",
     unsupported: "No hay vista previa para este tipo de archivo.",

@@ -56,6 +56,22 @@
   FLUX editor the tools show as unavailable. Core: new command
   `image_edit_stage_annotation`, and `edit_images` takes an optional
   `annotationPath` (older callers are unaffected).
+- Image Studio: the pinned base image has an X ("Remove base image ... and
+  start over"). It closes the current session and starts a fresh one, like
+  "New chat": the canvas shows "Get started: add an image or choose a file"
+  with the file picker (focused) and a pointer to the sidebar chats, the
+  tray and the history strip empty, the tools reset, and the next edit
+  creates its own conversation. Earlier results stay in their chat. The X
+  is disabled while an edit runs.
+- Preview pane: an image (a chat image or an image file) shows a
+  small X on its corner, "Remove from preview". It takes the image out of
+  the pane (no reopen toggle is left behind) so another one can be opened;
+  the file itself is never touched. Other previews keep only the pane's
+  close button.
+- The "Only images inside your working folders can be used..." refusal in
+  the Image Studio is now a card with an **Open Settings** button that
+  opens Settings on the working folders. Settings' Back then reads "Back to
+  the Image Studio" and returns to the same Studio session.
 
 ## 0.2.0 — First public beta
 

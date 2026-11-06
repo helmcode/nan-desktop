@@ -150,7 +150,8 @@ describe("entry points", () => {
     await openStudioFromChat();
     expect(canvasImage().getAttribute("alt")).toBe("Image being edited: a red fox");
     expect(canvasImage().getAttribute("src")).toBe("asset://localhost//data/images/r.png");
-    // The base is pinned first in the tray, locked (no remove button).
+    // The base is pinned first in the tray, locked (it can only be removed
+    // as a whole session, never swapped for a reference).
     expect(screen.getByRole("img", { name: "Base image (locked): a red fox" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Remove reference/ })).toBeNull();
     expect(within(history()).getByRole("button", { name: "Original: a red fox" })).toBeTruthy();
@@ -235,7 +236,7 @@ describe("entry points", () => {
     await screen.findByText("a red fox");
     fireEvent.click(screen.getByRole("button", { name: "Image Studio" }));
     await studio();
-    expect(screen.getByText("Start from an image")).toBeTruthy();
+    expect(screen.getByText("Get started: add an image or choose a file")).toBeTruthy();
     expect(applyButton().disabled).toBe(true);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Choose image" }));
@@ -916,5 +917,238 @@ describe("Spanish", () => {
     expect(within(toolbar).getByRole("button", { name: "Pincel" }).getAttribute("aria-pressed")).toBe("true");
     expect(within(toolbar).getByText("Pinta sobre la zona que quieres cambiar.")).toBeTruthy();
     expect(within(toolbar).getByRole("button", { name: "Rectángulo" })).toBeTruthy();
+  });
+});
+
+describe("removing the base image", () => {
+  const removeBaseButton = (label: string) =>
+    screen.getByRole("button", { name: `Remove base image ${label} and start over` }) as HTMLButtonElement;
+  const canvas = () => screen.getByRole("region", { name: "Canvas" });
+
+  it("the X on the base starts a fresh session: empty canvas, tray and history; the chat stays as it was", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await openStudioFromChat();
+    await addReference(1);
+    fireEvent.change(instructionBox(), { target: { value: "make it snowy" } });
+    await apply();
+    await waitFor(() => expect(invokedWith("edit_images")).toHaveLength(1));
+    rows = [...rows, row(3, "assistant", "make it snowy", { media_path: "/data/images/e.png", parent_message_id: 2 })];
+    await act(async () => emit("images://done", { conversation_id: 7, media_path: "/data/images/e.png" }));
+    await within(history()).findByRole("button", { name: "Edit 1: make it snowy" });
+    // A mark on the result, so the tool state has something to reset.
+    fireEvent.click(screen.getByRole("button", { name: "Brush" }));
+    expect(screen.getByRole("button", { name: "Brush" }).getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(removeBaseButton("make it snowy"));
+
+    // The canvas shows the empty state with the file picker, focused.
+    expect(within(canvas()).queryByRole("img")).toBeNull();
+    expect(within(canvas()).getByText("Get started: add an image or choose a file")).toBeTruthy();
+    expect(within(canvas()).getByText(/pick a chat in the sidebar and use Edit image/)).toBeTruthy();
+    const choose = within(canvas()).getByRole("button", { name: "Choose image" });
+    await waitFor(() => expect(document.activeElement).toBe(choose));
+    // Tray and history are empty; the tools are off and disabled.
+    expect(screen.queryByRole("img", { name: /Base image \(locked\)/ })).toBeNull();
+    expect(screen.queryByRole("img", { name: "photo-1.jpg" })).toBeNull();
+    expect(screen.getByText("0 of 2 references")).toBeTruthy();
+    expect(screen.queryByRole("navigation", { name: "Edit history" })).toBeNull();
+    const brush = screen.getByRole("button", { name: "Brush" }) as HTMLButtonElement;
+    expect(brush.disabled).toBe(true);
+    expect(brush.getAttribute("aria-pressed")).toBe("false");
+    expect(applyButton().disabled).toBe(true);
+    // Nothing in the chat is touched (no delete, no message change).
+    expect(invokedWith("conversation_delete")).toEqual([]);
+
+    // The next base opens a new session: its edit creates its own conversation.
+    await act(async () => {
+      fireEvent.click(choose);
+    });
+    await waitFor(() => expect(canvasImage().getAttribute("alt")).toBe("Image being edited: photo-2.jpg"));
+    expect(within(history()).getAllByRole("button")).toHaveLength(1);
+    fireEvent.change(instructionBox(), { target: { value: "add a hat" } });
+    await apply();
+    await waitFor(() =>
+      expect(invokedWith("edit_images")[1]).toEqual({
+        conversationId: 8,
+        parentMessageId: null,
+        instruction: "add a hat",
+        sourcePaths: ["/data/images/staged/p2.jpg"],
+      }),
+    );
+    expect(invokedWith("conversation_create")).toEqual([{ profileId: "nan" }]);
+  });
+
+  it("the X is disabled while an edit runs (the result must land in this session)", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await openStudioFromChat();
+    expect(removeBaseButton("a red fox").disabled).toBe(false);
+    fireEvent.change(instructionBox(), { target: { value: "make it snowy" } });
+    await apply();
+    await act(async () => emit("images://started", { conversation_id: 7 }));
+    expect(removeBaseButton("a red fox").disabled).toBe(true);
+    fireEvent.click(removeBaseButton("a red fox"));
+    expect(canvasImage().getAttribute("src")).toBe("asset://localhost//data/images/r.png");
+  });
+
+  it("is labelled in Spanish", async () => {
+    resetTauri(handlers());
+    renderApp("es");
+    await screen.findByText("a red fox");
+    fireEvent.click(screen.getByRole("button", { name: "Editar imagen" }));
+    await screen.findByRole("region", { name: "Estudio de imagen" });
+    fireEvent.click(screen.getByRole("button", { name: "Quitar la imagen base a red fox y empezar de nuevo" }));
+    expect(screen.getByText("Empieza: añade una imagen o elige un fichero")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Elegir imagen" })).toBeTruthy();
+  });
+});
+
+describe("removing an image from the preview pane", () => {
+  it("the X on an app image takes it out of the preview, never deleting anything", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await screen.findByText("a red fox");
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const pane = await screen.findByRole("complementary", { name: "Preview" });
+    const remove = within(pane).getByRole("button", { name: "Remove from preview" });
+    expect(remove.getAttribute("title")).toBe("Remove from preview");
+    const calls = invokedWith("conversation_delete").length;
+    fireEvent.click(remove);
+    await waitFor(() => expect(screen.queryByRole("complementary", { name: "Preview" })).toBeNull());
+    // Forgotten, not just hidden: no reopen toggle for the removed image.
+    expect(screen.queryByRole("button", { name: "Open preview" })).toBeNull();
+    expect(invokedWith("conversation_delete")).toHaveLength(calls);
+    // The chat image is still there, and another image can be opened.
+    expect(screen.getByRole("button", { name: "Edit image" })).toBeTruthy();
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    expect(await screen.findByRole("complementary", { name: "Preview" })).toBeTruthy();
+  });
+
+  it("a user image file gets the X too; other previews keep only the pane close", async () => {
+    rows.push(row(3, "assistant", "Saved.", { artifacts: [{ path: "/Users/ana/Photos/cat.png", kind: "file" }] }));
+    resetTauri(handlers());
+    renderApp();
+    await screen.findByText("Saved.");
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const pane = await screen.findByRole("complementary", { name: "Preview" });
+    expect(within(pane).getByRole("button", { name: "Remove from preview" })).toBeTruthy();
+    cleanup();
+
+    rows = [row(1, "user", "hola"), row(4, "assistant", "Done.", { artifacts: [{ path: "/Users/ana/data.csv", kind: "file" }] })];
+    resetTauri(handlers());
+    renderApp();
+    await screen.findByText("Done.");
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const csvPane = await screen.findByRole("complementary", { name: "Preview" });
+    expect(within(csvPane).queryByRole("button", { name: "Remove from preview" })).toBeNull();
+    expect(within(csvPane).getByRole("button", { name: "Close preview" })).toBeTruthy();
+  });
+
+  it("is labelled in Spanish", async () => {
+    resetTauri(handlers());
+    renderApp("es");
+    await screen.findByText("a red fox");
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const pane = await screen.findByRole("complementary", { name: "Vista previa" });
+    expect(within(pane).getByRole("button", { name: "Quitar de la vista previa" })).toBeTruthy();
+  });
+});
+
+describe("the folder-grant refusal opens Settings", () => {
+  const settingsHandlers = {
+    tools_settings_get: () => ({ tools_allow_run_command: true }),
+    memory_settings_get: () => ({ mode: "remote" }),
+    app_info: () => ({ version: "0.2.0" }),
+  };
+  const refused = () => {
+    throw "source_not_allowed";
+  };
+
+  it("keeps the message and adds Open Settings on the folders section; Back returns to the Studio", async () => {
+    const scrolled: Element[] = [];
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+    try {
+      resetTauri(handlers({ ...settingsHandlers, image_edit_pick: refused }));
+      renderApp();
+      await openStudioFromChat();
+      await act(async () => {
+        fireEvent.click(addReferenceButton() as HTMLButtonElement);
+      });
+      const alert = await screen.findByRole("alert");
+      expect(
+        within(alert).getByText(
+          "Only images inside your working folders can be used. Add the folder in Settings first.",
+        ),
+      ).toBeTruthy();
+      const open = within(alert).getByRole("button", { name: "Open Settings to add a working folder" });
+      expect(open.textContent).toBe("Open Settings");
+
+      fireEvent.click(open);
+      expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
+      expect(queryStudio()).toBeNull();
+      await waitFor(() =>
+        expect(scrolled.some((el) => el.getAttribute("aria-labelledby") === "ws-title")).toBe(true),
+      );
+
+      // Back returns to the same Studio session (base and tray intact).
+      fireEvent.click(screen.getByRole("button", { name: "Back to the Image Studio" }));
+      await studio();
+      expect(canvasImage().getAttribute("alt")).toBe("Image being edited: a red fox");
+      expect(screen.queryByRole("heading", { name: "Settings" })).toBeNull();
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("works from the empty Studio when staging a preview file is refused", async () => {
+    rows.push(row(3, "assistant", "Saved.", { artifacts: [{ path: "/Users/ana/Photos/cat.png", kind: "file" }] }));
+    resetTauri(handlers({ ...settingsHandlers, image_edit_stage: refused }));
+    renderApp();
+    await screen.findByText("Saved.");
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const pane = await screen.findByRole("complementary", { name: "Preview" });
+    fireEvent.click(within(pane).getByRole("button", { name: "Edit image" }));
+    await studio();
+    fireEvent.click(await screen.findByRole("button", { name: "Open Settings to add a working folder" }));
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
+  });
+
+  it("other errors stay a plain message with no Settings action", async () => {
+    resetTauri(
+      handlers({
+        image_edit_pick: () => {
+          throw "unsupported_image";
+        },
+      }),
+    );
+    renderApp();
+    await openStudioFromChat();
+    await act(async () => {
+      fireEvent.click(addReferenceButton() as HTMLButtonElement);
+    });
+    expect(await screen.findByText("Use a PNG, JPEG or WebP image.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Open Settings/ })).toBeNull();
+  });
+
+  it("reads Abrir Ajustes in Spanish, with the same message", async () => {
+    resetTauri(handlers({ ...settingsHandlers, image_edit_pick: refused }));
+    renderApp("es");
+    await screen.findByText("a red fox");
+    fireEvent.click(screen.getByRole("button", { name: "Editar imagen" }));
+    await screen.findByRole("region", { name: "Estudio de imagen" });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Añadir referencia" }));
+    });
+    expect(
+      await screen.findByText(
+        "Solo puedes usar imágenes de tus carpetas de trabajo. Añade la carpeta en Ajustes primero.",
+      ),
+    ).toBeTruthy();
+    const open = screen.getByRole("button", { name: "Abrir Ajustes para añadir una carpeta de trabajo" });
+    expect(open.textContent).toBe("Abrir Ajustes");
   });
 });

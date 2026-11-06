@@ -24,6 +24,7 @@ export function Settings({
   onSignOut,
   signingOut,
   focusSection = null,
+  backLabel,
 }: {
   profile: ProfileView | undefined;
   workspace: Workspace;
@@ -34,6 +35,8 @@ export function Settings({
   onSignOut: () => void;
   signingOut: boolean;
   focusSection?: SettingsSection;
+  /// The Back button's text (where Back returns to); "Back to chat" by default.
+  backLabel?: string;
 }) {
   const { t, locale, setLocale } = useI18n();
   // S15: run_command is on by default; the core still asks per action.
@@ -123,7 +126,7 @@ export function Settings({
       <header className="settings-header">
         <button type="button" className="btn btn-ghost btn-sm" onClick={onBack}>
           <IconArrowLeft size={16} />
-          {t.settings.back}
+          {backLabel ?? t.settings.back}
         </button>
         <h1 id="settings-title">{t.settings.title}</h1>
       </header>

@@ -1082,6 +1082,17 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     });
   }, []);
   const closePreview = useCallback(() => setPreviewOpen(false), [setPreviewOpen]);
+  // "Remove from preview" on an image: the pane forgets it (no reopen
+  // toggle until something else is opened). The file itself is untouched.
+  const removeFromPreview = useCallback((): void => {
+    const key = activeConvRef.current ?? NEW_CHAT_KEY;
+    setPreviews((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Map(prev);
+      next.delete(key);
+      return next;
+    });
+  }, []);
 
   // Image mode toggles for the open conversation only.
   const toggleImageMode = useCallback((): void => {
@@ -1326,10 +1337,17 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     await workspace.enableComputerWide();
   }, [workspace]);
 
+  // Settings' Back returns to where it was opened from: the Studio (its
+  // grant refusal's "Open Settings") or the chat.
+  const [settingsReturn, setSettingsReturn] = useState<"chat" | "studio">("chat");
   const openSettings = useCallback((section: SettingsSection): void => {
+    if (viewRef.current !== "settings") setSettingsReturn(viewRef.current === "studio" ? "studio" : "chat");
+    // Never a Back loop (Studio -> Settings -> Studio -> Settings...).
+    if (viewRef.current === "studio" && studioReturnRef.current === "settings") studioReturnRef.current = "chat";
     setSettingsFocus(section);
     setView("settings");
   }, []);
+  const openFolderSettings = useCallback((): void => openSettings("folders"), [openSettings]);
 
   const submit = (): void => {
     void (imageMode ? sendImage() : send());
@@ -1562,6 +1580,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
               onCreateConversation={createStudioConversation}
               onJob={onStudioJob}
               onSaveResult={onImageSaved}
+              onOpenSettings={openFolderSettings}
             />
           </Suspense>
         </ErrorBoundary>
@@ -1573,7 +1592,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           voice={voice}
           onVoiceChange={setVoice}
           onAskComputerWide={() => setAskComputerWide(true)}
-          onBack={() => setView("chat")}
+          onBack={() => setView(settingsReturn)}
+          backLabel={settingsReturn === "studio" ? t.settings.backToStudio : t.settings.back}
           onSignOut={onSignOut}
           signingOut={busy}
           focusSection={settingsFocus}
@@ -1846,6 +1866,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   onClose={closePreview}
                   onOpenLink={openWebPreview}
                   onEditImage={editFromPreview}
+                  onRemove={removeFromPreview}
                 />
               </Suspense>
             )}

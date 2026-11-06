@@ -125,6 +125,29 @@ export function afterEdit(
   };
 }
 
+/// One Studio session: the conversation the results land in, the base, the
+/// references and the lineage.
+export interface StudioSession {
+  conversationId: number | null;
+  base: StudioImage | null;
+  refs: StudioImage[];
+  history: HistoryNode[];
+}
+
+/// Removing the base closes the session and starts a fresh, empty one (the
+/// same as "New chat": the next edit creates its own conversation). The
+/// previous conversation and its messages are untouched: they live in the
+/// chat, not in the Studio session.
+export function clearedSession(): StudioSession {
+  return { conversationId: null, base: null, refs: [], history: [] };
+}
+
+/// The edit error that a folder grant fixes: the UI pairs it with an
+/// "Open Settings" action on the folders section.
+export function needsFolderGrant(kind: string): boolean {
+  return kind === "source_not_allowed";
+}
+
 /// Instruction length as the platform counts it (code points).
 export function instructionLength(text: string): number {
   return [...text].length;

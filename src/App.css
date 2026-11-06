@@ -473,6 +473,23 @@ button:disabled {
   border-radius: var(--radius-sm);
 }
 
+/* An inline error with one way out (the folder-grant refusal). */
+.grant-error-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.grant-error-text {
+  flex: 1 1 14rem;
+  margin: 0;
+}
+
+.grant-error-card .btn {
+  flex: none;
+}
+
 /* ---- shell ------------------------------------------------------------ */
 
 .shell {
@@ -922,6 +939,37 @@ button:disabled {
 .preview-note {
   color: var(--text-2);
   font-size: 0.9rem;
+}
+
+/* An image in the preview with its "Remove from preview" X on the corner. */
+.preview-image-frame {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  min-width: 40px;
+  min-height: 40px;
+}
+
+.preview-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background-color: rgba(10, 10, 14, 0.85);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.preview-remove:hover,
+.preview-remove:focus-visible {
+  border-color: var(--text-2);
 }
 
 .preview-image {

@@ -236,6 +236,7 @@ export const en = {
   settings: {
     title: "Settings",
     back: "Back to chat",
+    backToStudio: "Back to the Image Studio",
     folders: {
       title: "Working folders",
       lede: "The assistant only works with files in these folders.",
@@ -298,8 +299,9 @@ export const en = {
     openImageLabel: "Start over from another image",
     canvasLabel: "Canvas",
     canvasAlt: (label: string) => `Image being edited: ${label}`,
-    emptyTitle: "Start from an image",
-    emptyHint: "Choose a PNG, JPEG or WebP from your working folders.",
+    emptyTitle: "Get started: add an image or choose a file",
+    emptyHint:
+      "A PNG, JPEG or WebP from your working folders. You can also pick a chat in the sidebar and use Edit image on one of its images.",
     chooseImage: "Choose image",
     preparing: "Preparing the image…",
     viewLabel: "Zoom",
@@ -323,6 +325,9 @@ export const en = {
     baseLocked: (label: string) => `Base image (locked): ${label}`,
     addReference: "Add reference",
     removeReference: (label: string) => `Remove reference ${label}`,
+    removeBase: (label: string) => `Remove base image ${label} and start over`,
+    openSettings: "Open Settings",
+    openSettingsLabel: "Open Settings to add a working folder",
     referenceCount: (n: number, max: number) => `${n} of ${max} references`,
     instructionLabel: "What should change?",
     instructionPlaceholder: "For example: turn the sky into a warm sunset",
@@ -346,6 +351,7 @@ export const en = {
     title: "Preview",
     close: "Close preview",
     open: "Open preview",
+    removeFromPreview: "Remove from preview",
     openInBrowser: "Open in browser",
     loading: "Loading preview…",
     unsupported: "No preview for this file type.",

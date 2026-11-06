@@ -5,7 +5,9 @@
 // "Clear marks"), the canvas with the current base image and the marks
 // overlay, a side panel (the image tray with the base locked first, the
 // instruction and the one primary action) and the lineage history strip
-// underneath.
+// underneath. The X on the base closes the session (empty canvas, tray and
+// history; the chat keeps every earlier result). A folder-grant refusal
+// offers "Open Settings" on the working folders.
 //
 // Region tools (see `annotate.ts`): the marks stay on an overlay canvas
 // above the image. An edit with marks composites them onto a COPY of the
@@ -23,6 +25,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { GrantErrorCard } from "../components/GrantErrorCard";
 import { useSaveImage, type SaveImageResult } from "../components/SaveImageButton";
 import { editErrorLabel } from "../copy";
 import { useT } from "../i18n";
@@ -55,24 +58,22 @@ import {
   addReference,
   afterEdit,
   canSubmit,
+  clearedSession,
   editModelFor,
   editSources,
   instructionLength,
   maxReferences,
+  needsFolderGrant,
   regionToolsAvailable,
   removeReference,
   sendableReferences,
   type HistoryNode,
   type StudioImage,
   type StudioSeed,
+  type StudioSession,
 } from "./studio";
 
-interface Session {
-  conversationId: number | null;
-  base: StudioImage | null;
-  refs: StudioImage[];
-  history: HistoryNode[];
-}
+type Session = StudioSession;
 
 interface Job {
   conversationId: number;
@@ -156,6 +157,7 @@ export function ImageStudio({
   onCreateConversation,
   onJob,
   onSaveResult,
+  onOpenSettings,
 }: {
   seed: StudioSeed;
   profileId: string;
@@ -169,6 +171,8 @@ export function ImageStudio({
   /// An edit started (true) or ended (false) in `conversationId`.
   onJob: (conversationId: number, running: boolean) => void;
   onSaveResult: (result: SaveImageResult) => void;
+  /// Opens Settings on the working folders (the grant refusal's action).
+  onOpenSettings: () => void;
 }) {
   const t = useT();
   const [session, setSession] = useState<Session>(() => sessionFrom(seed));
@@ -179,6 +183,9 @@ export function ImageStudio({
   const [error, setError] = useState("");
   const [zoom, setZoom] = useState<Zoom>("fit");
   const instructionRef = useRef<HTMLTextAreaElement | null>(null);
+  const chooseRef = useRef<HTMLButtonElement | null>(null);
+  // Focus follows a removed base to the empty state's file picker.
+  const focusChooseRef = useRef(false);
   const jobRef = useRef<Job | null>(null);
   const running = stage !== null;
   const { base, refs, history } = session;
@@ -457,6 +464,24 @@ export function ImageStudio({
     setSession((prev) => ({ ...prev, refs: removeReference(prev.refs, path) }));
   };
 
+  /// The X on the base: closes this session and starts a fresh, empty one
+  /// (empty canvas, tray and history; the next edit creates its own
+  /// conversation). The earlier conversation stays in the chat as it was.
+  const removeBase = (): void => {
+    if (running) return;
+    setSession(clearedSession());
+    setError("");
+    setLayout(null);
+    dispatch({ type: "reset" });
+    focusChooseRef.current = true;
+  };
+
+  useEffect(() => {
+    if (base || !focusChooseRef.current) return;
+    focusChooseRef.current = false;
+    chooseRef.current?.focus();
+  }, [base]);
+
   const selectNode = (node: HistoryNode): void => {
     if (running) return;
     setSession((prev) => ({ ...prev, base: node.image, refs: removeReference(prev.refs, node.image.path) }));
@@ -611,6 +636,7 @@ export function ImageStudio({
                 <h2>{t.studio.emptyTitle}</h2>
                 <p className="studio-note">{t.studio.emptyHint}</p>
                 <button
+                  ref={chooseRef}
                   type="button"
                   className="btn btn-primary btn-sm"
                   onClick={() => void startFromFile()}
@@ -648,6 +674,16 @@ export function ImageStudio({
                     <IconLock size={11} />
                     {t.studio.baseBadge}
                   </span>
+                  <button
+                    type="button"
+                    className="studio-thumb-remove"
+                    aria-label={t.studio.removeBase(base.label)}
+                    title={t.studio.removeBase(base.label)}
+                    onClick={removeBase}
+                    disabled={running}
+                  >
+                    <IconX size={12} />
+                  </button>
                 </li>
               )}
               {refs.slice(0, maxRefs).map((ref, index) => (
@@ -720,11 +756,15 @@ export function ImageStudio({
             )}
             {/* The error state survives hiding the Studio; the alert is only
                 rendered while visible so it never leaks into the chat view. */}
-            {active && errorText && (
-              <p className="inline-error" role="alert">
-                {errorText}
-              </p>
-            )}
+            {active &&
+              errorText &&
+              (needsFolderGrant(error) ? (
+                <GrantErrorCard message={errorText} onOpenSettings={onOpenSettings} />
+              ) : (
+                <p className="inline-error" role="alert">
+                  {errorText}
+                </p>
+              ))}
             <div className="studio-actions">
               <button
                 type="button"
