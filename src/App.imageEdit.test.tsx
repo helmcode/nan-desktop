@@ -7,14 +7,23 @@
 //   instruction, caps the references per edit model (2 extra on qwen, none
 //   on FLUX, on both profiles), keeps Apply disabled while
 //   empty or running, records the lineage and lets a node become the base;
-// - Esc returns to the previous view; tool slots are visible but inert;
+// - Esc returns to the previous view; the brush and rectangle mark a region
+//   on an overlay (one tool at a time, cleared on a new base) and a marked
+//   edit sends the base plus the marked copy with the region suffix;
 // - results still land in the chat with the "Edited" badge.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { emit, invoke, invokedWith, resetTauri } from "./test/tauriMock";
+import { emit, invokedWith, resetTauri } from "./test/tauriMock";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("./test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).eventModule());
+// jsdom has no 2D canvas to rasterize with: the marked copy's PNG is stubbed
+// (its painting is covered by the pure tests in studio/annotate.test.ts).
+const renderAnnotatedPng = vi.hoisted(() => vi.fn(async () => "UE5HbWFya2Vk"));
+vi.mock("./studio/annotate", async (original) => ({
+  ...(await original<typeof import("./studio/annotate")>()),
+  renderAnnotatedPng,
+}));
 
 import App from "./App";
 import { I18nProvider } from "./i18n";
@@ -70,6 +79,7 @@ function handlers(
       path: "/data/images/staged/s1.png",
       name: String(args?.path).split("/").pop(),
     }),
+    image_edit_stage_annotation: () => ({ path: "/data/images/annotations/m1.png", name: "annotation.png" }),
     preview_read_file: () => {
       throw "unavailable";
     },
@@ -118,6 +128,7 @@ async function addReference(n: number): Promise<void> {
 
 beforeEach(() => {
   window.localStorage.clear();
+  renderAnnotatedPng.mockClear();
   picks = 0;
   rows = [row(1, "user", "hola"), row(2, "assistant", "a red fox", { media_path: "/data/images/r.png" })];
 });
@@ -632,34 +643,247 @@ describe("while a Studio edit runs", () => {
   });
 });
 
-describe("toolbar", () => {
-  it("tool slots are visible, labelled as coming soon, and do nothing", async () => {
+const REGION_SUFFIX_EN =
+  "Apply the change ONLY inside the area marked in magenta in the second image; do not modify anything outside it.";
+
+describe("region tools", () => {
+  // The overlay's 2D context: records what was painted on it.
+  let painted: string[];
+  let getContext: { mockRestore: () => void };
+  beforeEach(() => {
+    painted = [];
+    const record = (op: string) => () => {
+      painted.push(op);
+    };
+    const ctx = {
+      globalAlpha: 1,
+      strokeStyle: "",
+      lineWidth: 1,
+      lineCap: "butt",
+      lineJoin: "miter",
+      save: () => undefined,
+      restore: () => undefined,
+      clearRect: record("clearRect"),
+      beginPath: () => undefined,
+      moveTo: () => undefined,
+      lineTo: () => undefined,
+      stroke: record("stroke"),
+      strokeRect: record("strokeRect"),
+      drawImage: record("drawImage"),
+    };
+    getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockImplementation((() => ctx) as unknown as HTMLCanvasElement["getContext"]);
+  });
+  afterEach(() => getContext.mockRestore());
+
+  const toolbar = () => screen.getByRole("toolbar", { name: "Editing tools" });
+  const brushTool = () => within(toolbar()).getByRole("button", { name: "Brush" });
+  const rectTool = () => within(toolbar()).getByRole("button", { name: "Rectangle" });
+  const clearButton = () => screen.queryByRole("button", { name: "Clear marks" });
+
+  /// The base loads at 1000x500 and shows at 200x100 (5 image px per screen px).
+  async function loadImage(): Promise<HTMLElement> {
+    const img = canvasImage() as HTMLImageElement;
+    Object.defineProperty(img, "naturalWidth", { configurable: true, value: 1000 });
+    Object.defineProperty(img, "naturalHeight", { configurable: true, value: 500 });
+    fireEvent.load(img);
+    const overlay = await screen.findByTestId("studio-overlay");
+    overlay.getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100 }) as DOMRect;
+    return overlay;
+  }
+
+  function drag(overlay: HTMLElement, from: [number, number], to: [number, number]): void {
+    fireEvent.pointerDown(overlay, { clientX: from[0], clientY: from[1], button: 0, pointerId: 1 });
+    fireEvent.pointerMove(overlay, { clientX: to[0], clientY: to[1], pointerId: 1 });
+    fireEvent.pointerUp(overlay, { clientX: to[0], clientY: to[1], pointerId: 1 });
+  }
+
+  it("brush and rectangle are real tools, one active at a time, no 'soon' chip", async () => {
     resetTauri(handlers());
     renderApp();
     await openStudioFromChat();
-    const toolbar = screen.getByRole("toolbar", { name: "Editing tools" });
-    const brush = within(toolbar).getByRole("button", { name: "Mask brush: coming soon" });
-    const region = within(toolbar).getByRole("button", { name: "Region select: coming soon" });
-    for (const tool of [brush, region]) {
-      expect(tool.getAttribute("aria-disabled")).toBe("true");
-      expect(tool.getAttribute("title")).toMatch(/coming soon$/);
-    }
-    // The state is visible without hovering: a "Soon" chip sits next to the
-    // inert tools (hidden from AT — each tool's name already says it).
-    const chip = within(toolbar).getByText("Soon");
-    expect(chip.classList.contains("studio-soon-chip")).toBe(true);
-    expect(chip.getAttribute("aria-hidden")).toBe("true");
-    expect(chip.tagName).toBe("SPAN");
-    expect(brush.nextElementSibling).toBe(region);
-    expect(region.nextElementSibling).toBe(chip);
-    const before = invoke.mock.calls.length;
-    const canvas = screen.getByRole("region", { name: "Canvas" }).outerHTML;
-    fireEvent.click(brush);
-    fireEvent.click(region);
-    expect(invoke.mock.calls.length).toBe(before);
-    expect(screen.getByRole("region", { name: "Canvas" }).outerHTML).toBe(canvas);
-    expect(brush.getAttribute("aria-pressed")).toBeNull();
+    expect(within(toolbar()).queryByText("Soon")).toBeNull();
+    expect(brushTool().getAttribute("aria-pressed")).toBe("false");
+    expect(rectTool().getAttribute("aria-pressed")).toBe("false");
+    // The zoom stays a view-only control next to them.
+    expect(within(toolbar()).getByRole("button", { name: "Fit to view" })).toBeTruthy();
+
+    fireEvent.click(brushTool());
+    expect(brushTool().getAttribute("aria-pressed")).toBe("true");
+    expect(within(toolbar()).getByText("Paint over the area to change.")).toBeTruthy();
+    fireEvent.click(rectTool());
+    expect(brushTool().getAttribute("aria-pressed")).toBe("false");
+    expect(rectTool().getAttribute("aria-pressed")).toBe("true");
+    expect(within(toolbar()).getByText("Drag a box around the area to change.")).toBeTruthy();
+    fireEvent.click(rectTool());
+    expect(rectTool().getAttribute("aria-pressed")).toBe("false");
+    // No marks, no "Clear marks".
+    expect(clearButton()).toBeNull();
   });
+
+  it("the brush paints on the overlay, never on the image; Clear marks removes it", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await openStudioFromChat();
+    const overlay = await loadImage();
+    const src = canvasImage().getAttribute("src");
+    // Without a tool the overlay draws nothing.
+    drag(overlay, [10, 10], [40, 30]);
+    expect(clearButton()).toBeNull();
+
+    fireEvent.click(brushTool());
+    painted = [];
+    drag(overlay, [10, 10], [40, 30]);
+    expect(painted).toContain("stroke");
+    expect(overlay.getAttribute("width")).toBe("1000");
+    expect(overlay.getAttribute("height")).toBe("500");
+    expect(canvasImage().getAttribute("src")).toBe(src);
+    expect(screen.getByText("Only the marked area will change.")).toBeTruthy();
+    // The instruction cap makes room for the region suffix.
+    expect(screen.getByText(`0 / ${2000 - (REGION_SUFFIX_EN.length + 2)}`)).toBeTruthy();
+
+    fireEvent.click(clearButton() as HTMLElement);
+    expect(clearButton()).toBeNull();
+    expect(screen.queryByText("Only the marked area will change.")).toBeNull();
+    expect(screen.getByText("0 / 2000")).toBeTruthy();
+    // The tool stays active after clearing.
+    expect(brushTool().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("a marked edit sends the base plus the marked copy and the region suffix; the copy never joins the history", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await openStudioFromChat();
+    const overlay = await loadImage();
+    fireEvent.click(rectTool());
+    drag(overlay, [10, 10], [50, 40]);
+    // A second drag replaces the first rectangle.
+    drag(overlay, [20, 20], [60, 50]);
+    fireEvent.change(instructionBox(), { target: { value: "make the door red" } });
+    await apply();
+
+    await waitFor(() => expect(invokedWith("edit_images")).toHaveLength(1));
+    expect(renderAnnotatedPng).toHaveBeenCalledTimes(1);
+    expect(renderAnnotatedPng).toHaveBeenCalledWith("asset://localhost//data/images/r.png", { width: 1000, height: 500 }, {
+      strokes: [],
+      rect: { x: 100, y: 100, w: 200, h: 150, width: 15 },
+    });
+    expect(invokedWith("image_edit_stage_annotation")).toEqual([{ profileId: "nan", pngBase64: "UE5HbWFya2Vk" }]);
+    expect(invokedWith("edit_images")).toEqual([
+      {
+        conversationId: 7,
+        parentMessageId: 2,
+        instruction: `make the door red\n\n${REGION_SUFFIX_EN}`,
+        sourcePaths: ["/data/images/r.png"],
+        annotationPath: "/data/images/annotations/m1.png",
+      },
+    ]);
+
+    rows = [...rows, row(3, "assistant", "make the door red", { media_path: "/data/images/e.png", parent_message_id: 2 })];
+    await act(async () => emit("images://done", { conversation_id: 7, media_path: "/data/images/e.png" }));
+    await within(history()).findByRole("button", { name: "Edit 1: make the door red" });
+    // Original + the result: the marked copy is not a history image.
+    expect(within(history()).getAllByRole("button")).toHaveLength(2);
+    expect(within(history()).queryByRole("img", { name: /annotation/ })).toBeNull();
+    // A new base starts unmarked, with no tool active.
+    expect(clearButton()).toBeNull();
+    expect(rectTool().getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("a tool with nothing marked edits exactly like before (one image, no suffix)", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await openStudioFromChat();
+    await loadImage();
+    fireEvent.click(brushTool());
+    fireEvent.change(instructionBox(), { target: { value: "make it snowy" } });
+    await apply();
+    await waitFor(() => expect(invokedWith("edit_images")).toHaveLength(1));
+    const args = invokedWith("edit_images")[0] ?? {};
+    expect(args).toEqual({
+      conversationId: 7,
+      parentMessageId: 2,
+      instruction: "make it snowy",
+      sourcePaths: ["/data/images/r.png"],
+    });
+    expect("annotationPath" in args).toBe(false);
+    expect(invokedWith("image_edit_stage_annotation")).toHaveLength(0);
+    expect(renderAnnotatedPng).not.toHaveBeenCalled();
+  });
+
+  it("with marks, the marked copy takes one reference slot", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await openStudioFromChat();
+    await addReference(1);
+    await addReference(2);
+    const overlay = await loadImage();
+    fireEvent.click(brushTool());
+    drag(overlay, [10, 10], [20, 20]);
+    expect(screen.getByRole("img", { name: "photo-2.jpg" }).getAttribute("title")).toBe(
+      "photo-2.jpg: not sent while an area is marked",
+    );
+    fireEvent.change(instructionBox(), { target: { value: "blend" } });
+    await apply();
+    await waitFor(() => expect(invokedWith("edit_images")).toHaveLength(1));
+    expect(invokedWith("edit_images")[0]?.sourcePaths).toEqual(["/data/images/r.png", "/data/images/staged/p1.jpg"]);
+    expect(invokedWith("edit_images")[0]?.annotationPath).toBe("/data/images/annotations/m1.png");
+  });
+
+  it("a refused marked copy keeps the marks and the instruction for a retry", async () => {
+    resetTauri(
+      handlers({
+        image_edit_stage_annotation: () => {
+          throw "image_too_large";
+        },
+      }),
+    );
+    renderApp();
+    await openStudioFromChat();
+    const overlay = await loadImage();
+    fireEvent.click(brushTool());
+    drag(overlay, [10, 10], [20, 20]);
+    fireEvent.change(instructionBox(), { target: { value: "make it red" } });
+    await apply();
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(invokedWith("edit_images")).toHaveLength(0);
+    expect(clearButton()).toBeTruthy();
+    expect(instructionBox().value).toBe("make it red");
+    expect(applyButton().disabled).toBe(false);
+  });
+
+  it("picking another history node clears the marks", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await openStudioFromChat();
+    fireEvent.change(instructionBox(), { target: { value: "make it snowy" } });
+    await apply();
+    rows = [...rows, row(3, "assistant", "make it snowy", { media_path: "/data/images/e.png", parent_message_id: 2 })];
+    await act(async () => emit("images://done", { conversation_id: 7, media_path: "/data/images/e.png" }));
+    await within(history()).findByRole("button", { name: "Edit 1: make it snowy" });
+    const overlay = await loadImage();
+    fireEvent.click(brushTool());
+    drag(overlay, [10, 10], [20, 20]);
+    expect(clearButton()).toBeTruthy();
+    fireEvent.click(within(history()).getByRole("button", { name: "Original: a red fox" }));
+    await waitFor(() => expect(clearButton()).toBeNull());
+    expect(brushTool().getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("on a one-image model (FLUX) the region tools are shown but unavailable", async () => {
+    resetTauri(handlers({}, "helmcode"));
+    renderApp();
+    await openStudioFromChat();
+    for (const name of ["Brush", "Rectangle"]) {
+      const tool = within(toolbar()).getByRole("button", { name: `${name}: not available with this image model` });
+      expect((tool as HTMLButtonElement).disabled).toBe(true);
+      expect(tool.getAttribute("aria-pressed")).toBeNull();
+    }
+  });
+});
+
+describe("toolbar", () => {
 
   it("zoom switches between fit and actual size", async () => {
     resetTauri(handlers());
@@ -687,7 +911,10 @@ describe("Spanish", () => {
     expect(screen.getByRole("button", { name: "Añadir referencia" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Historial de ediciones" })).toBeTruthy();
     const toolbar = screen.getByRole("toolbar", { name: "Herramientas de edición" });
-    expect(within(toolbar).getByText("Próximamente").getAttribute("aria-hidden")).toBe("true");
-    expect(within(toolbar).getByRole("button", { name: "Pincel de máscara: muy pronto" })).toBeTruthy();
+    expect(within(toolbar).queryByText("Próximamente")).toBeNull();
+    fireEvent.click(within(toolbar).getByRole("button", { name: "Pincel" }));
+    expect(within(toolbar).getByRole("button", { name: "Pincel" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(toolbar).getByText("Pinta sobre la zona que quieres cambiar.")).toBeTruthy();
+    expect(within(toolbar).getByRole("button", { name: "Rectángulo" })).toBeTruthy();
   });
 });

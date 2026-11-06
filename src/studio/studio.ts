@@ -7,6 +7,10 @@
 // (none for FLUX), and a lineage history: the image the session started
 // from, then one node per edit result. Clicking a history node makes it the
 // new base.
+//
+// The region tools (see `annotate.ts`) mark an area on an overlay; an
+// annotated edit sends the base, then the marked copy, then the references
+// that still fit the model's cap.
 
 /// Most images per edit for any model (qwen; mirrored by the core).
 export const MAX_EDIT_IMAGES = 3;
@@ -81,11 +85,22 @@ export function removeReference(refs: readonly StudioImage[], path: string): Stu
   return refs.filter((ref) => ref.path !== path);
 }
 
-/// Submit needs a base, a non-blank instruction within the cap, and no edit
-/// running.
-export function canSubmit(base: StudioImage | null, instruction: string, running: boolean): boolean {
+/// Submit needs a base, a non-blank instruction within the cap (minus the
+/// `reserved` characters an annotated edit appends), and no edit running.
+export function canSubmit(base: StudioImage | null, instruction: string, running: boolean, reserved = 0): boolean {
   const text = instruction.trim();
-  return !running && base !== null && text.length > 0 && [...text].length <= MAX_EDIT_INSTRUCTION;
+  return !running && base !== null && text.length > 0 && [...text].length <= MAX_EDIT_INSTRUCTION - reserved;
+}
+
+/// The region tools (brush, rectangle) send the marked copy as a SECOND
+/// image next to the base, so they need a model that takes at least two.
+export function regionToolsAvailable(model: string): boolean {
+  return maxEditImages(model) >= 2;
+}
+
+/// References an edit can send: the marked copy takes one reference slot.
+export function sendableReferences(maxRefs: number, annotated: boolean): number {
+  return Math.max(0, maxRefs - (annotated ? 1 : 0));
 }
 
 /// The images an edit sends, base first, never more references than `max`

@@ -30,6 +30,12 @@
 //!   bytes are copied into the staged folder so the tray can show a
 //!   thumbnail through the asset protocol (scope `$APPDATA/images/**`).
 //!
+//! - a MARKED copy (`<app data>/images/annotations/<uuid>.png`, Image Studio
+//!   region tools): the base with the user's magenta marks, rendered by the
+//!   Studio and written by [`image_edit_stage_annotation`]. It is passed
+//!   apart (`annotation_path`), goes SECOND (right after the base), counts
+//!   against the model's cap and is deleted when its edit ends.
+//!
 //! Every source is re-verified at edit time: regular file (never a
 //! symlink), inside those two folders, at most [`MAX_EDIT_IMAGE_BYTES`],
 //! PNG/JPEG/WebP by magic bytes, 1..=[`max_edit_images_for`] sources for
@@ -90,6 +96,14 @@ pub const MAX_EDIT_RESPONSE_BYTES: u64 = 64 << 20;
 
 /// Folder (under the images folder) holding the user's staged picks.
 pub const STAGED_DIR: &str = "staged";
+
+/// Folder (under the images folder) holding the Image Studio's MARKED
+/// copies: the base with the user's region marks painted on (PNG, rendered
+/// by the Studio). A marked copy is single-use: it rides along one edit as
+/// the second image ([`edit_images`] `annotation_path`), is deleted when
+/// that edit ends, and is never a history image. Kept apart from the staged
+/// picks so deleting it can never touch a pick the Studio still reuses.
+pub const ANNOTATIONS_DIR: &str = "annotations";
 
 // ---------------------------------------------------------------------------
 // Error kinds (serialized snake_case; the renderer maps them to copy)
@@ -258,6 +272,11 @@ pub fn staged_dir(app_data: &Path) -> PathBuf {
     images::images_dir(app_data).join(STAGED_DIR)
 }
 
+/// The marked-copies folder: `<app data>/images/annotations`.
+pub fn annotations_dir(app_data: &Path) -> PathBuf {
+    images::images_dir(app_data).join(ANNOTATIONS_DIR)
+}
+
 /// `<uuid>.<ext>` with an allowed image extension.
 fn is_app_image_name(name: &str, allowed: &[&str]) -> bool {
     let Some((stem, ext)) = name.rsplit_once('.') else {
@@ -360,6 +379,108 @@ pub fn validate_edit_request(
     Ok((instruction, paths))
 }
 
+/// Resolve `raw` as a marked copy this app wrote: a regular PNG file (never
+/// a symlink) named `<uuid>.png` directly inside [`annotations_dir`], at
+/// most [`MAX_EDIT_IMAGE_BYTES`]. Returns the canonical path.
+pub fn resolve_annotation(app_data: &Path, raw: &str) -> Result<PathBuf, EditErrorKind> {
+    let raw = Path::new(raw.trim());
+    let meta = std::fs::symlink_metadata(raw).map_err(|_| EditErrorKind::SourceNotAllowed)?;
+    if !meta.file_type().is_file() {
+        return Err(EditErrorKind::SourceNotAllowed);
+    }
+    let canonical = std::fs::canonicalize(raw).map_err(|_| EditErrorKind::SourceNotAllowed)?;
+    let dir = std::fs::canonicalize(annotations_dir(app_data))
+        .map_err(|_| EditErrorKind::SourceNotAllowed)?;
+    let name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if canonical.parent() != Some(dir.as_path()) || !is_app_image_name(name, &["png"]) {
+        return Err(EditErrorKind::SourceNotAllowed);
+    }
+    if meta.len() > MAX_EDIT_IMAGE_BYTES {
+        return Err(EditErrorKind::ImageTooLarge);
+    }
+    if sniff_file(&canonical)? != ImageFormat::Png {
+        return Err(EditErrorKind::UnsupportedImage);
+    }
+    Ok(canonical)
+}
+
+/// [`validate_edit_request`] for an edit that may carry a marked copy: the
+/// copy takes one of the model's `max` image slots and goes SECOND, right
+/// after the base (so it needs a base and a model that takes two images).
+/// Returns the trimmed instruction, the canonical source paths in wire order
+/// and the canonical marked copy (to delete once the edit ends).
+pub fn validate_annotated_request(
+    app_data: &Path,
+    instruction: &str,
+    source_paths: &[String],
+    annotation_path: Option<&str>,
+    max: usize,
+) -> Result<(String, Vec<PathBuf>, Option<PathBuf>), EditErrorKind> {
+    let Some(raw) = annotation_path else {
+        let (instruction, paths) = validate_edit_request(app_data, instruction, source_paths, max)?;
+        return Ok((instruction, paths, None));
+    };
+    if max < 2 {
+        return Err(EditErrorKind::TooManyImages);
+    }
+    let (instruction, mut paths) =
+        validate_edit_request(app_data, instruction, source_paths, max - 1)?;
+    let annotation = resolve_annotation(app_data, raw)?;
+    paths.insert(1, annotation.clone());
+    Ok((instruction, paths, Some(annotation)))
+}
+
+/// Write a marked copy the Studio rendered: PNG by magic bytes, at most
+/// [`MAX_EDIT_IMAGE_BYTES`], saved as `<app data>/images/annotations/<uuid>.png`.
+pub fn stage_annotation(app_data: &Path, bytes: &[u8]) -> Result<StagedSource, EditErrorKind> {
+    if bytes.len() as u64 > MAX_EDIT_IMAGE_BYTES {
+        return Err(EditErrorKind::ImageTooLarge);
+    }
+    if sniff_format(bytes) != Some(ImageFormat::Png) {
+        return Err(EditErrorKind::UnsupportedImage);
+    }
+    let dir = annotations_dir(app_data);
+    std::fs::create_dir_all(&dir).map_err(|_| EditErrorKind::Protocol)?;
+    let path = dir.join(format!("{}.png", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).map_err(|_| EditErrorKind::Protocol)?;
+    Ok(StagedSource {
+        path: path.display().to_string(),
+        name: "annotation.png".to_string(),
+    })
+}
+
+/// [`stage_annotation`] from the renderer's base64 (no `data:` prefix). The
+/// encoded length is bounded before decoding.
+pub fn stage_annotation_base64(
+    app_data: &Path,
+    png_base64: &str,
+) -> Result<StagedSource, EditErrorKind> {
+    let encoded = png_base64.trim();
+    if encoded.len() as u64 > MAX_EDIT_IMAGE_BYTES.div_ceil(3) * 4 {
+        return Err(EditErrorKind::ImageTooLarge);
+    }
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| EditErrorKind::UnsupportedImage)?;
+    stage_annotation(app_data, &bytes)
+}
+
+/// Deletes the marked copy when the edit task ends, whatever the outcome
+/// (done, error, or cancelled: an aborted task drops its future, and this
+/// guard with it).
+struct RemoveOnDrop(Option<PathBuf>);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Staging a picked local file (grants + deny-list)
 // ---------------------------------------------------------------------------
@@ -419,15 +540,21 @@ pub fn stage_picked_source(
     })
 }
 
-/// Delete staged picks older than `min_age` (startup, best effort). Only
-/// regular files directly inside the staged folder; never follows
-/// symlinks. Returns how many were removed.
+/// Delete staged picks and marked copies (a marked copy is normally deleted
+/// when its edit ends; this catches a crash) older than `min_age` (startup,
+/// best effort). Only regular files directly inside those folders; never
+/// follows symlinks. Returns how many were removed.
 pub fn sweep_staged_sources(
     app_data: &Path,
     min_age: std::time::Duration,
     now: std::time::SystemTime,
 ) -> usize {
-    let Ok(entries) = std::fs::read_dir(staged_dir(app_data)) else {
+    sweep_dir(&staged_dir(app_data), min_age, now)
+        + sweep_dir(&annotations_dir(app_data), min_age, now)
+}
+
+fn sweep_dir(dir: &Path, min_age: std::time::Duration, now: std::time::SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
     let mut deleted = 0;
@@ -654,6 +781,9 @@ pub fn edit_images(
     parent_message_id: Option<i64>,
     instruction: String,
     source_paths: Vec<String>,
+    // Optional (older callers omit it): the Image Studio's marked copy, sent
+    // as the SECOND image right after the base. See [`ANNOTATIONS_DIR`].
+    annotation_path: Option<String>,
 ) -> Result<(), String> {
     let app_data = app.path().app_data_dir().map_err(|err| err.to_string())?;
     let conn = chat_store::open_db(&app_data)?;
@@ -664,10 +794,11 @@ pub fn edit_images(
     // takes one image): refused here, before the server would 400.
     let model = edit_model_for(&conversation.profile_id)
         .ok_or_else(|| EditErrorKind::Protocol.as_str().to_string())?;
-    let (instruction, sources) = validate_edit_request(
+    let (instruction, sources, annotation) = validate_annotated_request(
         &app_data,
         &instruction,
         &source_paths,
+        annotation_path.as_deref(),
         max_edit_images_for(model),
     )
     .map_err(|kind| kind.as_str().to_string())?;
@@ -690,6 +821,7 @@ pub fn edit_images(
             parent_message_id,
             instruction,
             sources,
+            annotation,
             generation,
         },
     ));
@@ -703,11 +835,15 @@ struct EditJob {
     model: &'static str,
     parent_message_id: Option<i64>,
     instruction: String,
+    /// Wire order; includes the marked copy (second) when there is one.
     sources: Vec<PathBuf>,
+    /// The marked copy, deleted when the job ends.
+    annotation: Option<PathBuf>,
     generation: u64,
 }
 
 async fn run_image_edit(app: AppHandle, window: Window, job: EditJob) {
+    let _annotation = RemoveOnDrop(job.annotation.clone());
     let conversation_id = job.conversation_id;
     let state = app.state::<images::ImagesState>();
     let _ = window.emit(
@@ -731,7 +867,13 @@ async fn run_image_edit(app: AppHandle, window: Window, job: EditJob) {
     // Re-verify and read every source right before the upload.
     let mut sources = Vec::with_capacity(job.sources.len());
     for path in &job.sources {
-        match load_source(&app_data, &path.to_string_lossy()) {
+        let raw = path.to_string_lossy();
+        let loaded = if job.annotation.as_ref() == Some(path) {
+            resolve_annotation(&app_data, &raw).and_then(|path| read_image_file(&path))
+        } else {
+            load_source(&app_data, &raw)
+        };
+        match loaded {
             Ok(source) => sources.push(source),
             Err(kind) => return emit_error(kind),
         }
@@ -865,6 +1007,23 @@ pub async fn image_edit_stage(
     let home = std::env::home_dir();
     stage_requested_source(&app_data, &store, &profile_id, home.as_deref(), &path)
         .map_err(|kind| kind.as_str().to_string())
+}
+
+/// Image Studio region tools: store the marked copy the Studio rendered (the
+/// base with the user's marks painted on, PNG base64) so the next
+/// [`edit_images`] can send it as `annotation_path`. Returns its path; a
+/// refusal is the kind string.
+#[tauri::command]
+pub async fn image_edit_stage_annotation(
+    app: AppHandle,
+    profile_id: String,
+    png_base64: String,
+) -> Result<StagedSource, String> {
+    if !crate::profile::is_known_profile_id(&profile_id) {
+        return Err(EditErrorKind::Protocol.as_str().to_string());
+    }
+    let app_data = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    stage_annotation_base64(&app_data, &png_base64).map_err(|kind| kind.as_str().to_string())
 }
 
 #[cfg(test)]
@@ -1701,5 +1860,179 @@ mod tests {
             block_on(edit_at("http://127.0.0.1:9", "other", "t", "x", sources)),
             Err(EditErrorKind::Protocol)
         );
+    }
+
+    // ---- Image Studio marked copy (region tools) --------------------------------
+
+    #[test]
+    fn a_marked_copy_is_staged_as_a_png_in_its_own_folder() {
+        let (_tmp, app) = app_data();
+        let staged = stage_annotation_base64(&app, TINY_PNG_B64).expect("staged");
+        let path = PathBuf::from(&staged.path);
+        assert!(path.starts_with(annotations_dir(&app)));
+        assert!(
+            !path.starts_with(staged_dir(&app)),
+            "never next to the picks"
+        );
+        assert!(path.to_string_lossy().ends_with(".png"));
+        assert_eq!(std::fs::read(&path).expect("read"), png());
+        assert_eq!(
+            resolve_annotation(&app, &staged.path).ok(),
+            path.canonicalize().ok()
+        );
+    }
+
+    #[test]
+    fn a_marked_copy_must_be_a_bounded_png() {
+        let (_tmp, app) = app_data();
+        let jpeg_b64 = BASE64_STANDARD.encode(jpeg());
+        assert_eq!(
+            stage_annotation_base64(&app, &jpeg_b64),
+            Err(EditErrorKind::UnsupportedImage)
+        );
+        assert_eq!(
+            stage_annotation_base64(&app, "not base64!"),
+            Err(EditErrorKind::UnsupportedImage)
+        );
+        let huge = "A".repeat((MAX_EDIT_IMAGE_BYTES.div_ceil(3) * 4 + 4) as usize);
+        assert_eq!(
+            stage_annotation_base64(&app, &huge),
+            Err(EditErrorKind::ImageTooLarge)
+        );
+        assert!(!annotations_dir(&app).exists(), "nothing written");
+    }
+
+    #[test]
+    fn only_a_marked_copy_resolves_as_one() {
+        let (_tmp, app) = app_data();
+        // A chat image and a staged pick are sources, not marked copies.
+        let chat = chat_image(&app, &png());
+        assert_eq!(
+            resolve_annotation(&app, &chat),
+            Err(EditErrorKind::SourceNotAllowed)
+        );
+        std::fs::create_dir_all(staged_dir(&app)).expect("staged");
+        let pick = staged_dir(&app).join(format!("{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&pick, png()).expect("write");
+        assert_eq!(
+            resolve_annotation(&app, &pick.display().to_string()),
+            Err(EditErrorKind::SourceNotAllowed)
+        );
+        // Not a uuid name, or a PNG name with other bytes.
+        std::fs::create_dir_all(annotations_dir(&app)).expect("dir");
+        let named = annotations_dir(&app).join("evil.png");
+        std::fs::write(&named, png()).expect("write");
+        assert_eq!(
+            resolve_annotation(&app, &named.display().to_string()),
+            Err(EditErrorKind::SourceNotAllowed)
+        );
+        let fake = annotations_dir(&app).join(format!("{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&fake, jpeg()).expect("write");
+        assert_eq!(
+            resolve_annotation(&app, &fake.display().to_string()),
+            Err(EditErrorKind::UnsupportedImage)
+        );
+        // And a marked copy is never accepted as a plain source.
+        let marked = stage_annotation(&app, &png()).expect("staged");
+        assert_eq!(
+            validate_qwen_request(&app, "x", &[marked.path]),
+            Err(EditErrorKind::SourceNotAllowed)
+        );
+    }
+
+    #[test]
+    fn an_annotated_edit_sends_the_marked_copy_second_within_the_cap() {
+        let (_tmp, app) = app_data();
+        let base = chat_image(&app, &png());
+        let reference = chat_image(&app, &png());
+        let marked = stage_annotation(&app, &png()).expect("staged");
+        let (instruction, paths, annotation) = validate_annotated_request(
+            &app,
+            " snow ",
+            std::slice::from_ref(&base),
+            Some(&marked.path),
+            MAX_EDIT_IMAGES,
+        )
+        .expect("valid");
+        assert_eq!(instruction, "snow");
+        let marked_canonical = PathBuf::from(&marked.path).canonicalize().expect("canon");
+        assert_eq!(annotation.as_ref(), Some(&marked_canonical));
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[1], marked_canonical, "the marked copy goes second");
+        assert_eq!(
+            paths[0],
+            PathBuf::from(&base).canonicalize().expect("canon")
+        );
+
+        // Base + marked copy + one reference fills qwen's three slots...
+        let three = validate_annotated_request(
+            &app,
+            "x",
+            &[base.clone(), reference.clone()],
+            Some(&marked.path),
+            MAX_EDIT_IMAGES,
+        )
+        .expect("valid");
+        assert_eq!(three.1.len(), 3);
+        assert_eq!(three.1[1], marked_canonical);
+        // ...a second reference is one too many.
+        let extra = chat_image(&app, &png());
+        assert_eq!(
+            validate_annotated_request(
+                &app,
+                "x",
+                &[base.clone(), reference, extra],
+                Some(&marked.path),
+                MAX_EDIT_IMAGES,
+            )
+            .map(|_| ()),
+            Err(EditErrorKind::TooManyImages)
+        );
+        // A one-image model (FLUX) never takes a marked copy.
+        assert_eq!(
+            validate_annotated_request(
+                &app,
+                "x",
+                std::slice::from_ref(&base),
+                Some(&marked.path),
+                max_edit_images_for("flux-3-image-klein"),
+            )
+            .map(|_| ()),
+            Err(EditErrorKind::TooManyImages)
+        );
+        // A marked copy alone (no base) is refused.
+        assert_eq!(
+            validate_annotated_request(&app, "x", &[], Some(&marked.path), MAX_EDIT_IMAGES)
+                .map(|_| ()),
+            Err(EditErrorKind::NoImages)
+        );
+    }
+
+    #[test]
+    fn without_a_marked_copy_the_request_is_unchanged() {
+        let (_tmp, app) = app_data();
+        let base = chat_image(&app, &png());
+        let plain = validate_qwen_request(&app, "x", std::slice::from_ref(&base)).expect("ok");
+        let (instruction, paths, annotation) =
+            validate_annotated_request(&app, "x", &[base], None, MAX_EDIT_IMAGES).expect("ok");
+        assert_eq!((instruction, paths), plain);
+        assert_eq!(annotation, None);
+    }
+
+    #[test]
+    fn the_marked_copy_is_removed_when_its_job_ends_and_swept_otherwise() {
+        let (_tmp, app) = app_data();
+        let marked = PathBuf::from(stage_annotation(&app, &png()).expect("staged").path);
+        drop(RemoveOnDrop(Some(marked.clone())));
+        assert!(!marked.exists(), "deleted with the job");
+        drop(RemoveOnDrop(None));
+
+        // A crash leaves one behind: the startup sweep takes it with the picks.
+        let left = PathBuf::from(stage_annotation(&app, &png()).expect("staged").path);
+        let now = std::time::SystemTime::now();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        assert_eq!(sweep_staged_sources(&app, day, now), 0);
+        assert_eq!(sweep_staged_sources(&app, day, now + day * 2), 1);
+        assert!(!left.exists());
     }
 }

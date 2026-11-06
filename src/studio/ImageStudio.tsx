@@ -1,10 +1,18 @@
 // Image Studio: a dedicated view for instruction-based image editing.
 //
 // Layout: a header (back, title, open another image, download), a tools bar
-// over the canvas (real zoom toggle plus disabled "coming soon" slots), the
-// canvas with the current base image, a side panel (the image tray with the
-// base locked first, the instruction and the one primary action) and the
-// lineage history strip underneath.
+// over the canvas (zoom toggle, the brush and rectangle region tools and
+// "Clear marks"), the canvas with the current base image and the marks
+// overlay, a side panel (the image tray with the base locked first, the
+// instruction and the one primary action) and the lineage history strip
+// underneath.
+//
+// Region tools (see `annotate.ts`): the marks stay on an overlay canvas
+// above the image. An edit with marks composites them onto a COPY of the
+// base (`image_edit_stage_annotation`), sends it as the second image
+// (`annotationPath`) and appends a fixed pointer to the magenta area to the
+// instruction. The marked copy is only an instruction vehicle: it never
+// joins the history and the core deletes it when the edit ends.
 //
 // The Studio is UI over the existing edit core: `edit_images` runs the edit
 // and persists the result as a chat message (so it also shows in the
@@ -12,7 +20,7 @@
 // through the folder grants, and every image is shown through the asset
 // protocol (bytes never cross IPC).
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSaveImage, type SaveImageResult } from "../components/SaveImageButton";
@@ -27,9 +35,21 @@ import {
   IconLock,
   IconPlus,
   IconSelection,
+  IconTrash,
   IconX,
 } from "../icons";
 import type { ChatMessageRow, StagedEditSource } from "../types";
+import {
+  INITIAL_TOOL_STATE,
+  annotatedInstruction,
+  hasMarks,
+  paintMarks,
+  renderAnnotatedPng,
+  reservedForSuffix,
+  toImagePoint,
+  toolReducer,
+  type Tool,
+} from "./annotate";
 import {
   MAX_EDIT_INSTRUCTION,
   addReference,
@@ -39,7 +59,9 @@ import {
   editSources,
   instructionLength,
   maxReferences,
+  regionToolsAvailable,
   removeReference,
+  sendableReferences,
   type HistoryNode,
   type StudioImage,
   type StudioSeed,
@@ -92,15 +114,37 @@ function DownloadButton({ path, onResult }: { path: string; onResult: (result: S
   );
 }
 
-/// A tool that does not exist yet: visible, focusable (so the tooltip and
-/// the name reach everyone) and inert. No handler on purpose (S9).
-function SoonTool({ name, children }: { name: string; children: ReactNode }) {
-  const t = useT();
-  const label = t.studio.soon(name);
+/// Where the image sits inside the canvas box (for the overlay) and its own
+/// pixel size (the overlay's resolution).
+interface Layout {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  naturalWidth: number;
+  naturalHeight: number;
+}
+
+function layoutOf(img: HTMLImageElement): Layout {
+  return {
+    left: img.offsetLeft,
+    top: img.offsetTop,
+    width: img.offsetWidth,
+    height: img.offsetHeight,
+    naturalWidth: img.naturalWidth,
+    naturalHeight: img.naturalHeight,
+  };
+}
+
+function sameLayout(a: Layout | null, b: Layout): boolean {
   return (
-    <button type="button" className="icon-btn studio-tool soon" aria-disabled="true" aria-label={label} title={label}>
-      {children}
-    </button>
+    a !== null &&
+    a.left === b.left &&
+    a.top === b.top &&
+    a.width === b.width &&
+    a.height === b.height &&
+    a.naturalWidth === b.naturalWidth &&
+    a.naturalHeight === b.naturalHeight
   );
 }
 
@@ -140,7 +184,55 @@ export function ImageStudio({
   const { base, refs, history } = session;
   // The tray offers exactly what the tenant's edit model accepts: qwen
   // takes the base plus 2 references, FLUX the base alone.
-  const maxRefs = maxReferences(editModelFor(profileId));
+  const model = editModelFor(profileId);
+  const maxRefs = maxReferences(model);
+  // Region tools: one active tool, the marks, the image's place on screen.
+  const toolsAvailable = regionToolsAvailable(model);
+  const [tools, dispatch] = useReducer(toolReducer, INITIAL_TOOL_STATE);
+  const [layout, setLayout] = useState<Layout | null>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const overlayRef = useRef<HTMLCanvasElement | null>(null);
+  const annotated = toolsAvailable && hasMarks(tools.marks);
+  const suffix = t.studio.annotationSuffix;
+  const reserved = annotated ? reservedForSuffix(suffix) : 0;
+  // The marked copy takes one of the model's image slots.
+  const refsSent = sendableReferences(maxRefs, annotated);
+  const basePath = base?.path ?? null;
+
+  // A new base (history node, result, another file) starts unmarked.
+  useEffect(() => {
+    dispatch({ type: "reset" });
+  }, [basePath]);
+
+  const measure = useCallback((): void => {
+    const img = imageRef.current;
+    if (!img) return;
+    const next = layoutOf(img);
+    setLayout((prev) => (sameLayout(prev, next) ? prev : next));
+  }, []);
+
+  // The overlay follows the image: zoom, view switches and resizes.
+  useEffect(() => {
+    measure();
+  }, [zoom, active, measure]);
+  useEffect(() => {
+    const img = imageRef.current;
+    if (!img || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => measure());
+    observer.observe(img);
+    if (img.parentElement) observer.observe(img.parentElement);
+    return () => observer.disconnect();
+  }, [basePath, measure]);
+
+  // Paint the marks on the overlay (never on the image itself).
+  useEffect(() => {
+    const canvas = overlayRef.current;
+    if (!canvas || !layout) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    paintMarks(ctx, tools.marks);
+  }, [tools.marks, layout]);
 
   // A user file shown in the preview pane: stage it first.
   useEffect(() => {
@@ -229,25 +321,39 @@ export function ImageStudio({
 
   const submit = useCallback(async (): Promise<void> => {
     const text = instruction.trim();
-    if (!base || !canSubmit(base, text, running || preparing)) return;
+    if (!base || !canSubmit(base, text, running || preparing, reserved)) return;
+    // Snapshot the marks: the edit sends what was on screen at Apply.
+    const marks = annotated ? tools.marks : null;
+    const size = layout ? { width: layout.naturalWidth, height: layout.naturalHeight } : null;
     setError("");
     setStage("starting");
     let conversationId = session.conversationId;
     try {
+      if (marks && (!size || size.width <= 0 || size.height <= 0)) throw new Error("protocol");
       if (conversationId === null) {
         conversationId = await onCreateConversation(text);
         if (conversationId === null) throw new Error("protocol");
         const created = conversationId;
         setSession((prev) => ({ ...prev, conversationId: created }));
       }
-      const sent = editSources(base, refs, maxRefs);
+      const sent = editSources(base, refs, refsSent);
+      // The marked copy: the base with the marks on top, staged as a PNG.
+      let annotationPath: string | null = null;
+      if (marks && size) {
+        const png = await renderAnnotatedPng(convertFileSrc(base.path), size, marks).catch(() => {
+          throw new Error("protocol");
+        });
+        const staged = await invoke<StagedEditSource>("image_edit_stage_annotation", { profileId, pngBase64: png });
+        annotationPath = staged.path;
+      }
       jobRef.current = { conversationId, instruction: text };
       onJob(conversationId, true);
       await invoke("edit_images", {
         conversationId,
         parentMessageId: base.messageId,
-        instruction: text,
+        instruction: annotationPath ? annotatedInstruction(text, suffix) : text,
         sourcePaths: sent,
+        ...(annotationPath ? { annotationPath } : {}),
       });
     } catch (err) {
       // Refused before the job started: no event will follow.
@@ -256,7 +362,56 @@ export function ImageStudio({
       // Keep the instruction and the tray so the user can fix and retry.
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [instruction, base, refs, maxRefs, running, preparing, session.conversationId, onCreateConversation, onJob, endJob]);
+  }, [
+    instruction,
+    base,
+    refs,
+    refsSent,
+    reserved,
+    annotated,
+    tools.marks,
+    layout,
+    suffix,
+    profileId,
+    running,
+    preparing,
+    session.conversationId,
+    onCreateConversation,
+    onJob,
+    endJob,
+  ]);
+
+  const pointAt = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!layout) return null;
+    return toImagePoint(
+      { x: e.clientX, y: e.clientY },
+      e.currentTarget.getBoundingClientRect(),
+      { width: layout.naturalWidth, height: layout.naturalHeight },
+    );
+  };
+  const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>): void => {
+    if (!tools.tool || running || e.button !== 0) return;
+    const at = pointAt(e);
+    if (!at) return;
+    e.preventDefault();
+    // Keep the drag even when the pointer leaves the image.
+    try {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    } catch {
+      // No capture (synthetic pointer): the drag still works over the image.
+    }
+    dispatch({ type: "down", point: at.point, scale: at.scale });
+  };
+  const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>): void => {
+    if (!tools.drag) return;
+    const at = pointAt(e);
+    if (at) dispatch({ type: "move", point: at.point });
+  };
+  const onPointerUp = (): void => dispatch({ type: "up" });
+  const selectTool = (tool: Tool): void => {
+    if (!toolsAvailable || running) return;
+    dispatch({ type: "select", tool });
+  };
 
   // The core answers with `images://stopped` (handled above).
   const cancel = useCallback(async (): Promise<void> => {
@@ -371,17 +526,45 @@ export function ImageStudio({
               </button>
             </div>
             <span className="studio-toolbar-sep" aria-hidden="true" />
-            <SoonTool name={t.studio.toolBrush}>
-              <IconBrush size={16} />
-            </SoonTool>
-            <SoonTool name={t.studio.toolRegion}>
-              <IconSelection size={16} />
-            </SoonTool>
-            {/* Visible, so the inert state reads without hovering. Hidden
-                from assistive tech: each tool's name already says it. */}
-            <span className="studio-soon-chip" aria-hidden="true">
-              {t.studio.soonChip}
-            </span>
+            {(
+              [
+                ["brush", t.studio.toolBrush, t.studio.toolBrushHint, <IconBrush key="i" size={16} />],
+                ["rect", t.studio.toolRegion, t.studio.toolRegionHint, <IconSelection key="i" size={16} />],
+              ] as const
+            ).map(([tool, name, hint, icon]) => {
+              const pressed = tools.tool === tool;
+              const label = toolsAvailable ? name : t.studio.toolUnavailable(name);
+              return (
+                <button
+                  key={tool}
+                  type="button"
+                  className={`icon-btn studio-tool${pressed ? " active" : ""}`}
+                  aria-pressed={toolsAvailable ? pressed : undefined}
+                  aria-label={label}
+                  title={toolsAvailable ? `${name}: ${hint}` : label}
+                  disabled={!base || running || !toolsAvailable}
+                  onClick={() => selectTool(tool)}
+                >
+                  {icon}
+                </button>
+              );
+            })}
+            {annotated && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm studio-clear"
+                onClick={() => dispatch({ type: "clear" })}
+                disabled={running}
+              >
+                <IconTrash size={14} />
+                {t.studio.clearMarks}
+              </button>
+            )}
+            {tools.tool && (
+              <span className="studio-tool-hint" aria-live="polite">
+                {tools.tool === "brush" ? t.studio.toolBrushHint : t.studio.toolRegionHint}
+              </span>
+            )}
           </div>
 
           <div
@@ -391,7 +574,33 @@ export function ImageStudio({
             aria-busy={running || preparing}
           >
             {base ? (
-              <img className="studio-image" src={convertFileSrc(base.path)} alt={t.studio.canvasAlt(base.label)} />
+              <>
+                <img
+                  ref={imageRef}
+                  className="studio-image"
+                  src={convertFileSrc(base.path)}
+                  alt={t.studio.canvasAlt(base.label)}
+                  onLoad={measure}
+                />
+                {/* The marks layer: same box as the image, the image's own
+                    resolution. Decorative for assistive tech (the tool
+                    buttons and "Clear marks" carry the state). */}
+                {layout && layout.naturalWidth > 0 && (
+                  <canvas
+                    ref={overlayRef}
+                    className={`studio-overlay${tools.tool ? " drawing" : ""}`}
+                    data-testid="studio-overlay"
+                    aria-hidden="true"
+                    width={layout.naturalWidth}
+                    height={layout.naturalHeight}
+                    style={{ left: layout.left, top: layout.top, width: layout.width, height: layout.height }}
+                    onPointerDown={onPointerDown}
+                    onPointerMove={onPointerMove}
+                    onPointerUp={onPointerUp}
+                    onPointerCancel={onPointerUp}
+                  />
+                )}
+              </>
             ) : preparing ? (
               <p className="studio-note" role="status">
                 {t.studio.preparing}
@@ -441,9 +650,13 @@ export function ImageStudio({
                   </span>
                 </li>
               )}
-              {refs.slice(0, maxRefs).map((ref) => (
-                <li key={ref.path} className="studio-thumb">
-                  <img src={convertFileSrc(ref.path)} alt={ref.label} title={ref.label} />
+              {refs.slice(0, maxRefs).map((ref, index) => (
+                <li key={ref.path} className={`studio-thumb${index >= refsSent ? " unused" : ""}`}>
+                  <img
+                    src={convertFileSrc(ref.path)}
+                    alt={ref.label}
+                    title={index >= refsSent ? t.studio.referenceNotSent(ref.label) : ref.label}
+                  />
                   <button
                     type="button"
                     className="studio-thumb-remove"
@@ -491,15 +704,20 @@ export function ImageStudio({
                 }
               }}
               placeholder={t.studio.instructionPlaceholder}
-              maxLength={MAX_EDIT_INSTRUCTION}
+              maxLength={MAX_EDIT_INSTRUCTION - reserved}
               aria-describedby="studio-instruction-meta"
               rows={5}
               readOnly={running}
             />
             <div id="studio-instruction-meta" className="studio-meta">
               <span>{t.studio.submitHint}</span>
-              <span className="studio-counter">{t.studio.counter(length, MAX_EDIT_INSTRUCTION)}</span>
+              <span className="studio-counter">{t.studio.counter(length, MAX_EDIT_INSTRUCTION - reserved)}</span>
             </div>
+            {annotated && (
+              <p className="studio-hint studio-marked" role="status">
+                {t.studio.marksActive}
+              </p>
+            )}
             {/* The error state survives hiding the Studio; the alert is only
                 rendered while visible so it never leaks into the chat view. */}
             {active && errorText && (
@@ -512,7 +730,7 @@ export function ImageStudio({
                 type="button"
                 className="btn btn-primary studio-apply"
                 onClick={() => void submit()}
-                disabled={!canSubmit(base, instruction, busy)}
+                disabled={!canSubmit(base, instruction, busy, reserved)}
                 aria-busy={running}
               >
                 {running ? stageText : t.studio.apply}

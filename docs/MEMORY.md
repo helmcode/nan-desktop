@@ -68,7 +68,18 @@ Studio can reuse them across edits; the copies are removed at startup once
 they are older than 24 h).
 The Image Studio keeps its session (base, references, history) in memory
 only while the app runs; nothing about it is persisted beyond the chat
-rows each edit creates. The result comes back
+rows each edit creates. Region marks (brush strokes, the rectangle) stay
+on an overlay in memory and are never drawn into your image. An edit with
+marks paints them onto a copy of the base (PNG, written by the core to
+`<app data>/images/annotations`), sends that copy as the second image right
+after the untouched base, and adds a fixed sentence to the instruction
+("only change the area marked in magenta in the second image"); the stored
+chat row carries that full instruction. The marked copy is deleted as soon
+as its edit ends (done, error or cancel), is never a history image, and a
+copy left by a crash is removed by the same 24 h startup sweep as the
+staged files. The region tools need an edit model that takes at least two
+images (the community's qwen); on a one-image model they are shown as
+unavailable. The result comes back
 inline (`b64_json`), is saved locally like a generated image and stored in
 `chat.db` as a new assistant row whose `parent_message_id` points at the
 message the source image came from; the chat shows it with an "Edited"

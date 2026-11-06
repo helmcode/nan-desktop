@@ -34,8 +34,7 @@
   up to 2 more reference images, an instruction (up to 2000 characters,
   with a counter) and one Apply button with progress and Cancel. Every
   result joins a history strip (original, then each edit); click any step
-  to keep editing from it, and download the current image. Mask brush and
-  region select are shown as "coming soon" and do nothing yet. Esc goes
+  to keep editing from it, and download the current image. Esc goes
   back, Cmd/Ctrl + Enter applies. Results also appear in the chat as a new
   image with an "Edited" badge and a link to its original. Sent from the
   Rust core to `POST /v1/images/edits` with the desktop session; images are
@@ -45,6 +44,18 @@
   already shown in the preview pane). While an edit runs, switching to
   another conversation is paused (the sidebar explains why) so the result
   and any error land in the open Studio.
+- Image Studio region tools: the **Brush** and the **Rectangle** in the
+  Studio toolbar now work. Pick one (one at a time; click again to turn it
+  off), paint over or drag a box around the part to change, and "Clear
+  marks" starts over. Marks are drawn in magenta on a layer above the image,
+  never into it, and reset when the base image changes. Applying with marks
+  sends the untouched base plus a marked copy and tells the model to change
+  only the magenta area (the marked copy takes one reference slot and never
+  joins the history). Without marks an edit works exactly as before. Needs
+  an edit model that takes two images (NaN community); on the enterprise
+  FLUX editor the tools show as unavailable. Core: new command
+  `image_edit_stage_annotation`, and `edit_images` takes an optional
+  `annotationPath` (older callers are unaffected).
 
 ## 0.2.0 — First public beta
 

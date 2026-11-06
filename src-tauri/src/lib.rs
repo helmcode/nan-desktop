@@ -204,6 +204,7 @@ pub fn run() {
             image_edit::edit_images,
             image_edit::image_edit_pick,
             image_edit::image_edit_stage,
+            image_edit::image_edit_stage_annotation,
             tools::tools_grant_add,
             tools::tools_grant_computer_wide,
             tools::tools_grant_list,
