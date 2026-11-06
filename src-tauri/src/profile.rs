@@ -109,6 +109,33 @@ pub fn inference_base_for(id: &str) -> Option<&'static str> {
     }
 }
 
+/// Desktop-only image GENERATION route, the same path on both tenants'
+/// platform APIs (the server forces the model, `n=1`).
+pub const DESKTOP_GENERATIONS_PATH: &str = "/v1/desktop/images/generations";
+
+/// Image EDIT route of a locked profile's platform API. The tenants mount it
+/// on different paths: the community serves the public-shaped
+/// `/v1/images/edits` (desktop sessions only), the enterprise platform the
+/// desktop twin `/v1/desktop/images/edits`.
+pub fn image_edits_path(id: &str) -> Option<&'static str> {
+    match id {
+        NAN_ID => Some("/v1/images/edits"),
+        HELMCODE_ID => Some("/v1/desktop/images/edits"),
+        _ => None,
+    }
+}
+
+/// The model each tenant's edit route runs (the server picks it; the app
+/// never sends `model`). Mirrored by `editModelFor` in `src/studio/studio.ts`
+/// so the Studio tray offers exactly as many images as the model accepts.
+pub fn image_edit_model(id: &str) -> Option<&'static str> {
+    match id {
+        NAN_ID => Some("qwen-image-3.0-pro"),
+        HELMCODE_ID => Some("flux-3-image-klein"),
+        _ => None,
+    }
+}
+
 /// Whether `id` is one of the two locked profile ids.
 pub fn is_known_profile_id(id: &str) -> bool {
     id == NAN_ID || id == HELMCODE_ID
@@ -279,6 +306,20 @@ mod tests {
         assert_eq!(profiles[0].name, "NaN community");
         assert_eq!(profiles[1].id, "helmcode");
         assert_eq!(profiles[1].name, "Helmcode enterprise");
+    }
+
+    #[test]
+    fn image_routes_and_edit_models_are_per_profile() {
+        assert_eq!(DESKTOP_GENERATIONS_PATH, "/v1/desktop/images/generations");
+        assert_eq!(image_edits_path("nan"), Some("/v1/images/edits"));
+        assert_eq!(
+            image_edits_path("helmcode"),
+            Some("/v1/desktop/images/edits")
+        );
+        assert_eq!(image_edits_path("anything-else"), None);
+        assert_eq!(image_edit_model("nan"), Some("qwen-image-3.0-pro"));
+        assert_eq!(image_edit_model("helmcode"), Some("flux-3-image-klein"));
+        assert_eq!(image_edit_model("anything-else"), None);
     }
 
     #[test]

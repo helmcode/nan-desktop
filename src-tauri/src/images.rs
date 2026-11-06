@@ -1,14 +1,21 @@
-//! Inline image generation (T5, S5): `qwen-image-2.1` through
-//! `POST {inference_base}/images/generations` (the base ends in `/v1`, so
-//! the wire path is `/v1/images/generations`; see [`generations_url`]).
+//! Inline image generation (T5, S5; FLUX since T10c): `flux-3-image-klein`
+//! through the DESKTOP-ONLY route
+//! `POST {platform_base}/v1/desktop/images/generations` (see
+//! [`generations_url`]), served by both tenants' platform APIs to desktop
+//! sessions. The server forces the model and `n=1`; the tenant's
+//! entitlement and monthly image quota still apply server-side.
 //!
-//! Architecture mirrors `chat.rs` (S4): the key is read from the credential vault
-//! (account = profile id, derived from the conversation row — the renderer
-//! never sends secrets or URLs), the request is sent from the Rust core with
-//! body `{model: "qwen-image-2.1", prompt, size}`, and the reply is decoded
-//! and saved as a PNG under `app_data_dir/images/<uuid>.png`. The web
-//! renderer never sees the key, any URL, or the image bytes — only status
-//! events and the saved file's path:
+//! Architecture mirrors `chat.rs` (S4): the credential is the profile's
+//! desktop SESSION JWT from the vault (account `<profile>.session`, the one
+//! image editing, web search and memory sync use; the profile is derived
+//! from the conversation row, the renderer never sends secrets or URLs). The
+//! request is sent from the Rust core as `multipart/form-data` with the
+//! public route's fields (`prompt`, `size`, `n=1`; never `model`, see
+//! [`generation_parts`]), and the reply is decoded and saved under
+//! `app_data_dir/images/<uuid>.<png|jpg>`: the extension follows the image's
+//! magic bytes (FLUX answers JPEG, see [`save_image`]). The web renderer
+//! never sees the token, any URL, or the image bytes, only status events and
+//! the saved file's path:
 //!
 //! - `images://started` `{conversation_id}` — the task began
 //! - `images://done`    `{conversation_id, media_path}` — image saved AND
@@ -17,28 +24,30 @@
 //! - `images://stopped` `{conversation_id}` — the user cancelled (or a new
 //!   generation superseded the running one in the same conversation)
 //!
-//! Error kinds are chat's [`chat::ErrorKind`]. On this surface `rate_limited`
-//! (429) means the tenant's monthly image quota was exhausted (the shared
-//! 100-images/month pool), so the UI renders a quota message. `decode` is
-//! the only image-specific use of the audio-introduced kind: a `b64_json`
-//! payload that fails to base64-decode (or decodes to zero bytes).
+//! Error kinds are [`ImageErrorKind`] (the edit surface's kinds): 400
+//! `invalid_request`, 401 `unauthorized`, 403 `tier_restricted` (the plan
+//! does not include images), 404 `not_available` (the route is not mounted
+//! for this account), 429 `rate_limited` (the tenant's monthly image quota,
+//! so the UI renders a quota message), anything else `server`. `decode` is a
+//! `b64_json` payload that fails to base64-decode (or decodes to zero bytes).
 //!
-//! **Reply shapes.** `b64_json` is decoded inline. The LIVE community
-//! tenant answers `{"data":[{"url": "https://…r2.cloudflarestorage.com/…"}]}`
-//! (a presigned URL the tenant itself issues in its authenticated reply;
-//! verified 2026-11-02). That URL is downloaded https-only (every redirect
-//! hop too), with NO credentials attached — the bearer key only ever goes
-//! to the tenant's own inference host — at most 3 redirects and a 20 MiB
-//! streaming cap. A non-https URL fails closed with kind `protocol`.
+//! **Reply shapes.** `b64_json` (the desktop route's contract) is decoded
+//! inline. A `{"data":[{"url": "https://..."}]}` reply (a presigned URL the
+//! tenant itself issues in its authenticated reply, the shape the public
+//! community route answered on 2026-11-02) is still understood: it is
+//! downloaded https-only (every redirect hop too), with NO credentials
+//! attached (the bearer token only ever goes to the tenant's own platform
+//! host), at most 3 redirects and a 20 MiB streaming cap. A non-https URL
+//! fails closed with kind `protocol`.
 //!
-//! Generation takes ~1 minute per image, so `image_generate` is a managed
+//! Generation takes up to a minute per image, so `image_generate` is a managed
 //! task (same cancel-safe registry pattern as the chat streams): exactly one
 //! active generation per conversation, a new send aborts the previous one,
 //! `image_cancel` aborts it explicitly. Different conversations may generate
 //! in parallel.
 //!
 //! Persistence: on success the core appends ONE assistant message row
-//! (`content` = prompt, `model` = qwen-image-2.1, `media_path` = the saved
+//! (`content` = prompt, `model` = [`IMAGE_MODEL`], `media_path` = the saved
 //! file) via `chat_store::insert_image_message`. If the DB insert fails the
 //! already-written file is deleted — no orphan files. The renderer then
 //! loads the image through the Tauri asset protocol (scope pinned to
@@ -54,15 +63,16 @@
 //! that fails in between leaves an orphan: [`sweep_orphan_images`] removes
 //! unreferenced images older than 24 h at startup (best effort).
 //!
-//! Image EDITING (`POST /v1/images/edits`, desktop-session only) lives in
-//! `image_edit.rs`; it reuses this module's save path, registry and events.
+//! Image EDITING (desktop sessions only, a per-profile route, see
+//! [`edits_url`]) lives in `image_edit.rs`; it reuses this module's base,
+//! save path, registry and events.
 //!
 //! Zero telemetry (S8): the only hosts contacted are the conversation
-//! profile's own inference base — a compiled-in constant (S2) — and, for the
+//! profile's own platform base (a compiled-in constant, S2) and, for the
 //! `url` reply shape, the presigned storage URL that base returned; in debug
-//! builds the `NAN_DESKTOP_MOCK_INFERENCE` environment variable may point it
-//! at a local mock (`test/mock-images.mjs`), exactly like the chat surface.
-//! Release builds ignore the variable entirely (S12).
+//! builds the `NAN_DESKTOP_MOCK_IMAGES` environment variable may point it at
+//! a local mock (`test/mock-images.mjs`). Release builds ignore the variable
+//! entirely (S12).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,9 +86,15 @@ use tauri::{AppHandle, Emitter, Manager, Window};
 
 use crate::chat;
 use crate::chat_store;
+use crate::profile;
 
-/// The image-generation model both locked tenants serve (S5).
-pub const IMAGE_MODEL: &str = "qwen-image-2.1";
+/// Image failure kinds: the generation route classifies like the edit route
+/// (same platform contract), so both surfaces share one set of kinds.
+pub type ImageErrorKind = crate::image_edit::EditErrorKind;
+
+/// The image-generation model the desktop route runs on both tenants (the
+/// server forces it; it is only stored on the result row).
+pub const IMAGE_MODEL: &str = "flux-3-image-klein";
 
 /// Default generation size (1k tier; see `validate_size`).
 pub const DEFAULT_SIZE: &str = "1024x1024";
@@ -120,45 +136,66 @@ pub fn validate_size(size: &str) -> Result<(u32, u32), chat::ErrorKind> {
     }
 }
 
-/// Generation endpoint for an inference base. The compiled-in inference
-/// bases ALREADY end in `/v1` (`https://api.nan.builders/v1`, same root as
-/// `{base}/chat/completions`), so this yields `/v1/images/generations`;
-/// adding another `/v1` here would hit `/v1/v1/...` and 404. Debug mocks
-/// set `NAN_DESKTOP_MOCK_INFERENCE` to their `/v1` root as well.
-///
-/// A base given WITHOUT the `/v1` suffix (a bare host root) still yields the
-/// `/v1/images/generations` path, so the wire path can never silently lose
-/// its version prefix.
+/// Join a `/v1/...` route `path` onto `base`. The compiled-in platform
+/// bases are bare host roots (`https://cloud-api.nan.builders`); debug mocks
+/// may be given with a `/v1` suffix (`http://127.0.0.1:14325/v1`). Either
+/// way the wire path carries exactly ONE `/v1` prefix: never `/v1/v1/...`
+/// (a 404) and never a path that lost its version prefix.
+fn route_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{base}{path}")
+}
+
+/// The desktop-only generation endpoint on a platform base:
+/// `{base}/v1/desktop/images/generations` on both tenants.
 pub fn generations_url(base: &str) -> String {
-    let base = base.trim_end_matches('/');
-    if base.ends_with("/v1") {
-        format!("{base}/images/generations")
-    } else {
-        format!("{base}/v1/images/generations")
-    }
+    route_url(base, profile::DESKTOP_GENERATIONS_PATH)
 }
 
-/// Image EDIT endpoint for a base, alongside [`generations_url`] and with
-/// the same `/v1` rule: a base ending in `/v1` gets `/images/edits`, a bare
-/// host root gets `/v1/images/edits`. The edit surface is served by the
-/// community platform API (desktop sessions only), so the base passed here
-/// is the profile's PLATFORM base (see `image_edit::edits_base`).
-pub fn edits_url(base: &str) -> String {
-    let base = base.trim_end_matches('/');
-    if base.ends_with("/v1") {
-        format!("{base}/images/edits")
-    } else {
-        format!("{base}/v1/images/edits")
-    }
+/// The image EDIT endpoint of `profile_id` on a platform base. The tenants
+/// mount it on different paths (see [`profile::image_edits_path`]):
+/// community `/v1/images/edits`, enterprise `/v1/desktop/images/edits`.
+/// `None` for an unknown profile.
+pub fn edits_url(base: &str, profile_id: &str) -> Option<String> {
+    profile::image_edits_path(profile_id).map(|path| route_url(base, path))
 }
 
-/// Build the OpenAI-compatible `/images/generations` JSON body.
-pub fn image_body(prompt: &str, size: &str) -> serde_json::Value {
-    serde_json::json!({
-        "model": IMAGE_MODEL,
-        "prompt": prompt,
-        "size": size,
-    })
+/// The base both image routes are called on: the profile's PLATFORM base
+/// (debug builds: `NAN_DESKTOP_MOCK_IMAGES`, or the older
+/// `NAN_DESKTOP_MOCK_IMAGE_EDITS`, may point it at `test/mock-images.mjs`;
+/// release builds ignore both variables).
+pub fn images_base(profile_id: &str) -> Option<String> {
+    if cfg!(debug_assertions) {
+        for var in ["NAN_DESKTOP_MOCK_IMAGES", "NAN_DESKTOP_MOCK_IMAGE_EDITS"] {
+            if let Ok(mock) = std::env::var(var) {
+                let mock = mock.trim().trim_end_matches('/');
+                if !mock.is_empty() {
+                    return Some(mock.to_string());
+                }
+            }
+        }
+    }
+    crate::device_flow::platform_base(profile_id)
+}
+
+/// The generation request body, field by field in wire order: `prompt`,
+/// `size`, `n=1`. Never `model`: the desktop route forces it server-side.
+pub fn generation_parts(prompt: &str, size: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("prompt", prompt.to_string()),
+        ("size", size.to_string()),
+        ("n", "1".to_string()),
+    ]
+}
+
+/// [`generation_parts`] as a reqwest multipart form.
+fn generation_form(prompt: &str, size: &str) -> reqwest::multipart::Form {
+    let mut form = reqwest::multipart::Form::new();
+    for (name, value) in generation_parts(prompt, size) {
+        form = form.text(name, value);
+    }
+    form
 }
 
 /// What the tenant's images endpoint returned for one generation.
@@ -279,12 +316,14 @@ fn download_redirect_policy(allow_loopback_http: bool) -> reqwest::redirect::Pol
     })
 }
 
-/// Debug builds whose inference base is the local mock
-/// (`NAN_DESKTOP_MOCK_INFERENCE`) may fetch the mock's loopback http image
-/// URL. Always `false` in release builds (S12).
-fn mock_inference_active() -> bool {
+/// Debug builds whose images base is the local mock (see [`images_base`])
+/// may fetch the mock's loopback http image URL. Always `false` in release
+/// builds (S12).
+fn mock_images_active() -> bool {
     cfg!(debug_assertions)
-        && std::env::var("NAN_DESKTOP_MOCK_INFERENCE").is_ok_and(|mock| !mock.trim().is_empty())
+        && ["NAN_DESKTOP_MOCK_IMAGES", "NAN_DESKTOP_MOCK_IMAGE_EDITS"]
+            .iter()
+            .any(|var| std::env::var(var).is_ok_and(|mock| !mock.trim().is_empty()))
 }
 
 /// GET `url` with `client` (which carries NO default headers — never a
@@ -330,9 +369,19 @@ pub fn images_dir(app_data: &Path) -> PathBuf {
     app_data.join("images")
 }
 
-/// Resolve `raw` as an image this app generated: a regular `.png` file (never
-/// a symlink) sitting DIRECTLY inside [`images_dir`]. Returns the canonical
-/// path. This is the only source the `generate_image` `save_path` copy and
+/// The extensions this app saves images under (see [`save_image`]).
+pub const SAVED_EXTENSIONS: [&str; 2] = ["png", "jpg"];
+
+/// Whether `path` carries one of [`SAVED_EXTENSIONS`] (case-insensitive).
+pub fn has_saved_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| SAVED_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
+}
+
+/// Resolve `raw` as an image this app generated: a regular `.png` or `.jpg`
+/// file (never a symlink) sitting DIRECTLY inside [`images_dir`]. Returns
+/// the canonical path. This is the only source the `generate_image` `save_path` copy and
 /// the user's "Save as…" accept, so neither can be turned into a way to copy
 /// an arbitrary file out of the user's disk.
 pub fn verify_generated_image(app_data: &Path, raw: &Path) -> Result<PathBuf, &'static str> {
@@ -345,10 +394,7 @@ pub fn verify_generated_image(app_data: &Path, raw: &Path) -> Result<PathBuf, &'
         std::fs::canonicalize(raw).map_err(|_| "the generated image does not resolve")?;
     let dir = std::fs::canonicalize(images_dir(app_data))
         .map_err(|_| "the generated images folder does not resolve")?;
-    let is_png = canonical
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
-    if canonical.parent() != Some(dir.as_path()) || !is_png {
+    if canonical.parent() != Some(dir.as_path()) || !has_saved_extension(&canonical) {
         return Err("only images generated by this app can be saved");
     }
     Ok(canonical)
@@ -365,6 +411,22 @@ pub fn copy_generated_image(app_data: &Path, source: &Path, dest: &Path) -> Resu
     let bytes = std::fs::read(&source).map_err(|err| format!("cannot read the image: {err}"))?;
     std::fs::write(dest, &bytes).map_err(|err| format!("cannot write the image: {err}"))?;
     Ok(bytes.len() as u64)
+}
+
+/// The save dialog's file-type filter for a generated image: JPEG for a
+/// `.jpg` image (FLUX), PNG otherwise. The copy keeps the bytes as they
+/// are, so the offered extension must match them.
+pub fn save_dialog_filter(source: &Path) -> (&'static str, &'static [&'static str]) {
+    const JPEG_EXTENSIONS: &[&str] = &["jpg", "jpeg"];
+    const PNG_EXTENSIONS: &[&str] = &["png"];
+    let is_jpeg = source
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg"));
+    if is_jpeg {
+        ("JPEG", JPEG_EXTENSIONS)
+    } else {
+        ("PNG", PNG_EXTENSIONS)
+    }
 }
 
 /// The user's own "Save as…" on a generated image in the chat (round 6).
@@ -386,13 +448,14 @@ pub async fn image_save_as(app: AppHandle, source_path: String) -> Result<Option
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "image.png".into());
+    let (filter_name, filter_exts) = save_dialog_filter(&source);
     let dialog_app = app.clone();
     let picked = tauri::async_runtime::spawn_blocking(move || {
         dialog_app
             .dialog()
             .file()
             .set_file_name(file_name)
-            .add_filter("PNG", &["png"])
+            .add_filter(filter_name, filter_exts)
             .blocking_save_file()
     })
     .await
@@ -410,14 +473,14 @@ pub async fn image_save_as(app: AppHandle, source_path: String) -> Result<Option
 /// persisted yet) is always far younger than this, so it is never touched.
 pub const ORPHAN_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
-/// Best-effort orphan sweep (round 6): delete `<app data>/images/<uuid>.png`
+/// Best-effort orphan sweep (round 6): delete `<app data>/images/<uuid>.<png|jpg>`
 /// files that NO message references any more (see
 /// [`chat_store::references_file_name`]) and whose mtime is at least
 /// `min_age` before `now`. Orphans appear when a conversation fails after
 /// the image was generated (the tool's file is saved before the reply's
 /// artifacts are). Fail-safe: a missing or unreadable chat store, an
 /// unreadable folder or a failing query deletes NOTHING (or stops the
-/// sweep); only regular files named exactly `<uuid>.png` are candidates
+/// sweep); only regular files named exactly `<uuid>.png` or `<uuid>.jpg` are candidates
 /// (never symlinks, folders or anything else). Returns how many files were
 /// deleted. Never panics.
 pub fn sweep_orphan_images(
@@ -447,9 +510,11 @@ pub fn sweep_orphan_images(
         let Some(name) = name.to_str() else {
             continue;
         };
-        let is_generated_name = name
-            .strip_suffix(".png")
-            .is_some_and(|stem| uuid::Uuid::parse_str(stem).is_ok());
+        let is_generated_name = SAVED_EXTENSIONS.iter().any(|ext| {
+            name.strip_suffix(ext)
+                .and_then(|stem| stem.strip_suffix('.'))
+                .is_some_and(|stem| uuid::Uuid::parse_str(stem).is_ok())
+        });
         if !is_generated_name {
             continue;
         }
@@ -491,12 +556,29 @@ pub fn sweep_orphans_in_background(app_data: PathBuf) {
         });
 }
 
-/// Save image bytes as `<dir>/<uuid>.png` (creating `dir` if missing) and
-/// return the absolute path. The uuid file name keeps concurrent generations
-/// from colliding and needs no extra metadata in the store.
-pub fn save_png(dir: &Path, bytes: &[u8]) -> Result<PathBuf, chat::ErrorKind> {
+/// The extension an image is saved under, decided by its MAGIC BYTES:
+/// `jpg` for JPEG (FLUX answers `media_type: image/jpeg`), `png` for
+/// everything else (PNG, and the qwen results). A reply's `media_type`
+/// claim is never trusted on its own, like a file extension: bytes that do
+/// not start with the JPEG signature are never named `.jpg`.
+pub fn saved_extension(bytes: &[u8]) -> &'static str {
+    match crate::image_edit::sniff_format(bytes) {
+        Some(crate::image_edit::ImageFormat::Jpeg) => "jpg",
+        _ => "png",
+    }
+}
+
+/// Save image bytes as `<dir>/<uuid>.<png|jpg>` (see [`saved_extension`];
+/// creating `dir` if missing) and return the absolute path. The uuid file
+/// name keeps concurrent generations from colliding and needs no extra
+/// metadata in the store.
+pub fn save_image(dir: &Path, bytes: &[u8]) -> Result<PathBuf, chat::ErrorKind> {
     std::fs::create_dir_all(dir).map_err(|_| chat::ErrorKind::Protocol)?;
-    let path = dir.join(format!("{}.png", uuid::Uuid::new_v4()));
+    let path = dir.join(format!(
+        "{}.{}",
+        uuid::Uuid::new_v4(),
+        saved_extension(bytes)
+    ));
     std::fs::write(&path, bytes).map_err(|_| chat::ErrorKind::Protocol)?;
     Ok(path)
 }
@@ -522,7 +604,7 @@ pub struct ImagesDonePayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ImagesErrorPayload {
     pub conversation_id: i64,
-    pub kind: chat::ErrorKind,
+    pub kind: ImageErrorKind,
 }
 
 /// `images://stopped` — the user cancelled (or superseded) the generation.
@@ -709,7 +791,7 @@ async fn run_image_generation(
     let state = app.state::<ImagesState>();
     let _ = window.emit("images://started", ImagesStartedPayload { conversation_id });
 
-    let emit_error = |kind: chat::ErrorKind| {
+    let emit_error = |kind: ImageErrorKind| {
         release_image(&state, conversation_id, generation);
         let _ = window.emit(
             "images://error",
@@ -728,18 +810,18 @@ async fn run_image_generation(
     // ---- save + persist (no orphan files) -----------------------------------
     let app_dir = match app.path().app_data_dir() {
         Ok(dir) => dir,
-        Err(_) => return emit_error(chat::ErrorKind::Protocol),
+        Err(_) => return emit_error(ImageErrorKind::Protocol),
     };
-    let path = match save_png(&images_dir(&app_dir), &bytes) {
+    let path = match save_image(&images_dir(&app_dir), &bytes) {
         Ok(path) => path,
-        Err(kind) => return emit_error(kind),
+        Err(kind) => return emit_error(kind.into()),
     };
     let media_path = path.to_string_lossy().to_string();
     let conn = match chat_store::open_db(&app_dir) {
         Ok(conn) => conn,
         Err(_) => {
             let _ = std::fs::remove_file(&path);
-            return emit_error(chat::ErrorKind::Protocol);
+            return emit_error(ImageErrorKind::Protocol);
         }
     };
     let persisted =
@@ -749,7 +831,7 @@ async fn run_image_generation(
         // The row could not be written — delete the file so no orphan is
         // left behind (the renderer only ever shows DB-backed images).
         let _ = std::fs::remove_file(&path);
-        return emit_error(chat::ErrorKind::Protocol);
+        return emit_error(ImageErrorKind::Protocol);
     }
 
     release_image(&state, conversation_id, generation);
@@ -762,68 +844,68 @@ async fn run_image_generation(
     );
 }
 
-/// Generate one image for `profile_id` and return the decoded PNG bytes:
-/// vault key + compiled-in inference base (Rust core only, S4), then
-/// `POST {base}/images/generations`. Shared by the composer's image mode
-/// and the chat's `generate_image` tool. A 429 is the tenant's monthly
-/// image quota (shared 100/month pool) — classified `rate_limited`.
+/// Generate one image for `profile_id` and return the decoded bytes (JPEG
+/// from FLUX; see [`save_image`] for the file name): the vault's desktop
+/// session + the compiled-in platform base (Rust core only, S4), then
+/// `POST {base}/v1/desktop/images/generations`. Shared by the composer's
+/// image mode and the chat's `generate_image` tool. No session in the vault
+/// is `missing_key`; a 429 is the tenant's monthly image quota
+/// (`rate_limited`).
 pub async fn request_image(
     profile_id: &str,
     prompt: &str,
     size: &str,
-) -> Result<Vec<u8>, chat::ErrorKind> {
-    let key = chat::read_profile_key(profile_id)?;
-    request_image_with_key(profile_id, &key, prompt, size).await
+) -> Result<Vec<u8>, ImageErrorKind> {
+    let token = chat::read_session_token(profile_id).ok_or(ImageErrorKind::MissingKey)?;
+    request_image_with_token(profile_id, &token, prompt, size).await
 }
 
-/// [`request_image`] after the vault read: resolve the profile's
-/// inference base, POST the generation, then decode (`b64_json`) or
-/// download (presigned `url`). Split out so the live smoke test exercises
-/// the exact production path with a key supplied from the environment.
-pub async fn request_image_with_key(
+/// [`request_image`] after the vault read: resolve the profile's platform
+/// base, POST the generation, then decode (`b64_json`) or download
+/// (presigned `url`). Split out so the live smoke test exercises the exact
+/// production path with a session supplied from the environment.
+pub async fn request_image_with_token(
     profile_id: &str,
-    key: &str,
+    token: &str,
     prompt: &str,
     size: &str,
-) -> Result<Vec<u8>, chat::ErrorKind> {
-    let base = chat::inference_base(profile_id).ok_or(chat::ErrorKind::Protocol)?;
-    generate_at(&base, key, prompt, size, mock_inference_active()).await
+) -> Result<Vec<u8>, ImageErrorKind> {
+    let base = images_base(profile_id).ok_or(ImageErrorKind::Protocol)?;
+    generate_at(&base, token, prompt, size, mock_images_active()).await
 }
 
-/// The wire flow against one inference base: POST the generation with the
-/// bearer key (to `base` ONLY), then decode the `b64_json` or download the
-/// presigned `url` WITHOUT credentials.
+/// The wire flow against one platform base: POST the multipart generation
+/// with the session bearer (to `base` ONLY), then decode the `b64_json` or
+/// download the presigned `url` WITHOUT credentials. Statuses classify like
+/// the edit route ([`crate::image_edit::classify_edit_status`]).
 async fn generate_at(
     base: &str,
-    key: &str,
+    token: &str,
     prompt: &str,
     size: &str,
     allow_loopback_http: bool,
-) -> Result<Vec<u8>, chat::ErrorKind> {
+) -> Result<Vec<u8>, ImageErrorKind> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(chat::CONNECT_TIMEOUT_SECS))
         .build()
-        .map_err(|_| chat::ErrorKind::Protocol)?;
+        .map_err(|_| ImageErrorKind::Protocol)?;
     // No overall request timeout: a ~1-minute generation must not be killed
     // mid-flight (same policy as the chat streams).
     let response = client
         .post(generations_url(base))
-        .bearer_auth(key)
-        .json(&image_body(prompt, size))
+        .bearer_auth(token)
+        .multipart(generation_form(prompt, size))
         .send()
         .await
-        .map_err(|err| chat::classify_transport(err.is_timeout()))?;
+        .map_err(|_| ImageErrorKind::Network)?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        return Err(chat::classify_chat_status(status));
+        return Err(crate::image_edit::classify_edit_status(status));
     }
-    let body = response
-        .text()
-        .await
-        .map_err(|err| chat::classify_transport(err.is_timeout()))?;
+    let body = response.text().await.map_err(|_| ImageErrorKind::Network)?;
     match parse_reply(&body, allow_loopback_http)? {
         ImageReply::Bytes(bytes) => Ok(bytes),
-        ImageReply::Url(url) => download_with(&url, allow_loopback_http).await,
+        ImageReply::Url(url) => Ok(download_with(&url, allow_loopback_http).await?),
     }
 }
 
@@ -842,7 +924,7 @@ pub fn tool_definition() -> serde_json::Value {
         "parameters": { "type": "object", "properties": {
             "prompt": { "type": "string", "description": "Detailed description of the image to create." },
             "size": { "type": "string", "description": "WIDTHxHEIGHT, each 512-1280 in steps of 16. Default 1024x1024." },
-            "save_path": { "type": "string", "description": "Optional. Absolute path of a .png file (or a folder) inside one of the user's working folders to also save the image there, with the same approval as write_file. A path outside the working folders is NOT saved there: ask the user to add that folder first." }
+            "save_path": { "type": "string", "description": "Optional. Absolute path of an image file (or a folder; the file keeps the image's own format, .jpg or .png) inside one of the user's working folders to also save the image there, with the same approval as write_file. A path outside the working folders is NOT saved there: ask the user to add that folder first." }
         }, "required": ["prompt"] }
     }})
 }
@@ -876,12 +958,12 @@ pub fn parse_tool_args(arguments: &str) -> Option<(String, String)> {
 /// [`tool_result_for_model`] plus the outcome of the `save_path` copy
 /// (`save`, built by `tools::image_save_for_model`), when one was asked.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn tool_result_for_model(result: &Result<PathBuf, chat::ErrorKind>) -> String {
+pub fn tool_result_for_model(result: &Result<PathBuf, ImageErrorKind>) -> String {
     tool_result_with_save(result, None)
 }
 
 pub fn tool_result_with_save(
-    result: &Result<PathBuf, chat::ErrorKind>,
+    result: &Result<PathBuf, ImageErrorKind>,
     save: Option<serde_json::Value>,
 ) -> String {
     match result {
@@ -896,16 +978,22 @@ pub fn tool_result_with_save(
             }
             reply.to_string()
         }
-        Err(chat::ErrorKind::RateLimited) => serde_json::json!({
+        Err(ImageErrorKind::RateLimited) => serde_json::json!({
             "ok": false,
             "error": "quota_exhausted",
             "message": "The monthly image quota is used up. Tell the user; do not retry.",
         })
         .to_string(),
+        Err(ImageErrorKind::TierRestricted | ImageErrorKind::NotAvailable) => serde_json::json!({
+            "ok": false,
+            "error": "not_available",
+            "message": "Image generation is not available on the user's plan or account. Tell the user; do not retry.",
+        })
+        .to_string(),
         Err(kind) => serde_json::json!({
             "ok": false,
             "error": "image_failed",
-            "message": format!("Image generation failed ({kind:?}). Tell the user; do not retry more than once."),
+            "message": format!("Image generation failed ({}). Tell the user; do not retry more than once.", kind.as_str()),
         })
         .to_string(),
     }
@@ -918,9 +1006,9 @@ pub async fn run_tool(
     profile_id: &str,
     prompt: &str,
     size: &str,
-) -> Result<PathBuf, chat::ErrorKind> {
+) -> Result<PathBuf, ImageErrorKind> {
     let bytes = request_image(profile_id, prompt, size).await?;
-    save_png(&images_dir(app_data), &bytes)
+    Ok(save_image(&images_dir(app_data), &bytes)?)
 }
 
 /// Cancel the active generation for a conversation (if any) and emit
@@ -999,26 +1087,31 @@ mod tests {
         }
     }
 
-    // ---- image_body -----------------------------------------------------------
+    // ---- generation_parts (multipart fields of the desktop route) ---------------
 
     #[test]
-    fn image_body_matches_the_openai_images_shape() {
+    fn generation_parts_are_prompt_size_then_n_1_and_never_the_model() {
         assert_eq!(
-            image_body("a cat on a roof", "1024x1024"),
-            serde_json::json!({
-                "model": "qwen-image-2.1",
-                "prompt": "a cat on a roof",
-                "size": "1024x1024",
-            })
+            generation_parts("a cat on a roof", "1024x1024"),
+            vec![
+                ("prompt", "a cat on a roof".to_string()),
+                ("size", "1024x1024".to_string()),
+                ("n", "1".to_string()),
+            ]
+        );
+        // The desktop route forces the model server-side: never sent.
+        assert!(
+            !generation_parts("x", "512x512")
+                .iter()
+                .any(|(name, _)| *name == "model")
         );
     }
 
     #[test]
-    fn image_body_carries_the_prompt_verbatim_including_multibyte() {
-        let body = image_body("Café ☕ — listó", "768x512");
-        assert_eq!(body["prompt"], "Café ☕ — listó");
-        assert_eq!(body["size"], "768x512");
-        assert_eq!(body["model"], "qwen-image-2.1");
+    fn generation_parts_carry_the_prompt_verbatim_including_multibyte() {
+        let parts = generation_parts("Café ☕, listó", "768x512");
+        assert_eq!(parts[0], ("prompt", "Café ☕, listó".to_string()));
+        assert_eq!(parts[1], ("size", "768x512".to_string()));
     }
 
     // ---- parse_images_response --------------------------------------------------
@@ -1132,7 +1225,10 @@ mod tests {
         );
     }
 
-    // ---- images_dir + save_png ---------------------------------------------------
+    // ---- images_dir + save_image ---------------------------------------------------
+
+    /// A JPEG header (what FLUX answers with `media_type: image/jpeg`).
+    const FAKE_JPEG: &[u8] = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01";
 
     #[test]
     fn images_dir_is_the_images_subdirectory() {
@@ -1143,21 +1239,56 @@ mod tests {
     }
 
     #[test]
-    fn save_png_writes_exact_bytes_under_a_png_name() {
+    fn save_image_writes_exact_bytes_under_a_png_name_for_non_jpeg() {
         let dir = TempDir::new().expect("temp dir");
         let bytes = b"fake png bytes \xF0\x9F\x98\x80";
-        let path = save_png(&dir.path().join("nested"), bytes).expect("save");
+        let path = save_image(&dir.path().join("nested"), bytes).expect("save");
         assert_eq!(path.extension().and_then(|e| e.to_str()), Some("png"));
         assert!(path.starts_with(dir.path()));
         assert_eq!(std::fs::read(&path).expect("read"), bytes.to_vec());
+        // A real PNG keeps .png too.
+        let png = save_image(dir.path(), &tiny_png()).expect("save png");
+        assert_eq!(png.extension().and_then(|e| e.to_str()), Some("png"));
     }
 
     #[test]
-    fn save_png_names_are_unique() {
+    fn save_image_names_jpeg_bytes_jpg() {
         let dir = TempDir::new().expect("temp dir");
-        let a = save_png(dir.path(), b"one").expect("save a");
-        let b = save_png(dir.path(), b"two").expect("save b");
+        let path = save_image(dir.path(), FAKE_JPEG).expect("save");
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("jpg"));
+        assert_eq!(std::fs::read(&path).expect("read"), FAKE_JPEG.to_vec());
+        let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
+        assert!(uuid::Uuid::parse_str(stem).is_ok(), "uuid file name");
+    }
+
+    #[test]
+    fn saved_extension_follows_the_magic_bytes_only() {
+        assert_eq!(saved_extension(FAKE_JPEG), "jpg");
+        assert_eq!(saved_extension(&tiny_png()), "png");
+        // Anything that is not JPEG by its bytes is never named .jpg.
+        assert_eq!(saved_extension(b"\xFF\xD8"), "png");
+        assert_eq!(saved_extension(b""), "png");
+        assert_eq!(saved_extension(b"RIFF\0\0\0\0WEBPVP8 "), "png");
+    }
+
+    #[test]
+    fn save_image_names_are_unique() {
+        let dir = TempDir::new().expect("temp dir");
+        let a = save_image(dir.path(), b"one").expect("save a");
+        let b = save_image(dir.path(), b"two").expect("save b");
         assert_ne!(a, b, "uuid file names never collide");
+    }
+
+    #[test]
+    fn the_save_dialog_offers_the_images_own_format() {
+        assert_eq!(
+            save_dialog_filter(Path::new("/d/images/a.jpg")),
+            ("JPEG", &["jpg", "jpeg"][..])
+        );
+        assert_eq!(
+            save_dialog_filter(Path::new("/d/images/a.png")),
+            ("PNG", &["png"][..])
+        );
     }
 
     // ---- registry (cancel-safe per-conversation single generation) ----------------
@@ -1211,53 +1342,89 @@ mod tests {
     // ---- constants -----------------------------------------------------------------
 
     #[test]
-    fn generation_url_is_exactly_v1_images_generations_on_both_tenants() {
+    fn generation_url_is_the_desktop_route_on_both_tenants() {
         for (id, expected) in [
-            ("nan", "https://api.nan.builders/v1/images/generations"),
-            ("helmcode", "https://api.helmcode.com/v1/images/generations"),
+            (
+                "nan",
+                "https://cloud-api.nan.builders/v1/desktop/images/generations",
+            ),
+            (
+                "helmcode",
+                "https://cloud-api.helmcode.com/v1/desktop/images/generations",
+            ),
         ] {
-            let base = crate::profile::inference_base_for(id).expect("tenant");
+            let base = crate::profile::platform_base_for(id).expect("tenant");
             let url = generations_url(base);
             assert_eq!(url, expected);
             assert!(!url.contains("/v1/v1/"), "no doubled /v1 prefix");
         }
-        // A mock root with a trailing slash still yields one separator.
+        // A mock root given with /v1 (and a trailing slash) still yields
+        // exactly one /v1 prefix.
         assert_eq!(
             generations_url("http://127.0.0.1:1/v1/"),
-            "http://127.0.0.1:1/v1/images/generations"
-        );
-        // A bare host root (no /v1) can never lose the version prefix: this
-        // exact path regression (`{base}/images/generations` on a non-/v1
-        // root, or `/v1/v1/`) is what 404'd image generation for 4 rounds.
-        assert_eq!(
-            generations_url("https://api.nan.builders"),
-            "https://api.nan.builders/v1/images/generations"
+            "http://127.0.0.1:1/v1/desktop/images/generations"
         );
         assert_eq!(
-            generations_url("https://api.nan.builders/"),
-            "https://api.nan.builders/v1/images/generations"
+            generations_url("https://cloud-api.nan.builders/"),
+            "https://cloud-api.nan.builders/v1/desktop/images/generations"
         );
         for base in [
-            "https://api.nan.builders/v1",
-            "https://api.nan.builders",
+            "https://cloud-api.nan.builders/v1",
+            "https://cloud-api.nan.builders",
             "http://127.0.0.1:9/v1",
         ] {
             let url = generations_url(base);
-            assert!(url.ends_with("/v1/images/generations"), "{url}");
+            assert!(url.ends_with("/v1/desktop/images/generations"), "{url}");
             assert_eq!(url.matches("/v1/").count(), 1, "{url}");
+            // Never the public route any more.
+            assert!(!url.ends_with("/v1/images/generations"), "{url}");
         }
     }
 
     #[test]
+    fn edit_urls_are_resolved_per_profile() {
+        assert_eq!(
+            edits_url("https://cloud-api.nan.builders", "nan").as_deref(),
+            Some("https://cloud-api.nan.builders/v1/images/edits")
+        );
+        assert_eq!(
+            edits_url("https://cloud-api.helmcode.com", "helmcode").as_deref(),
+            Some("https://cloud-api.helmcode.com/v1/desktop/images/edits")
+        );
+        // The /v1 rule applies to both paths.
+        assert_eq!(
+            edits_url("http://127.0.0.1:9/v1/", "helmcode").as_deref(),
+            Some("http://127.0.0.1:9/v1/desktop/images/edits")
+        );
+        assert_eq!(edits_url("https://cloud-api.nan.builders", "other"), None);
+    }
+
+    #[test]
     fn the_production_request_path_uses_the_compiled_in_base_unchanged() {
-        // `request_image_with_key` resolves the base through
-        // `chat::inference_base`; without the debug mock variable it is the
-        // compiled-in constant, so the wire URL is pinned end to end.
-        if std::env::var("NAN_DESKTOP_MOCK_INFERENCE").is_err() {
-            let base = chat::inference_base("nan").expect("nan base");
+        // `request_image_with_token` resolves the base through
+        // `images_base` (the platform base); without the debug mock
+        // variables it is the compiled-in constant, so the wire URL is
+        // pinned end to end.
+        if std::env::var("NAN_DESKTOP_MOCK_IMAGES").is_err()
+            && std::env::var("NAN_DESKTOP_MOCK_IMAGE_EDITS").is_err()
+            && std::env::var("NAN_DESKTOP_MOCK_PLATFORM").is_err()
+        {
+            for (id, expected) in [
+                (
+                    "nan",
+                    "https://cloud-api.nan.builders/v1/desktop/images/generations",
+                ),
+                (
+                    "helmcode",
+                    "https://cloud-api.helmcode.com/v1/desktop/images/generations",
+                ),
+            ] {
+                let base = images_base(id).expect("base");
+                assert_eq!(generations_url(&base), expected);
+            }
             assert_eq!(
-                generations_url(&base),
-                "https://api.nan.builders/v1/images/generations"
+                edits_url(&images_base("helmcode").expect("base"), "helmcode").as_deref(),
+                Some("https://cloud-api.helmcode.com/v1/desktop/images/edits")
             );
         }
     }
@@ -1523,13 +1690,14 @@ mod tests {
 
     // ---- end-to-end wire flow (mock tenant → presigned url → download) -------------
 
-    const E2E_KEY: &str = "sk-e2e-key-0123456789";
+    /// The desktop session JWT the e2e tenant expects.
+    const E2E_KEY: &str = "fake-session-jwt-e2e";
 
-    /// The mock tenant: answers the generation with the LIVE url shape,
-    /// pointing at a SEPARATE storage host (another loopback port).
+    /// The mock tenant: answers the desktop generation route with the url
+    /// shape, pointing at a SEPARATE storage host (another loopback port).
     fn start_tenant(storage_origin: String) -> Loopback {
         Loopback::start(move |path, request| {
-            if path != "/v1/images/generations" {
+            if path != "/v1/desktop/images/generations" {
                 return http_response("404 Not Found", &[], b"{}");
             }
             if !request
@@ -1570,14 +1738,23 @@ mod tests {
         .expect("generation through the url shape");
         assert_eq!(bytes, png, "the downloaded bytes are the stored image");
 
-        // Tenant: exactly one POST to /v1/images/generations WITH the key.
+        // Tenant: exactly one multipart POST to the desktop route WITH the
+        // session: prompt, size, n=1 and never a model.
         let tenant_requests = tenant.requests();
         assert_eq!(tenant_requests.len(), 1);
-        assert_eq!(tenant_requests[0].0, "/v1/images/generations");
-        assert!(tenant_requests[0].1.head.starts_with("post "));
-        let body: serde_json::Value =
-            serde_json::from_slice(&tenant_requests[0].1.body).expect("json body");
-        assert_eq!(body, image_body("un gato astronauta", "1024x1024"));
+        assert_eq!(tenant_requests[0].0, "/v1/desktop/images/generations");
+        let request = &tenant_requests[0].1;
+        assert!(request.head.starts_with("post "));
+        assert!(
+            request
+                .head
+                .contains("content-type: multipart/form-data; boundary=")
+        );
+        let body = String::from_utf8_lossy(&request.body);
+        assert!(body.contains("name=\"prompt\"\r\n\r\nun gato astronauta\r\n"));
+        assert!(body.contains("name=\"size\"\r\n\r\n1024x1024\r\n"));
+        assert!(body.contains("name=\"n\"\r\n\r\n1\r\n"));
+        assert!(!body.contains("name=\"model\""));
 
         // Storage: one GET, and the key NEVER reached it in any form.
         let storage_requests = storage.requests();
@@ -1616,7 +1793,7 @@ mod tests {
             true,
         ))
         .expect("generation");
-        let saved = save_png(&images_dir(app_data.path()), &bytes);
+        let saved = save_image(&images_dir(app_data.path()), &bytes).map_err(ImageErrorKind::from);
         let model_reply: serde_json::Value =
             serde_json::from_str(&tool_result_for_model(&saved)).expect("tool json");
         assert_eq!(model_reply["ok"], true);
@@ -1678,7 +1855,7 @@ mod tests {
 
     #[test]
     fn e2e_b64_reply_still_works_and_errors_classify() {
-        // b64_json shape (the enterprise tenant) end to end.
+        // b64_json shape (the desktop route's contract) end to end.
         let tenant = Loopback::start(|_, _| {
             let body = format!(r#"{{"data":[{{"b64_json":"{TINY_PNG_B64}"}}]}}"#);
             http_response("200 OK", &[], body.as_bytes())
@@ -1693,11 +1870,16 @@ mod tests {
             )),
             Ok(tiny_png())
         );
-        // 429 is the monthly quota; 404 (a wrong path) is NOT silently ok.
+        // The platform contract, like the edit route: 429 is the monthly
+        // quota, 403 the plan, 404 a route that is not mounted (NOT
+        // silently ok), 400 a refused request.
         for (status, kind) in [
-            ("429 Too Many Requests", chat::ErrorKind::RateLimited),
-            ("401 Unauthorized", chat::classify_chat_status(401)),
-            ("404 Not Found", chat::classify_chat_status(404)),
+            ("429 Too Many Requests", ImageErrorKind::RateLimited),
+            ("401 Unauthorized", ImageErrorKind::Unauthorized),
+            ("403 Forbidden", ImageErrorKind::TierRestricted),
+            ("404 Not Found", ImageErrorKind::NotAvailable),
+            ("400 Bad Request", ImageErrorKind::InvalidRequest),
+            ("502 Bad Gateway", ImageErrorKind::Server),
         ] {
             let tenant = Loopback::start(move |_, _| http_response(status, &[], b"{}"));
             assert_eq!(
@@ -1715,6 +1897,33 @@ mod tests {
     }
 
     #[test]
+    fn e2e_a_flux_jpeg_reply_is_saved_as_jpg() {
+        // FLUX answers `media_type: image/jpeg` with JPEG bytes: the bytes
+        // arrive intact and the saved file is `<uuid>.jpg`.
+        let jpeg_b64 = BASE64_STANDARD.encode(FAKE_JPEG);
+        let tenant = Loopback::start(move |_, _| {
+            let body = format!(
+                r#"{{"created":1,"data":[{{"b64_json":"{jpeg_b64}","media_type":"image/jpeg"}}]}}"#
+            );
+            http_response("200 OK", &[], body.as_bytes())
+        });
+        let bytes = block_on(generate_at(
+            &format!("{}/v1", tenant.origin),
+            E2E_KEY,
+            "un zorro",
+            "1024x1024",
+            false,
+        ))
+        .expect("generation");
+        assert_eq!(bytes, FAKE_JPEG.to_vec());
+        let app_data = TempDir::new().expect("app data");
+        let path = save_image(&images_dir(app_data.path()), &bytes).expect("saved");
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("jpg"));
+        // A saved JPEG is one of this app's images (Save as, save_path).
+        assert!(verify_generated_image(app_data.path(), &path).is_ok());
+    }
+
+    #[test]
     fn e2e_production_mode_refuses_a_plain_http_url_reply() {
         // Without the mock allowance a non-https url is never fetched.
         let storage = Loopback::start(|_, _| ok_bytes(b"x"));
@@ -1727,7 +1936,7 @@ mod tests {
                 "512x512",
                 false
             )),
-            Err(chat::ErrorKind::Protocol)
+            Err(ImageErrorKind::Protocol)
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(storage.requests().is_empty());
@@ -1735,43 +1944,35 @@ mod tests {
 
     // ---- LIVE smoke (manual: real community tenant, real key) ----------------------
 
-    /// Real generation through the app's own path against
-    /// `https://api.nan.builders/v1`. Ignored by default (needs the network
-    /// and a member key). Run:
+    /// Real generation through the app's own path against the community's
+    /// desktop route (`https://cloud-api.nan.builders/v1/desktop/images/
+    /// generations`). Ignored by default (needs the network and a desktop
+    /// session). Run:
     ///
     /// ```sh
-    /// NAN_SMOKE_MODELS_JSON=/path/to/models.json \   # or NAN_SMOKE_KEY=…
+    /// NAN_SMOKE_SESSION=<desktop session JWT> \
     ///   cargo test live_smoke -- --ignored --nocapture
     /// ```
     ///
-    /// The key is read from `NAN_SMOKE_KEY`, else from
-    /// `providers.nan.apiKey` in the JSON file at `NAN_SMOKE_MODELS_JSON`.
-    /// It is never printed. The image is written to `NAN_SMOKE_OUT`
-    /// (default `/tmp/nan-desktop-live-smoke.png`).
+    /// The session is never printed. The image is written to
+    /// `NAN_SMOKE_OUT` (default `/tmp/nan-desktop-live-smoke.img`).
     #[test]
-    #[ignore = "live network smoke: needs a member key (see doc comment)"]
+    #[ignore = "live network smoke: needs a desktop session (see doc comment)"]
     fn live_smoke_community_generation() {
         assert!(
-            std::env::var("NAN_DESKTOP_MOCK_INFERENCE").is_err(),
-            "unset NAN_DESKTOP_MOCK_INFERENCE: the smoke must hit the real tenant"
+            std::env::var("NAN_DESKTOP_MOCK_IMAGES").is_err()
+                && std::env::var("NAN_DESKTOP_MOCK_IMAGE_EDITS").is_err(),
+            "unset the image mock variables: the smoke must hit the real tenant"
         );
-        let key = std::env::var("NAN_SMOKE_KEY").ok().or_else(|| {
-            let path = std::env::var("NAN_SMOKE_MODELS_JSON").ok()?;
-            let raw = std::fs::read_to_string(path).ok()?;
-            let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
-            json["providers"]["nan"]["apiKey"]
-                .as_str()
-                .map(str::to_string)
-        });
-        let key = key.expect("set NAN_SMOKE_KEY or NAN_SMOKE_MODELS_JSON");
+        let key = std::env::var("NAN_SMOKE_SESSION").expect("set NAN_SMOKE_SESSION");
         assert!(!key.is_empty());
         let out = std::env::var("NAN_SMOKE_OUT")
-            .unwrap_or_else(|_| "/tmp/nan-desktop-live-smoke.png".to_string());
+            .unwrap_or_else(|_| "/tmp/nan-desktop-live-smoke.img".to_string());
 
-        let base = chat::inference_base("nan").expect("nan base");
+        let base = images_base("nan").expect("nan base");
         println!("live smoke: POST {}", generations_url(&base));
         let started = std::time::Instant::now();
-        let result = block_on(request_image_with_key(
+        let result = block_on(request_image_with_token(
             "nan",
             &key,
             "A small red fox sitting in fresh snow, soft morning light, photographic",
@@ -1842,13 +2043,23 @@ mod tests {
         assert_eq!(ok["ok"], true);
         assert_eq!(ok["path"], "/data/images/a.png");
         let quota: serde_json::Value =
-            serde_json::from_str(&tool_result_for_model(&Err(chat::ErrorKind::RateLimited)))
+            serde_json::from_str(&tool_result_for_model(&Err(ImageErrorKind::RateLimited)))
                 .expect("json");
         assert_eq!(quota["error"], "quota_exhausted");
+        for kind in [ImageErrorKind::TierRestricted, ImageErrorKind::NotAvailable] {
+            let plan: serde_json::Value =
+                serde_json::from_str(&tool_result_for_model(&Err(kind))).expect("json");
+            assert_eq!(plan["error"], "not_available", "{kind:?}");
+        }
         let failed: serde_json::Value =
-            serde_json::from_str(&tool_result_for_model(&Err(chat::ErrorKind::Server)))
+            serde_json::from_str(&tool_result_for_model(&Err(ImageErrorKind::Server)))
                 .expect("json");
         assert_eq!(failed["ok"], false);
+        assert!(
+            failed["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("(server)"))
+        );
     }
 
     // ---- round 6: save_path + Save as… ---------------------------------------
@@ -1891,7 +2102,7 @@ mod tests {
         assert_eq!(saved["save"]["saved"], true);
         // A failed generation never reports a save.
         let failed: serde_json::Value = serde_json::from_str(&tool_result_with_save(
-            &Err(chat::ErrorKind::Server),
+            &Err(ImageErrorKind::Server),
             Some(serde_json::json!({ "saved": true })),
         ))
         .expect("json");
@@ -1901,7 +2112,7 @@ mod tests {
     #[test]
     fn save_as_copies_only_images_this_app_generated() {
         let app_data = TempDir::new().expect("app data");
-        let saved = save_png(&images_dir(app_data.path()), b"png-bytes").expect("save");
+        let saved = save_image(&images_dir(app_data.path()), b"png-bytes").expect("save");
         let out = TempDir::new().expect("out");
         let dest = out.path().join("mine.png");
         assert_eq!(copy_generated_image(app_data.path(), &saved, &dest), Ok(9));
@@ -1964,8 +2175,9 @@ mod tests {
         let conn = chat_store::open_db(app_data.path()).expect("db");
         let conv = chat_store::insert_conversation(&conn, "nan", "t").expect("conv");
 
-        // Referenced by an image row (composer image mode).
-        let by_media = save_png(&dir, b"a").expect("png");
+        // Referenced by an image row (composer image mode; a FLUX JPEG).
+        let by_media = save_image(&dir, FAKE_JPEG).expect("jpg");
+        assert_eq!(by_media.extension().and_then(|e| e.to_str()), Some("jpg"));
         chat_store::insert_image_message(
             &conn,
             conv,
@@ -1975,7 +2187,7 @@ mod tests {
         )
         .expect("image row");
         // Referenced by a tool reply's artifacts.
-        let by_artifact = save_png(&dir, b"b").expect("png");
+        let by_artifact = save_image(&dir, b"b").expect("png");
         let reply = chat_store::insert_message(&conn, conv, "assistant", "Aquí está.", Some("m"))
             .expect("reply");
         chat_store::set_message_artifacts(
@@ -1988,7 +2200,7 @@ mod tests {
         )
         .expect("artifacts");
         // Only quoted in a reply's text: kept too (never guess).
-        let by_text = save_png(&dir, b"c").expect("png");
+        let by_text = save_image(&dir, b"c").expect("png");
         chat_store::insert_message(
             &conn,
             conv,
@@ -1998,25 +2210,44 @@ mod tests {
         )
         .expect("text row");
         // The leak: generated, then the conversation failed.
-        let orphan = save_png(&dir, b"d").expect("png");
+        let orphan = save_image(&dir, b"d").expect("png");
+        let jpg_orphan = save_image(&dir, FAKE_JPEG).expect("jpg");
         // An orphan still being produced (in flight): fresh, kept.
-        let fresh = save_png(&dir, b"e").expect("png");
+        let fresh = save_image(&dir, b"e").expect("png");
         // Not a generated name: never a candidate, whatever its age.
         let foreign = dir.join("keep-me.png");
         std::fs::write(&foreign, "x").expect("foreign");
+        let foreign_jpg = dir.join("keep-me.jpg");
+        std::fs::write(&foreign_jpg, "x").expect("foreign jpg");
         drop(conn);
-        for old in [&by_media, &by_artifact, &by_text, &orphan, &foreign] {
+        for old in [
+            &by_media,
+            &by_artifact,
+            &by_text,
+            &orphan,
+            &jpg_orphan,
+            &foreign,
+        ] {
             age_file(old, TWO_DAYS);
         }
+        age_file(&foreign_jpg, TWO_DAYS);
 
         let deleted = sweep_orphan_images(
             app_data.path(),
             ORPHAN_MIN_AGE,
             std::time::SystemTime::now(),
         );
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted, 2);
         assert!(!orphan.exists(), "the old orphan is deleted");
-        for kept in [&by_media, &by_artifact, &by_text, &fresh, &foreign] {
+        assert!(!jpg_orphan.exists(), "the old JPEG orphan is deleted");
+        for kept in [
+            &by_media,
+            &by_artifact,
+            &by_text,
+            &fresh,
+            &foreign,
+            &foreign_jpg,
+        ] {
             assert!(kept.exists(), "{} must be kept", kept.display());
         }
         // Idempotent.
@@ -2035,7 +2266,7 @@ mod tests {
     fn sweep_never_deletes_when_the_store_is_missing_or_corrupted() {
         // No chat store at all: references are unknowable.
         let app_data = TempDir::new().expect("app data");
-        let orphan = save_png(&images_dir(app_data.path()), b"x").expect("png");
+        let orphan = save_image(&images_dir(app_data.path()), b"x").expect("png");
         age_file(&orphan, TWO_DAYS);
         assert_eq!(
             sweep_orphan_images(
@@ -2075,7 +2306,7 @@ mod tests {
         // A row whose artifacts JSON is damaged still protects its image:
         // matching is on the raw column text.
         let app_data = TempDir::new().expect("app data");
-        let image = save_png(&images_dir(app_data.path()), b"x").expect("png");
+        let image = save_image(&images_dir(app_data.path()), b"x").expect("png");
         let conn = chat_store::open_db(app_data.path()).expect("db");
         let conv = chat_store::insert_conversation(&conn, "nan", "t").expect("conv");
         let reply =
@@ -2123,8 +2354,8 @@ mod tests {
     }
 
     #[test]
-    fn image_model_is_the_locked_s5_model() {
-        assert_eq!(IMAGE_MODEL, "qwen-image-2.1");
+    fn image_model_is_flux_on_the_desktop_route() {
+        assert_eq!(IMAGE_MODEL, "flux-3-image-klein");
         assert_eq!(DEFAULT_SIZE, "1024x1024");
         assert_eq!(MIN_DIM, 512);
         assert_eq!(MAX_DIM, 1280);

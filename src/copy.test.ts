@@ -30,6 +30,11 @@ describe("copy helpers", () => {
     expect(imageErrorLabel(en, "not_available")).toBe(en.imageErrors.not_available);
     expect(imageErrorLabel(en, "forbidden")).toBe(en.imageErrors.forbidden);
     expect(imageErrorLabel(en, "network")).toBe(en.chatErrors.network);
+    // The desktop generate route classifies like the edit route.
+    expect(imageErrorLabel(en, "tier_restricted")).toBe("Your plan does not include image generation.");
+    expect(imageErrorLabel(es, "tier_restricted")).toBe("Tu plan no incluye generación de imágenes.");
+    expect(imageErrorLabel(en, "not_available")).toBe("Image generation is not available on this account.");
+    expect(imageErrorLabel(en, "invalid_request")).toBe(en.imageErrors.invalid_request);
   });
 
   it("classifies grant errors", () => {

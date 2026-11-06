@@ -1,23 +1,25 @@
-//! Image EDITING: `POST {platform_base}/v1/images/edits` (see
-//! [`images::edits_url`]). The community platform API serves this route to
-//! DESKTOP sessions only, so the request carries the profile's desktop
-//! session JWT (vault account `<profile>.session`, the same credential web
-//! search and memory sync use), never the inference key.
+//! Image EDITING on the profile's platform API, a per-tenant route (see
+//! [`images::edits_url`]): community `POST /v1/images/edits`, enterprise
+//! `POST /v1/desktop/images/edits`. Both tenants serve it to DESKTOP
+//! sessions only, so the request carries the profile's desktop session JWT
+//! (vault account `<profile>.session`, the same credential web search and
+//! memory sync use), never the inference key.
 //!
 //! Contract (multipart/form-data): `prompt` (the edit instruction,
-//! 1..=2000 chars; OpenAI field name — the platform reads `prompt`),
-//! `image[]` (1..=3 image files), `n=1`. The reply is ALWAYS
-//! `{"data":[{"b64_json": …}]}`; a `url` reply is a protocol error and is
+//! 1..=2000 chars; OpenAI field name, the platform reads `prompt`),
+//! `image[]` (1..=N image files, N set by the tenant's edit model: see
+//! [`max_edit_images_for`]), `n=1`. The reply is ALWAYS
+//! `{"data":[{"b64_json": ...}]}`; a `url` reply is a protocol error and is
 //! never fetched. Status mapping (UI kinds): 400 `invalid_request`, 401
 //! `unauthorized`, 403 `tier_restricted`, 404 `not_available` (the feature
-//! is not deployed or not enabled for this account), 429 `rate_limited`,
-//! anything else `server`.
+//! is not deployed or not enabled for this account, e.g. the enterprise
+//! route briefly unmounted), 429 `rate_limited`, anything else `server`.
 //!
 //! Sources. The renderer only NAMES images; the bytes are read from disk
 //! by this core and never cross the IPC boundary. A source is accepted
 //! only when it is one of this app's own images:
 //!
-//! - a chat image (`<app data>/images/<uuid>.png`, a generated or edited
+//! - a chat image (`<app data>/images/<uuid>.<png|jpg>`, a generated or edited
 //!   result, referenced by its `media_path` or tool artifact path), or
 //! - a STAGED pick (`<app data>/images/staged/<uuid>.<png|jpg|webp>`): the
 //!   user's local file, picked with the NATIVE file dialog opened by the
@@ -30,14 +32,17 @@
 //!
 //! Every source is re-verified at edit time: regular file (never a
 //! symlink), inside those two folders, at most [`MAX_EDIT_IMAGE_BYTES`],
-//! PNG/JPEG/WebP by magic bytes. 1..=[`MAX_EDIT_IMAGES`] sources.
+//! PNG/JPEG/WebP by magic bytes, 1..=[`max_edit_images_for`] sources for
+//! the profile's edit model (FLUX takes ONE image; sending more is a 400,
+//! so it is refused locally first).
 //!
 //! Lifecycle and persistence reuse the generation surface: the same
 //! per-conversation registry (`image_cancel` stops an edit too) and the
 //! same `images://started|done|error|stopped` events, plus
 //! `images://progress {conversation_id, stage}` (`uploading`, `saving`).
-//! The result is saved like a generated image (`save_png`, R2-independent:
-//! the bytes arrive inline) and persisted as a CHILD assistant row whose
+//! The result is saved like a generated image (`images::save_image`:
+//! `.jpg` for a JPEG reply, `.png` otherwise; R2-independent, the bytes
+//! arrive inline) and persisted as a CHILD assistant row whose
 //! `parent_message_id` links the message the source image came from.
 //!
 //! Privacy: the instruction and the image bytes are never logged; nothing
@@ -55,11 +60,24 @@ use crate::chat_store;
 use crate::images;
 use crate::tools::grants;
 
-/// The model the platform runs edits on (stored on the result row).
-pub const EDIT_MODEL: &str = "qwen-image-3.0-pro";
+/// The model the profile's edit route runs (stored on the result row; the
+/// app never sends it). See [`crate::profile::image_edit_model`].
+pub fn edit_model_for(profile_id: &str) -> Option<&'static str> {
+    crate::profile::image_edit_model(profile_id)
+}
 
-/// Most source images per edit (platform contract).
+/// Most source images per edit for any model (qwen; platform contract).
 pub const MAX_EDIT_IMAGES: usize = 3;
+
+/// Most source images an edit on `model` accepts (the bridge's model
+/// registry): `flux-3-image-klein` takes exactly ONE (the base);
+/// `qwen-image-3.0-pro` 1..=3. Unknown models get the strictest cap.
+pub fn max_edit_images_for(model: &str) -> usize {
+    match model {
+        "qwen-image-3.0-pro" => MAX_EDIT_IMAGES,
+        _ => 1,
+    }
+}
 
 /// Largest source image accepted (20 MiB).
 pub const MAX_EDIT_IMAGE_BYTES: u64 = 20 << 20;
@@ -85,7 +103,7 @@ pub enum EditErrorKind {
     InvalidInstruction,
     /// No source image.
     NoImages,
-    /// More than [`MAX_EDIT_IMAGES`] sources.
+    /// More sources than the edit model accepts ([`max_edit_images_for`]).
     TooManyImages,
     /// A source is larger than [`MAX_EDIT_IMAGE_BYTES`].
     ImageTooLarge,
@@ -226,11 +244,11 @@ pub fn validate_instruction(raw: &str) -> Result<String, EditErrorKind> {
     Ok(instruction.to_string())
 }
 
-/// 1..=[`MAX_EDIT_IMAGES`] sources.
-pub fn validate_source_count(count: usize) -> Result<(), EditErrorKind> {
+/// 1..=`max` sources (`max` from [`max_edit_images_for`]).
+pub fn validate_source_count(count: usize, max: usize) -> Result<(), EditErrorKind> {
     match count {
         0 => Err(EditErrorKind::NoImages),
-        n if n > MAX_EDIT_IMAGES => Err(EditErrorKind::TooManyImages),
+        n if n > max => Err(EditErrorKind::TooManyImages),
         _ => Ok(()),
     }
 }
@@ -250,7 +268,7 @@ fn is_app_image_name(name: &str, allowed: &[&str]) -> bool {
 
 /// Resolve `raw` as an edit source this app owns (see module docs): a
 /// regular file (never a symlink) directly inside the images folder
-/// (`<uuid>.png`) or the staged folder (`<uuid>.<png|jpg|webp>`), at most
+/// (`<uuid>.<png|jpg>`) or the staged folder (`<uuid>.<png|jpg|webp>`), at most
 /// [`MAX_EDIT_IMAGE_BYTES`]. Returns the canonical path. Magic bytes are
 /// checked by [`load_source`].
 pub fn resolve_edit_source(app_data: &Path, raw: &str) -> Result<PathBuf, EditErrorKind> {
@@ -268,9 +286,10 @@ pub fn resolve_edit_source(app_data: &Path, raw: &str) -> Result<PathBuf, EditEr
         .and_then(|name| name.to_str())
         .unwrap_or_default();
     let parent = canonical.parent();
-    let owned = (parent == Some(images.as_path()) && is_app_image_name(name, &["png"]))
-        || (parent == Some(staged.as_path())
-            && is_app_image_name(name, &["png", "jpg", "jpeg", "webp"]));
+    let in_images = parent == Some(images.as_path());
+    let in_staged = parent == Some(staged.as_path());
+    let owned = (in_images && is_app_image_name(name, &images::SAVED_EXTENSIONS))
+        || (in_staged && is_app_image_name(name, &["png", "jpg", "jpeg", "webp"]));
     if !owned {
         return Err(EditErrorKind::SourceNotAllowed);
     }
@@ -321,15 +340,17 @@ fn sniff_file(path: &Path) -> Result<ImageFormat, EditErrorKind> {
 }
 
 /// Everything the command validates before spawning the task: the
-/// instruction, the source count, and each source (ownership, size, magic).
+/// instruction, the source count against the edit model's cap (`max`, from
+/// [`max_edit_images_for`]), and each source (ownership, size, magic).
 /// Returns the trimmed instruction and the canonical source paths.
 pub fn validate_edit_request(
     app_data: &Path,
     instruction: &str,
     source_paths: &[String],
+    max: usize,
 ) -> Result<(String, Vec<PathBuf>), EditErrorKind> {
     let instruction = validate_instruction(instruction)?;
-    validate_source_count(source_paths.len())?;
+    validate_source_count(source_paths.len(), max)?;
     let mut paths = Vec::with_capacity(source_paths.len());
     for raw in source_paths {
         let path = resolve_edit_source(app_data, raw)?;
@@ -514,31 +535,19 @@ pub fn parse_edit_response(body: &str) -> Result<Vec<u8>, EditErrorKind> {
     Ok(bytes)
 }
 
-/// The base the edits endpoint is called on: the profile's PLATFORM base
-/// (debug builds: `NAN_DESKTOP_MOCK_IMAGE_EDITS` may point it at
-/// `test/mock-images.mjs`; release builds ignore the variable).
-pub fn edits_base(profile_id: &str) -> Option<String> {
-    if cfg!(debug_assertions)
-        && let Ok(mock) = std::env::var("NAN_DESKTOP_MOCK_IMAGE_EDITS")
-    {
-        let mock = mock.trim().trim_end_matches('/');
-        if !mock.is_empty() {
-            return Some(mock.to_string());
-        }
-    }
-    crate::device_flow::platform_base(profile_id)
-}
-
-/// POST the edit to `base` with the session `token` and return the
-/// decoded result image. The reply body is read with a
-/// [`MAX_EDIT_RESPONSE_BYTES`] cap.
+/// POST the edit to `profile_id`'s edit route on `base` (see
+/// [`images::edits_url`]) with the session `token` and return the decoded
+/// result image. The reply body is read with a [`MAX_EDIT_RESPONSE_BYTES`]
+/// cap.
 pub async fn edit_at(
     base: &str,
+    profile_id: &str,
     token: &str,
     instruction: &str,
     sources: Vec<EditSource>,
 ) -> Result<Vec<u8>, EditErrorKind> {
     use futures_util::StreamExt as _;
+    let url = images::edits_url(base, profile_id).ok_or(EditErrorKind::Protocol)?;
     let form = edit_form(edit_parts(instruction, sources))?;
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(chat::CONNECT_TIMEOUT_SECS))
@@ -546,7 +555,7 @@ pub async fn edit_at(
         .map_err(|_| EditErrorKind::Protocol)?;
     // No overall timeout: an edit takes about a minute, like a generation.
     let response = client
-        .post(images::edits_url(base))
+        .post(url)
         .bearer_auth(token)
         .multipart(form)
         .send()
@@ -579,18 +588,19 @@ pub async fn edit_at(
 // Persistence
 // ---------------------------------------------------------------------------
 
-/// Save the edit result like a generated image and persist the CHILD row
-/// (deleting the file again if the row cannot be written). Returns the
-/// saved path.
+/// Save the edit result like a generated image (`.jpg` for JPEG bytes) and
+/// persist the CHILD row with the `model` that ran the edit (deleting the
+/// file again if the row cannot be written). Returns the saved path.
 pub fn persist_edit_result(
     app_data: &Path,
     conversation_id: i64,
     parent_message_id: Option<i64>,
     instruction: &str,
+    model: &str,
     bytes: &[u8],
 ) -> Result<PathBuf, EditErrorKind> {
     let path =
-        images::save_png(&images::images_dir(app_data), bytes).map_err(EditErrorKind::from)?;
+        images::save_image(&images::images_dir(app_data), bytes).map_err(EditErrorKind::from)?;
     let media_path = path.to_string_lossy().to_string();
     let persisted = chat_store::open_db(app_data)
         .map_err(|_| EditErrorKind::Protocol)
@@ -599,7 +609,7 @@ pub fn persist_edit_result(
                 &conn,
                 conversation_id,
                 instruction,
-                EDIT_MODEL,
+                model,
                 &media_path,
                 parent_message_id,
             )
@@ -646,12 +656,21 @@ pub fn edit_images(
     source_paths: Vec<String>,
 ) -> Result<(), String> {
     let app_data = app.path().app_data_dir().map_err(|err| err.to_string())?;
-    let (instruction, sources) = validate_edit_request(&app_data, &instruction, &source_paths)
-        .map_err(|kind| kind.as_str().to_string())?;
     let conn = chat_store::open_db(&app_data)?;
     let conversation = chat_store::conversation_get(&conn, conversation_id)
         .map_err(|err| err.to_string())?
         .ok_or_else(|| format!("unknown conversation id: {conversation_id}"))?;
+    // The cap follows the model the conversation's tenant edits with (FLUX
+    // takes one image): refused here, before the server would 400.
+    let model = edit_model_for(&conversation.profile_id)
+        .ok_or_else(|| EditErrorKind::Protocol.as_str().to_string())?;
+    let (instruction, sources) = validate_edit_request(
+        &app_data,
+        &instruction,
+        &source_paths,
+        max_edit_images_for(model),
+    )
+    .map_err(|kind| kind.as_str().to_string())?;
     if let Some(parent) = parent_message_id
         && !chat_store::message_in_conversation(&conn, conversation_id, parent)
             .map_err(|err| err.to_string())?
@@ -667,6 +686,7 @@ pub fn edit_images(
         EditJob {
             conversation_id,
             profile_id: conversation.profile_id,
+            model,
             parent_message_id,
             instruction,
             sources,
@@ -680,6 +700,7 @@ pub fn edit_images(
 struct EditJob {
     conversation_id: i64,
     profile_id: String,
+    model: &'static str,
     parent_message_id: Option<i64>,
     instruction: String,
     sources: Vec<PathBuf>,
@@ -718,7 +739,7 @@ async fn run_image_edit(app: AppHandle, window: Window, job: EditJob) {
     let Some(token) = chat::read_session_token(&job.profile_id) else {
         return emit_error(EditErrorKind::MissingKey);
     };
-    let Some(base) = edits_base(&job.profile_id) else {
+    let Some(base) = images::images_base(&job.profile_id) else {
         return emit_error(EditErrorKind::Protocol);
     };
     let _ = window.emit(
@@ -728,7 +749,7 @@ async fn run_image_edit(app: AppHandle, window: Window, job: EditJob) {
             stage: "uploading",
         },
     );
-    let bytes = match edit_at(&base, &token, &job.instruction, sources).await {
+    let bytes = match edit_at(&base, &job.profile_id, &token, &job.instruction, sources).await {
         Ok(bytes) => bytes,
         Err(kind) => return emit_error(kind),
     };
@@ -744,6 +765,7 @@ async fn run_image_edit(app: AppHandle, window: Window, job: EditJob) {
         conversation_id,
         job.parent_message_id,
         &job.instruction,
+        job.model,
         &bytes,
     ) {
         Ok(path) => path,
@@ -850,6 +872,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// The community's edit model (3 images).
+    const QWEN: &str = "qwen-image-3.0-pro";
+
     /// A tiny valid 1x1 PNG (same fixture as images.rs and the mock).
     const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
@@ -875,9 +900,18 @@ mod tests {
         (dir, app)
     }
 
-    /// A chat image `<app>/images/<uuid>.png` with `bytes`.
+    /// [`validate_edit_request`] with the qwen cap (3 images, community).
+    fn validate_qwen_request(
+        app: &Path,
+        instruction: &str,
+        paths: &[String],
+    ) -> Result<(String, Vec<PathBuf>), EditErrorKind> {
+        validate_edit_request(app, instruction, paths, MAX_EDIT_IMAGES)
+    }
+
+    /// A chat image `<app>/images/<uuid>.<png|jpg>` with `bytes`.
     fn chat_image(app: &Path, bytes: &[u8]) -> String {
-        images::save_png(&images::images_dir(app), bytes)
+        images::save_image(&images::images_dir(app), bytes)
             .expect("save")
             .display()
             .to_string()
@@ -886,41 +920,89 @@ mod tests {
     // ---- URL + body builders ---------------------------------------------------
 
     #[test]
-    fn edits_url_sits_alongside_the_generations_url() {
+    fn edits_url_follows_the_profile_with_the_v1_rule() {
+        let url = |base: &str, profile: &str| images::edits_url(base, profile).expect("known");
         assert_eq!(
-            images::edits_url("https://cloud-api.nan.builders"),
+            url("https://cloud-api.nan.builders", "nan"),
             "https://cloud-api.nan.builders/v1/images/edits"
         );
         assert_eq!(
-            images::edits_url("https://cloud-api.nan.builders/"),
+            url("https://cloud-api.nan.builders/", "nan"),
             "https://cloud-api.nan.builders/v1/images/edits"
         );
         assert_eq!(
-            images::edits_url("http://127.0.0.1:14325/v1"),
+            url("http://127.0.0.1:14325/v1", "nan"),
             "http://127.0.0.1:14325/v1/images/edits"
+        );
+        assert_eq!(
+            url("https://cloud-api.helmcode.com", "helmcode"),
+            "https://cloud-api.helmcode.com/v1/desktop/images/edits"
+        );
+        assert_eq!(
+            url("http://127.0.0.1:14325/v1/", "helmcode"),
+            "http://127.0.0.1:14325/v1/desktop/images/edits"
         );
         for base in [
             "https://cloud-api.nan.builders",
             "https://api.nan.builders/v1",
             "http://127.0.0.1:9/v1/",
         ] {
-            let url = images::edits_url(base);
-            assert!(url.ends_with("/v1/images/edits"), "{url}");
-            assert_eq!(url.matches("/v1/").count(), 1, "{url}");
+            for (profile, suffix) in [
+                ("nan", "/v1/images/edits"),
+                ("helmcode", "/v1/desktop/images/edits"),
+            ] {
+                let full = url(base, profile);
+                assert!(full.ends_with(suffix), "{full}");
+                assert_eq!(full.matches("/v1/").count(), 1, "{full}");
+            }
+        }
+        assert_eq!(images::edits_url("https://x", "unknown"), None);
+    }
+
+    #[test]
+    fn production_edits_go_to_each_tenants_platform_api() {
+        if std::env::var("NAN_DESKTOP_MOCK_IMAGE_EDITS").is_err()
+            && std::env::var("NAN_DESKTOP_MOCK_IMAGES").is_err()
+            && std::env::var("NAN_DESKTOP_MOCK_PLATFORM").is_err()
+        {
+            for (profile, expected) in [
+                ("nan", "https://cloud-api.nan.builders/v1/images/edits"),
+                (
+                    "helmcode",
+                    "https://cloud-api.helmcode.com/v1/desktop/images/edits",
+                ),
+            ] {
+                let base = images::images_base(profile).expect("base");
+                let url = images::edits_url(&base, profile);
+                assert_eq!(url.as_deref(), Some(expected));
+            }
         }
     }
 
     #[test]
-    fn production_edits_base_is_the_community_platform_api() {
-        if std::env::var("NAN_DESKTOP_MOCK_IMAGE_EDITS").is_err()
-            && std::env::var("NAN_DESKTOP_MOCK_PLATFORM").is_err()
-        {
-            let base = edits_base("nan").expect("nan base");
-            assert_eq!(
-                images::edits_url(&base),
-                "https://cloud-api.nan.builders/v1/images/edits"
-            );
-        }
+    fn the_edit_cap_follows_the_tenants_edit_model() {
+        assert_eq!(edit_model_for("nan"), Some("qwen-image-3.0-pro"));
+        assert_eq!(edit_model_for("helmcode"), Some("flux-3-image-klein"));
+        assert_eq!(edit_model_for("unknown"), None);
+        assert_eq!(max_edit_images_for("qwen-image-3.0-pro"), 3);
+        // FLUX edits the base only: any reference is a 400 server-side.
+        assert_eq!(max_edit_images_for("flux-3-image-klein"), 1);
+        // An unknown model gets the strictest cap.
+        assert_eq!(max_edit_images_for("something-new"), 1);
+    }
+
+    #[test]
+    fn a_flux_edit_with_a_reference_is_refused_before_any_network() {
+        let (_tmp, app) = app_data();
+        let a = chat_image(&app, &png());
+        let flux = max_edit_images_for("flux-3-image-klein");
+        assert!(validate_edit_request(&app, "snow", std::slice::from_ref(&a), flux).is_ok());
+        assert_eq!(
+            validate_edit_request(&app, "snow", &[a.clone(), a.clone()], flux),
+            Err(EditErrorKind::TooManyImages)
+        );
+        let qwen = max_edit_images_for("qwen-image-3.0-pro");
+        assert!(validate_edit_request(&app, "snow", &[a.clone(), a.clone(), a], qwen).is_ok());
     }
 
     #[test]
@@ -1078,12 +1160,22 @@ mod tests {
     }
 
     #[test]
-    fn one_to_three_images_and_the_fourth_is_rejected() {
-        assert_eq!(validate_source_count(0), Err(EditErrorKind::NoImages));
+    fn one_to_max_images_and_one_more_is_rejected() {
+        assert_eq!(validate_source_count(0, 3), Err(EditErrorKind::NoImages));
         for n in 1..=3 {
-            assert_eq!(validate_source_count(n), Ok(()));
+            assert_eq!(validate_source_count(n, 3), Ok(()));
         }
-        assert_eq!(validate_source_count(4), Err(EditErrorKind::TooManyImages));
+        assert_eq!(
+            validate_source_count(4, 3),
+            Err(EditErrorKind::TooManyImages)
+        );
+        // FLUX: the base only.
+        assert_eq!(validate_source_count(1, 1), Ok(()));
+        assert_eq!(
+            validate_source_count(2, 1),
+            Err(EditErrorKind::TooManyImages)
+        );
+        assert_eq!(validate_source_count(0, 1), Err(EditErrorKind::NoImages));
     }
 
     #[test]
@@ -1101,21 +1193,21 @@ mod tests {
     fn validate_edit_request_enforces_every_cap() {
         let (_tmp, app) = app_data();
         let a = chat_image(&app, &png());
-        let ok = validate_edit_request(&app, "  snow ", std::slice::from_ref(&a)).expect("valid");
+        let ok = validate_qwen_request(&app, "  snow ", std::slice::from_ref(&a)).expect("valid");
         assert_eq!(ok.0, "snow");
         assert_eq!(ok.1.len(), 1);
 
         let four = vec![a.clone(), a.clone(), a.clone(), a.clone()];
         assert_eq!(
-            validate_edit_request(&app, "snow", &four),
+            validate_qwen_request(&app, "snow", &four),
             Err(EditErrorKind::TooManyImages)
         );
         assert_eq!(
-            validate_edit_request(&app, &"x".repeat(2001), std::slice::from_ref(&a)),
+            validate_qwen_request(&app, &"x".repeat(2001), std::slice::from_ref(&a)),
             Err(EditErrorKind::InvalidInstruction)
         );
         assert_eq!(
-            validate_edit_request(&app, "snow", &[]),
+            validate_qwen_request(&app, "snow", &[]),
             Err(EditErrorKind::NoImages)
         );
     }
@@ -1126,7 +1218,7 @@ mod tests {
         // Magic bytes win over the .png name.
         let fake = chat_image(&app, b"%PDF-1.7 not an image");
         assert_eq!(
-            validate_edit_request(&app, "x", &[fake]),
+            validate_qwen_request(&app, "x", &[fake]),
             Err(EditErrorKind::UnsupportedImage)
         );
         // One byte over 20 MiB (sparse file: no real disk use).
@@ -1134,7 +1226,7 @@ mod tests {
         let file = std::fs::File::create(&big).expect("create");
         file.set_len(MAX_EDIT_IMAGE_BYTES + 1).expect("set_len");
         assert_eq!(
-            validate_edit_request(&app, "x", &[big.display().to_string()]),
+            validate_qwen_request(&app, "x", &[big.display().to_string()]),
             Err(EditErrorKind::ImageTooLarge)
         );
     }
@@ -1210,7 +1302,7 @@ mod tests {
         assert_eq!(path.extension().and_then(|e| e.to_str()), Some("jpg"));
         assert_eq!(std::fs::read(&path).expect("read"), jpeg());
         // And the staged copy is a valid edit source.
-        assert!(validate_edit_request(&app, "x", &[staged.path]).is_ok());
+        assert!(validate_qwen_request(&app, "x", &[staged.path]).is_ok());
     }
 
     #[test]
@@ -1308,7 +1400,7 @@ mod tests {
             stage_requested_source(&app, &store, "nan", None, &shown_path).expect("staged");
         assert_eq!(staged.name, "dog.png");
         assert!(PathBuf::from(&staged.path).starts_with(staged_dir(&app)));
-        assert!(validate_edit_request(&app, "x", &[staged.path]).is_ok());
+        assert!(validate_qwen_request(&app, "x", &[staged.path]).is_ok());
 
         for raw in ["", "   ", "dog.png", "Photos/dog.png"] {
             assert_eq!(
@@ -1380,14 +1472,14 @@ mod tests {
 
         // First edit succeeds and is persisted…
         assert!(
-            validate_edit_request(&app, "add a hat", std::slice::from_ref(&staged.path)).is_ok()
+            validate_qwen_request(&app, "add a hat", std::slice::from_ref(&staged.path)).is_ok()
         );
-        persist_edit_result(&app, conv, None, "add a hat", &png()).expect("persisted");
+        persist_edit_result(&app, conv, None, "add a hat", QWEN, &png()).expect("persisted");
         // …and the staged copy is still there for the next one (Studio
         // session); only the 24 h startup sweep removes it.
         assert!(PathBuf::from(&staged.path).exists(), "staged copy kept");
         assert!(
-            validate_edit_request(&app, "add a scarf", std::slice::from_ref(&staged.path)).is_ok()
+            validate_qwen_request(&app, "add a scarf", std::slice::from_ref(&staged.path)).is_ok()
         );
         let now = std::time::SystemTime::now();
         let day = std::time::Duration::from_secs(24 * 60 * 60);
@@ -1408,20 +1500,37 @@ mod tests {
             chat_store::insert_image_message(&conn, conv, "a fox", "qwen-image-2.1", &parent_path)
                 .expect("parent");
 
-        let saved = persist_edit_result(&app, conv, Some(parent), "make it snowy", &png())
+        let saved = persist_edit_result(&app, conv, Some(parent), "make it snowy", QWEN, &png())
             .expect("persisted");
         assert!(saved.starts_with(images::images_dir(&app)));
         assert_eq!(std::fs::read(&saved).expect("read"), png());
+        assert_eq!(saved.extension().and_then(|e| e.to_str()), Some("png"));
 
         let rows = chat_store::list_messages(&conn, conv).expect("list");
         let child = rows.last().expect("child row");
         assert_eq!(child.parent_message_id, Some(parent));
         assert_eq!(child.content, "make it snowy");
-        assert_eq!(child.model.as_deref(), Some(EDIT_MODEL));
+        assert_eq!(child.model.as_deref(), Some(QWEN));
         let saved_text = saved.to_string_lossy().to_string();
         assert_eq!(child.media_path.as_deref(), Some(saved_text.as_str()));
         // The result is itself a valid source for the next edit.
-        assert!(validate_edit_request(&app, "more", &[saved.display().to_string()]).is_ok());
+        assert!(validate_qwen_request(&app, "more", &[saved.display().to_string()]).is_ok());
+    }
+
+    #[test]
+    fn a_flux_jpeg_result_is_saved_as_jpg_and_stays_editable() {
+        let (_tmp, app) = app_data();
+        let conn = chat_store::open_db(&app).expect("db");
+        let conv = chat_store::insert_conversation(&conn, "helmcode", "t").expect("conv");
+        let flux = edit_model_for("helmcode").expect("model");
+        let saved = persist_edit_result(&app, conv, None, "snow", flux, &jpeg()).expect("saved");
+        assert_eq!(saved.extension().and_then(|e| e.to_str()), Some("jpg"));
+        assert_eq!(std::fs::read(&saved).expect("read"), jpeg());
+        let rows = chat_store::list_messages(&conn, conv).expect("list");
+        assert_eq!(rows.last().and_then(|r| r.model.as_deref()), Some(flux));
+        // A `.jpg` chat image is a valid source (the next Studio edit).
+        let source = load_source(&app, &saved.display().to_string()).expect("source");
+        assert_eq!(source.format, ImageFormat::Jpeg);
     }
 
     #[test]
@@ -1433,7 +1542,7 @@ mod tests {
             .expect("dir")
             .count();
         assert_eq!(
-            persist_edit_result(&app, conv, Some(424242), "x", &png()),
+            persist_edit_result(&app, conv, Some(424242), "x", QWEN, &png()),
             Err(EditErrorKind::Protocol)
         );
         let after = std::fs::read_dir(images::images_dir(&app))
@@ -1505,8 +1614,14 @@ mod tests {
                 format: ImageFormat::Webp,
             },
         ];
-        let bytes = block_on(edit_at(&base, "fake-session-jwt", "make it snowy", sources))
-            .expect("edit ok");
+        let bytes = block_on(edit_at(
+            &base,
+            "nan",
+            "fake-session-jwt",
+            "make it snowy",
+            sources,
+        ))
+        .expect("edit ok");
         assert_eq!(bytes, png());
 
         let raw = rx.recv().expect("request");
@@ -1538,16 +1653,53 @@ mod tests {
             ("502 Bad Gateway", EditErrorKind::Server),
             ("503 Service Unavailable", EditErrorKind::Server),
         ] {
-            let (base, _rx) = serve_once(status, r#"{"error":"x"}"#.into());
-            let sources = vec![EditSource {
-                bytes: png(),
-                format: ImageFormat::Png,
-            }];
-            assert_eq!(
-                block_on(edit_at(&base, "t", "x", sources)),
-                Err(kind),
-                "{status}"
-            );
+            for profile in ["nan", "helmcode"] {
+                let (base, _rx) = serve_once(status, r#"{"error":"x"}"#.into());
+                let sources = vec![EditSource {
+                    bytes: png(),
+                    format: ImageFormat::Png,
+                }];
+                assert_eq!(
+                    block_on(edit_at(&base, profile, "t", "x", sources)),
+                    Err(kind),
+                    "{profile} {status}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn e2e_the_enterprise_edit_posts_to_the_desktop_twin_and_keeps_jpeg() {
+        let jpeg_b64 = BASE64_STANDARD.encode(jpeg());
+        let (base, rx) = serve_once(
+            "200 OK",
+            format!(r#"{{"created":1,"data":[{{"b64_json":"{jpeg_b64}"}}]}}"#),
+        );
+        let sources = vec![EditSource {
+            bytes: png(),
+            format: ImageFormat::Png,
+        }];
+        let bytes = block_on(edit_at(&base, "helmcode", "jwt", "snow", sources)).expect("edit ok");
+        assert_eq!(bytes, jpeg());
+        let raw = rx.recv().expect("request");
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("POST /v1/desktop/images/edits "),
+            "{}",
+            text.lines().next().unwrap_or_default()
+        );
+        assert_eq!(text.to_lowercase().matches("name=\"image[]\"").count(), 1);
+    }
+
+    #[test]
+    fn e2e_an_unknown_profile_never_reaches_the_network() {
+        let sources = vec![EditSource {
+            bytes: png(),
+            format: ImageFormat::Png,
+        }];
+        assert_eq!(
+            block_on(edit_at("http://127.0.0.1:9", "other", "t", "x", sources)),
+            Err(EditErrorKind::Protocol)
+        );
     }
 }

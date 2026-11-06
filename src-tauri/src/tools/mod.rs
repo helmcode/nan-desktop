@@ -648,11 +648,15 @@ pub fn validate_action(
     }
 }
 
-/// `save_image`: `path` is a `.png` file (an extension-less name gets
-/// `.png`) or an existing folder (the image keeps its generated file name).
-/// The destination folder must exist; an existing regular file is replaced
-/// (stated in the summary and on the approval card, like write_file). The
-/// source is verified against the app's images folder by
+/// `save_image`: `path` is an image file or an existing folder (the image
+/// keeps its generated file name). The destination always carries the
+/// generated image's OWN format (`.jpg` for a JPEG from FLUX, `.png`
+/// otherwise; the bytes are copied as they are): an extension-less name gets
+/// it, and an image extension of the other format (`.png` asked for a JPEG,
+/// or `.jpg`/`.jpeg` for a PNG) is switched to it. Any other extension is
+/// refused. The destination folder must exist; an existing regular file is
+/// replaced (stated in the summary and on the approval card, like
+/// write_file). The source is verified against the app's images folder by
 /// [`check_protected_paths`], which knows the app data dir.
 fn validate_save_image(
     store: &GrantsStore,
@@ -667,18 +671,21 @@ fn validate_save_image(
             .ok_or_else(|| Rejection::new("protocol", "the generated image has no file name"))?;
         canonical = canonical.join(name);
     }
-    let is_png = canonical
+    let source_is_jpeg = Path::new(source)
         .extension()
-        .map(|ext| ext.eq_ignore_ascii_case("png"));
-    match is_png {
-        None => {
-            canonical.set_extension("png");
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"));
+    let ext = canonical
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase());
+    match (ext.as_deref(), source_is_jpeg) {
+        (Some("png"), false) | (Some("jpg" | "jpeg"), true) => {}
+        (None | Some("png" | "jpg" | "jpeg"), _) => {
+            canonical.set_extension(if source_is_jpeg { "jpg" } else { "png" });
         }
-        Some(true) => {}
-        Some(false) => {
+        (Some(_), _) => {
             return Err(Rejection::new(
                 "protocol",
-                "save_path must be a .png file or a folder",
+                "save_path must be an image file (.png or .jpg) or a folder",
             ));
         }
     }
@@ -2807,14 +2814,18 @@ pub(crate) async fn save_generated_image<A: Approver>(
         }
     };
     let target = if outside {
-        // Keep the requested file name when it is a .png, else the
-        // generated one; never any of the requested folders.
+        // Keep the requested file name when it is an image name (its
+        // extension is then matched to the image's format by
+        // `validate_save_image`), else the generated one; never any of the
+        // requested folders.
         let requested_name = Path::new(&requested)
             .file_name()
             .filter(|name| {
-                Path::new(name)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+                Path::new(name).extension().is_some_and(|ext| {
+                    ["png", "jpg", "jpeg"]
+                        .iter()
+                        .any(|e| ext.eq_ignore_ascii_case(e))
+                })
             })
             .or_else(|| source.file_name())
             .map(PathBuf::from)
@@ -4536,6 +4547,56 @@ mod tests {
     }
 
     #[test]
+    fn save_image_keeps_the_generated_images_own_format() {
+        // FLUX answers JPEG: the image is saved as `<uuid>.jpg`, and the
+        // copy (bytes as they are) must never be named `.png`.
+        const FAKE_JPEG: &[u8] = b"\xFF\xD8\xFF\xE0round6";
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let (scratch, _guard3) = tempdir();
+        let st = state_with_scratch(&scratch);
+        let images = crate::images::images_dir(&dir);
+        fs::create_dir_all(&images).expect("images dir");
+        let source = images.join(format!("{}.jpg", uuid::Uuid::new_v4()));
+        fs::write(&source, FAKE_JPEG).expect("jpg");
+        let source = canon(&source);
+        let approver = FakeApprover::answering(false);
+        for (asked, saved) in [
+            ("zorro.png", "zorro.jpg"),
+            ("zorro.jpeg", "zorro.jpeg"),
+            ("zorro.jpg", "zorro.jpg"),
+            ("zorro", "zorro.jpg"),
+        ] {
+            let save = save_image(&dir, &st, &approver, &source, &path_str(&root.join(asked)));
+            assert_eq!(
+                save.saved_path(),
+                Some(path_str(&root.join(saved)).as_str()),
+                "{asked}"
+            );
+            assert_eq!(fs::read(root.join(saved)).expect("saved"), FAKE_JPEG);
+        }
+        // A folder keeps the generated `<uuid>.jpg` name.
+        let save = save_image(&dir, &st, &approver, &source, &path_str(&root));
+        let into_folder = root.join(source.file_name().expect("name"));
+        assert_eq!(save.saved_path(), Some(path_str(&into_folder).as_str()));
+        // And a PNG asked as `.jpg` is saved as `.png`.
+        let png = generated_image(&dir);
+        let save = save_image(
+            &dir,
+            &st,
+            &approver,
+            &png,
+            &path_str(&root.join("logo.jpg")),
+        );
+        assert_eq!(
+            save.saved_path(),
+            Some(path_str(&root.join("logo.png")).as_str())
+        );
+    }
+
+    #[test]
     fn save_image_in_ask_mode_shows_the_destination_and_a_deny_saves_nothing() {
         let (folder, _guard) = tempdir();
         let root = canon(&folder);
@@ -4601,13 +4662,13 @@ mod tests {
         assert_eq!(rejection.kind, "scope");
         assert!(!target.exists());
         assert_eq!(approver.prompts(), (0, 0), "refused before any prompt");
-        // A non-png name is refused rather than silently renamed.
+        // A non-image name is refused rather than silently renamed.
         let save = save_image(
             &app_data,
             &st,
             &approver,
             &source,
-            &path_str(&home.join("a.jpg")),
+            &path_str(&home.join("a.txt")),
         );
         let ImageSave::Failed { rejection, .. } = &save else {
             panic!("expected Failed, got {save:?}");

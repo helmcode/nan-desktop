@@ -39,9 +39,23 @@
 //                                 Errors mirror the platform: 400 generic,
 //                                 401, instruction "trigger-403" → 403
 //                                 tier_restricted, "trigger-404" → 404,
-//                                 "trigger-502" → 502. Point the app at it
-//                                 with NAN_DESKTOP_MOCK_IMAGE_EDITS=
-//                                 http://127.0.0.1:14325/v1 (debug builds).
+//                                 "trigger-502" → 502.
+//   POST /v1/desktop/images/edits → the enterprise desktop twin of the
+//                                 edit route: same contract, but ONE image
+//                                 (FLUX edits the base only; 2+ → 400).
+//   POST /v1/desktop/images/generations → the desktop-only FLUX generate
+//                                 route the app calls on BOTH tenants:
+//                                 session bearer `fake-jwt`, multipart
+//                                 `prompt`, `size`, `n=1` (model forced
+//                                 server-side). Answers {"data":[{"b64_json":
+//                                 <tiny JPEG>, "media_type":"image/jpeg"}]};
+//                                 prompt "trigger-403" / "trigger-404" /
+//                                 "trigger-429" → that status.
+//                                 Point the app at this server with
+//                                 NAN_DESKTOP_MOCK_IMAGES=
+//                                 http://127.0.0.1:14325/v1 (debug builds;
+//                                 the older NAN_DESKTOP_MOCK_IMAGE_EDITS
+//                                 still works).
 //   GET  /storage/<id>.png      → the PNG bytes, NO auth required (it is
 //                                 "presigned"). Records whether any
 //                                 Authorization header arrived — the app
@@ -183,7 +197,9 @@ function isImage(data) {
   return png || jpeg || webp;
 }
 
-function handleEdits(req, res, body) {
+// `maxImages`: 3 on the community route (qwen), 1 on the enterprise
+// desktop twin (FLUX edits the base only; more is a 400).
+function handleEdits(req, res, body, maxImages = MAX_EDIT_IMAGES) {
   if ((req.headers.authorization ?? "") !== `Bearer ${MOCK_SESSION}`) {
     return sendJson(res, 401, { error: "unauthorized" });
   }
@@ -200,7 +216,7 @@ function handleEdits(req, res, body) {
     chars === 0 ||
     chars > MAX_INSTRUCTION_CHARS ||
     images.length === 0 ||
-    images.length > MAX_EDIT_IMAGES ||
+    images.length > maxImages ||
     n !== "1" ||
     !images.every((img) => isImage(img.data))
   ) {
@@ -213,6 +229,33 @@ function handleEdits(req, res, body) {
     n,
   };
   sendJson(res, 200, { created: 1730000000, data: [{ b64_json: TINY_PNG_B64 }] });
+}
+
+// A tiny JPEG header: what FLUX answers (`media_type: image/jpeg`); the app
+// names it `.jpg` by its magic bytes.
+const TINY_JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]).toString("base64");
+
+// POST /v1/desktop/images/generations: the desktop-only FLUX route (both
+// tenants). Session bearer, multipart `prompt`, `size`, `n=1`; the model is
+// forced server-side (a `model` field is ignored, like the platform).
+function handleDesktopGenerations(req, res, body) {
+  if ((req.headers.authorization ?? "") !== `Bearer ${MOCK_SESSION}`) {
+    return sendJson(res, 401, { error: "unauthorized" });
+  }
+  const parts = parseMultipart(req.headers["content-type"], body);
+  if (!parts) return sendJson(res, 400, { error: "invalid request" });
+  const field = (name) => parts.find((p) => p.name === name)?.data.toString("utf8");
+  const prompt = field("prompt") ?? "";
+  const size = field("size") ?? "1024x1024";
+  const n = field("n") ?? "1";
+  if (prompt === "trigger-403") return sendJson(res, 403, { error: "tier_restricted" });
+  if (prompt === "trigger-404") return sendJson(res, 404, { error: "not_found" });
+  if (prompt === "trigger-429") return sendJson(res, 429, { error: "monthly image quota reached" });
+  if (prompt.trim().length === 0 || n !== "1" || !validSize(size)) {
+    return sendJson(res, 400, { error: "invalid request" });
+  }
+  recorded.generation = { model: "flux-3-image-klein", prompt_chars: [...prompt].length, size, shape: "b64" };
+  sendJson(res, 200, { created: 1730000000, data: [{ b64_json: TINY_JPEG_B64, media_type: "image/jpeg" }] });
 }
 
 function handleStorage(req, res, pathname) {
@@ -242,6 +285,12 @@ const server = createServer((req, res) => {
   }
   if (req.method === "POST" && url.pathname === "/v1/images/edits") {
     return void readBody(req).then((body) => handleEdits(req, res, body));
+  }
+  if (req.method === "POST" && url.pathname === "/v1/desktop/images/generations") {
+    return void readBody(req).then((body) => handleDesktopGenerations(req, res, body));
+  }
+  if (req.method === "POST" && url.pathname === "/v1/desktop/images/edits") {
+    return void readBody(req).then((body) => handleEdits(req, res, body, 1));
   }
   sendJson(res, 404, { error: "not found" });
 });

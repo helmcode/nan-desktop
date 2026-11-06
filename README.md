@@ -381,9 +381,25 @@ header (default `1024x1024`), and sending runs `image_generate` in the
 active conversation. The generated image renders INLINE in the transcript
 under the assistant bubble, with the prompt as its caption.
 
-**v1 scope (L13 product review): generation ONLY — there is no image
-editing UI** (`flux-2-klein` / `/v1/images/edits` stay out; the model picker
-keeps filtering those ids).
+> **Current state (T10c, FLUX).** Generation runs `flux-3-image-klein`
+> through the DESKTOP-ONLY route `POST {platform_base}/v1/desktop/images/generations`
+> on BOTH tenants: the desktop session JWT as bearer (not the inference key),
+> multipart `prompt`, `size`, `n=1` (never `model`; the server forces it).
+> Editing (the Image Studio) is offered on both profiles too, on a
+> per-profile route: community `/v1/images/edits` (qwen-image-3.0-pro, base
+> plus up to 2 references), enterprise `/v1/desktop/images/edits` (FLUX,
+> the base only; the Studio tray offers no reference slot and the core
+> refuses extra images before the server would 400). FLUX answers JPEG:
+> images are saved as `<uuid>.jpg` or `<uuid>.png` by their magic bytes.
+> Error kinds follow the platform contract on both routes: 400
+> `invalid_request`, 401 `unauthorized`, 403 `tier_restricted`, 404
+> `not_available`, 429 `rate_limited`. Debug builds point both routes at
+> `test/mock-images.mjs` with `NAN_DESKTOP_MOCK_IMAGES=http://127.0.0.1:14325/v1`.
+> The sections below describe the original T5 generation surface; where
+> they differ, this note wins.
+
+**v1 scope (L13 product review): generation ONLY** (superseded: image
+editing now ships in the Image Studio, see the note above).
 
 ### Architecture: bytes stay in the Rust core (S4)
 
@@ -480,18 +496,19 @@ E2E (mock tenant → presigned url → credential-free download → saved →
 + auto-opened preview, per-conversation image mode, the post-PDF switch),
 and fails if any pinned test was renamed or skipped.
 
-**Live smoke (manual, real tenant, needs a member key):**
+**Live smoke (manual, real tenant, needs a desktop session):**
 
 ```sh
 cd src-tauri
-NAN_SMOKE_MODELS_JSON=~/.pi/agent/models.json \
+NAN_SMOKE_SESSION=<desktop session JWT> \
   cargo test live_smoke -- --ignored --nocapture
 ```
 
-It runs `request_image_with_key("nan", …)` — the app's own path after the
-keychain read — against `https://api.nan.builders/v1`, writes the image to
-`/tmp/nan-desktop-live-smoke.png` and prints its byte size and elapsed
-time (never the key).
+It runs `request_image_with_token("nan", ...)`, the app's own path after
+the vault read, against the community's desktop route
+(`https://cloud-api.nan.builders/v1/desktop/images/generations`), writes
+the image to `/tmp/nan-desktop-live-smoke.img` and prints its byte size,
+format and elapsed time (never the session).
 
 ### What is NOT in the image MVP
 

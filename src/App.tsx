@@ -150,9 +150,6 @@ function withoutKey(set: Set<number>, key: number): Set<number> {
   return next;
 }
 
-// Image editing is served to the NaN community's desktop sessions only.
-const IMAGE_EDIT_PROFILE = "nan";
-
 type Screen = "loading" | "error" | "picker" | "authorizing" | "chat";
 type AuthPhase = "waiting" | "denied" | "expired" | "error";
 
@@ -502,7 +499,10 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // While a Studio edit runs (`studioBusy`), switching conversations or
   // starting another Studio session is paused so the result and any error
   // land in the open Studio session (no lost work).
-  const imageEditAvailable = overview.active_profile === IMAGE_EDIT_PROFILE;
+  // Image generation, editing and the Studio are offered on BOTH profiles:
+  // each tenant's platform serves them to desktop sessions only (desktop
+  // routes server-side), and the plan is enforced there (403
+  // tier_restricted, 404 not_available when a route is not mounted).
   const [studio, setStudio] = useState<{ key: number; seed: StudioSeed } | null>(null);
   const studioReturnRef = useRef<"chat" | "settings">("chat");
   const studioJobsRef = useRef<Set<number>>(new Set());
@@ -1387,7 +1387,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             path={mediaPath}
             alt={m.content}
             onResult={onImageSaved}
-            onEdit={imageEditAvailable ? () => startEdit(m.id, mediaPath, m.content) : undefined}
+            onEdit={() => startEdit(m.id, mediaPath, m.content)}
           />
           {parentId !== null && (
             <p className="edit-lineage">
@@ -1426,7 +1426,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
               path={path}
               alt={t.chat.generatedImage}
               onResult={onImageSaved}
-              onEdit={imageEditAvailable ? () => startEdit(m.id, path, t.chat.generatedImage) : undefined}
+              onEdit={() => startEdit(m.id, path, t.chat.generatedImage)}
             />
             <div className="msg-actions">
               <SaveImageButton path={path} onResult={onImageSaved} />
@@ -1474,17 +1474,15 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             <IconPlus size={16} />
             {t.sidebar.newChat}
           </button>
-          {imageEditAvailable && (
-            <button
-              type="button"
-              className={`sidebar-link${view === "studio" ? " active" : ""}`}
-              aria-current={view === "studio" ? "page" : undefined}
-              onClick={() => openStudio(null)}
-            >
-              <IconImage size={16} />
-              {t.sidebar.studio}
-            </button>
-          )}
+          <button
+            type="button"
+            className={`sidebar-link${view === "studio" ? " active" : ""}`}
+            aria-current={view === "studio" ? "page" : undefined}
+            onClick={() => openStudio(null)}
+          >
+            <IconImage size={16} />
+            {t.sidebar.studio}
+          </button>
         </div>
         <nav className="conv-list" aria-label={t.sidebar.history}>
           {conversations.length === 0 && <p className="conv-empty">{t.sidebar.empty}</p>}
@@ -1847,7 +1845,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   profileId={overview.active_profile}
                   onClose={closePreview}
                   onOpenLink={openWebPreview}
-                  onEditImage={imageEditAvailable ? editFromPreview : undefined}
+                  onEditImage={editFromPreview}
                 />
               </Suspense>
             )}

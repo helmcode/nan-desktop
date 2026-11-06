@@ -1,18 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  FLUX_MODEL,
   MAX_EDIT_IMAGES,
   MAX_EDIT_INSTRUCTION,
-  MAX_REFERENCES,
+  QWEN_EDIT_MODEL,
   addReference,
   afterEdit,
   canSubmit,
+  editModelFor,
   editSources,
   instructionLength,
   isEditableImagePath,
+  maxEditImages,
+  maxReferences,
   removeReference,
   type HistoryNode,
   type StudioImage,
 } from "./studio";
+
+const QWEN_REFS = maxReferences(QWEN_EDIT_MODEL);
 
 const chat = (name: string, messageId: number): StudioImage => ({
   path: `/data/images/${name}.png`,
@@ -27,22 +33,44 @@ const staged = (name: string): StudioImage => ({
   staged: true,
 });
 
-describe("the reference tray", () => {
-  it("holds the base plus at most two references (three images per edit)", () => {
+describe("the edit model and its cap", () => {
+  it("follows the tenant: qwen on the community, FLUX on the enterprise", () => {
+    expect(editModelFor("nan")).toBe("qwen-image-3.0-pro");
+    expect(editModelFor("helmcode")).toBe("flux-3-image-klein");
+    expect(FLUX_MODEL).toBe("flux-3-image-klein");
+  });
+
+  it("qwen takes three images (base + 2), FLUX only the base, unknown models the strictest", () => {
     expect(MAX_EDIT_IMAGES).toBe(3);
-    expect(MAX_REFERENCES).toBe(2);
+    expect(maxEditImages(QWEN_EDIT_MODEL)).toBe(3);
+    expect(maxReferences(QWEN_EDIT_MODEL)).toBe(2);
+    expect(maxEditImages(FLUX_MODEL)).toBe(1);
+    expect(maxReferences(FLUX_MODEL)).toBe(0);
+    expect(maxEditImages("something-new")).toBe(1);
+    expect(maxReferences(editModelFor("unknown"))).toBe(0);
+  });
+});
+
+describe("the reference tray", () => {
+  it("holds the base plus at most two references on qwen (three images per edit)", () => {
+    expect(QWEN_REFS).toBe(2);
     const base = chat("fox", 2);
-    let refs = addReference([], base, staged("a"));
-    refs = addReference(refs, base, staged("b"));
+    let refs = addReference([], base, staged("a"), QWEN_REFS);
+    refs = addReference(refs, base, staged("b"), QWEN_REFS);
     expect(refs.map((r) => r.label)).toEqual(["a.jpg", "b.jpg"]);
-    expect(addReference(refs, base, staged("c"))).toEqual(refs);
+    expect(addReference(refs, base, staged("c"), QWEN_REFS)).toEqual(refs);
+  });
+
+  it("takes no reference at all on FLUX", () => {
+    const base = chat("fox", 2);
+    expect(addReference([], base, staged("a"), maxReferences(FLUX_MODEL))).toEqual([]);
   });
 
   it("ignores duplicates and the base itself", () => {
     const base = chat("fox", 2);
-    const refs = addReference([], base, staged("a"));
-    expect(addReference(refs, base, staged("a"))).toHaveLength(1);
-    expect(addReference(refs, base, base)).toHaveLength(1);
+    const refs = addReference([], base, staged("a"), QWEN_REFS);
+    expect(addReference(refs, base, staged("a"), QWEN_REFS)).toHaveLength(1);
+    expect(addReference(refs, base, base, QWEN_REFS)).toHaveLength(1);
   });
 
   it("removes by path and never mutates its input", () => {
@@ -70,7 +98,17 @@ describe("submitting", () => {
   });
 
   it("sends the base first, then the references", () => {
-    expect(editSources(chat("fox", 2), [staged("a")])).toEqual(["/data/images/fox.png", "/data/images/staged/a.jpg"]);
+    expect(editSources(chat("fox", 2), [staged("a")], QWEN_REFS)).toEqual([
+      "/data/images/fox.png",
+      "/data/images/staged/a.jpg",
+    ]);
+  });
+
+  it("a FLUX edit sends the base alone, whatever the tray held", () => {
+    const refs = [staged("a"), staged("b")];
+    expect(editSources(chat("fox", 2), refs, maxReferences(FLUX_MODEL))).toEqual(["/data/images/fox.png"]);
+    // Never more than the cap on qwen either.
+    expect(editSources(chat("fox", 2), [...refs, staged("c")], QWEN_REFS)).toHaveLength(3);
   });
 });
 
@@ -87,7 +125,11 @@ describe("after an edit", () => {
     expect(next.history).toEqual([{ image: original }, { image: result }]);
     expect(next.refs).toEqual(refs);
     // The previous base can be picked again and sent as a source.
-    expect(editSources(next.history[0].image, next.refs)).toEqual([original.path, refs[0].path, refs[1].path]);
+    expect(editSources(next.history[0].image, next.refs, QWEN_REFS)).toEqual([
+      original.path,
+      refs[0].path,
+      refs[1].path,
+    ]);
   });
 
   it("never duplicates the result as a reference and never mutates its input", () => {

@@ -89,7 +89,8 @@ pub struct ChatMessageRow {
     /// reply never finished, so the UI renders an interrupted notice.
     pub partial: bool,
     /// T5: absolute path of the generated image file for assistant image
-    /// messages (`qwen-image-2.1`). `None` for every text row; the renderer
+    /// messages (`<uuid>.png` or, for FLUX JPEGs, `<uuid>.jpg`). `None` for
+    /// every text row; the renderer
     /// loads the file through the asset protocol (never the raw bytes).
     pub media_path: Option<String>,
     /// P1-7: web search sources cited by this assistant reply (empty for

@@ -85,7 +85,7 @@ const REQUIRED_TESTS = [
   "preview::tests::failures_map_to_typed_kinds",
   "preview::tests::no_key_material_or_page_content_leaks_into_errors_or_replies",
   // Image endpoint path (base already ends in /v1)
-  "images::tests::generation_url_is_exactly_v1_images_generations_on_both_tenants",
+  "images::tests::generation_url_is_the_desktop_route_on_both_tenants",
   // Round 3: act-don't-narrate, produced files as chips, generate_image tool
   "tools::tests::run_command_cwd_that_is_a_file_is_refused",
   "tools::tests::file_writes_report_the_produced_file",

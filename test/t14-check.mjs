@@ -5,13 +5,15 @@
 // path over mocks and refuses to pass if any pinned test was renamed,
 // filtered or skipped:
 //
-//   Rust (loopback HTTP, no network): the mock tenant answers the LIVE
-//   community shape {"data":[{"url": presigned}]} → the core downloads it
-//   with NO Authorization header (also across redirects), 20 MiB cap,
-//   non-200 → protocol → the generate_image tool saves it under
-//   app_data/images and persists an `image` artifact whose row JSON is
-//   exactly what the renderer reads. Plus the /v1 path pin and the memory
-//   sync keeping artifacts.
+//   Rust (loopback HTTP, no network): the mock tenant's desktop route
+//   (/v1/desktop/images/generations, multipart, session bearer) answers
+//   {"data":[{"url": presigned}]} → the core downloads it with NO
+//   Authorization header (also across redirects), 20 MiB cap, non-200 →
+//   protocol → the generate_image tool saves it under app_data/images and
+//   persists an `image` artifact whose row JSON is exactly what the
+//   renderer reads. A FLUX JPEG reply is saved as `.jpg`. Plus the route
+//   pins (desktop generate on both tenants, per-profile edit paths) and the
+//   memory sync keeping artifacts.
 //
 //   UI (vitest, mocked Tauri IPC): chat send → `generating_image` activity
 //   → done → inline image + the preview pane opens it; a produced file
@@ -31,7 +33,9 @@ const cargoDir = join(repoRoot, "src-tauri");
 const isWindows = process.platform === "win32";
 
 const REQUIRED_RUST = [
-  "images::tests::generation_url_is_exactly_v1_images_generations_on_both_tenants",
+  "images::tests::generation_url_is_the_desktop_route_on_both_tenants",
+  "images::tests::edit_urls_are_resolved_per_profile",
+  "images::tests::e2e_a_flux_jpeg_reply_is_saved_as_jpg",
   "images::tests::the_production_request_path_uses_the_compiled_in_base_unchanged",
   "images::tests::parses_b64_json_reply_into_exact_bytes",
   "images::tests::https_url_reply_is_the_live_community_shape",
@@ -73,6 +77,9 @@ function fail(message) {
 const env = { ...process.env, PATH: `${process.env.HOME ?? ""}/.cargo/bin:${process.env.PATH ?? ""}` };
 // The E2E must exercise the loopback mocks only — never a dev override.
 delete env.NAN_DESKTOP_MOCK_INFERENCE;
+delete env.NAN_DESKTOP_MOCK_IMAGES;
+delete env.NAN_DESKTOP_MOCK_IMAGE_EDITS;
+delete env.NAN_DESKTOP_MOCK_PLATFORM;
 
 // ------------------------------------------------------------------- Rust
 

@@ -32,12 +32,13 @@ import {
 import type { ChatMessageRow, StagedEditSource } from "../types";
 import {
   MAX_EDIT_INSTRUCTION,
-  MAX_REFERENCES,
   addReference,
   afterEdit,
   canSubmit,
+  editModelFor,
   editSources,
   instructionLength,
+  maxReferences,
   removeReference,
   type HistoryNode,
   type StudioImage,
@@ -137,6 +138,9 @@ export function ImageStudio({
   const jobRef = useRef<Job | null>(null);
   const running = stage !== null;
   const { base, refs, history } = session;
+  // The tray offers exactly what the tenant's edit model accepts: qwen
+  // takes the base plus 2 references, FLUX the base alone.
+  const maxRefs = maxReferences(editModelFor(profileId));
 
   // A user file shown in the preview pane: stage it first.
   useEffect(() => {
@@ -236,7 +240,7 @@ export function ImageStudio({
         const created = conversationId;
         setSession((prev) => ({ ...prev, conversationId: created }));
       }
-      const sent = editSources(base, refs);
+      const sent = editSources(base, refs, maxRefs);
       jobRef.current = { conversationId, instruction: text };
       onJob(conversationId, true);
       await invoke("edit_images", {
@@ -252,7 +256,7 @@ export function ImageStudio({
       // Keep the instruction and the tray so the user can fix and retry.
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [instruction, base, refs, running, preparing, session.conversationId, onCreateConversation, onJob, endJob]);
+  }, [instruction, base, refs, maxRefs, running, preparing, session.conversationId, onCreateConversation, onJob, endJob]);
 
   // The core answers with `images://stopped` (handled above).
   const cancel = useCallback(async (): Promise<void> => {
@@ -291,8 +295,8 @@ export function ImageStudio({
 
   const addRef = useCallback(async (): Promise<void> => {
     const image = await pick();
-    if (image) setSession((prev) => ({ ...prev, refs: addReference(prev.refs, prev.base, image) }));
-  }, [pick]);
+    if (image) setSession((prev) => ({ ...prev, refs: addReference(prev.refs, prev.base, image, maxRefs) }));
+  }, [pick, maxRefs]);
 
   const removeRef = (path: string): void => {
     setSession((prev) => ({ ...prev, refs: removeReference(prev.refs, path) }));
@@ -424,9 +428,9 @@ export function ImageStudio({
           <section className="studio-refs" aria-labelledby="studio-refs-title">
             <div className="studio-panel-head">
               <h2 id="studio-refs-title">{t.studio.referencesTitle}</h2>
-              <span className="studio-count">{t.studio.referenceCount(refs.length, MAX_REFERENCES)}</span>
+              {maxRefs > 0 && <span className="studio-count">{t.studio.referenceCount(refs.length, maxRefs)}</span>}
             </div>
-            <p className="studio-hint">{t.studio.referencesHint(MAX_REFERENCES)}</p>
+            <p className="studio-hint">{maxRefs > 0 ? t.studio.referencesHint(maxRefs) : t.studio.baseOnlyHint}</p>
             <ul className="studio-tray">
               {base && (
                 <li className="studio-thumb base" title={t.studio.baseLocked(base.label)}>
@@ -437,7 +441,7 @@ export function ImageStudio({
                   </span>
                 </li>
               )}
-              {refs.map((ref) => (
+              {refs.slice(0, maxRefs).map((ref) => (
                 <li key={ref.path} className="studio-thumb">
                   <img src={convertFileSrc(ref.path)} alt={ref.label} title={ref.label} />
                   <button
@@ -452,7 +456,7 @@ export function ImageStudio({
                   </button>
                 </li>
               ))}
-              {refs.length < MAX_REFERENCES && (
+              {refs.length < maxRefs && (
                 <li>
                   <button
                     type="button"

@@ -4,7 +4,8 @@
 //   "Edit image" button in the preview pane (app images and editable user
 //   files), and the sidebar "Image Studio" entry (start from a picked file);
 // - the Studio opens pre-loaded (canvas, locked base, history), focuses the
-//   instruction, caps the references at 2 extra, keeps Apply disabled while
+//   instruction, caps the references per edit model (2 extra on qwen, none
+//   on FLUX, on both profiles), keeps Apply disabled while
 //   empty or running, records the lineage and lets a node become the base;
 // - Esc returns to the previous view; tool slots are visible but inert;
 // - results still land in the chat with the "Edited" badge.
@@ -246,13 +247,25 @@ describe("entry points", () => {
     expect(invokedWith("conversation_create")).toEqual([{ profileId: "nan" }]);
   });
 
-  it("is hidden for the enterprise profile (community-only surface)", async () => {
+  it("is offered on both profiles (desktop-only server-side on both tenants)", async () => {
+    for (const profile of ["nan", "helmcode"]) {
+      resetTauri(handlers({}, profile));
+      renderApp();
+      await screen.findByText("a red fox");
+      expect(screen.getByRole("button", { name: "Edit image" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Image Studio" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Download image" })).toBeTruthy();
+      cleanup();
+    }
+  });
+
+  it("the enterprise preview pane offers Edit image too", async () => {
     resetTauri(handlers({}, "helmcode"));
     renderApp();
     await screen.findByText("a red fox");
-    expect(screen.queryByRole("button", { name: "Edit image" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Image Studio" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Download image" })).toBeTruthy();
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const pane = await screen.findByRole("complementary", { name: "Preview" });
+    expect(within(pane).getByRole("button", { name: "Edit image" })).toBeTruthy();
   });
 });
 
@@ -272,6 +285,24 @@ describe("the reference tray", () => {
     expect(screen.queryByRole("img", { name: "photo-1.jpg" })).toBeNull();
     expect(screen.getByRole("img", { name: "photo-2.jpg" })).toBeTruthy();
     expect(addReferenceButton()).toBeTruthy();
+  });
+
+  it("on the enterprise profile (FLUX) the base is the only image and the edit sends it alone", async () => {
+    resetTauri(handlers({}, "helmcode"));
+    renderApp();
+    await openStudioFromChat();
+    // The base is pre-loaded, locked; no reference slot, no counter.
+    expect(screen.getByRole("img", { name: "Base image (locked): a red fox" })).toBeTruthy();
+    expect(addReferenceButton()).toBeNull();
+    expect(screen.queryByText(/references$/)).toBeNull();
+    expect(screen.getByText("This editor works on the base image only.")).toBeTruthy();
+    fireEvent.change(instructionBox(), { target: { value: "make it snowy" } });
+    await apply();
+    await waitFor(() =>
+      expect(invokedWith("edit_images")).toEqual([
+        { conversationId: 7, parentMessageId: 2, instruction: "make it snowy", sourcePaths: ["/data/images/r.png"] },
+      ]),
+    );
   });
 
   it("a refused pick shows the grant message and leaves the tray as it was", async () => {

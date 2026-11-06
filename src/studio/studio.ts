@@ -3,18 +3,38 @@
 // edit (count, size, format, ownership); these only keep the UI honest.
 //
 // A session has one BASE image (always the first image sent, locked in the
-// reference tray), up to MAX_REFERENCES extra reference images, and a
-// lineage history: the image the session started from, then one node per
-// edit result. Clicking a history node makes it the new base.
+// reference tray), up to `maxReferences(model)` extra reference images
+// (none for FLUX), and a lineage history: the image the session started
+// from, then one node per edit result. Clicking a history node makes it the
+// new base.
 
-/// Most images per edit (platform contract, mirrored by the core).
+/// Most images per edit for any model (qwen; mirrored by the core).
 export const MAX_EDIT_IMAGES = 3;
 
 /// Longest instruction the platform accepts, in characters.
 export const MAX_EDIT_INSTRUCTION = 2000;
 
-/// Extra references next to the base (the platform takes 3 images in all).
-export const MAX_REFERENCES = MAX_EDIT_IMAGES - 1;
+export const QWEN_EDIT_MODEL = "qwen-image-3.0-pro";
+export const FLUX_MODEL = "flux-3-image-klein";
+
+/// The model each tenant's edit route runs (the server picks it; the app
+/// never sends it). Mirrors `profile::image_edit_model` in the core.
+export function editModelFor(profileId: string): string {
+  return profileId === "nan" ? QWEN_EDIT_MODEL : FLUX_MODEL;
+}
+
+/// Most images one edit on `model` accepts (the bridge's model registry):
+/// qwen 1..3, FLUX exactly one (the base). Unknown models get the strictest
+/// cap. Mirrors `image_edit::max_edit_images_for` in the core, which
+/// re-validates every edit.
+export function maxEditImages(model: string): number {
+  return model === QWEN_EDIT_MODEL ? MAX_EDIT_IMAGES : 1;
+}
+
+/// Extra references next to the base: 2 for qwen, 0 for FLUX.
+export function maxReferences(model: string): number {
+  return maxEditImages(model) - 1;
+}
 
 export interface StudioImage {
   /// Absolute path of an app-owned image: a chat image under the images
@@ -45,13 +65,14 @@ export interface StudioSeed {
 }
 
 /// Add a reference: ignored when it is the base, already there, or the
-/// tray is full.
+/// tray is full (`max` from `maxReferences`).
 export function addReference(
   refs: readonly StudioImage[],
   base: StudioImage | null,
   image: StudioImage,
+  max: number,
 ): StudioImage[] {
-  if (refs.length >= MAX_REFERENCES) return [...refs];
+  if (refs.length >= max) return [...refs];
   if (base?.path === image.path || refs.some((ref) => ref.path === image.path)) return [...refs];
   return [...refs, image];
 }
@@ -67,9 +88,10 @@ export function canSubmit(base: StudioImage | null, instruction: string, running
   return !running && base !== null && text.length > 0 && [...text].length <= MAX_EDIT_INSTRUCTION;
 }
 
-/// The images an edit sends, base first.
-export function editSources(base: StudioImage, refs: readonly StudioImage[]): string[] {
-  return [base.path, ...refs.map((ref) => ref.path)];
+/// The images an edit sends, base first, never more references than `max`
+/// (a FLUX edit sends the base alone: extra images are a 400 server-side).
+export function editSources(base: StudioImage, refs: readonly StudioImage[], max: number): string[] {
+  return [base.path, ...refs.slice(0, Math.max(0, max)).map((ref) => ref.path)];
 }
 
 /// After a successful edit: the result joins the history and becomes the
