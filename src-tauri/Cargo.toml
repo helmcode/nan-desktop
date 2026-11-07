@@ -56,6 +56,9 @@ rusqlite = { version = "0.41.0", features = ["bundled"] }
 # the dependency tree transitively (tauri uses uuid; reqwest/tauri use base64).
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.23"
+# Local skills (T14/S1): NFC checks on bundle paths and accent folding for
+# the generated skill name. Already in the tree transitively (url -> idna).
+icu_normalizer = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

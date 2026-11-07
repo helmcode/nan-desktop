@@ -26,6 +26,8 @@ mod memory;
 // Preview pane backends (S21): granted-file reads + platform page fetch.
 mod preview;
 mod profile;
+// Local skills (T14/S1): store, bundle validation and the context block.
+mod skills;
 // Incremental SSE parser shared by the streaming chat surface.
 mod sse;
 mod stt;
@@ -195,6 +197,10 @@ pub fn run() {
             memory::memory_settings_get,
             memory::memory_set_mode,
             memory::memory_sync,
+            skills::skills_list,
+            skills::skills_create,
+            skills::skills_update,
+            skills::skills_delete,
             tts::tts_speak,
             tts::tts_stop,
             stt::stt_transcribe,

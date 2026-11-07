@@ -1,5 +1,5 @@
 import { Fragment, Suspense, lazy, useCallback, useEffect, useReducer, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
@@ -56,6 +56,7 @@ import { VOICE_UI } from "./flags";
 import { useI18n, useT } from "./i18n";
 import {
   IconArrowUp,
+  IconBolt,
   IconChevronDown,
   IconFile,
   IconFolder,
@@ -82,6 +83,23 @@ import type {
   WebSource,
 } from "./types";
 import type { StudioSeed } from "./studio/studio";
+import { SkillPicker } from "./skills/SkillPicker";
+import { SkillsView } from "./skills/SkillsView";
+import {
+  activeSkillFor,
+  adoptActiveSkill,
+  draftFromConversation,
+  emptyDraft,
+  filterSkills,
+  listSkills,
+  slashQuery,
+  upsertSkill,
+  withActiveSkill,
+  withoutSkill,
+  type ActiveSkills,
+  type Skill,
+  type SkillDraft,
+} from "./skills/skills";
 import { useWorkspace } from "./workspace";
 
 // The preview pane and its renderers load on first use (S21).
@@ -441,7 +459,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const activeProfile: ProfileView | undefined = overview.profiles.find((p) => p.id === overview.active_profile);
   const workspace = useWorkspace(overview.active_profile);
 
-  const [view, setView] = useState<"chat" | "settings" | "studio">("chat");
+  const [view, setView] = useState<"chat" | "settings" | "studio" | "skills">("chat");
   const viewRef = useRef(view);
   useEffect(() => {
     viewRef.current = view;
@@ -489,6 +507,19 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const imageMode = imageModes.has(activeConvId ?? NEW_CHAT_KEY);
   const [imageSize, setImageSize] = useState(DEFAULT_IMAGE_SIZE);
   const [imageGeneratingIds, setImageGeneratingIds] = useState<Set<number>>(() => new Set());
+
+  // Local skills (T14/S1). `activeSkills` is the skill turned on per
+  // conversation (the blank chat uses NEW_CHAT_KEY until its row exists);
+  // only its id travels with `chat_send`, the core adds the text. The
+  // picker opens from the "Use skill" button or a leading "/".
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [skillsLoadError, setSkillsLoadError] = useState(false);
+  const [skillForm, setSkillForm] = useState<SkillDraft | null>(null);
+  const [activeSkills, setActiveSkills] = useState<ActiveSkills>(() => new Map());
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const [pickerIndex, setPickerIndex] = useState(0);
+  const activeSkill = activeSkillFor(activeSkills, activeConvId ?? NEW_CHAT_KEY, skills);
 
   // Image edits happen in the Image Studio, its own view. `studio` is the
   // current session (null until first opened); the Studio stays mounted
@@ -641,6 +672,23 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         // Offline or no key: keep the default; sending surfaces the error.
       });
   }, [refreshConversations, loadMessages, syncMemory]);
+
+  // Local skills: listed once; every save/delete updates the list in place.
+  useEffect(() => {
+    let alive = true;
+    listSkills()
+      .then((list) => {
+        if (!alive) return;
+        setSkills(list);
+        setSkillsLoadError(false);
+      })
+      .catch(() => {
+        if (alive) setSkillsLoadError(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Chat event transport. Registered once; refs carry the active ids.
   useEffect(() => {
@@ -1239,6 +1287,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       next.add(created);
       return next;
     });
+    // ...and the skill turned on there.
+    setActiveSkills((prev) => adoptActiveSkill(prev, NEW_CHAT_KEY, created));
     return created;
   }, []);
 
@@ -1250,6 +1300,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     let conversationId: number | null = null;
     // The open conversation's folders (read before a new row adopts them).
     const grantIds = selectedFolders;
+    // ...and its skill: only the id is sent; the core reads the text.
+    const skillId = activeSkill?.id ?? null;
     try {
       conversationId = await ensureConversation();
       if (conversationId === null) return;
@@ -1276,9 +1328,30 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       // away mid-reply never hides it; the refresh after `chat_send` swaps
       // in the core's stored title and ordering.
       setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(text)));
-      await sendChat({ conversationId: id, model, content: text, grantIds });
+      await sendChat({ conversationId: id, model, content: text, grantIds, ...(skillId ? { skillId } : {}) });
       void refreshConversations();
-    } catch {
+    } catch (err) {
+      // The skill was deleted elsewhere: nothing was sent or stored. Turn it
+      // off and give the text back so the user can resend.
+      if (skillId && String(err).startsWith("skill:")) {
+        const key = conversationId ?? NEW_CHAT_KEY;
+        setActiveSkills((prev) => withActiveSkill(withActiveSkill(prev, key, null), NEW_CHAT_KEY, null));
+        setSkills((prev) => prev.filter((skill) => skill.id !== skillId));
+        setComposer(text);
+        if (conversationId !== null) {
+          const id = conversationId;
+          setStreamingIds((prev) => withoutKey(prev, id));
+          setDrafts((prev) => {
+            const next = new Map(prev);
+            next.delete(id);
+            return next;
+          });
+          void loadMessages(id);
+        }
+        setInlineError("skill");
+        void refreshConversations();
+        return;
+      }
       if (conversationId !== null) {
         const id = conversationId;
         setStreamingIds((prev) => {
@@ -1295,7 +1368,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       setInlineError("send");
       void refreshConversations();
     }
-  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders]);
+  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages]);
 
   const sendImage = useCallback(async (): Promise<void> => {
     const prompt = composer.trim();
@@ -1353,11 +1426,83 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     void (imageMode ? sendImage() : send());
   };
 
+  // ---- skills -------------------------------------------------------------
+  const slash = imageMode || slashDismissed ? null : slashQuery(composer);
+  const pickerVisible = view === "chat" && (skillPickerOpen || slash !== null);
+  const pickerItems = pickerVisible ? filterSkills(skills, slash ?? "") : [];
+  const pickerActive = Math.min(pickerIndex, Math.max(pickerItems.length - 1, 0));
+
+  const closeSkillPicker = useCallback((): void => {
+    setSkillPickerOpen(false);
+    setPickerIndex(0);
+  }, []);
+
+  /// Turn a skill on for the open conversation (picker, "/" or the list).
+  const activateSkill = useCallback(
+    (skill: Skill): void => {
+      setActiveSkills((prev) => withActiveSkill(prev, activeConvRef.current ?? NEW_CHAT_KEY, skill.id));
+      setSkillPickerOpen(false);
+      setPickerIndex(0);
+      // A "/query" typed to find it is not part of the message.
+      setComposer((prev) => (slashQuery(prev) !== null ? "" : prev));
+      setView("chat");
+      composerRef.current?.focus();
+    },
+    [],
+  );
+
+  const deactivateSkill = useCallback((): void => {
+    setActiveSkills((prev) => withActiveSkill(prev, activeConvRef.current ?? NEW_CHAT_KEY, null));
+  }, []);
+
+  const openSkills = useCallback((form: SkillDraft | null): void => {
+    setSkillPickerOpen(false);
+    setSkillForm(form);
+    setView("skills");
+  }, []);
+
+  const onSkillSaved = useCallback((saved: Skill): void => {
+    setSkills((prev) => upsertSkill(prev, saved));
+    setSkillsLoadError(false);
+    setSkillForm(null);
+  }, []);
+
+  const onSkillDeleted = useCallback((id: string): void => {
+    setSkills((prev) => prev.filter((skill) => skill.id !== id));
+    setActiveSkills((prev) => withoutSkill(prev, id));
+  }, []);
+
+  /// Composer keys while the skill picker is open: arrows move, Enter picks,
+  /// Escape closes. Returns true when the key was handled.
+  const pickerKey = (e: ReactKeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (!pickerVisible) return false;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (slash !== null) setSlashDismissed(true);
+      closeSkillPicker();
+      return true;
+    }
+    if (pickerItems.length === 0) return false;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      setPickerIndex((pickerActive + step + pickerItems.length) % pickerItems.length);
+      return true;
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      activateSkill(pickerItems[pickerActive]);
+      return true;
+    }
+    return false;
+  };
+
   // Errors are stored as kinds and localized here, so a language switch
   // re-renders them in the new language.
   const errorText = (code: string): string => {
     if (!code) return "";
     if (code === "send") return t.chat.sendFailed;
+    if (code === "skill") return t.skills.errors.send;
     if (code.startsWith("image:")) return imageErrorLabel(t, code.slice("image:".length));
     if (code.startsWith("edit:")) return editErrorLabel(t, code.slice("edit:".length));
     if (code.startsWith("cmd:")) return commandErrorLabel(t, code.slice("cmd:".length));
@@ -1501,6 +1646,15 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             <IconImage size={16} />
             {t.sidebar.studio}
           </button>
+          <button
+            type="button"
+            className={`sidebar-link${view === "skills" ? " active" : ""}`}
+            aria-current={view === "skills" ? "page" : undefined}
+            onClick={() => openSkills(null)}
+          >
+            <IconBolt size={16} />
+            {t.sidebar.skills}
+          </button>
         </div>
         <nav className="conv-list" aria-label={t.sidebar.history}>
           {conversations.length === 0 && <p className="conv-empty">{t.sidebar.empty}</p>}
@@ -1585,7 +1739,18 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           </Suspense>
         </ErrorBoundary>
       )}
-      {view === "studio" ? null : view === "settings" ? (
+      {view === "studio" ? null : view === "skills" ? (
+        <SkillsView
+          skills={skills}
+          loadError={skillsLoadError}
+          form={skillForm}
+          onFormChange={setSkillForm}
+          onSaved={onSkillSaved}
+          onDeleted={onSkillDeleted}
+          onUse={activateSkill}
+          onBack={() => setView("chat")}
+        />
+      ) : view === "settings" ? (
         <Settings
           profile={activeProfile}
           workspace={workspace}
@@ -1633,6 +1798,16 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                 </select>
                 <IconChevronDown size={14} />
               </label>
+              {messages.some((m) => (m.role === "user" || m.role === "system") && m.content.trim().length > 0) && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm save-skill-btn"
+                  onClick={() => openSkills(draftFromConversation(messages))}
+                >
+                  <IconBolt size={14} />
+                  {t.skills.saveFromChat}
+                </button>
+              )}
               {preview && (
                 <button
                   type="button"
@@ -1730,13 +1905,47 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             </div>
 
             <footer className="composer">
+              {activeSkill && (
+                <div className="skill-pill-row">
+                  <span className="skill-pill" role="status">
+                    <IconBolt size={13} />
+                    <span className="skill-pill-text">{t.skills.using(activeSkill.title)}</span>
+                    <button
+                      type="button"
+                      className="skill-pill-x"
+                      aria-label={t.skills.stopUsing(activeSkill.title)}
+                      title={t.skills.stopUsing(activeSkill.title)}
+                      onClick={deactivateSkill}
+                    >
+                      <IconX size={13} />
+                    </button>
+                  </span>
+                </div>
+              )}
+              {pickerVisible && (
+                <div className="skill-picker-anchor">
+                  <SkillPicker
+                    items={pickerItems}
+                    hasSkills={skills.length > 0}
+                    activeIndex={pickerActive}
+                    onPick={activateSkill}
+                    onCreate={() => openSkills(emptyDraft())}
+                  />
+                </div>
+              )}
               <div className={`composer-box${imageMode ? " image-mode" : ""}`}>
                 <textarea
                   ref={composerRef}
                   className="composer-input"
                   value={composer}
-                  onChange={(e) => setComposer(e.currentTarget.value)}
+                  onChange={(e) => {
+                    const value = e.currentTarget.value;
+                    setComposer(value);
+                    setPickerIndex(0);
+                    if (!value.startsWith("/")) setSlashDismissed(false);
+                  }}
                   onKeyDown={(e) => {
+                    if (pickerKey(e)) return;
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                       e.preventDefault();
                       submit();
@@ -1773,6 +1982,26 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                           ))}
                         </select>
                       </label>
+                    )}
+                    {!imageMode && (
+                      <button
+                        type="button"
+                        className={`icon-btn skill-toggle${pickerVisible ? " active" : ""}`}
+                        aria-expanded={pickerVisible}
+                        aria-label={t.skills.useSkill}
+                        title={t.skills.useSkill}
+                        onClick={() => {
+                          if (!pickerVisible) {
+                            setSkillPickerOpen(true);
+                            return;
+                          }
+                          if (slash !== null) setSlashDismissed(true);
+                          closeSkillPicker();
+                        }}
+                        disabled={composerBusy}
+                      >
+                        <IconBolt size={18} />
+                      </button>
                     )}
                     <button
                       type="button"

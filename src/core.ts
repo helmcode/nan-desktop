@@ -90,6 +90,10 @@ export type ChatSendArgs = {
   model: string;
   content: string;
   grantIds: string[];
+  /// The skill turned on for this conversation (T14). Only the id crosses
+  /// the boundary: the core reads the skill from its own store and adds it
+  /// to this reply's context. Omitted when no skill is on.
+  skillId?: string;
 };
 
 export function sendChat(args: ChatSendArgs): Promise<void> {

@@ -73,6 +73,29 @@
   opens Settings on the working folders. Settings' Back then reads "Back to
   the Image Studio" and returns to the same Studio session.
 
+### Skills
+- New **Skills** section in the sidebar: save instructions you reuse and
+  turn them on in any conversation. A skill is three fields (name, what it
+  is for, instructions) plus up to 5 optional reference files (.md, .txt,
+  .json, .yaml, .yml; UTF-8 text, 64 KB each). The app generates the
+  agentskills bundle (`SKILL.md` + `references/`) from them; the 64 KB
+  `SKILL.md` and 256 KB bundle caps and the bundle path rules (NFC, no
+  dotfiles, no `..`, no NUL) are checked in the Rust core on every save.
+  Skills are stored locally only (`app_data/skills/`, one JSON per skill,
+  atomic writes); there is no sharing yet.
+- In the chat, the composer's bolt button ("Use skill") or typing `/` at the
+  start of a message opens a picker (arrows, Enter, Esc). The active skill
+  shows as a pill above the composer with an X to turn it off; it is
+  remembered per conversation. "Save as skill" in the chat header opens the
+  form preloaded from the conversation for review. Skills can be edited and
+  deleted (two-step confirm); deleting one turns it off everywhere.
+- Security: only the skill id is sent with `chat_send`; the core reads the
+  skill from its store and adds it as its own delimited, labeled system
+  block (tags inside the text are neutralized). A skill is text only: it
+  never changes the offered tools, the folder grants, the approval modes or
+  the model (pinned by
+  `chat::tests::activating_a_skill_cannot_change_tools_permissions_or_model`).
+
 ## 0.2.0 — First public beta
 
 The first publicly announced build of Helmcode Desktop: a focused AI

@@ -33,6 +33,13 @@ export const IconGear = (p: IconProps) => (
   </Icon>
 );
 
+/** Skills (T14): a lightning bolt, "instructions that do something". */
+export const IconBolt = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z" />
+  </Icon>
+);
+
 export const IconDownload = (p: IconProps) => (
   <Icon {...p}>
     <path d="M12 4v11" />
