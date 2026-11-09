@@ -95,6 +95,34 @@
   never changes the offered tools, the folder grants, the approval modes or
   the model (pinned by
   `chat::tests::activating_a_skill_cannot_change_tools_permissions_or_model`).
+- Shared skills (Helmcode organizations, S4). When the org has
+  `skills_sharing` on (read from `GET /api/auth/me`, default off), each of
+  your skills offers **Share with my team**: a confirmation shows exactly
+  what teammates will see (title, description, rendered instructions, file
+  names) and warns that your name appears as the author and an
+  administrator reviews it first. The core builds the bundle with the same
+  generator as every save (`SKILL.md` first, then `references/` sorted) and
+  sends `POST /api/skills`. Cards show Local / In review / Shared / Not
+  approved (with the reason); editing a shared skill offers **Share again**
+  (`PUT`, back to review). Hidden on NaN (no orgs) and without the flag.
+- New **Team** tab next to **Mine**: the org's approved skills (featured
+  first) with author and date. **View** opens a read-only, sanitized render
+  with "Shared by <author> (team)"; **Use** turns it on in the chat exactly
+  like a local skill (pill, `/` picker); **Duplicate in my skills** copies
+  it into a new local skill you can edit (no link back).
+- Sync: on startup, when the Skills view opens and every 15 minutes, with
+  `If-None-Match` (a 304 keeps the cache). Approved bundles are cached in
+  `app_data/skills-cache/<profile>/` (`<id>/<sha>.json`) so **Use** works
+  offline; a skill no longer listed as approved is purged from the cache
+  (revocation is effective) and a 404 (sharing turned off) clears it. 429
+  shows "Wait a moment", 401 the session-expired flow.
+- Security: the session JWT stays in the core; the renderer reaches the
+  library only through a closed route allowlist (`/api/auth/me`,
+  `/api/skills[/{id}]`), uploads must pass the bundle validator, and cached
+  bundles are re-validated and hash-checked on every read. A team skill is
+  the same delimited text block plus a provenance line and cannot change
+  tools, grants, approvals or the model (pinned by
+  `chat::tests::activating_an_org_skill_cannot_change_tools_permissions_or_model`).
 
 ## 0.2.0 — First public beta
 

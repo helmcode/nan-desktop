@@ -59,6 +59,9 @@ base64 = "0.23"
 # Local skills (T14/S1): NFC checks on bundle paths and accent folding for
 # the generated skill name. Already in the tree transitively (url -> idna).
 icu_normalizer = "2"
+# Shared skills (S4): content hash of a bundle (share link + the offline
+# cache file name). Already in the tree transitively.
+sha2 = "0.10"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

@@ -44,6 +44,31 @@ chat never blocks and you are never signed out because of it.
 - **Credentials** (the encrypted local vault, see SECURITY.md).
 - **Your prompts and responses**: the platform keeps a strict zero-logs
   policy — no prompt or response content is recorded anywhere.
+- **Your skills** (`app_data/skills/`), unless you explicitly press
+  **Share with my team** on one (Helmcode organizations with sharing on).
+  Only that skill's bundle (`SKILL.md` + its reference files) is uploaded,
+  after a confirmation that shows exactly what teammates will see.
+
+## Skills shared by your team (Helmcode)
+
+- The team library is not synced like conversations: it is a read-only
+  cache of what the org approved. `app_data/skills-cache/<profile>/`
+  holds `index.json` (the last list, its ETag, which bundles are cached
+  and which local skills you shared) and one `<id>/<sha>.json` per cached
+  bundle, written atomically.
+- Refreshed on startup, when the Skills view opens and every 15 minutes,
+  with `If-None-Match` (a 304 changes nothing). Approved bundles are
+  downloaded so **Use** works offline.
+- **Revocation is effective**: a skill no longer listed as approved
+  (rejected, hidden, deleted, or you left the org) is deleted from the
+  cache on the next successful list, and the core refuses to cache or use
+  a bundle that is not currently listed as approved. If the org turns
+  sharing off (404), the whole cache is cleared. Offline, the last copy
+  keeps working.
+- Cached bundles are re-validated (same rules as a local save) and checked
+  against their content hash on every read; a tampered file is ignored.
+- **Duplicate in my skills** makes an independent local copy: it is never
+  linked back or updated by the team version.
 
 ## At rest on your machine
 

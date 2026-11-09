@@ -3167,3 +3167,106 @@ button:disabled {
   color: var(--text-2);
   font-size: 0.88rem;
 }
+
+/* ---- shared skills (S4): tabs, share states, team library -------------- */
+
+.skills-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.skills-tab {
+  padding: 0.45rem 0.9rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.skills-tab:hover {
+  color: var(--text);
+}
+
+.skills-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent-text);
+}
+
+.skill-badge {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 0.72rem;
+  font-weight: 500;
+  vertical-align: middle;
+}
+
+.skill-badge-pending,
+.skill-badge-featured {
+  border-color: transparent;
+  background-color: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.skill-badge-approved {
+  color: var(--text);
+}
+
+.skill-badge-rejected,
+.skill-badge-hidden {
+  border-color: transparent;
+  background-color: var(--warn-soft);
+  color: var(--warn);
+}
+
+.skill-share-note,
+.skill-provenance {
+  color: var(--text-3);
+  font-size: 0.8rem;
+}
+
+.skills-notice {
+  color: var(--text-2);
+  font-size: 0.88rem;
+}
+
+.share-dialog {
+  max-width: 560px;
+}
+
+.share-preview {
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0.5rem 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background-color: var(--surface-2);
+}
+
+.share-preview-body,
+.team-skill-body {
+  margin-top: 0.5rem;
+}
+
+.share-warning {
+  color: var(--warn);
+  font-size: 0.86rem;
+}
+
+.team-skill-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.team-skill-detail .grant-actions {
+  margin-top: 0.5rem;
+}

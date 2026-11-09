@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -85,6 +85,21 @@ import type {
 import type { StudioSeed } from "./studio/studio";
 import { SkillPicker } from "./skills/SkillPicker";
 import { SkillsView } from "./skills/SkillsView";
+import {
+  EMPTY_VIEW,
+  TEAM_PROFILE,
+  TEAM_SYNC_INTERVAL_MS,
+  fetchSkillsSharing,
+  isTeamSkillId,
+  loadCache,
+  setLink,
+  syncTeam,
+  teamAsSkill,
+  teamLibrary,
+  usableTeamSkills,
+  type TeamMeta,
+  type TeamState,
+} from "./skills/team";
 import {
   activeSkillFor,
   adoptActiveSkill,
@@ -519,7 +534,18 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [pickerIndex, setPickerIndex] = useState(0);
-  const activeSkill = activeSkillFor(activeSkills, activeConvId ?? NEW_CHAT_KEY, skills);
+
+  // Shared skills (S4, Helmcode only; the community has no orgs): the team
+  // library as the core caches it plus the last sync problem, and the org's
+  // `skills_sharing` flag (the share actions). A team skill turns on like a
+  // local one; its id is `team:<id>` and the core reads the cached bundle.
+  const teamProfile = overview.active_profile === TEAM_PROFILE ? TEAM_PROFILE : null;
+  const [teamState, setTeamState] = useState<TeamState>({ view: EMPTY_VIEW, problem: null });
+  const [skillsSharing, setSkillsSharing] = useState(false);
+  const teamSkills = useMemo(() => teamLibrary(teamState.view).map(teamAsSkill), [teamState.view]);
+  const pickerSkills = useMemo(() => [...skills, ...usableTeamSkills(teamState.view)], [skills, teamState.view]);
+  const knownSkills = useMemo(() => [...skills, ...teamSkills], [skills, teamSkills]);
+  const activeSkill = activeSkillFor(activeSkills, activeConvId ?? NEW_CHAT_KEY, knownSkills);
 
   // Image edits happen in the Image Studio, its own view. `studio` is the
   // current session (null until first opened); the Studio stays mounted
@@ -689,6 +715,43 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       alive = false;
     };
   }, []);
+
+  // Team library (S4): one sync now, every 15 minutes while the app runs,
+  // and whenever the Skills view opens. ETag-conditional, so a quiet sync
+  // is a 304. The cached copy shows first (offline "Use" keeps working).
+  const syncTeamLibrary = useCallback(async (): Promise<void> => {
+    const profileId = activeProfileRef.current;
+    if (profileId !== TEAM_PROFILE) return;
+    const [next, sharing] = await Promise.all([
+      syncTeam(profileId).catch(() => null),
+      fetchSkillsSharing(profileId),
+    ]);
+    if (activeProfileRef.current !== profileId) return;
+    setSkillsSharing(sharing);
+    if (!next) return;
+    setTeamState(next);
+    if (next.problem === "expired") setSessionExpired(true);
+  }, []);
+
+  useEffect(() => {
+    if (!teamProfile) {
+      setTeamState({ view: EMPTY_VIEW, problem: null });
+      setSkillsSharing(false);
+      return;
+    }
+    let alive = true;
+    loadCache(teamProfile)
+      .then((view) => {
+        if (alive) setTeamState((prev) => (prev.view === EMPTY_VIEW ? { view, problem: null } : prev));
+      })
+      .catch(() => {});
+    void syncTeamLibrary();
+    const timer = window.setInterval(() => void syncTeamLibrary(), TEAM_SYNC_INTERVAL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [teamProfile, syncTeamLibrary]);
 
   // Chat event transport. Registered once; refs carry the active ids.
   useEffect(() => {
@@ -1337,6 +1400,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         const key = conversationId ?? NEW_CHAT_KEY;
         setActiveSkills((prev) => withActiveSkill(withActiveSkill(prev, key, null), NEW_CHAT_KEY, null));
         setSkills((prev) => prev.filter((skill) => skill.id !== skillId));
+        // A team skill revoked since the last sync: refresh the library.
+        if (isTeamSkillId(skillId)) void syncTeamLibrary();
         setComposer(text);
         if (conversationId !== null) {
           const id = conversationId;
@@ -1368,7 +1433,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       setInlineError("send");
       void refreshConversations();
     }
-  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages]);
+  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary]);
 
   const sendImage = useCallback(async (): Promise<void> => {
     const prompt = composer.trim();
@@ -1429,7 +1494,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // ---- skills -------------------------------------------------------------
   const slash = imageMode || slashDismissed ? null : slashQuery(composer);
   const pickerVisible = view === "chat" && (skillPickerOpen || slash !== null);
-  const pickerItems = pickerVisible ? filterSkills(skills, slash ?? "") : [];
+  const pickerItems = pickerVisible ? filterSkills(pickerSkills, slash ?? "") : [];
   const pickerActive = Math.min(pickerIndex, Math.max(pickerItems.length - 1, 0));
 
   const closeSkillPicker = useCallback((): void => {
@@ -1467,10 +1532,28 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     setSkillForm(null);
   }, []);
 
-  const onSkillDeleted = useCallback((id: string): void => {
-    setSkills((prev) => prev.filter((skill) => skill.id !== id));
-    setActiveSkills((prev) => withoutSkill(prev, id));
-  }, []);
+  const onSkillDeleted = useCallback(
+    (id: string): void => {
+      setSkills((prev) => prev.filter((skill) => skill.id !== id));
+      setActiveSkills((prev) => withoutSkill(prev, id));
+      // The local copy is gone: forget its share link (the shared row, if
+      // any, stays in the team library; an admin manages it there).
+      if (teamProfile && teamState.view.links[id]) {
+        setLink(teamProfile, id, null)
+          .then((view) => setTeamState((prev) => ({ ...prev, view: { ...prev.view, links: view.links } })))
+          .catch(() => {});
+      }
+    },
+    [teamProfile, teamState.view.links],
+  );
+
+  /// "Use" on a team skill (its bundle is already cached by the view).
+  const activateTeamSkill = useCallback((meta: TeamMeta): void => activateSkill(teamAsSkill(meta)), [activateSkill]);
+
+  // Opening the Skills view refreshes the team library (a 304 when quiet).
+  useEffect(() => {
+    if (view === "skills") void syncTeamLibrary();
+  }, [view, syncTeamLibrary]);
 
   /// Composer keys while the skill picker is open: arrows move, Enter picks,
   /// Escape closes. Returns true when the key was handled.
@@ -1749,6 +1832,19 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           onDeleted={onSkillDeleted}
           onUse={activateSkill}
           onBack={() => setView("chat")}
+          team={
+            teamProfile
+              ? {
+                  profileId: teamProfile,
+                  sharing: skillsSharing,
+                  state: teamState,
+                  onState: setTeamState,
+                  onRetry: () => void syncTeamLibrary(),
+                  onUse: activateTeamSkill,
+                  onSignIn: onSignOut,
+                }
+              : null
+          }
         />
       ) : view === "settings" ? (
         <Settings
@@ -1926,7 +2022,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                 <div className="skill-picker-anchor">
                   <SkillPicker
                     items={pickerItems}
-                    hasSkills={skills.length > 0}
+                    hasSkills={pickerSkills.length > 0}
                     activeIndex={pickerActive}
                     onPick={activateSkill}
                     onCreate={() => openSkills(emptyDraft())}

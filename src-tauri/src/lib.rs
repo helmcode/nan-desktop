@@ -28,6 +28,8 @@ mod preview;
 mod profile;
 // Local skills (T14/S1): store, bundle validation and the context block.
 mod skills;
+// Shared skills (S4): org library API passthrough + offline team cache.
+mod skills_team;
 // Incremental SSE parser shared by the streaming chat surface.
 mod sse;
 mod stt;
@@ -201,6 +203,14 @@ pub fn run() {
             skills::skills_create,
             skills::skills_update,
             skills::skills_delete,
+            skills::skills_bundle,
+            skills_team::skills_team_request,
+            skills_team::skills_team_cache_load,
+            skills_team::skills_team_cache_store_list,
+            skills_team::skills_team_cache_put,
+            skills_team::skills_team_cache_get,
+            skills_team::skills_team_cache_clear,
+            skills_team::skills_team_link,
             tts::tts_speak,
             tts::tts_stop,
             stt::stt_transcribe,

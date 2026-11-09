@@ -1,10 +1,12 @@
-// The Skills view (T14/S1): the user's own local skills. A list (use, edit,
-// delete) and a three-field form (name, what it is for, instructions) plus
-// optional reference files. The user never sees the generated SKILL.md or
-// its frontmatter: the core generates it from these fields on every save.
+// The Skills view (T14/S1 + S4): the user's own local skills ("Mine": use,
+// edit, delete, and "Share with my team" when the org allows it) and, on
+// Helmcode, the team library ("Team": view, use, duplicate). A three-field
+// form (name, what it is for, instructions) plus optional reference files;
+// the user never sees the generated SKILL.md or its frontmatter.
 
-import { useRef, useState } from "react";
-import { useT } from "../i18n";
+import { useEffect, useRef, useState } from "react";
+import { useI18n, useT, type Strings } from "../i18n";
+import { Markdown } from "../Markdown";
 import { IconArrowLeft, IconBolt, IconFile, IconPencil, IconPlus, IconTrash, IconX } from "../icons";
 import {
   REFERENCE_ACCEPT,
@@ -19,6 +21,31 @@ import {
   type Skill,
   type SkillDraft,
 } from "./skills";
+import {
+  loadTeamSkill,
+  shareSkill,
+  shareStateFor,
+  teamLibrary,
+  type ShareState,
+  type TeamMeta,
+  type TeamProblem,
+  type TeamSkill,
+  type TeamState,
+} from "./team";
+
+/** The team side of the view (Helmcode only; `null` hides all of it). */
+export type TeamProps = {
+  profileId: string;
+  /** The org's `skills_sharing` flag: the share actions exist only with it. */
+  sharing: boolean;
+  state: TeamState;
+  onState: (state: TeamState) => void;
+  onRetry: () => void;
+  /** Turn a team skill on in the chat (its bundle is cached first). */
+  onUse: (meta: TeamMeta) => void;
+  /** The session-expired flow. */
+  onSignIn: () => void;
+};
 
 export type SkillsViewProps = {
   skills: Skill[];
@@ -32,7 +59,11 @@ export type SkillsViewProps = {
   onDeleted: (id: string) => void;
   onUse: (skill: Skill) => void;
   onBack: () => void;
+  /** S4: the team library and sharing. `null` (NaN) hides both. */
+  team?: TeamProps | null;
 };
+
+type Tab = "mine" | "team";
 
 export function SkillsView({
   skills,
@@ -43,11 +74,17 @@ export function SkillsView({
   onDeleted,
   onUse,
   onBack,
+  team = null,
 }: SkillsViewProps) {
   const t = useT();
   const s = t.skills;
+  const [tab, setTab] = useState<Tab>("mine");
   const [armedId, setArmedId] = useState<string | null>(null);
   const [listError, setListError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [sharing, setSharing] = useState<{ skill: Skill; reshare: boolean } | null>(null);
+  const showTabs = !form && team !== null;
+  const activeTab: Tab = showTabs ? tab : "mine";
 
   const remove = async (skill: Skill): Promise<void> => {
     if (armedId !== skill.id) {
@@ -64,6 +101,11 @@ export function SkillsView({
     }
   };
 
+  const pickTab = (next: Tab): void => {
+    setTab(next);
+    setNotice("");
+  };
+
   return (
     <section className="settings skills-view" aria-labelledby="skills-title">
       <header className="settings-header">
@@ -72,11 +114,47 @@ export function SkillsView({
           {form ? s.title : s.back}
         </button>
         <h1 id="skills-title">{form ? (form.id ? s.formEditTitle : s.formNewTitle) : s.title}</h1>
-        {!form && <p className="section-lede">{s.intro}</p>}
+        {!form && <p className="section-lede">{activeTab === "team" ? s.team.intro : s.intro}</p>}
+        {showTabs && (
+          <div className="skills-tabs" role="tablist" aria-label={s.team.tabsLabel}>
+            {(["mine", "team"] as const).map((key) => (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                id={`skills-tab-${key}`}
+                aria-selected={activeTab === key}
+                aria-controls={`skills-panel-${key}`}
+                className={`skills-tab${activeTab === key ? " active" : ""}`}
+                onClick={() => pickTab(key)}
+              >
+                {key === "mine" ? s.team.tabMine : s.team.tabTeam}
+              </button>
+            ))}
+          </div>
+        )}
       </header>
-      <div className="settings-body">
+      <div
+        className="settings-body"
+        {...(showTabs ? { role: "tabpanel", id: `skills-panel-${activeTab}`, "aria-labelledby": `skills-tab-${activeTab}` } : {})}
+      >
+        {notice && (
+          <p className="skills-notice" role="status">
+            {notice}
+          </p>
+        )}
         {form ? (
           <SkillForm form={form} onChange={onFormChange} onSaved={onSaved} />
+        ) : activeTab === "team" && team ? (
+          <TeamPanel
+            team={team}
+            onUseTeam={team.onUse}
+            onDuplicated={(created) => {
+              onSaved(created);
+              setTab("mine");
+              setNotice(s.team.duplicated(created.title));
+            }}
+          />
         ) : (
           <>
             {loadError && (
@@ -110,11 +188,21 @@ export function SkillsView({
                 <ul className="grant-list skills-list" aria-label={s.title}>
                   {skills.map((skill) => {
                     const armed = armedId === skill.id;
+                    const state: ShareState | null = team?.sharing ? shareStateFor(skill, team.state.view) : null;
+                    const canShare = state !== null && state.kind === "local";
+                    const canReshare = state !== null && state.kind !== "local" && state.edited;
                     return (
                       <li key={skill.id} className="grant-card skill-card">
                         <div className="skill-text">
-                          <p className="skill-title">{skill.title}</p>
+                          <p className="skill-title">
+                            {skill.title}
+                            {state && <ShareBadge state={state} />}
+                          </p>
                           <p className="skill-description">{skill.description}</p>
+                          {state && state.kind === "rejected" && state.reason && (
+                            <p className="skill-share-note">{s.team.rejectReason(state.reason)}</p>
+                          )}
+                          {canReshare && <p className="skill-share-note">{s.team.editedNote}</p>}
                         </div>
                         <div className="grant-actions">
                           <button
@@ -125,6 +213,16 @@ export function SkillsView({
                           >
                             {s.use}
                           </button>
+                          {(canShare || canReshare) && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              aria-label={canShare ? s.team.shareLabel(skill.title) : s.team.reshareLabel(skill.title)}
+                              onClick={() => setSharing({ skill, reshare: canReshare })}
+                            >
+                              {canShare ? s.team.share : s.team.reshare}
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="btn btn-ghost btn-sm"
@@ -153,9 +251,373 @@ export function SkillsView({
           </>
         )}
       </div>
+      {sharing && team && (
+        <ShareDialog
+          skill={sharing.skill}
+          reshare={sharing.reshare}
+          team={team}
+          onCancel={() => setSharing(null)}
+          onShared={(title) => {
+            setSharing(null);
+            setNotice(s.team.shared(title));
+          }}
+        />
+      )}
     </section>
   );
 }
+
+// ------------------------------------------------------------- sharing --
+
+function ShareBadge({ state }: { state: ShareState }) {
+  const s = useT().skills.team;
+  const label =
+    state.kind === "local"
+      ? s.statusLocal
+      : state.kind === "pending"
+        ? s.statusPending
+        : state.kind === "approved"
+          ? s.statusApproved
+          : state.kind === "rejected"
+            ? s.statusRejected
+            : s.statusHidden;
+  return <span className={`skill-badge skill-badge-${state.kind}`}>{label}</span>;
+}
+
+/** Localized text for a team problem. */
+export function teamProblemText(t: Strings, problem: TeamProblem): string {
+  const s = t.skills.team;
+  switch (problem) {
+    case "disabled":
+      return s.disabled;
+    case "expired":
+      return s.expired;
+    case "forbidden":
+      return s.forbidden;
+    case "rate_limited":
+      return s.rateLimited;
+    case "offline":
+      return s.offline;
+    case "invalid":
+      return s.invalid;
+    default:
+      return s.generic;
+  }
+}
+
+function ProblemLine({ problem, onSignIn }: { problem: TeamProblem; onSignIn: () => void }) {
+  const t = useT();
+  return (
+    <p className={problem === "rate_limited" || problem === "offline" ? "skills-notice" : "inline-error"} role="alert">
+      {teamProblemText(t, problem)}
+      {problem === "expired" && (
+        <>
+          {" "}
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onSignIn}>
+            {t.skills.team.signIn}
+          </button>
+        </>
+      )}
+    </p>
+  );
+}
+
+/**
+ * The confirmation before sharing: EXACTLY what teammates will see (title,
+ * description, the rendered instructions, the file names) and the warning.
+ */
+function ShareDialog({
+  skill,
+  reshare,
+  team,
+  onCancel,
+  onShared,
+}: {
+  skill: Skill;
+  reshare: boolean;
+  team: TeamProps;
+  onCancel: () => void;
+  onShared: (title: string) => void;
+}) {
+  const t = useT();
+  const s = t.skills.team;
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<TeamProblem | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  const confirm = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setProblem(null);
+    const link = team.state.view.links[skill.id] ?? null;
+    const result = await shareSkill(team.profileId, skill, link);
+    setBusy(false);
+    if (result.ok) {
+      team.onState({ ...team.state, view: result.view });
+      onShared(skill.title);
+      return;
+    }
+    setProblem(result.problem);
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
+      <div
+        className="modal share-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="share-title"
+        aria-describedby="share-warning"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <h2 id="share-title">{reshare ? s.dialogResubmitTitle : s.dialogTitle}</h2>
+        <p className="modal-note">{s.dialogLede}</p>
+        <div className="share-preview" aria-label={s.dialogLede}>
+          <p className="skill-title">{skill.title}</p>
+          <p className="skill-description">{skill.description}</p>
+          <div className="share-preview-body">
+            <Markdown text={skill.instructions} />
+          </div>
+          {skill.references.length > 0 && (
+            <>
+              <p className="skill-label">{s.referencesLabel}</p>
+              <ul className="skill-files">
+                {skill.references.map((reference) => (
+                  <li key={reference.name} className="skill-file">
+                    <IconFile size={14} />
+                    <span className="skill-file-name">{reference.name}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+        <p id="share-warning" className="share-warning">
+          {s.warning}
+        </p>
+        {problem && <ProblemLine problem={problem} onSignIn={team.onSignIn} />}
+        <div className="modal-actions">
+          <button ref={cancelRef} type="button" className="btn btn-ghost" onClick={onCancel}>
+            {t.skills.cancel}
+          </button>
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void confirm()}>
+            {busy ? s.sharing : reshare ? s.reshare : s.confirm}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------- the library --
+
+function formatDate(value: string, locale: string): string {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(locale);
+}
+
+function TeamPanel({
+  team,
+  onUseTeam,
+  onDuplicated,
+}: {
+  team: TeamProps;
+  onUseTeam: (meta: TeamMeta) => void;
+  onDuplicated: (created: Skill) => void;
+}) {
+  const { t, locale } = useI18n();
+  const s = t.skills.team;
+  const [viewing, setViewing] = useState<{ meta: TeamMeta; skill: TeamSkill } | null>(null);
+  const [problem, setProblem] = useState<TeamProblem | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [duplicateError, setDuplicateError] = useState("");
+  const library = teamLibrary(team.state.view);
+  const syncProblem = team.state.problem;
+
+  /** The cached bundle (fetched and cached when missing). */
+  const load = async (meta: TeamMeta): Promise<TeamSkill | null> => {
+    setBusyId(meta.id);
+    setProblem(null);
+    setDuplicateError("");
+    const result = await loadTeamSkill(team.profileId, meta.id);
+    setBusyId(null);
+    if ("problem" in result) {
+      setProblem(result.problem);
+      return null;
+    }
+    const { view } = team.state;
+    if (!(meta.id in view.cached)) {
+      team.onState({ ...team.state, view: { ...view, cached: { ...view.cached, [meta.id]: meta.updated_at } } });
+    }
+    return result.skill;
+  };
+
+  const open = async (meta: TeamMeta): Promise<void> => {
+    const skill = await load(meta);
+    if (skill) setViewing({ meta, skill });
+  };
+
+  const use = async (meta: TeamMeta): Promise<void> => {
+    if (await load(meta)) onUseTeam(meta);
+  };
+
+  const duplicate = async (meta: TeamMeta): Promise<void> => {
+    const skill = await load(meta);
+    if (!skill) return;
+    try {
+      const created = await createSkill({
+        title: skill.title,
+        description: skill.description,
+        instructions: skill.instructions,
+        references: skill.references.map((reference) => ({ ...reference })),
+      });
+      onDuplicated(created);
+    } catch (err) {
+      setDuplicateError(skillErrorText(t, err));
+    }
+  };
+
+  if (syncProblem === "disabled") {
+    return (
+      <div className="skills-empty">
+        <IconBolt size={28} />
+        <p className="empty-title">{s.disabled}</p>
+      </div>
+    );
+  }
+
+  const actions = (meta: TeamMeta) => (
+    <>
+      <button
+        type="button"
+        className="btn btn-primary btn-sm"
+        aria-label={s.useLabel(meta.title)}
+        disabled={busyId === meta.id}
+        onClick={() => void use(meta)}
+      >
+        {s.use}
+      </button>
+      <button
+        type="button"
+        className="btn btn-ghost btn-sm"
+        aria-label={s.duplicateLabel(meta.title)}
+        disabled={busyId === meta.id}
+        onClick={() => void duplicate(meta)}
+      >
+        {s.duplicate}
+      </button>
+    </>
+  );
+
+  const problems = (
+    <>
+      {syncProblem && <ProblemLine problem={syncProblem} onSignIn={team.onSignIn} />}
+      {problem && problem !== syncProblem && <ProblemLine problem={problem} onSignIn={team.onSignIn} />}
+      {duplicateError && (
+        <p className="inline-error" role="alert">
+          {duplicateError}
+        </p>
+      )}
+    </>
+  );
+
+  if (viewing) {
+    const { meta, skill } = viewing;
+    return (
+      <article className="team-skill-detail" aria-labelledby="team-skill-title">
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setViewing(null)}>
+          <IconArrowLeft size={16} />
+          {s.back}
+        </button>
+        <h2 id="team-skill-title">{skill.title}</h2>
+        <p className="skill-provenance">{s.sharedBy(meta.author_name || skill.author_name)}</p>
+        <p className="skill-description">{skill.description}</p>
+        <div className="team-skill-body">
+          <Markdown text={skill.instructions} />
+        </div>
+        {skill.references.length > 0 && (
+          <>
+            <p className="skill-label">{s.referencesLabel}</p>
+            <ul className="skill-files">
+              {skill.references.map((reference) => (
+                <li key={reference.name} className="skill-file">
+                  <IconFile size={14} />
+                  <span className="skill-file-name">{reference.name}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        {problems}
+        <div className="grant-actions">{actions(meta)}</div>
+      </article>
+    );
+  }
+
+  return (
+    <>
+      {problems}
+      {syncProblem && syncProblem !== "rate_limited" && syncProblem !== "offline" && library.length === 0 && (
+        <button type="button" className="btn btn-ghost btn-sm" onClick={team.onRetry}>
+          {s.retry}
+        </button>
+      )}
+      {library.length === 0 ? (
+        !syncProblem && (
+          <div className="skills-empty">
+            <IconBolt size={28} />
+            <p className="empty-title">{s.empty}</p>
+          </div>
+        )
+      ) : (
+        <ul className="grant-list skills-list" aria-label={s.tabTeam}>
+          {library.map((meta) => {
+            const date = formatDate(meta.updated_at, locale);
+            return (
+              <li key={meta.id} className="grant-card skill-card">
+                <div className="skill-text">
+                  <p className="skill-title">
+                    {meta.title}
+                    {meta.featured && <span className="skill-badge skill-badge-featured">{s.featured}</span>}
+                  </p>
+                  <p className="skill-description">{meta.description}</p>
+                  <p className="skill-provenance">
+                    {s.sharedBy(meta.author_name)}
+                    {date && ` · ${s.updated(date)}`}
+                  </p>
+                </div>
+                <div className="grant-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    aria-label={s.viewLabel(meta.title)}
+                    disabled={busyId === meta.id}
+                    onClick={() => void open(meta)}
+                  >
+                    {s.view}
+                  </button>
+                  {actions(meta)}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
+  );
+}
+
+// ------------------------------------------------------------- the form --
 
 function SkillForm({
   form,
