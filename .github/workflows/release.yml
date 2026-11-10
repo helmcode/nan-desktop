@@ -52,9 +52,9 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
           fail=0
-          grep -q "\"version\": \"$tag\"" src-tauri/tauri.conf.json || { echo "::error::src-tauri/tauri.conf.json version != $tag"; fail=1; }
-          grep -q "^version = \"$tag\"" src-tauri/Cargo.toml || { echo "::error::src-tauri/Cargo.toml version != $tag"; fail=1; }
-          grep -q "\"version\": \"$tag\"" package.json || { echo "::error::package.json version != $tag"; fail=1; }
+          grep -Fq "\"version\": \"$tag\"" src-tauri/tauri.conf.json || { echo "::error::src-tauri/tauri.conf.json version != $tag"; fail=1; }
+          grep -Fq "version = \"$tag\"" src-tauri/Cargo.toml || { echo "::error::src-tauri/Cargo.toml version != $tag"; fail=1; }
+          grep -Fq "\"version\": \"$tag\"" package.json || { echo "::error::package.json version != $tag"; fail=1; }
           [ "$fail" -eq 0 ] || exit 1
       - name: Create or reuse draft release
         id: release

@@ -56,6 +56,7 @@ die() { printf '[macos-sign] ERROR: %s\n' "$*" >&2; exit 1; }
 # the bundle carries them.
 ENTITLEMENTS=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src-tauri/Entitlements.plist
 
+[ -f "$ENTITLEMENTS" ] || die "entitlements not found: $ENTITLEMENTS"
 [ -d "$APP" ] || die "app bundle not found: $APP"
 [ -f "$DMG" ] || die "dmg not found: $DMG"
 APP_NAME=$(basename "$APP")
