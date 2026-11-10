@@ -1,6 +1,6 @@
 [package]
 name = "nan-desktop"
-version = "0.2.0"
+version = "0.2.1"
 description = "nan-desktop — native desktop app for the NaN and Helmcode inference platforms (Tauri v2, zero telemetry)"
 authors = ["Helmcode S.L."]
 edition = "2024"

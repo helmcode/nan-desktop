@@ -51,6 +51,11 @@ APP=${APP%/}
 log() { printf '[macos-sign] %s\n' "$*" >&2; }
 die() { printf '[macos-sign] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Entitlements for the hardened-runtime bundle signature (microphone access
+# for push-to-talk STT). Nested binaries are signed WITHOUT entitlements; only
+# the bundle carries them.
+ENTITLEMENTS=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src-tauri/Entitlements.plist
+
 [ -d "$APP" ] || die "app bundle not found: $APP"
 [ -f "$DMG" ] || die "dmg not found: $DMG"
 APP_NAME=$(basename "$APP")
@@ -134,7 +139,8 @@ sign_app() {
     while IFS= read -r -d '' f; do
       "${cs[@]}" "$f"
     done < <(find "$app/Contents" -type d -name '*.framework' -print0)
-    "${cs[@]}" "$app"
+    # The bundle itself carries the entitlements (audio input for STT).
+    "${cs[@]}" --entitlements "$ENTITLEMENTS" "$app"
   fi
 }
 
@@ -151,6 +157,10 @@ verify_app() {
   if [ "$MODE" = developer-id ]; then
     printf '%s\n' "$info" | grep -q 'TeamIdentifier=not set' && die "$app: TeamIdentifier not set"
     printf '%s\n' "$info" | grep -q 'flags=.*runtime' || die "$app: hardened runtime missing"
+    # The bundle must carry the audio-input entitlement or push-to-talk STT
+    # is silently denied under hardened runtime.
+    codesign -d --entitlements - "$app" 2>/dev/null | grep -q 'com.apple.security.device.audio-input' \
+      || die "$app: audio-input entitlement missing"
   fi
 }
 
@@ -161,6 +171,10 @@ notarize() {
   if [ "$NOTARY" = api-key ]; then
     printf '%s' "$APPLE_API_KEY" > "$WORK/AuthKey.p8"
     chmod 600 "$WORK/AuthKey.p8"
+    # Fail loudly on the classic mix-up: pasting the base64 of the .p8 instead
+    # of its contents gives notarytool errors that are hard to read.
+    grep -q 'BEGIN PRIVATE KEY' "$WORK/AuthKey.p8" \
+      || die "APPLE_API_KEY does not look like a .p8 (no BEGIN PRIVATE KEY); paste the file contents, not base64"
     creds=(--key "$WORK/AuthKey.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
   else
     creds=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")

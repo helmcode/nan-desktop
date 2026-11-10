@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!-- Merged into the generated bundle Info.plist by the Tauri bundler.
+         Without NSMicrophoneUsageDescription, TCC denies mic access to the
+         Developer-ID-signed build silently (push-to-talk STT breaks). -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Helmcode Desktop uses the microphone for push-to-talk speech-to-text when you hold the voice shortcut.</string>
+  </dict>
+</plist>
