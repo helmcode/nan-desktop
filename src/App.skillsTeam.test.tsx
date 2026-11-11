@@ -503,7 +503,7 @@ describe("An interrupted bundle round (round 14/S3)", () => {
   it("speaks Spanish: the preparing badge", async () => {
     setup({ rows: [meta("a", { title: "Alpha" })], bundle: () => ({ status: 429 }) });
     renderApp("es");
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills("Ajustes", "Skills");
     await openTeamTab("Equipo");
     expect(await screen.findByText("Se está preparando…")).toBeTruthy();
   });

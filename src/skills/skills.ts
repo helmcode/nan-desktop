@@ -296,6 +296,8 @@ export function skillErrorText(t: Strings, err: unknown): string {
       return e.bundleTooLarge;
     case "too_many_files":
       return e.tooManyFiles;
+    case "secret_detected":
+      return e.secretDetected(core.path ?? "SKILL.md");
     case "file_too_large":
       return core.path === "SKILL.md" ? e.tooLarge : e.fileTooLarge(name);
     case "extension":

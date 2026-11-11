@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Platform
+- The user menu's account section also offers Update while a newer version
+  exists, so closing the banner does not hide it.
+- Settings: opening Settings from the user menu now switches the whole window
+  to a section layout (Account, Working folders, Memory, Language) with its
+  own sidebar; leaving Settings returns to the chat exactly as it was.
 - macOS: fixed "Helmcode Desktop is damaged and can't be opened". 0.2.0
   shipped an app that was only linker-signed (bundle resources not sealed).
   Release builds now get a verified bundle signature, and the app inside the
@@ -74,6 +79,15 @@
   the Image Studio" and returns to the same Studio session.
 
 ### Skills
+- A team bundle round stopped by a rate limit or an expired session retries in
+  60 seconds, then 5 minutes, instead of waiting the 15-minute refresh; Team
+  rows whose bundle is not cached yet show "Preparing" instead of looking
+  ready.
+- The "Save as skill" scaffold follows the skill-creator method: the body is
+  the conversation instructions under a "~ Working order" heading (byte-
+  identical when regenerated), the description guide asks for what it does
+  plus trigger phrases, and a blocking secret detector refuses to generate,
+  validate or publish a bundle carrying credentials.
 - New **Skills** section in the sidebar: save instructions you reuse and
   turn them on in any conversation. A skill is three fields (name, what it
   is for, instructions) plus up to 5 optional reference files (.md, .txt,

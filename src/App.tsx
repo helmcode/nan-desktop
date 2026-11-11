@@ -34,7 +34,7 @@ import { LanguageScreen } from "./components/LanguageScreen";
 import { SaveImageButton, type SaveImageResult } from "./components/SaveImageButton";
 import { Toast, type ToastNotice } from "./components/Toast";
 import { UpdateBanner, UPDATE_CHECK_INTERVAL_MS } from "./components/UpdateBanner";
-import { UserMenu, type UserMenuUpdate } from "./components/UserMenu";
+import { UserMenu, type SettingsPane, type SettingsSection } from "./components/UserMenu";
 import {
   DEFAULT_IMAGE_SIZE,
   IMAGE_SIZES,
