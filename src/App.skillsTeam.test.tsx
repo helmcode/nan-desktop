@@ -48,6 +48,8 @@ function weekly(patch: Partial<Skill> = {}): Skill {
 type Setup = {
   profile?: "nan" | "helmcode";
   sharing?: boolean;
+  /** Override for `GET /api/auth/me` (round 13: the identity chip). */
+  me?: { status: number; body?: Record<string, unknown> };
   skills?: Skill[];
   rows?: TeamMeta[];
   links?: Record<string, ShareLink>;
@@ -65,6 +67,7 @@ function setup(opts: Setup = {}) {
   let created = 0;
   const route = (req: ApiRequest): ApiReply => {
     if (req.path === "/api/auth/me") {
+      if (opts.me) return { status: opts.me.status, body: opts.me.body ?? {} };
       return { status: 200, body: { email: "ana@example.com", ...(opts.sharing ? { skills_sharing: true } : {}) } };
     }
     if (req.method === "GET" && req.path === "/api/skills") {
@@ -157,6 +160,20 @@ afterEach(() => {
 });
 
 describe("Share with my team: gating", () => {
+  it("round 13: the bottom-left chip shows the signed-in user's email", async () => {
+    setup({ profile: "helmcode" });
+    renderApp();
+    await screen.findByText("ana@example.com");
+    expect(screen.queryByText("Helmcode for teams")).toBeNull();
+  });
+
+  it("round 13: without /api/auth/me the chip keeps the platform label", async () => {
+    setup({ profile: "helmcode", me: { status: 404, body: {} } });
+    renderApp();
+    await screen.findByText("Helmcode for teams");
+    expect(screen.queryByText("ana@example.com")).toBeNull();
+  });
+
   it("is hidden on the community profile even with the flag, and NaN never calls the library", async () => {
     const { core } = setup({ profile: "nan", sharing: true, skills: [weekly()] });
     renderApp();
@@ -164,7 +181,9 @@ describe("Share with my team: gating", () => {
     expect(await screen.findByText("Weekly report")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /with my team/ })).toBeNull();
     expect(screen.queryByRole("tablist")).toBeNull();
-    expect(core.requests).toEqual([]);
+    // Round 13: the only allowed community call is the identity read of the
+    // bottom-left chip; no skills/library surfaces may fire.
+    expect(core.requests).toEqual([{ method: "GET", path: "/api/auth/me", body: null, ifNoneMatch: null }]);
   });
 
   it("is hidden on Helmcode when the org flag is off (the Team tab still exists)", async () => {

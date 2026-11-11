@@ -89,6 +89,7 @@ import {
   EMPTY_VIEW,
   TEAM_PROFILE,
   TEAM_SYNC_INTERVAL_MS,
+  fetchIdentity,
   fetchSkillsSharing,
   isTeamSkillId,
   loadCache,
@@ -603,6 +604,22 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [sttHint, setSttHint] = useState("");
   const recorderRef = useRef<MediaRecorder | null>(null);
 
+  // Round 13: the signed-in user's email for the bottom-left chip. Fetched on
+  // profile change; a miss keeps the platform label (both tenants answer
+  // /api/auth/me, but a session that cannot read it must not break the chip).
+  const [userEmail, setUserEmail] = useState<{ [profileId: string]: string }>({});
+  useEffect(() => {
+    const profileId = overview.active_profile;
+    if (!profileId) return;
+    let alive = true;
+    fetchIdentity(profileId).then(({ email }) => {
+      if (!alive || !email) return;
+      setUserEmail((prev) => (prev[profileId] === email ? prev : { ...prev, [profileId]: email }));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [overview.active_profile]);
   const activeProfileRef = useRef<string | null>(overview.active_profile);
   useEffect(() => {
     activeProfileRef.current = overview.active_profile;
@@ -1593,7 +1610,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     return chatErrorLabel(t, code);
   };
 
-  const accountName = activeProfile ? profileTitle(t, activeProfile.id, activeProfile.name) : t.sidebar.noAccount;
+  const profileLabel = activeProfile ? profileTitle(t, activeProfile.id, activeProfile.name) : t.sidebar.noAccount;
+  const accountName = (activeProfile && userEmail[activeProfile.id]) || profileLabel;
   const placed = placeCards(approvals, activeConvId, messages.length);
   // The open conversation's allow-mode suggestion, anchored like the cards.
   const activeNudge = nudges.active.find((nudge) => nudge.conversationId === activeConvId);

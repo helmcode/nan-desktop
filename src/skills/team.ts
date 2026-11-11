@@ -186,6 +186,27 @@ export async function fetchSkillsSharing(profileId: string): Promise<boolean> {
   }
 }
 
+/** The signed-in user's email (round 13: the bottom-left chip shows it).
+ * Both tenants answer /api/auth/me; enterprise is flat, community may nest
+ * it under a user object, and a miss simply asks the chip for its fallback. */
+export async function fetchIdentity(profileId: string): Promise<{ email: string | null }> {
+  try {
+    const res = await request(profileId, "GET", ME_PATH);
+    if (res.status !== 200 || res.body === null || typeof res.body !== "object") return { email: null };
+    const body = res.body as Record<string, unknown>;
+    const user = body.user as Record<string, unknown> | undefined;
+    const email =
+      typeof body.email === "string" && body.email
+        ? body.email
+        : user && typeof user.email === "string" && user.email
+          ? user.email
+          : null;
+    return { email };
+  } catch {
+    return { email: null };
+  }
+}
+
 // ----------------------------------------------------------------- sync --
 
 function asMeta(value: unknown): TeamMeta | null {
