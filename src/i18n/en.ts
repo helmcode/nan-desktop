@@ -88,7 +88,6 @@ export const en = {
     history: "History",
     newChat: "New chat",
     studio: "Image Studio",
-    skills: "Skills",
     /** Tooltip on chat switches while an Image Studio edit runs. */
     switchBlocked: "Wait for the image edit to finish before switching chats",
     empty: "Your chats will appear here.",
@@ -236,6 +235,7 @@ export const en = {
   },
   settings: {
     title: "Settings",
+    sections: "Settings sections",
     back: "Back to chat",
     backToStudio: "Back to the Image Studio",
     folders: {

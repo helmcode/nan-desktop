@@ -34,7 +34,7 @@ import { LanguageScreen } from "./components/LanguageScreen";
 import { SaveImageButton, type SaveImageResult } from "./components/SaveImageButton";
 import { Toast, type ToastNotice } from "./components/Toast";
 import { UpdateBanner, UPDATE_CHECK_INTERVAL_MS } from "./components/UpdateBanner";
-import { UserMenu, type SettingsSection } from "./components/UserMenu";
+import { UserMenu, type UserMenuUpdate } from "./components/UserMenu";
 import {
   DEFAULT_IMAGE_SIZE,
   IMAGE_SIZES,
@@ -62,14 +62,16 @@ import {
   type UpdateInfo,
 } from "./core";
 import { VOICE_UI } from "./flags";
-import { useI18n, useT } from "./i18n";
+import { useI18n, useT, type Strings } from "./i18n";
 import {
   IconArrowUp,
   IconBolt,
   IconChevronDown,
   IconFile,
   IconFolder,
+  IconGear,
   IconGlobe,
+  IconMemory,
   IconMic,
   IconPanel,
   IconImage,
@@ -185,6 +187,44 @@ const RECORDING_MIME_CANDIDATES = ["audio/webm", "audio/mp4"];
 
 // Preview state key for a chat that has no conversation row yet.
 const NEW_CHAT_KEY = -1;
+
+// Round 14 (S2): the Settings surface lists its sections in the sidebar that
+// normally holds the chats, and shows one section at a time. Order is the
+// reading order of the owner's reference; Account comes first because it is
+// where "about" and sign out live.
+const SETTINGS_SECTIONS: readonly SettingsPane[] = ["account", "folders", "memory", "language", "skills"];
+
+/// The sidebar text of a Settings section (existing keys, no new copy).
+function settingsSectionLabel(t: Strings, section: SettingsPane): string {
+  switch (section) {
+    case "account":
+      return t.userMenu.account;
+    case "folders":
+      return t.settings.folders.title;
+    case "memory":
+      return t.settings.memory.title;
+    case "language":
+      return t.settings.language.title;
+    case "skills":
+      return t.skills.title;
+  }
+}
+
+/// The sidebar glyph of a Settings section (the same icon set as the rail).
+function SettingsSectionIcon({ section }: { section: SettingsPane }) {
+  switch (section) {
+    case "account":
+      return <IconGear size={16} />;
+    case "folders":
+      return <IconFolder size={16} />;
+    case "memory":
+      return <IconMemory size={16} />;
+    case "language":
+      return <IconGlobe size={16} />;
+    case "skills":
+      return <IconBolt size={16} />;
+  }
+}
 
 /// A copy of `set` without `key` (state updates never mutate).
 function withoutKey(set: Set<number>, key: number): Set<number> {
@@ -484,12 +524,13 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const activeProfile: ProfileView | undefined = overview.profiles.find((p) => p.id === overview.active_profile);
   const workspace = useWorkspace(overview.active_profile);
 
-  const [view, setView] = useState<"chat" | "settings" | "studio" | "skills">("chat");
+  const [view, setView] = useState<"chat" | "settings" | "studio">("chat");
   const viewRef = useRef(view);
   useEffect(() => {
     viewRef.current = view;
   }, [view]);
-  const [settingsFocus, setSettingsFocus] = useState<SettingsSection>(null);
+  // Which Settings section the surface shows (the sidebar picks it).
+  const [settingsSection, setSettingsSection] = useState<SettingsPane>("account");
   const [askComputerWide, setAskComputerWide] = useState(false);
 
   const [conversations, setConversations] = useState<ConversationView[]>([]);
@@ -1544,16 +1585,41 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   }, [workspace]);
 
   // Settings' Back returns to where it was opened from: the Studio (its
-  // grant refusal's "Open Settings") or the chat.
+  // grant refusal's "Open Settings") or the chat. `null` asks for the first
+  // section (Account), which is what the menu's own "Settings" entry means.
   const [settingsReturn, setSettingsReturn] = useState<"chat" | "studio">("chat");
-  const openSettings = useCallback((section: SettingsSection): void => {
+  const openSettings = useCallback((target: SettingsSection): void => {
     if (viewRef.current !== "settings") setSettingsReturn(viewRef.current === "studio" ? "studio" : "chat");
     // Never a Back loop (Studio -> Settings -> Studio -> Settings...).
     if (viewRef.current === "studio" && studioReturnRef.current === "settings") studioReturnRef.current = "chat";
-    setSettingsFocus(section);
+    setSettingsSection(target ?? "account");
     setView("settings");
   }, []);
   const openFolderSettings = useCallback((): void => openSettings("folders"), [openSettings]);
+
+  // Leaving Settings returns to where it was opened from. The chat pane is
+  // unmounted while Settings is open (its state lives here, so the open
+  // conversation and the composer survive), hence the focus comes back in an
+  // effect once it is mounted again: the entry point is the composer, the
+  // same as when the Skills view returned to the chat.
+  const focusChatOnReturn = useRef(false);
+  const settingsNavRef = useRef<HTMLElement | null>(null);
+  const leaveSettings = useCallback((): void => {
+    focusChatOnReturn.current = settingsReturn === "chat";
+    setView(settingsReturn);
+  }, [settingsReturn]);
+  useEffect(() => {
+    if (view !== "chat" || !focusChatOnReturn.current) return;
+    focusChatOnReturn.current = false;
+    composerRef.current?.focus();
+  }, [view]);
+
+  // Entering Settings puts the keyboard in the section list: the menu item
+  // that opened it is gone with the chat sidebar.
+  useEffect(() => {
+    if (view !== "settings") return;
+    settingsNavRef.current?.querySelector<HTMLButtonElement>('[aria-current="page"]')?.focus();
+  }, [view]);
 
   const submit = (): void => {
     void (imageMode ? sendImage() : send());
@@ -1588,11 +1654,14 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     setActiveSkills((prev) => withActiveSkill(prev, activeConvRef.current ?? NEW_CHAT_KEY, null));
   }, []);
 
-  const openSkills = useCallback((form: SkillDraft | null): void => {
-    setSkillPickerOpen(false);
-    setSkillForm(form);
-    setView("skills");
-  }, []);
+  const openSkills = useCallback(
+    (form: SkillDraft | null): void => {
+      setSkillPickerOpen(false);
+      setSkillForm(form);
+      openSettings("skills");
+    },
+    [openSettings],
+  );
 
   const onSkillSaved = useCallback((saved: Skill): void => {
     setSkills((prev) => upsertSkill(prev, saved));
@@ -1618,10 +1687,10 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   /// "Use" on a team skill (its bundle is already cached by the view).
   const activateTeamSkill = useCallback((meta: TeamMeta): void => activateSkill(teamAsSkill(meta)), [activateSkill]);
 
-  // Opening the Skills view refreshes the team library (a 304 when quiet).
+  // Opening the Skills section refreshes the team library (a 304 when quiet).
   useEffect(() => {
-    if (view === "skills") void syncTeamLibrary();
-  }, [view, syncTeamLibrary]);
+    if (view === "settings" && settingsSection === "skills") void syncTeamLibrary();
+  }, [view, settingsSection, syncTeamLibrary]);
 
   /// Composer keys while the skill picker is open: arrows move, Enter picks,
   /// Escape closes. Returns true when the key was handled.
@@ -1773,85 +1842,99 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
 
   return (
     <main className="shell">
-      <aside className="sidebar" aria-label={t.sidebar.conversations}>
+      {/* Round 14 (S2): inside Settings the same sidebar lists the sections
+          instead of the chats, so the whole window becomes Settings. */}
+      <aside className="sidebar" aria-label={view === "settings" ? t.settings.sections : t.sidebar.conversations}>
         <div className="sidebar-top">
           <div className="sidebar-brand">
             <BrandMark size="sm" />
             <span className="sidebar-name">{t.app.name}</span>
           </div>
-          <button
-            type="button"
-            className="btn btn-primary new-chat-btn"
-            onClick={newChat}
-            aria-disabled={studioBusy ? "true" : undefined}
-            title={studioBusy ? t.sidebar.switchBlocked : undefined}
-          >
-            <IconPlus size={16} />
-            {t.sidebar.newChat}
-          </button>
-          <button
-            type="button"
-            className={`sidebar-link${view === "studio" ? " active" : ""}`}
-            aria-current={view === "studio" ? "page" : undefined}
-            onClick={() => openStudio(null)}
-          >
-            <IconImage size={16} />
-            {t.sidebar.studio}
-          </button>
-          <button
-            type="button"
-            className={`sidebar-link${view === "skills" ? " active" : ""}`}
-            aria-current={view === "skills" ? "page" : undefined}
-            onClick={() => openSkills(null)}
-          >
-            <IconBolt size={16} />
-            {t.sidebar.skills}
-          </button>
-        </div>
-        <nav className="conv-list" aria-label={t.sidebar.history}>
-          {conversations.length === 0 && <p className="conv-empty">{t.sidebar.empty}</p>}
-          {conversations.map((c) => {
-            const armed = pendingDeleteId === c.id;
-            const live = streamingIds.has(c.id) || imageGeneratingIds.has(c.id);
-            // A Studio edit writing to this conversation also locks its delete.
-            const editLocked = studioBusy && studioJobsRef.current.has(c.id);
-            return (
-              <div
-                key={c.id}
-                className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}${live ? " streaming" : ""}`}
+          {view !== "settings" && (
+            <>
+              <button
+                type="button"
+                className="btn btn-primary new-chat-btn"
+                onClick={newChat}
+                aria-disabled={studioBusy ? "true" : undefined}
+                title={studioBusy ? t.sidebar.switchBlocked : undefined}
               >
-                <button
-                  type="button"
-                  className="conv-main"
-                  onClick={() => selectConversation(c.id)}
-                  aria-disabled={studioBusy ? "true" : undefined}
-                  title={studioBusy ? t.sidebar.switchBlocked : c.title}
-                  aria-current={c.id === activeConvId ? "page" : undefined}
+                <IconPlus size={16} />
+                {t.sidebar.newChat}
+              </button>
+              <button
+                type="button"
+                className={`sidebar-link${view === "studio" ? " active" : ""}`}
+                aria-current={view === "studio" ? "page" : undefined}
+                onClick={() => openStudio(null)}
+              >
+                <IconImage size={16} />
+                {t.sidebar.studio}
+              </button>
+            </>
+          )}
+        </div>
+        {view === "settings" ? (
+          <nav className="settings-nav" aria-label={t.settings.sections} ref={settingsNavRef}>
+            {SETTINGS_SECTIONS.map((section) => (
+              <button
+                key={section}
+                type="button"
+                className={`sidebar-link${settingsSection === section ? " active" : ""}`}
+                aria-current={settingsSection === section ? "page" : undefined}
+                onClick={() => setSettingsSection(section)}
+              >
+                <SettingsSectionIcon section={section} />
+                {settingsSectionLabel(t, section)}
+              </button>
+            ))}
+          </nav>
+        ) : (
+          <nav className="conv-list" aria-label={t.sidebar.history}>
+            {conversations.length === 0 && <p className="conv-empty">{t.sidebar.empty}</p>}
+            {conversations.map((c) => {
+              const armed = pendingDeleteId === c.id;
+              const live = streamingIds.has(c.id) || imageGeneratingIds.has(c.id);
+              // A Studio edit writing to this conversation also locks its delete.
+              const editLocked = studioBusy && studioJobsRef.current.has(c.id);
+              return (
+                <div
+                  key={c.id}
+                  className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}${live ? " streaming" : ""}`}
                 >
-                  <span className="conv-title">{c.title}</span>
-                  {live && (
-                    <>
-                      <span className="pulse-dot" aria-hidden="true" />
-                      {/* Inline spans concatenate in the accessible name:
-                          the space keeps it "Fox Replying", not "FoxReplying". */}{" "}
-                      <span className="visually-hidden">{t.sidebar.replying}</span>
-                    </>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  className={`conv-delete${armed ? " armed" : ""}`}
-                  aria-label={armed ? t.sidebar.deleteArmedLabel(c.title) : t.sidebar.deleteLabel(c.title)}
-                  aria-disabled={editLocked ? "true" : undefined}
-                  title={editLocked ? t.sidebar.switchBlocked : armed ? t.sidebar.deleteArmedTitle : t.sidebar.deleteTitle}
-                  onClick={() => confirmDeleteConversation(c.id)}
-                >
-                  {armed ? t.sidebar.deleteArmed : <IconTrash size={15} />}
-                </button>
-              </div>
-            );
-          })}
-        </nav>
+                  <button
+                    type="button"
+                    className="conv-main"
+                    onClick={() => selectConversation(c.id)}
+                    aria-disabled={studioBusy ? "true" : undefined}
+                    title={studioBusy ? t.sidebar.switchBlocked : c.title}
+                    aria-current={c.id === activeConvId ? "page" : undefined}
+                  >
+                    <span className="conv-title">{c.title}</span>
+                    {live && (
+                      <>
+                        <span className="pulse-dot" aria-hidden="true" />
+                        {/* Inline spans concatenate in the accessible name:
+                            the space keeps it "Fox Replying", not "FoxReplying". */}{" "}
+                        <span className="visually-hidden">{t.sidebar.replying}</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className={`conv-delete${armed ? " armed" : ""}`}
+                    aria-label={armed ? t.sidebar.deleteArmedLabel(c.title) : t.sidebar.deleteLabel(c.title)}
+                    aria-disabled={editLocked ? "true" : undefined}
+                    title={editLocked ? t.sidebar.switchBlocked : armed ? t.sidebar.deleteArmedTitle : t.sidebar.deleteTitle}
+                    onClick={() => confirmDeleteConversation(c.id)}
+                  >
+                    {armed ? t.sidebar.deleteArmed : <IconTrash size={15} />}
+                  </button>
+                </div>
+              );
+            })}
+          </nav>
+        )}
         <div className="sidebar-bottom">
           <UserMenu
             accountName={accountName}
@@ -1892,43 +1975,50 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           </Suspense>
         </ErrorBoundary>
       )}
-      {view === "studio" ? null : view === "skills" ? (
-        <SkillsView
-          skills={skills}
-          loadError={skillsLoadError}
-          form={skillForm}
-          onFormChange={setSkillForm}
-          onSaved={onSkillSaved}
-          onDeleted={onSkillDeleted}
-          onUse={activateSkill}
-          onBack={() => setView("chat")}
-          team={
-            teamProfile
-              ? {
-                  profileId: teamProfile,
-                  sharing: skillsSharing,
-                  state: teamState,
-                  onState: setTeamState,
-                  onRetry: () => void syncTeamLibrary(),
-                  onUse: activateTeamSkill,
-                  onSignIn: onSignOut,
-                }
-              : null
-          }
-        />
-      ) : view === "settings" ? (
-        <Settings
-          profile={activeProfile}
-          workspace={workspace}
-          voice={voice}
-          onVoiceChange={setVoice}
-          onAskComputerWide={() => setAskComputerWide(true)}
-          onBack={() => setView(settingsReturn)}
-          backLabel={settingsReturn === "studio" ? t.settings.backToStudio : t.settings.back}
-          onSignOut={onSignOut}
-          signingOut={busy}
-          focusSection={settingsFocus}
-        />
+      {view === "studio" ? null : view === "settings" ? (
+        // The surface shows one section at a time; the section list in the
+        // sidebar picks it. `data-section` is what App.css keys the visible
+        // section off (see .settings-surface there).
+        <div className="settings-surface" data-section={settingsSection}>
+          {settingsSection === "skills" ? (
+            <SkillsView
+              skills={skills}
+              loadError={skillsLoadError}
+              form={skillForm}
+              onFormChange={setSkillForm}
+              onSaved={onSkillSaved}
+              onDeleted={onSkillDeleted}
+              onUse={activateSkill}
+              onBack={leaveSettings}
+              team={
+                teamProfile
+                  ? {
+                      profileId: teamProfile,
+                      sharing: skillsSharing,
+                      state: teamState,
+                      onState: setTeamState,
+                      onRetry: () => void syncTeamLibrary(),
+                      onUse: activateTeamSkill,
+                      onSignIn: onSignOut,
+                    }
+                  : null
+              }
+            />
+          ) : (
+            <Settings
+              profile={activeProfile}
+              workspace={workspace}
+              voice={voice}
+              onVoiceChange={setVoice}
+              onAskComputerWide={() => setAskComputerWide(true)}
+              onBack={leaveSettings}
+              backLabel={settingsReturn === "studio" ? t.settings.backToStudio : t.settings.back}
+              onSignOut={onSignOut}
+              signingOut={busy}
+              focusSection={settingsSection}
+            />
+          )}
+        </div>
       ) : (
         <ErrorBoundary
           resetKey={previewKey}

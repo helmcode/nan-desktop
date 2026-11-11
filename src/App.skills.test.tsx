@@ -81,6 +81,15 @@ function renderApp(locale: Locale = "en") {
   );
 }
 
+/// Round 14 (S2): the Skills view is a Settings section now, so the way in
+/// is the account menu and then the section list (no left-rail entry).
+async function openSkills(settings = "Settings", skills = "Skills"): Promise<void> {
+  fireEvent.click(await screen.findByRole("button", { name: /Account menu|Menú de la cuenta/ }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: settings }));
+  fireEvent.click(await screen.findByRole("button", { name: skills }));
+  await screen.findByRole("heading", { name: skills, level: 1 });
+}
+
 async function composer(): Promise<HTMLElement> {
   return screen.findByRole("textbox", { name: "Message" });
 }
@@ -138,11 +147,14 @@ describe("The update button (round 14/S1)", () => {
 });
 
 describe("Skills view", () => {
-  it("is in the sidebar and shows an empty state with a way to create one", async () => {
+  it("opens from the Settings section list, inside Settings, with a way to create one", async () => {
     resetTauri(handlers([]));
     renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
-    expect(await screen.findByRole("heading", { name: "Skills" })).toBeTruthy();
+    await openSkills();
+    // Inside Settings: the section list replaced the conversation sidebar.
+    const nav = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(nav).getByRole("button", { name: "Skills" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByRole("navigation", { name: "History" })).toBeNull();
     expect(screen.getByText("You have no skills yet")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Create a skill" })).toBeTruthy();
   });
@@ -150,7 +162,7 @@ describe("Skills view", () => {
   it("creates a skill from the three fields; the user never sees frontmatter", async () => {
     resetTauri(handlers([]));
     renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills();
     fireEvent.click(await screen.findByRole("button", { name: "Create a skill" }));
     expect(screen.queryByText(/name:|description:|---/)).toBeNull();
     fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Weekly report" } });
@@ -178,7 +190,7 @@ describe("Skills view", () => {
   it("asks for the missing fields before saving", async () => {
     resetTauri(handlers([]));
     renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills();
     fireEvent.click(await screen.findByRole("button", { name: "Create a skill" }));
     fireEvent.click(screen.getByRole("button", { name: "Save skill" }));
     expect((await screen.findByRole("alert")).textContent).toBe("Give the skill a name.");
@@ -188,7 +200,7 @@ describe("Skills view", () => {
   it("rejects 100 KiB of instructions without calling the core", async () => {
     resetTauri(handlers([]));
     renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills();
     fireEvent.click(await screen.findByRole("button", { name: "Create a skill" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Big" } });
     fireEvent.change(screen.getByRole("textbox", { name: "What it is for" }), { target: { value: "Too big" } });
@@ -209,7 +221,7 @@ describe("Skills view", () => {
       },
     });
     renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills();
     fireEvent.click(await screen.findByRole("button", { name: "Create a skill" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "X" } });
     fireEvent.change(screen.getByRole("textbox", { name: "What it is for" }), { target: { value: "Y" } });
@@ -225,7 +237,7 @@ describe("Skills view", () => {
   it("edits (regenerates) and deletes with a second click", async () => {
     resetTauri(handlers([skill(ID_A, "Tone", "Formal tone")]));
     renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills();
     fireEvent.click(await screen.findByRole("button", { name: 'Edit skill "Tone"' }));
     expect(await screen.findByRole("heading", { name: "Edit skill" })).toBeTruthy();
     expect((screen.getByRole("textbox", { name: "Instructions" }) as HTMLTextAreaElement).value).toBe("Tone steps");
@@ -250,7 +262,7 @@ describe("Skills view", () => {
   it("is translated to Spanish", async () => {
     resetTauri(handlers([]));
     renderApp("es");
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills("Ajustes", "Skills");
     expect(await screen.findByText("Todavía no tienes skills")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Crear una skill" }));
     expect(screen.getByRole("textbox", { name: "Para qué sirve" })).toBeTruthy();
@@ -353,9 +365,12 @@ describe("Using a skill in the chat", () => {
   it("Use in chat from the list turns it on and returns to the chat", async () => {
     resetTauri(handlers([skill(ID_A, "Tone", "Formal tone")]));
     renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills();
     fireEvent.click(await screen.findByRole("button", { name: 'Use "Tone" in the chat' }));
     expect(await screen.findByText("Using: Tone")).toBeTruthy();
+    // Using it leaves Settings: the chat is back, section list and all gone.
+    expect(screen.queryByRole("navigation", { name: "Settings sections" })).toBeNull();
+    expect(screen.getByRole("navigation", { name: "History" })).toBeTruthy();
     expect(await composer()).toBeTruthy();
   });
 
@@ -392,6 +407,9 @@ describe("Save as skill", () => {
     await screen.findByText("Summarize my notes weekly");
     fireEvent.click(screen.getByRole("button", { name: "Save as skill" }));
     expect(await screen.findByRole("heading", { name: "New skill" })).toBeTruthy();
+    // The form lives in the Skills section of the Settings surface (round 14).
+    const nav = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(nav).getByRole("button", { name: "Skills" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByText("We copied the start of this chat. Review the text before saving.")).toBeTruthy();
     const instructions = screen.getByRole("textbox", { name: "Instructions" }) as HTMLTextAreaElement;
     expect(instructions.value).toBe("Summarize my notes weekly");

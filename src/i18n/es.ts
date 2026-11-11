@@ -89,7 +89,6 @@ export const es: Strings = {
     history: "Historial",
     newChat: "Nueva conversación",
     studio: "Estudio de imagen",
-    skills: "Skills",
     switchBlocked: "Espera a que termine la edición de imagen para cambiar de conversación",
     empty: "Tus conversaciones aparecerán aquí.",
     deleteArmedLabel: (title: string) => `Pulsa otra vez para borrar «${title}» para siempre`,
@@ -235,6 +234,7 @@ export const es: Strings = {
   },
   settings: {
     title: "Ajustes",
+    sections: "Secciones de ajustes",
     back: "Volver al chat",
     backToStudio: "Volver al Estudio de imagen",
     folders: {

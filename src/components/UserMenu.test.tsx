@@ -61,6 +61,16 @@ describe("UserMenu (S20)", () => {
     expect(onOpenSettings).toHaveBeenLastCalledWith(null);
   });
 
+  it("has no Skills entry: Skills is a section of the Settings surface (S2)", () => {
+    const { onOpenSettings } = renderMenu();
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    expect(screen.queryByRole("menuitem", { name: "Skills" })).toBeNull();
+    // "Settings" opens the first section (Account); the surface's own sidebar
+    // is what leads to Skills from there.
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+    expect(onOpenSettings).toHaveBeenLastCalledWith(null);
+  });
+
   it("switches language in place and persists it", () => {
     renderMenu();
     fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));

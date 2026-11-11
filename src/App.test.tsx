@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { emit, invokedWith, resetTauri } from "./test/tauriMock";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("./test/tauriMock")).coreModule());
@@ -248,6 +248,105 @@ describe("chat shell", () => {
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
     expect(screen.getByRole("radiogroup", { name: "Approval mode for Proyecto" })).toBeTruthy();
     expect(screen.getByText("Helmcode Desktop")).toBeTruthy();
+  });
+});
+
+describe("Settings as a surface (round 14, S2)", () => {
+  const settingsHandlers = {
+    tools_settings_get: () => ({ tools_allow_run_command: true }),
+    memory_settings_get: () => ({ mode: "remote" }),
+    app_info: () => ({ version: "0.2.2" }),
+  };
+
+  async function openSettings(menuItem = "Settings"): Promise<HTMLElement> {
+    fireEvent.click(await screen.findByRole("button", { name: /Account menu/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: menuItem }));
+    return screen.findByRole("navigation", { name: "Settings sections" });
+  }
+
+  it("swaps the chat history for the section list and opens the Account section", async () => {
+    resetTauri({ ...chatHandlers([row(1, "user", "Keep this chat")]), ...settingsHandlers });
+    const { container } = renderApp("en");
+    await screen.findByText("Keep this chat");
+
+    const nav = await openSettings();
+    expect(within(nav).getAllByRole("button").map((item) => item.textContent)).toEqual([
+      "Account",
+      "Working folders",
+      "Memory",
+      "Language",
+      "Skills",
+    ]);
+    const current = () => container.querySelector('.settings-surface')?.getAttribute("data-section");
+    expect(within(nav).getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
+    expect(current()).toBe("account");
+    // The conversations sidebar is replaced while Settings is open.
+    expect(screen.queryByRole("navigation", { name: "History" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New chat" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Image Studio" })).toBeNull();
+    // Account is what About / sign out showed before the restructure.
+    expect(screen.getByRole("heading", { name: "About" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
+  });
+
+  it("moves between sections from the section list, keyboard included", async () => {
+    resetTauri({ ...chatHandlers([row(1, "user", "Keep this chat")]), ...settingsHandlers });
+    const { container } = renderApp("en");
+    await screen.findByText("Keep this chat");
+
+    const nav = await openSettings("Working folders");
+    const current = () => container.querySelector('.settings-surface')?.getAttribute("data-section");
+    expect(current()).toBe("folders");
+    const folders = within(nav).getByRole("button", { name: "Working folders" });
+    expect(folders.getAttribute("aria-current")).toBe("page");
+    // The keyboard lands in the section list, on the open section.
+    await waitFor(() => expect(document.activeElement).toBe(folders));
+
+    const memory = within(nav).getByRole("button", { name: "Memory" });
+    fireEvent.click(memory);
+    expect(current()).toBe("memory");
+    expect(memory.getAttribute("aria-current")).toBe("page");
+    expect(within(nav).getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBeNull();
+  });
+
+  it("leaving Settings restores the open conversation and the composer, and gives focus back to the chat", async () => {
+    resetTauri({
+      ...chatHandlers([]),
+      conversation_list: () => [
+        { id: 7, title: "Report", updated_at: "", last_message: null },
+        { id: 9, title: "Notes", updated_at: "", last_message: null },
+      ],
+      messages_list: (args) =>
+        args?.conversationId === 9 ? [row(2, "user", "Notes keep")] : [row(1, "user", "Report keep")],
+      ...settingsHandlers,
+    });
+    renderApp("en");
+    // The boot opens the first chat; the user switches to the other one.
+    await screen.findByText("Report keep");
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    await screen.findByText("Notes keep");
+    const box = (await screen.findByRole("textbox", { name: "Message" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "half written reply" } });
+
+    await openSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
+
+    expect(await screen.findByText("Notes keep")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Notes" }).getAttribute("aria-current")).toBe("page");
+    const back = (await screen.findByRole("textbox", { name: "Message" })) as HTMLTextAreaElement;
+    expect(back.value).toBe("half written reply");
+    await waitFor(() => expect(document.activeElement).toBe(back));
+    expect(screen.queryByRole("navigation", { name: "Settings sections" })).toBeNull();
+    expect(screen.getByRole("navigation", { name: "History" })).toBeTruthy();
+  });
+
+  it("the left rail no longer offers Skills (it lives in Settings)", async () => {
+    resetTauri(chatHandlers([row(1, "user", "hi")]));
+    renderApp("en");
+    await screen.findByText("hi");
+    expect(screen.getByRole("button", { name: "Image Studio" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Skills" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Skills" })).toBeNull();
   });
 });
 

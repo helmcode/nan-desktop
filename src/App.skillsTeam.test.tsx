@@ -150,9 +150,11 @@ function renderApp(locale: Locale = "en") {
   );
 }
 
-async function openSkills(): Promise<void> {
-  fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
-  await screen.findByRole("heading", { name: "Skills", level: 1 });
+async function openSkills(settings = "Settings", skills = "Skills"): Promise<void> {
+  fireEvent.click(await screen.findByRole("button", { name: /Account menu|Menú de la cuenta/ }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: settings }));
+  fireEvent.click(await screen.findByRole("button", { name: skills }));
+  await screen.findByRole("heading", { name: skills, level: 1 });
 }
 
 async function openTeamTab(name = "Team"): Promise<void> {
@@ -317,7 +319,7 @@ describe("Share with my team: the flow", () => {
   it("speaks Spanish: the button, the dialog warning and the tabs", async () => {
     setup({ sharing: true, skills: [weekly()] });
     renderApp("es");
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills("Ajustes", "Skills");
     expect(await screen.findByRole("tab", { name: "Mías" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Equipo" })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "Compartir «Weekly report» con mi equipo" }));
@@ -333,6 +335,22 @@ describe("The Team tab", () => {
     meta("p", { title: "Pending one", status: "pending", author_name: "Me" }),
   ];
   const instructions = { a: "Step **one**.\n\n<img src=x onerror=alert(1)>\n\n<script>alert(1)</script>" };
+
+  it("lives inside Settings with the local and team tabs and no conversation list (S2)", async () => {
+    setup({ rows, sharing: true, skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    const nav = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(nav).getByRole("button", { name: "Skills" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByRole("navigation", { name: "History" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Mine" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Team" })).toBeTruthy();
+    // Local and team skills keep their own lists under the tabs.
+    expect(await screen.findByText("Weekly report")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Team" }));
+    const list = await screen.findByRole("list", { name: "Team" });
+    expect(within(list).getByText("Beta")).toBeTruthy();
+  });
 
   it("lists the org's approved skills, featured first, with author and provenance", async () => {
     setup({ rows });
@@ -379,8 +397,8 @@ describe("The Team tab", () => {
     await waitFor(() => expect(invokedWith("chat_send")[0]?.skillId).toBe("team:a"));
   });
 
-  it("cached team skills are offered in the composer picker", async () => {
-    setup({ rows });
+  it("cached team skills are offered in the composer picker, next to the local ones", async () => {
+    setup({ rows, skills: [weekly()] });
     renderApp();
     await screen.findByText("Summarize my notes weekly");
     await waitFor(() => expect(invokedWith("skills_team_cache_put").length).toBeGreaterThanOrEqual(2));
@@ -388,6 +406,7 @@ describe("The Team tab", () => {
     const list = await screen.findByRole("listbox", { name: "Your skills" });
     expect(within(list).getByText("Beta")).toBeTruthy();
     expect(within(list).getByText("Alpha")).toBeTruthy();
+    expect(within(list).getByText("Weekly report")).toBeTruthy();
   });
 
   it("Duplicate copies the bundle into a new, editable local skill", async () => {
@@ -502,7 +521,7 @@ describe("Team library errors", () => {
   it("404 in Spanish", async () => {
     setup({ list: () => ({ status: 404 }) });
     renderApp("es");
-    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openSkills("Ajustes", "Skills");
     await openTeamTab("Equipo");
     expect(await screen.findByText("Tu organización no tiene skills compartidas activadas")).toBeTruthy();
   });

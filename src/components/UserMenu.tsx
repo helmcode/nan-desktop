@@ -1,6 +1,7 @@
 // S20: bottom-left user chip (avatar initial + account name + chevron) and
-// its menu: account info, working folders, memory, language, settings and
-// sign out. The Settings route stays; this menu is the entry point.
+// its menu: account info, working folders, memory, language and sign out.
+// The menu opens the Settings surface (round 14: a whole window whose own
+// sidebar lists the sections), on the section the entry names.
 // Round 14/S1: the account section also offers "Update" whenever a newer
 // version exists, so closing the banner never hides the update.
 
@@ -9,8 +10,8 @@ import { accountInitial } from "../copy";
 import { LOCALES, useI18n } from "../i18n";
 import {
   IconCheck,
-  IconChevronDown,
   IconDownload,
+  IconChevronDown,
   IconFolder,
   IconGear,
   IconGlobe,
@@ -18,7 +19,15 @@ import {
   IconMemory,
 } from "../icons";
 
-export type SettingsSection = "folders" | "memory" | "language" | null;
+/** One of the sections the Settings surface shows (its sidebar lists them). */
+export type SettingsPane = "account" | "folders" | "memory" | "language" | "skills";
+
+/** A section to open: a pane, or null for the first one (Account). */
+export type SettingsSection = SettingsPane | null;
+
+/** What an account-menu entry asks for: one of the sections it names, or
+ *  null for the first one (Account). */
+export type SettingsTarget = Exclude<SettingsPane, "skills"> | null;
 
 /** The newer version the updater found: the same check the banner reads. */
 export type UserMenuUpdate = {
@@ -38,7 +47,7 @@ export function UserMenu({
   accountName: string;
   accountDetail: string;
   update?: UserMenuUpdate | null;
-  onOpenSettings: (section: SettingsSection) => void;
+  onOpenSettings: (section: SettingsTarget) => void;
   onSignOut: () => void;
   signingOut: boolean;
 }) {
@@ -68,7 +77,7 @@ export function UserMenu({
     };
   }, [open]);
 
-  const go = (section: SettingsSection): void => {
+  const go = (section: SettingsTarget): void => {
     setOpen(false);
     onOpenSettings(section);
   };
