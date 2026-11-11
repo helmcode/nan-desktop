@@ -462,6 +462,7 @@ export const en = {
       generic: "Could not reach your team's skills. Try again.",
       retry: "Try again",
       featured: "Featured",
+      preparing: "Preparing…",
       sharedBy: (author: string) => `Shared by ${author} (team)`,
       updated: (date: string) => `Updated ${date}`,
       view: "View",

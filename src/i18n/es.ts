@@ -462,6 +462,7 @@ export const es: Strings = {
       generic: "No se han podido cargar las skills de tu equipo. Inténtalo de nuevo.",
       retry: "Reintentar",
       featured: "Destacada",
+      preparing: "Se está preparando…",
       sharedBy: (author: string) => `Compartida por ${author} (equipo)`,
       updated: (date: string) => `Actualizada el ${date}`,
       view: "Ver",

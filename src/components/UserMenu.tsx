@@ -1,6 +1,8 @@
 // S20: bottom-left user chip (avatar initial + account name + chevron) and
 // its menu: account info, working folders, memory, language, settings and
 // sign out. The Settings route stays; this menu is the entry point.
+// Round 14/S1: the account section also offers "Update" whenever a newer
+// version exists, so closing the banner never hides the update.
 
 import { useEffect, useRef, useState } from "react";
 import { accountInitial } from "../copy";
@@ -8,6 +10,7 @@ import { LOCALES, useI18n } from "../i18n";
 import {
   IconCheck,
   IconChevronDown,
+  IconDownload,
   IconFolder,
   IconGear,
   IconGlobe,
@@ -17,21 +20,32 @@ import {
 
 export type SettingsSection = "folders" | "memory" | "language" | null;
 
+/** The newer version the updater found: the same check the banner reads. */
+export type UserMenuUpdate = {
+  version: string;
+  /** The banner's install flow: download, verify, install, relaunch. */
+  onUpdate: () => Promise<void>;
+};
+
 export function UserMenu({
   accountName,
   accountDetail,
+  update = null,
   onOpenSettings,
   onSignOut,
   signingOut,
 }: {
   accountName: string;
   accountDetail: string;
+  update?: UserMenuUpdate | null;
   onOpenSettings: (section: SettingsSection) => void;
   onSignOut: () => void;
   signingOut: boolean;
 }) {
   const { t, locale, setLocale } = useI18n();
   const [open, setOpen] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateFailed, setUpdateFailed] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -59,6 +73,19 @@ export function UserMenu({
     onOpenSettings(section);
   };
 
+  const startUpdate = async (): Promise<void> => {
+    if (!update || updating) return;
+    setUpdating(true);
+    setUpdateFailed(false);
+    try {
+      // On success the app installs and relaunches; the menu goes away.
+      await update.onUpdate();
+    } catch {
+      setUpdating(false);
+      setUpdateFailed(true);
+    }
+  };
+
   return (
     <div className="user-menu" ref={rootRef}>
       {open && (
@@ -72,6 +99,27 @@ export function UserMenu({
               <span>{accountDetail}</span>
             </span>
           </div>
+          {update && (
+            <div className="user-menu-update">
+              <button
+                type="button"
+                role="menuitem"
+                className="btn btn-primary btn-sm"
+                title={t.updater.available(update.version)}
+                disabled={updating}
+                aria-busy={updating}
+                onClick={() => void startUpdate()}
+              >
+                <IconDownload size={14} />
+                {updating ? t.updater.updating : t.updater.update}
+              </button>
+              {updateFailed && (
+                <p className="user-menu-update-error" role="alert">
+                  {t.updater.failed}
+                </p>
+              )}
+            </div>
+          )}
           <div className="ws-menu-sep" role="separator" />
           <button type="button" role="menuitem" className="ws-menu-item" onClick={() => go("folders")}>
             <IconFolder size={15} />

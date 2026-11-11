@@ -16,7 +16,7 @@ vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).
 import App from "./App";
 import { I18nProvider, type Locale } from "./i18n";
 import type { Skill, SkillInput } from "./skills/skills";
-import { TEAM_SYNC_INTERVAL_MS, type ShareLink, type TeamMeta } from "./skills/team";
+import { TEAM_SYNC_INTERVAL_MS, planNextSync, type ShareLink, type TeamMeta } from "./skills/team";
 import type { ChatMessageRow } from "./types";
 
 const LOCAL = "0123456789abcdef0123456789abcdef";
@@ -56,6 +56,8 @@ type Setup = {
   instructions?: Record<string, string>;
   /** Overrides for `GET /api/skills` (the list), checked first. */
   list?: (req: ApiRequest) => ApiReply | null;
+  /** Overrides for `GET /api/skills/{id}` (a bundle), before the row lookup. */
+  bundle?: (req: ApiRequest) => ApiReply | null;
 };
 
 /// The chat handlers, a local skills store and a stateful library API.
@@ -78,6 +80,10 @@ function setup(opts: Setup = {}) {
       return { status: 200, etag, body: { skills: rows, etag } };
     }
     const id = req.path.slice("/api/skills/".length);
+    if (req.method === "GET") {
+      const override = opts.bundle?.(req);
+      if (override) return override;
+    }
     if (req.method === "POST") {
       const added = meta("sk_new", { status: "pending", title: "Weekly report", author_name: "Me" });
       rows.push(added);
@@ -151,6 +157,24 @@ async function openSkills(): Promise<void> {
 
 async function openTeamTab(name = "Team"): Promise<void> {
   fireEvent.click(await screen.findByRole("tab", { name }));
+}
+
+/**
+ * Captures the team sync delays (the short retries and the 15-minute
+ * refresh) without firing them; everything else keeps the real timer.
+ */
+function captureSyncTimers(): Array<{ delay: number; run: () => void }> {
+  const timers: Array<{ delay: number; run: () => void }> = [];
+  const original = window.setTimeout.bind(window);
+  const watched = [60_000, 5 * 60_000, TEAM_SYNC_INTERVAL_MS];
+  vi.spyOn(window, "setTimeout").mockImplementation(((handler: TimerHandler, timeout?: number) => {
+    if (typeof timeout === "number" && watched.includes(timeout)) {
+      timers.push({ delay: timeout, run: handler as () => void });
+      return original(() => {}, 1_000_000);
+    }
+    return original(handler as () => void, timeout);
+  }) as unknown as typeof window.setTimeout);
+  return timers;
 }
 
 beforeEach(() => window.localStorage.clear());
@@ -389,27 +413,80 @@ describe("The Team tab", () => {
   });
 
   it("refreshes every 15 minutes with If-None-Match (a 304 refetches nothing)", async () => {
-    const intervals: Array<() => void> = [];
-    const original = window.setInterval.bind(window);
-    const fake = (handler: TimerHandler, timeout?: number): number => {
-      if (timeout === TEAM_SYNC_INTERVAL_MS) intervals.push(handler as () => void);
-      return original(() => {}, 1_000_000);
-    };
-    vi.spyOn(window, "setInterval").mockImplementation(fake as unknown as typeof window.setInterval);
+    const timers = captureSyncTimers();
     const { core } = setup({ rows });
     renderApp();
     await screen.findByText("Summarize my notes weekly");
     await waitFor(() => expect(invokedWith("skills_team_cache_put").length).toBeGreaterThanOrEqual(2));
-    expect(intervals).toHaveLength(1);
+    const refresh = timers.filter((timer) => timer.delay === TEAM_SYNC_INTERVAL_MS);
+    expect(refresh).toHaveLength(1);
     const before = core.requests.length;
     await act(async () => {
-      intervals[0]();
+      refresh[0].run();
     });
     await waitFor(() => expect(core.requests.length).toBeGreaterThan(before));
     const list = core.requests.slice(before).filter((r) => r.path === "/api/skills");
     expect(list).toHaveLength(1);
     expect(list[0].ifNoneMatch).toBe('"v1"');
     expect(core.requests.slice(before).some((r) => r.path.startsWith("/api/skills/"))).toBe(false);
+  });
+});
+
+describe("An interrupted bundle round (round 14/S3)", () => {
+  it("retries in 60 seconds, then 5 minutes, then the normal interval", () => {
+    expect(planNextSync("rate_limited", 0)).toEqual({ delayMs: 60_000, failures: 1 });
+    expect(planNextSync("rate_limited", 1)).toEqual({ delayMs: 5 * 60_000, failures: 2 });
+    expect(planNextSync("expired", 2)).toEqual({ delayMs: TEAM_SYNC_INTERVAL_MS, failures: 3 });
+  });
+
+  it("a completed round goes back to the normal interval and resets the count", () => {
+    expect(planNextSync(null, 2)).toEqual({ delayMs: TEAM_SYNC_INTERVAL_MS, failures: 0 });
+    // Only the two problems that stop a round early ask for a short retry.
+    expect(planNextSync("offline", 1)).toEqual({ delayMs: TEAM_SYNC_INTERVAL_MS, failures: 0 });
+    expect(planNextSync("generic", 0)).toEqual({ delayMs: TEAM_SYNC_INTERVAL_MS, failures: 0 });
+  });
+
+  it("an approved row without a cached bundle says it is being prepared", async () => {
+    setup({ rows: [meta("a", { title: "Alpha" })], bundle: () => ({ status: 429 }) });
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    const list = await screen.findByRole("list", { name: "Team" });
+    const item = within(list).getByRole("listitem");
+    expect(item.textContent).toContain("Alpha");
+    expect(within(item).getByText("Preparing…")).toBeTruthy();
+  });
+
+  it("the retry in a minute caches the bundle and clears Preparing; cached rows keep their actions", async () => {
+    const timers = captureSyncTimers();
+    let stopped = true;
+    setup({ rows: [meta("a", { title: "Alpha" })], bundle: () => (stopped ? { status: 429 } : null) });
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    expect(await screen.findByText("Preparing…")).toBeTruthy();
+    const retry = timers.filter((timer) => timer.delay === 60_000);
+    expect(retry).toHaveLength(1);
+
+    stopped = false;
+    await act(async () => {
+      retry[0].run();
+    });
+    await waitFor(() => expect(screen.queryByText("Preparing…")).toBeNull());
+    const item = within(screen.getByRole("list", { name: "Team" })).getByRole("listitem");
+    expect(within(item).getByRole("button", { name: 'View "Alpha"' })).toBeTruthy();
+    expect(within(item).getByRole("button", { name: 'Use "Alpha" in the chat' })).toBeTruthy();
+    expect(within(item).getByRole("button", { name: 'Duplicate "Alpha" in my skills' })).toBeTruthy();
+    // The next round is the normal refresh again.
+    expect(timers[timers.length - 1].delay).toBe(TEAM_SYNC_INTERVAL_MS);
+  });
+
+  it("speaks Spanish: the preparing badge", async () => {
+    setup({ rows: [meta("a", { title: "Alpha" })], bundle: () => ({ status: 429 }) });
+    renderApp("es");
+    fireEvent.click(await screen.findByRole("button", { name: "Skills" }));
+    await openTeamTab("Equipo");
+    expect(await screen.findByText("Se está preparando…")).toBeTruthy();
   });
 });
 

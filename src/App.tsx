@@ -33,7 +33,7 @@ import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
 import { SaveImageButton, type SaveImageResult } from "./components/SaveImageButton";
 import { Toast, type ToastNotice } from "./components/Toast";
-import { UpdateBanner } from "./components/UpdateBanner";
+import { UpdateBanner, UPDATE_CHECK_INTERVAL_MS } from "./components/UpdateBanner";
 import { UserMenu, type SettingsSection } from "./components/UserMenu";
 import {
   DEFAULT_IMAGE_SIZE,
@@ -51,7 +51,16 @@ import {
   signInErrorLabel,
   storedVoice,
 } from "./copy";
-import { onApprovalRequest, onApprovalResolved, onNativeDecision, respondToApproval, sendChat } from "./core";
+import {
+  checkForUpdate,
+  installUpdate,
+  onApprovalRequest,
+  onApprovalResolved,
+  onNativeDecision,
+  respondToApproval,
+  sendChat,
+  type UpdateInfo,
+} from "./core";
 import { VOICE_UI } from "./flags";
 import { useI18n, useT } from "./i18n";
 import {
@@ -88,11 +97,11 @@ import { SkillsView } from "./skills/SkillsView";
 import {
   EMPTY_VIEW,
   TEAM_PROFILE,
-  TEAM_SYNC_INTERVAL_MS,
   fetchIdentity,
   fetchSkillsSharing,
   isTeamSkillId,
   loadCache,
+  planNextSync,
   setLink,
   syncTeam,
   teamAsSkill,
@@ -494,6 +503,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [inlineError, setInlineError] = useState("");
+  // Round 14/S1: the newer version the updater found. ONE check feeds the
+  // banner and the user menu, so a dismissed banner never hides the update.
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
 
   // Inline approval cards (S14) and per-conversation preview pane (S21).
   const [approvals, dispatchApproval] = useReducer(approvalsReducer, [] as ApprovalCardState[]);
@@ -733,21 +745,47 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     };
   }, []);
 
-  // Team library (S4): one sync now, every 15 minutes while the app runs,
-  // and whenever the Skills view opens. ETag-conditional, so a quiet sync
-  // is a 304. The cached copy shows first (offline "Use" keeps working).
-  const syncTeamLibrary = useCallback(async (): Promise<void> => {
+  // Auto-update (round 7): a silent check on startup and every 6 hours. The
+  // result is kept here (round 14/S1) so the user menu can offer "Update"
+  // after the banner is dismissed; the banner is given this same check and
+  // the same install flow, so there is one update path, not two.
+  const runUpdateCheck = useCallback(async (): Promise<UpdateInfo | null> => {
+    try {
+      const found = await checkForUpdate();
+      setAvailableUpdate(found);
+      return found;
+    } catch {
+      // Silent by design: dev builds, offline and a missing release feed.
+      setAvailableUpdate(null);
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    void runUpdateCheck();
+    const timer = window.setInterval(() => void runUpdateCheck(), UPDATE_CHECK_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [runUpdateCheck]);
+
+  // Team library (S4): one sync now, then again when the previous round is
+  // due, and whenever the Skills view opens. ETag-conditional, so a quiet
+  // sync is a 304. The cached copy shows first (offline "Use" keeps working).
+  // Round 14/S3: a round stopped by a rate limit or an expired session left
+  // the rows listed with no bundles on disk, so it retries in a minute
+  // instead of waiting the full 15 minutes.
+  const syncTeamLibrary = useCallback(async (): Promise<TeamState | null> => {
     const profileId = activeProfileRef.current;
-    if (profileId !== TEAM_PROFILE) return;
+    if (profileId !== TEAM_PROFILE) return null;
     const [next, sharing] = await Promise.all([
       syncTeam(profileId).catch(() => null),
       fetchSkillsSharing(profileId),
     ]);
-    if (activeProfileRef.current !== profileId) return;
+    if (activeProfileRef.current !== profileId) return next;
     setSkillsSharing(sharing);
-    if (!next) return;
+    if (!next) return null;
     setTeamState(next);
     if (next.problem === "expired") setSessionExpired(true);
+    return next;
   }, []);
 
   useEffect(() => {
@@ -757,16 +795,29 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       return;
     }
     let alive = true;
+    let timer = 0;
+    let failures = 0;
+
+    function scheduleNext(state: TeamState | null): void {
+      const plan = planNextSync(state?.problem ?? null, failures);
+      failures = plan.failures;
+      timer = window.setTimeout(() => void runRound(), plan.delayMs);
+    }
+
+    async function runRound(): Promise<void> {
+      const state = await syncTeamLibrary();
+      if (alive) scheduleNext(state);
+    }
+
     loadCache(teamProfile)
       .then((view) => {
         if (alive) setTeamState((prev) => (prev.view === EMPTY_VIEW ? { view, problem: null } : prev));
       })
       .catch(() => {});
-    void syncTeamLibrary();
-    const timer = window.setInterval(() => void syncTeamLibrary(), TEAM_SYNC_INTERVAL_MS);
+    void runRound();
     return () => {
       alive = false;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [teamProfile, syncTeamLibrary]);
 
@@ -1805,6 +1856,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           <UserMenu
             accountName={accountName}
             accountDetail={activeProfile ? profileDescription(t, activeProfile.id) : ""}
+            update={availableUpdate ? { version: availableUpdate.version, onUpdate: installUpdate } : null}
             onOpenSettings={openSettings}
             onSignOut={onSignOut}
             signingOut={busy}
@@ -1935,7 +1987,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                 </button>
               )}
             </header>
-            <UpdateBanner />
+            <UpdateBanner check={runUpdateCheck} install={installUpdate} />
 
             <div className="messages" ref={messagesRef}>
               <div className="messages-inner">

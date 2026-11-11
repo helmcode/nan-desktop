@@ -96,6 +96,47 @@ async function sendMessage(text: string): Promise<void> {
 beforeEach(() => window.localStorage.clear());
 afterEach(cleanup);
 
+describe("The update button (round 14/S1)", () => {
+  const newerVersion = () => ({ version: "0.2.3", current_version: "0.2.2" });
+
+  it("lives in the account section while a newer version exists, even after the banner is dismissed", async () => {
+    resetTauri({ ...handlers([]), update_check: newerVersion, update_install: () => undefined });
+    renderApp();
+    // The banner offers the update first; dismissing it must not hide it.
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    const update = await screen.findByRole("menuitem", { name: "Update" });
+    await act(async () => {
+      fireEvent.click(update);
+    });
+    expect(invokedWith("update_install")).toHaveLength(1);
+  });
+
+  it("is hidden on the latest version", async () => {
+    resetTauri({ ...handlers([]), update_check: () => null });
+    renderApp();
+    await waitFor(() => expect(invokedWith("update_check").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Update" })).toBeNull();
+  });
+
+  it("is hidden while the updater cannot check", async () => {
+    resetTauri({
+      ...handlers([]),
+      update_check: () => {
+        throw new Error("no release feed");
+      },
+    });
+    renderApp();
+    await waitFor(() => expect(invokedWith("update_check").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Update" })).toBeNull();
+  });
+});
+
 describe("Skills view", () => {
   it("is in the sidebar and shows an empty state with a way to create one", async () => {
     resetTauri(handlers([]));

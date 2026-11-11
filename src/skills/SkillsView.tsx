@@ -22,6 +22,7 @@ import {
   type SkillDraft,
 } from "./skills";
 import {
+  isBundleCached,
   loadTeamSkill,
   shareSkill,
   shareStateFor,
@@ -583,12 +584,16 @@ function TeamPanel({
         <ul className="grant-list skills-list" aria-label={s.tabTeam}>
           {library.map((meta) => {
             const date = formatDate(meta.updated_at, locale);
+            // Approved but not cached yet: the round that fetches the bundle
+            // has not finished, so the skill is not usable in the chat yet.
+            const preparing = !isBundleCached(team.state.view, meta);
             return (
               <li key={meta.id} className="grant-card skill-card">
                 <div className="skill-text">
                   <p className="skill-title">
                     {meta.title}
                     {meta.featured && <span className="skill-badge skill-badge-featured">{s.featured}</span>}
+                    {preparing && <span className="skill-badge skill-badge-preparing">{s.preparing}</span>}
                   </p>
                   <p className="skill-description">{meta.description}</p>
                   <p className="skill-provenance">

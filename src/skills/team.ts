@@ -22,6 +22,13 @@ export const TEAM_PROFILE = "helmcode";
 export const TEAM_PREFIX = "team:";
 /** Background refresh of the team library while the app runs. */
 export const TEAM_SYNC_INTERVAL_MS = 15 * 60 * 1000;
+/**
+ * Retries after a bundle round stopped early: a rate limit (429) or an
+ * expired session (401) leaves the rows listed with no cached bundle, so the
+ * next sync cannot wait the full refresh interval. One minute first, then
+ * five, then the normal interval.
+ */
+export const TEAM_RETRY_DELAYS_MS = [60 * 1000, 5 * 60 * 1000] as const;
 const SKILLS_PATH = "/api/skills";
 const ME_PATH = "/api/auth/me";
 
@@ -77,6 +84,9 @@ export type TeamResponse = { status: number; etag: string | null; body: unknown 
 export type TeamProblem = "disabled" | "expired" | "forbidden" | "rate_limited" | "offline" | "invalid" | "generic";
 
 export type TeamState = { view: CacheView; problem: TeamProblem | null };
+
+/** When to sync again: the wait and the consecutive interrupted rounds. */
+export type TeamSyncPlan = { delayMs: number; failures: number };
 
 export const EMPTY_VIEW: CacheView = { etag: null, skills: [], cached: {}, links: {} };
 
@@ -242,11 +252,29 @@ function sameVersion(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** Whether the cache holds the row's current bundle (Use needs it on disk). */
+export function isBundleCached(view: CacheView, meta: TeamMeta): boolean {
+  return meta.id in view.cached && sameVersion(view.cached[meta.id], meta.updated_at);
+}
+
 /** Approved rows whose bundle is missing from the cache or outdated. */
 export function bundlesToFetch(view: CacheView): TeamMeta[] {
-  return view.skills.filter(
-    (meta) => meta.status === "approved" && !(meta.id in view.cached && sameVersion(view.cached[meta.id], meta.updated_at)),
-  );
+  return view.skills.filter((meta) => meta.status === "approved" && !isBundleCached(view, meta));
+}
+
+/**
+ * The wait before the next sync. A round that stored a list but stopped
+ * before caching every bundle (`rate_limited` / `expired`) retries in 60s
+ * and then 5 minutes, so the composer picker fills as soon as the limit
+ * passes; after that, and after any round that completed, it waits the
+ * normal refresh interval and the counter starts over.
+ */
+export function planNextSync(problem: TeamProblem | null, failures: number): TeamSyncPlan {
+  const interrupted = problem === "rate_limited" || problem === "expired";
+  if (!interrupted) return { delayMs: TEAM_SYNC_INTERVAL_MS, failures: 0 };
+  const count = failures + 1;
+  const retry = count <= TEAM_RETRY_DELAYS_MS.length ? TEAM_RETRY_DELAYS_MS[count - 1] : null;
+  return { delayMs: retry ?? TEAM_SYNC_INTERVAL_MS, failures: count };
 }
 
 /** Fetch and cache one approved bundle. */
