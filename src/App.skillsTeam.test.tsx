@@ -165,13 +165,6 @@ async function openTeamTab(name = "Team"): Promise<void> {
  * Captures the team sync delays (the short retries and the 15-minute
  * refresh) without firing them; everything else keeps the real timer.
  */
-function vi_timers_run(timers: Array<{ delay: number; run: () => void }>, delay: number): () => void {
-  const matches = timers.filter((t) => t.delay === delay);
-  const last = matches[matches.length - 1];
-  if (!last) throw new Error(`no timer for delay ${delay}`);
-  return last.run;
-}
-
 function captureSyncTimers(): Array<{ delay: number; run: () => void }> {
   const timers: Array<{ delay: number; run: () => void }> = [];
   const original = window.setTimeout.bind(window);
@@ -184,6 +177,14 @@ function captureSyncTimers(): Array<{ delay: number; run: () => void }> {
     return original(handler as () => void, timeout);
   }) as unknown as typeof window.setTimeout);
   return timers;
+}
+
+/** The most recent captured timer with that delay (throws when none exists). */
+function lastTimerFor(timers: Array<{ delay: number; run: () => void }>, delay: number): () => void {
+  const matches = timers.filter((t) => t.delay === delay);
+  const last = matches[matches.length - 1];
+  if (!last) throw new Error(`no timer for delay ${delay}`);
+  return last.run;
 }
 
 beforeEach(() => window.localStorage.clear());
@@ -475,7 +476,9 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     await openTeamTab();
     await waitFor(() => expect(screen.getByText("Preparing…")).toBeTruthy());
     const at = (delay: number) => timers.filter((t) => t.delay === delay);
-    const call = vi_timers_run(timers, 60_000);
+    /** The delays of the timers scheduled after `from` (a slice window). */
+    const delaysSince = (from: number) => timers.slice(from).map((t) => t.delay);
+    const call = lastTimerFor(timers, 60_000);
 
     // First failure schedules 60s; a second one escalates to 5 minutes.
     await act(async () => {
@@ -483,16 +486,19 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     });
     await waitFor(() => expect(screen.getByText("Preparing…")).toBeTruthy());
     expect(at(5 * 60_000).length > 0).toBe(true);
-    const ladderAtFive = vi_timers_run(timers, 5 * 60_000);
+    const ladderAtFive = lastTimerFor(timers, 5 * 60_000);
 
-    // A success resets the ladder: the next timer is the normal refresh.
+    // A success resets the ladder: the timers that success round schedules are
+    // the normal 15-minute refresh only.
     failing = false;
+    const beforeSuccess = timers.length;
     await act(async () => {
       ladderAtFive();
     });
     await waitFor(() => expect(screen.queryByText("Preparing…")).toBeNull());
-    const totalAfterSuccess = timers.length;
-    expect(at(TEAM_SYNC_INTERVAL_MS).length > 0).toBe(true);
+    const successRound = delaysSince(beforeSuccess);
+    expect(successRound).toContain(TEAM_SYNC_INTERVAL_MS);
+    expect(successRound.filter((delay) => delay === 60_000 || delay === 5 * 60_000)).toEqual([]);
 
     // A fresh failure starts the ladder over at 60 seconds (count reset).
     // Give the sync something NEW to fetch: bump the list etag and the row
@@ -500,17 +506,20 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     rows[0] = meta("a", { title: "Alpha", updated_at: "2026-11-12T00:00:00Z" });
     grab.bump();
     failing = true;
+    const beforeFreshFailure = timers.length;
     // Flush the async round inside act so its re-scheduling happens while
     // React is settled; the run continues through list -> bundle -> plan.
-    const finalTimer = vi_timers_run(timers, TEAM_SYNC_INTERVAL_MS);
+    const finalTimer = lastTimerFor(timers, TEAM_SYNC_INTERVAL_MS);
     await act(async () => {
       finalTimer();
       await Promise.resolve();
       await Promise.resolve();
     });
     await waitFor(() => expect(screen.getByText("Preparing…")).toBeTruthy());
-    expect(timers.filter((t) => t.delay === 60_000).length).toBeGreaterThan(0);
-    expect(timers.length).toBeGreaterThan(totalAfterSuccess);
+    // The fresh round scheduled the first rung (60s), not the 5-minute one.
+    const freshRound = delaysSince(beforeFreshFailure);
+    expect(freshRound).toEqual([60_000]);
+    expect(freshRound).not.toContain(5 * 60_000);
   });
 
   it("a completed round goes back to the normal interval and resets the count", () => {
@@ -529,6 +538,12 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     const item = within(list).getByRole("listitem");
     expect(item.textContent).toContain("Alpha");
     expect(within(item).getByText("Preparing…")).toBeTruthy();
+    // Round 14 (C10): a space keeps the accessible name "Alpha Preparing…".
+    expect(item.querySelector(".skill-title")?.textContent).toBe("Alpha Preparing…");
+    // Round 14 (C11): the badge explains what it is waiting for.
+    expect(within(item).getByText("Preparing…").getAttribute("title")).toBe(
+      "Downloading to this computer; ready in a few seconds.",
+    );
   });
 
   it("the retry in a minute caches the bundle and clears Preparing; cached rows keep their actions", async () => {
@@ -560,7 +575,61 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     renderApp("es");
     await openSkills("Ajustes", "Skills");
     await openTeamTab("Equipo");
-    expect(await screen.findByText("Se está preparando…")).toBeTruthy();
+    expect(await screen.findByText("Preparando…")).toBeTruthy();
+  });
+});
+
+describe("Escape inside the Skills section (round 14/C2)", () => {
+  it("with the form open it closes the form and stays in Skills", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    expect(await screen.findByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("heading", { name: "New skill" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Skills", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("with a team skill open it closes the detail and stays in Skills", async () => {
+    setup({ rows: [meta("a", { title: "Alpha" })] });
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    fireEvent.click(await screen.findByRole("button", { name: 'View "Alpha"' }));
+    expect(await screen.findByRole("heading", { name: "Alpha", level: 2 })).toBeTruthy();
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("heading", { name: "Alpha" })).toBeNull();
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("with nothing open it leaves Settings, like every other section", async () => {
+    setup({ rows: [meta("a", { title: "Alpha" })], skills: [weekly()] });
+    renderApp();
+    await openSkills();
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("navigation", { name: "Settings sections" })).toBeNull();
+    expect(await screen.findByRole("textbox", { name: "Message" })).toBeTruthy();
+  });
+
+  it("round 14 (C12): the purpose field keeps its activation guide visible", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    const purpose = await screen.findByRole("textbox", { name: "What it is for" });
+    expect(purpose.getAttribute("placeholder")).toBe("e.g. Write the weekly report from my notes");
+    expect(purpose.getAttribute("aria-describedby")).toBe("skill-purpose-hint");
+    expect(document.getElementById("skill-purpose-hint")?.textContent).toBe(
+      'Describe what it does and when to use it: start with "Use when…"',
+    );
   });
 });
 

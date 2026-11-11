@@ -214,6 +214,14 @@ button:disabled {
   opacity: 0.5;
 }
 
+/* Round 14 (C4): the update buttons keep aria-disabled instead of `disabled`
+   so the keyboard is not dropped while the download runs; they must look
+   disabled all the same. */
+.btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .btn-sm {
   min-height: 34px;
   padding: 0 0.8rem;
@@ -2259,6 +2267,9 @@ button:disabled {
 .settings-surface[data-section="folders"] .settings-section:not([aria-labelledby="ws-title"]),
 .settings-surface[data-section="memory"] .settings-section:not([aria-labelledby="mem-title"]),
 .settings-surface[data-section="language"] .settings-section:not([aria-labelledby="lang-title"]) {
+  /* Round 14 (D2): these rules hide every section the open one is not. If Voice
+     is ever turned on (VOICE_UI), its section has no rule and would show in
+     every section: revisit this mapping when the Voice UI ships. */
   display: none;
 }
 
@@ -3304,17 +3315,22 @@ button:disabled {
 }
 
 
-/* Round 14/S1: the user menu's update offer */
+/* Round 14/S1: the user menu's update offer, and (round 14/C6) the same row
+   in the Settings Account section; both use the real text/severity tokens. */
 .user-menu-update {
   padding: 8px 12px 4px;
 }
-.user-menu-update-version {
+.update-action-version {
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: var(--text-2);
   margin: 0 0 6px;
 }
-.user-menu-update-error {
+.update-action-error {
   font-size: 12px;
-  color: var(--color-danger, #f87171);
+  color: var(--error);
   margin: 4px 0 0;
+}
+
+.about-update {
+  margin-top: 0.75rem;
 }

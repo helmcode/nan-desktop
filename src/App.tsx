@@ -456,10 +456,15 @@ function ComputerWideDialog({ onCancel, onContinue }: { onCancel: () => void; on
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
+      if (e.key === "Escape") {
+        // Round 14 (B1/B2): an open dialog is the innermost surface and
+        // consumes Escape, so the surface behind it stays where it is.
+        e.preventDefault();
+        onCancel();
+      }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [onCancel]);
 
   return (
@@ -1634,6 +1639,21 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     settingsNavRef.current?.querySelector<HTMLButtonElement>('[aria-current="page"]')?.focus();
   }, [view]);
 
+  // Round 14 (C2): Escape leaves Settings from ANY section (Account, Folders,
+  // Memory, Language, Skills alike). Inner surfaces register their own Escape
+  // handler in the capture phase and call preventDefault (B1/B2), so only the
+  // innermost thing closes and this handler never fires for them.
+  useEffect(() => {
+    if (view !== "settings") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (e.key !== "Escape") return;
+      leaveSettings();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view, leaveSettings]);
+
   const submit = (): void => {
     void (imageMode ? sendImage() : send());
   };
@@ -2007,6 +2027,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
               onDeleted={onSkillDeleted}
               onUse={activateSkill}
               onBack={leaveSettings}
+              backLabel={settingsReturn === "studio" ? t.settings.backToStudio : t.settings.back}
               team={
                 teamProfile
                   ? {
@@ -2033,6 +2054,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
               onSignOut={onSignOut}
               signingOut={busy}
               focusSection={settingsSection}
+              update={
+                availableUpdate
+                  ? { version: availableUpdate.version, onUpdate: startInstall, busy: installing }
+                  : null
+              }
             />
           )}
         </div>

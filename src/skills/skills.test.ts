@@ -210,6 +210,11 @@ describe("per-conversation active skill", () => {
 });
 
 describe("error texts", () => {
+  it("round 14 (C13): the save form's guide reads in Spanish", () => {
+    expect(es.skills.purposeHint).toContain("Úsala cuando");
+    expect(es.skills.purposeHint).not.toContain("Use when");
+    expect(es.skills.purposePlaceholder).not.toContain("Use when");
+  });
   it("round 14: secret_detected names the file in en and es, defaulting to SKILL.md", () => {
     expect(skillErrorText(en, { code: "secret_detected", path: "references/a.md" })).toBe(
       en.skills.errors.secretDetected("references/a.md"),
@@ -223,6 +228,12 @@ describe("error texts", () => {
     expect(skillErrorText(es, { code: "secret_detected" })).toBe(
       es.skills.errors.secretDetected("SKILL.md"),
     );
+    // The equality above would also hold if the template dropped its
+    // placeholder; these pin the file name in the rendered text.
+    expect(skillErrorText(en, { code: "secret_detected", path: "references/a.md" })).toContain("references/a.md");
+    expect(skillErrorText(es, { code: "secret_detected", path: "references/a.md" })).toContain("references/a.md");
+    expect(skillErrorText(en, { code: "secret_detected" })).toContain("SKILL.md");
+    expect(skillErrorText(es, { code: "secret_detected" })).toContain("SKILL.md");
   });
 
   it("localizes the core's refusals and the local problems", () => {

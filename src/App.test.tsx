@@ -245,7 +245,7 @@ describe("chat shell", () => {
     renderApp("en");
     fireEvent.click(await screen.findByRole("button", { name: /Account menu: NaN Community/ }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Working folders" }));
-    expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Working folders" })).toBeTruthy();
     expect(screen.getByRole("radiogroup", { name: "Approval mode for Proyecto" })).toBeTruthy();
     expect(screen.getByText("Helmcode Desktop")).toBeTruthy();
   });
@@ -347,6 +347,143 @@ describe("Settings as a surface (round 14, S2)", () => {
     expect(screen.getByRole("button", { name: "Image Studio" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Skills" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Skills" })).toBeNull();
+  });
+});
+
+describe("round 14 review fixes (B1/B2, C6, QA busy state)", () => {
+  const settingsHandlers = {
+    tools_settings_get: () => ({ tools_allow_run_command: true }),
+    memory_settings_get: () => ({ mode: "remote" }),
+    app_info: () => ({ version: "0.2.2" }),
+  };
+  const updateHandlers = (install: () => Promise<void>) => ({
+    update_check: () => ({ version: "0.3.0", current_version: "0.2.0" }),
+    update_install: install,
+  });
+
+  async function openSettings(menuItem = "Settings"): Promise<void> {
+    fireEvent.click(await screen.findByRole("button", { name: /Account menu/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: menuItem }));
+    await screen.findByRole("navigation", { name: "Settings sections" });
+  }
+
+  it("B1: Escape closes the account menu and stays in Settings", async () => {
+    resetTauri({ ...chatHandlers([row(1, "user", "hi")]), ...settingsHandlers });
+    renderApp("en");
+    await screen.findByText("hi");
+    await openSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    // A real key event targets the focused element, which is inside the menu.
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Account" })).toBeTruthy();
+  });
+
+  it("B1: Escape closes the whole-computer dialog and stays in Settings", async () => {
+    resetTauri({ ...chatHandlers([row(1, "user", "hi")]), ...settingsHandlers });
+    renderApp("en");
+    await screen.findByText("hi");
+    await openSettings("Working folders");
+
+    fireEvent.click(await screen.findByRole("button", { name: /Give access to the whole computer/ }));
+    expect(await screen.findByRole("alertdialog")).toBeTruthy();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("C6: the Account section offers the update and shares the busy state", async () => {
+    let finish: () => void = () => {};
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hi")]),
+      ...settingsHandlers,
+      ...updateHandlers(() => new Promise<void>((resolve) => (finish = resolve))),
+    });
+    renderApp("en");
+    await screen.findByText("hi");
+    await openSettings();
+
+    expect(await screen.findByText("A new version is available: 0.3.0")).toBeTruthy();
+    const update = screen.getByRole("button", { name: "Update" });
+    await act(async () => {
+      fireEvent.click(update);
+    });
+    const busy = screen.getByRole("button", { name: "Updating…" });
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect(invokedWith("update_install")).toHaveLength(1);
+    await act(async () => finish());
+  });
+
+  it("QA: one install at a time across the banner, the account menu and Settings", async () => {
+    let finish: () => void = () => {};
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hi")]),
+      ...settingsHandlers,
+      ...updateHandlers(() => new Promise<void>((resolve) => (finish = resolve))),
+    });
+    renderApp("en");
+    await screen.findByText("hi");
+
+    // The install starts from the banner, inside the chat.
+    const banner = await screen.findByRole("button", { name: "Update" });
+    await act(async () => {
+      fireEvent.click(banner);
+    });
+    await waitFor(() => expect(invokedWith("update_install")).toHaveLength(1));
+
+    // The account menu is busy too, and clicking it starts nothing.
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    const item = await screen.findByRole("menuitem", { name: "Updating…" });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(item);
+    expect(invokedWith("update_install")).toHaveLength(1);
+
+    // So is the Account section in Settings.
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+    await screen.findByRole("navigation", { name: "Settings sections" });
+    const inSettings = await screen.findByRole("button", { name: "Updating…" });
+    expect(inSettings.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(inSettings);
+    expect(invokedWith("update_install")).toHaveLength(1);
+
+    await act(async () => finish());
+  });
+
+  it("C1: Skills keeps the Back label of where Settings was opened from", async () => {
+    resetTauri({
+      ...chatHandlers([
+        row(1, "user", "make a fox"),
+        { ...row(2, "assistant", "a red fox"), media_path: "/data/images/r.png" },
+      ]),
+      ...settingsHandlers,
+      preview_read_file: () => {
+        throw "unavailable";
+      },
+      image_edit_pick: () => {
+        throw "source_not_allowed";
+      },
+      image_edit_stage: () => ({ path: "/data/images/staged/s1.png", name: "s1.png" }),
+    });
+    renderApp("en");
+    await screen.findByText("a red fox");
+
+    // Settings opened from the Studio: its Back returns to the Studio, and
+    // the Skills section must say the same (round 14/C1).
+    fireEvent.click(screen.getByRole("button", { name: "Edit image" }));
+    await screen.findByRole("region", { name: "Image Studio" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add reference" }));
+    const alert = await screen.findByRole("alert");
+    fireEvent.click(within(alert).getByRole("button", { name: "Open Settings to add a working folder" }));
+    await screen.findByRole("navigation", { name: "Settings sections" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Skills" }));
+    expect(await screen.findByRole("heading", { name: "Skills", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Back to the Image Studio" })).toBeTruthy();
   });
 });
 

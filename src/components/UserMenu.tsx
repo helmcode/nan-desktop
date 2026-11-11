@@ -10,7 +10,6 @@ import { accountInitial } from "../copy";
 import { LOCALES, useI18n } from "../i18n";
 import {
   IconCheck,
-  IconDownload,
   IconChevronDown,
   IconFolder,
   IconGear,
@@ -18,6 +17,7 @@ import {
   IconLogout,
   IconMemory,
 } from "../icons";
+import { UpdateAction } from "./UpdateAction";
 
 /** One of the sections the Settings surface shows (its sidebar lists them). */
 export type SettingsPane = "account" | "folders" | "memory" | "language" | "skills";
@@ -55,8 +55,6 @@ export function UserMenu({
 }) {
   const { t, locale, setLocale } = useI18n();
   const [open, setOpen] = useState(false);
-  const [updateFailed, setUpdateFailed] = useState(false);
-  const [ownUpdating, setOwnUpdating] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -67,36 +65,25 @@ export function UserMenu({
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // Round 14 (B1): the open menu is the innermost surface, so it consumes
+        // Escape. The capture phase runs before the Settings surface's own
+        // Escape handler, whose first line checks `defaultPrevented`.
+        e.preventDefault();
         setOpen(false);
         triggerRef.current?.focus();
       }
     };
     window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, { capture: true });
     return () => {
       window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onKey, { capture: true });
     };
   }, [open]);
 
   const go = (section: SettingsTarget): void => {
     setOpen(false);
     onOpenSettings(section);
-  };
-
-  const menuBusy = update?.busy === true || ownUpdating;
-  const startUpdate = async (): Promise<void> => {
-    if (!update || menuBusy) return;
-    setOwnUpdating(true);
-    setUpdateFailed(false);
-    try {
-      // On success the app installs and relaunches; the menu goes away.
-      await update.onUpdate();
-    } catch {
-      setUpdateFailed(true);
-    } finally {
-      setOwnUpdating(false);
-    }
   };
 
   return (
@@ -114,28 +101,15 @@ export function UserMenu({
           </div>
           {update && (
             <div className="user-menu-update">
-              <p className="user-menu-update-version">
-                {t.updater.available(update.version)}
-              </p>
-              <button
-                type="button"
-                role="menuitem"
-                className="btn btn-primary btn-sm"
-                aria-disabled={menuBusy}
-                aria-busy={menuBusy}
-                onClick={() => {
-                  if (menuBusy) return;
-                  void startUpdate();
-                }}
-              >
-                <IconDownload size={14} />
-                {menuBusy ? t.updater.updating : t.updater.update}
-              </button>
-              {updateFailed && (
-                <p className="user-menu-update-error" role="alert">
-                  {t.updater.failed}
-                </p>
-              )}
+              {/* Round 14 (C6): the same row the Settings Account section
+                  shows. It unmounts with the popover, so a failure from a
+                  previous attempt never survives a re-open (C7). */}
+              <UpdateAction
+                version={update.version}
+                onUpdate={update.onUpdate}
+                busy={update.busy}
+                menuItem
+              />
             </div>
           )}
           <div className="ws-menu-sep" role="separator" />

@@ -147,6 +147,35 @@ describe("UserMenu update button states (round 14 QA)", () => {
     expect(screen.getByRole("menuitem", { name: "Update" }).getAttribute("aria-disabled")).toBe("false");
   });
 
+  it("round 14 QA: while another surface installs, the item is busy and inert", () => {
+    const onUpdate = vi.fn(async () => {});
+    renderWithUpdate({ version: "0.2.3", onUpdate, busy: true });
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    // Round 14 (C8): the same copy key as the banner, with the version.
+    expect(screen.getByText("A new version is available: 0.2.3")).toBeTruthy();
+    const item = screen.getByRole("menuitem", { name: "Updating…" });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(item.getAttribute("aria-busy")).toBe("true");
+    fireEvent.click(item);
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it("round 14 (C7): a failure does not survive closing and reopening the menu", async () => {
+    const onUpdate = vi.fn().mockRejectedValue(new Error("boom"));
+    renderWithUpdate({ version: "0.2.3", onUpdate, busy: false });
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitem", { name: "Update" }));
+    });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("menuitem", { name: "Update" })).toBeTruthy();
+  });
+
   it("while installing the button is busy and cannot fire twice", async () => {
     let release: (() => void) | null = null;
     const onUpdate = vi.fn(

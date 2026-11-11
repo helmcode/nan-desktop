@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { BrandMark } from "./brand";
 import type { SettingsSection } from "./components/UserMenu";
+import { UpdateAction } from "./components/UpdateAction";
 import { VOICES, folderName, grantErrorLabel, profileTitle } from "./copy";
 import { DEFAULT_GRANT_MODE, type GrantMode } from "./core";
 import { VOICE_UI } from "./flags";
@@ -25,6 +26,7 @@ export function Settings({
   signingOut,
   focusSection = null,
   backLabel,
+  update = null,
 }: {
   profile: ProfileView | undefined;
   workspace: Workspace;
@@ -37,6 +39,10 @@ export function Settings({
   focusSection?: SettingsSection;
   /// The Back button's text (where Back returns to); "Back to chat" by default.
   backLabel?: string;
+  /// Round 14 (C6): the newer version, when the update check found one. The
+  /// same busy state as the banner and the account menu (one install at a
+  /// time), so the Account section offers the update without leaving chat.
+  update?: { version: string; onUpdate: () => Promise<void>; busy: boolean } | null;
 }) {
   const { t, locale, setLocale } = useI18n();
   // S15: run_command is on by default; the core still asks per action.
@@ -77,14 +83,9 @@ export function Settings({
     target?.scrollIntoView?.({ block: "start" });
   }, [focusSection]);
 
-  // Escape returns to the chat.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onBack();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onBack]);
+  // Round 14 (C2): Escape returns to the chat from the Settings surface in
+  // App.tsx, so every section (Skills included) behaves the same and an inner
+  // surface can consume the key first (B1/B2).
 
   const toggleRunCommand = async (enabled: boolean): Promise<void> => {
     setRunCommandBusy(true);
@@ -122,19 +123,18 @@ export function Settings({
   const errorText = grantErrorLabel(t, workspace.error);
 
   return (
-    <section className="settings" aria-labelledby="settings-title">
+    <section className="settings">
       <header className="settings-header">
         <button type="button" className="btn btn-ghost btn-sm" onClick={onBack}>
           <IconArrowLeft size={16} />
           {backLabel ?? t.settings.back}
         </button>
-        <h1 id="settings-title">{t.settings.title}</h1>
       </header>
 
       <div className="settings-body">
         {/* ---- Working folders ------------------------------------------ */}
         <section className="settings-section" aria-labelledby="ws-title" ref={foldersRef}>
-          <h2 id="ws-title">{f.title}</h2>
+          <h1 id="ws-title">{f.title}</h1>
           <p className="section-lede">{f.lede}</p>
 
           <ul className="grant-list">
@@ -267,7 +267,7 @@ export function Settings({
 
         {/* ---- Memory --------------------------------------------------- */}
         <section className="settings-section" aria-labelledby="mem-title" ref={memoryRef}>
-          <h2 id="mem-title">{t.settings.memory.title}</h2>
+          <h1 id="mem-title">{t.settings.memory.title}</h1>
           <p className="section-lede">{t.settings.memory.lede}</p>
           <div className="choice-list" role="radiogroup" aria-labelledby="mem-title">
             <ChoiceCard
@@ -290,7 +290,7 @@ export function Settings({
 
         {/* ---- Language ------------------------------------------------- */}
         <section className="settings-section" aria-labelledby="lang-title" ref={languageRef}>
-          <h2 id="lang-title">{t.settings.language.title}</h2>
+          <h1 id="lang-title">{t.settings.language.title}</h1>
           <p className="section-lede">{t.settings.language.lede}</p>
           <div className="choice-list choice-list-compact" role="radiogroup" aria-labelledby="lang-title">
             {LOCALES.map((id) => (
@@ -308,7 +308,7 @@ export function Settings({
         {/* ---- Voice (S24: hidden this round) ---------------------------- */}
         {VOICE_UI && (
           <section className="settings-section" aria-labelledby="voice-title">
-            <h2 id="voice-title">{t.settings.voice.title}</h2>
+            <h1 id="voice-title">{t.settings.voice.title}</h1>
             <p className="section-lede">{t.settings.voice.lede}</p>
             <div className="choice-list choice-list-compact" role="radiogroup" aria-labelledby="voice-title">
               {VOICES.map((v) => (
@@ -326,7 +326,7 @@ export function Settings({
 
         {/* ---- About ---------------------------------------------------- */}
         <section className="settings-section" aria-labelledby="about-title">
-          <h2 id="about-title">{t.settings.about.title}</h2>
+          <h1 id="about-title">{t.settings.about.title}</h1>
           <div className="about-product">
             <BrandMark size="md" />
             <strong>{t.settings.about.product}</strong>
@@ -341,6 +341,11 @@ export function Settings({
               <dd className="mono">{version || "-"}</dd>
             </div>
           </dl>
+          {update && (
+            <div className="about-update">
+              <UpdateAction version={update.version} onUpdate={update.onUpdate} busy={update.busy} />
+            </div>
+          )}
           <button type="button" className="btn btn-ghost btn-danger" onClick={onSignOut} disabled={signingOut}>
             {t.settings.about.signOut}
           </button>
