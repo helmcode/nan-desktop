@@ -123,7 +123,9 @@ export function Settings({
   const errorText = grantErrorLabel(t, workspace.error);
 
   return (
-    <section className="settings">
+    // Round 14 review (F4): every section carries an h1 and CSS shows one at a
+    // time, so the surface names itself for region navigation.
+    <section className="settings" aria-label={t.settings.title}>
       <header className="settings-header">
         <button type="button" className="btn btn-ghost btn-sm" onClick={onBack}>
           <IconArrowLeft size={16} />

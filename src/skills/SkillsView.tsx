@@ -5,6 +5,7 @@
 // the user never sees the generated SKILL.md or its frontmatter.
 
 import { useEffect, useRef, useState } from "react";
+import { isTopLayer, useEscapeLayer } from "../escapeLayers";
 import { useI18n, useT, type Strings } from "../i18n";
 import { Markdown } from "../Markdown";
 import { IconArrowLeft, IconBolt, IconFile, IconPencil, IconPlus, IconTrash, IconX } from "../icons";
@@ -68,6 +69,16 @@ export type SkillsViewProps = {
 
 type Tab = "mine" | "team";
 
+/** True when the draft holds anything closing it would throw away. */
+function draftHasContent(form: SkillDraft): boolean {
+  return (
+    form.title.trim() !== "" ||
+    form.description.trim() !== "" ||
+    form.instructions.trim() !== "" ||
+    form.references.length > 0
+  );
+}
+
 export function SkillsView({
   skills,
   loadError,
@@ -90,20 +101,28 @@ export function SkillsView({
   const showTabs = !form && team !== null;
   const activeTab: Tab = showTabs ? tab : "mine";
   const formOpen = form !== null;
+  const formFilled = form !== null && draftHasContent(form);
+  const formLayer = useEscapeLayer(formOpen);
 
   // Round 14 (C2): Esc closes the form before it reaches the Settings surface,
   // which would otherwise exit Settings. Captured, so it runs before the
-  // surface's own handler (B1/B2).
+  // surface's own handler (B1/B2). Round 14 review (F1): a draft that holds
+  // anything is never closed or wiped this way -- only its own Cancel/Back
+  // button closes it -- and an Escape that cancels an IME composition is not a
+  // dismissal at all. Round 14 review (F2): only the innermost open surface
+  // consumes the key (see escapeLayers).
   useEffect(() => {
     if (!formOpen) return;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(formLayer)) return;
+      // Consumed either way, so the Settings surface behind the form stays put.
       e.preventDefault();
-      onFormChange(null);
+      if (!formFilled) onFormChange(null);
     };
     window.addEventListener("keydown", onKey, { capture: true });
     return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [formOpen, onFormChange]);
+  }, [formOpen, formFilled, formLayer, onFormChange]);
 
   const remove = async (skill: Skill): Promise<void> => {
     if (armedId !== skill.id) {
@@ -363,18 +382,21 @@ function ShareDialog({
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<TeamProblem | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const layer = useEscapeLayer(true);
 
   useEffect(() => {
     cancelRef.current?.focus();
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape") return;
-      // Round 14 (B1): the dialog is the innermost surface and consumes Esc.
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(layer)) return;
+      // Round 14 (B1): the dialog is the innermost surface and consumes Esc
+      // (round 14 review F2: only the innermost one).
       e.preventDefault();
       onCancel();
     };
     window.addEventListener("keydown", onKey, { capture: true });
     return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [onCancel]);
+  }, [layer, onCancel]);
 
   const confirm = async (): Promise<void> => {
     if (busy) return;
@@ -465,19 +487,23 @@ function TeamPanel({
   const [duplicateError, setDuplicateError] = useState("");
   const library = teamLibrary(team.state.view);
   const syncProblem = team.state.problem;
+  const detailLayer = useEscapeLayer(viewing !== null);
 
   // Round 14 (C2): Esc closes the open team skill before the Settings surface
-  // sees the key (the same rule as the form and the share dialog).
+  // sees the key (the same rule as the form and the share dialog). Round 14
+  // review (F1/F2): never for an IME composition, and only when the detail is
+  // the innermost open surface.
   useEffect(() => {
     if (!viewing) return;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(detailLayer)) return;
       e.preventDefault();
       setViewing(null);
     };
     window.addEventListener("keydown", onKey, { capture: true });
     return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [viewing]);
+  }, [viewing, detailLayer]);
 
   /** The cached bundle (fetched and cached when missing). */
   const load = async (meta: TeamMeta): Promise<TeamSkill | null> => {

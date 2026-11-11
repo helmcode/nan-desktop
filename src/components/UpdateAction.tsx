@@ -14,7 +14,8 @@ export type UpdateActionProps = {
   version: string;
   /** The app's install flow: download, verify, install, relaunch. */
   onUpdate: () => Promise<void>;
-  /** True while ANOTHER surface is installing (one install at a time). */
+  /** True while any update install is in progress, this row's own included
+   *  (one install at a time); the guard below stops re-entry. */
   busy?: boolean;
   /** Inside the account menu's popover the row is a menuitem. */
   menuItem?: boolean;

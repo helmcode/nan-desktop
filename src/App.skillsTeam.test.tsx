@@ -594,6 +594,64 @@ describe("Escape inside the Skills section (round 14/C2)", () => {
     expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
   });
 
+  it("round 14 (F1): with a half-filled form it keeps the draft and stays in the form", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    const name = await screen.findByRole("textbox", { name: "Name" });
+    fireEvent.change(name, { target: { value: "Standup notes" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Instructions" }), {
+      target: { value: "Use **bullets** for the standup" },
+    });
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    // Nothing typed is thrown away: the form is still open, with its content.
+    expect(screen.getByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Standup notes");
+    expect((screen.getByRole("textbox", { name: "Instructions" }) as HTMLTextAreaElement).value).toBe(
+      "Use **bullets** for the standup",
+    );
+    // And the key never reached the Settings surface.
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("round 14 (F1): Escape that cancels an IME composition does nothing", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    expect(await screen.findByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+
+    // macOS composition (Japanese/Chinese input): Escape cancels the
+    // composition, so it must not close anything -- not even an empty form.
+    fireEvent.keyDown(document.body, { key: "Escape", isComposing: true });
+
+    expect(screen.getByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("round 14 (F2): with the form and the account menu open, Escape closes only the menu", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    const name = await screen.findByRole("textbox", { name: "Name" });
+    fireEvent.change(name, { target: { value: "Standup notes" } });
+    // The account menu stays available in the Settings sidebar, so both
+    // surfaces are open at once: the menu was opened last.
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Standup notes");
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
   it("with a team skill open it closes the detail and stays in Skills", async () => {
     setup({ rows: [meta("a", { title: "Alpha" })] });
     renderApp();

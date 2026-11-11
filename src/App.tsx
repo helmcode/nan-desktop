@@ -61,6 +61,7 @@ import {
   sendChat,
   type UpdateInfo,
 } from "./core";
+import { isTopLayer, useEscapeLayer } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
 import { useI18n, useT, type Strings } from "./i18n";
 import {
@@ -450,22 +451,25 @@ function Authorizing({
 function ComputerWideDialog({ onCancel, onContinue }: { onCancel: () => void; onContinue: () => void }) {
   const t = useT();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const layer = useEscapeLayer(true);
   // Focus once on open; re-renders of the shell must not steal focus back.
   useEffect(() => {
     cancelRef.current?.focus();
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        // Round 14 (B1/B2): an open dialog is the innermost surface and
-        // consumes Escape, so the surface behind it stays where it is.
-        e.preventDefault();
-        onCancel();
-      }
+      // Round 14 review (F1/F2): an Escape that cancels an IME composition is
+      // not a dismissal, and only the innermost open surface consumes the key.
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(layer)) return;
+      // Round 14 (B1/B2): an open dialog is the innermost surface and
+      // consumes Escape, so the surface behind it stays where it is.
+      e.preventDefault();
+      onCancel();
     };
     window.addEventListener("keydown", onKey, { capture: true });
     return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [onCancel]);
+  }, [layer, onCancel]);
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
@@ -1646,6 +1650,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   useEffect(() => {
     if (view !== "settings") return;
     const onKey = (e: KeyboardEvent) => {
+      // Round 14 review (F1): an Escape that cancels an IME composition is not
+      // a dismissal here either.
+      if (e.isComposing) return;
       if (e.defaultPrevented) return;
       if (e.key !== "Escape") return;
       leaveSettings();

@@ -419,6 +419,15 @@ describe("round 14 review fixes (B1/B2, C6, QA busy state)", () => {
     await act(async () => finish());
   });
 
+  it("F4: the Settings surface is a region named Settings (region navigation)", async () => {
+    resetTauri({ ...chatHandlers([row(1, "user", "hi")]), ...settingsHandlers });
+    renderApp("en");
+    await screen.findByText("hi");
+    await openSettings();
+    // The six sections each carry an h1, so the surface names itself instead.
+    expect(screen.getByRole("region", { name: "Settings" })).toBeTruthy();
+  });
+
   it("QA: one install at a time across the banner, the account menu and Settings", async () => {
     let finish: () => void = () => {};
     resetTauri({
