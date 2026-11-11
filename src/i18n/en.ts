@@ -280,7 +280,7 @@ export const en = {
       lede: "The voice that reads replies aloud.",
     },
     about: {
-      title: "About",
+      title: "Account",
       product: "Helmcode Desktop",
       account: "Account",
       version: "Version",

@@ -18,12 +18,15 @@ type Phase = "idle" | "installing" | "failed";
 export function UpdateBanner({
   check = checkForUpdate,
   install = installUpdate,
+  externalBusy = false,
   intervalMs = UPDATE_CHECK_INTERVAL_MS,
 }: {
   check?: () => Promise<UpdateInfo | null>;
   install?: () => Promise<void>;
+  externalBusy?: boolean;
   intervalMs?: number;
 }) {
+
   const t = useT();
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [visible, setVisible] = useState(false);
@@ -72,18 +75,18 @@ export function UpdateBanner({
       <button
         type="button"
         className="btn btn-primary btn-sm"
-        disabled={installing}
+        disabled={installing || externalBusy}
         aria-busy={installing}
         onClick={() => void onUpdate()}
       >
-        {installing ? t.updater.updating : t.updater.update}
+        {installing || externalBusy ? t.updater.updating : t.updater.update}
       </button>
       <button
         type="button"
         className="toast-close"
         aria-label={t.updater.dismiss}
         title={t.updater.dismiss}
-        disabled={installing}
+        disabled={installing || externalBusy}
         onClick={() => setVisible(false)}
       >
         <IconX size={12} />

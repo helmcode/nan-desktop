@@ -65,11 +65,11 @@ import { VOICE_UI } from "./flags";
 import { useI18n, useT, type Strings } from "./i18n";
 import {
   IconArrowUp,
+  IconUser,
   IconBolt,
   IconChevronDown,
   IconFile,
   IconFolder,
-  IconGear,
   IconGlobe,
   IconMemory,
   IconMic,
@@ -214,7 +214,7 @@ function settingsSectionLabel(t: Strings, section: SettingsPane): string {
 function SettingsSectionIcon({ section }: { section: SettingsPane }) {
   switch (section) {
     case "account":
-      return <IconGear size={16} />;
+      return <IconUser size={16} />;
     case "folders":
       return <IconFolder size={16} />;
     case "memory":
@@ -544,6 +544,19 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [inlineError, setInlineError] = useState("");
+  // One install at a time, shared by the banner and the user menu: the busy
+  // state lives here so the two surfaces cannot start a second install.
+  const [installing, setInstalling] = useState(false);
+  const startInstall = useCallback(async (): Promise<void> => {
+    if (installing) return;
+    setInstalling(true);
+    try {
+      await installUpdate();
+    } finally {
+      setInstalling(false);
+    }
+  }, [installing]);
+
   // Round 14/S1: the newer version the updater found. ONE check feeds the
   // banner and the user menu, so a dismissed banner never hides the update.
   const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
@@ -1939,7 +1952,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           <UserMenu
             accountName={accountName}
             accountDetail={activeProfile ? profileDescription(t, activeProfile.id) : ""}
-            update={availableUpdate ? { version: availableUpdate.version, onUpdate: installUpdate } : null}
+            update={
+              availableUpdate
+                ? { version: availableUpdate.version, onUpdate: startInstall, busy: installing }
+                : null
+            }
             onOpenSettings={openSettings}
             onSignOut={onSignOut}
             signingOut={busy}
@@ -2077,7 +2094,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                 </button>
               )}
             </header>
-            <UpdateBanner check={runUpdateCheck} install={installUpdate} />
+            <UpdateBanner check={runUpdateCheck} install={startInstall} externalBusy={installing} />
 
             <div className="messages" ref={messagesRef}>
               <div className="messages-inner">

@@ -34,6 +34,8 @@ export type UserMenuUpdate = {
   version: string;
   /** The banner's install flow: download, verify, install, relaunch. */
   onUpdate: () => Promise<void>;
+  /** True while ANOTHER surface (e.g. the banner) is installing. */
+  busy: boolean;
 };
 
 export function UserMenu({
@@ -53,8 +55,8 @@ export function UserMenu({
 }) {
   const { t, locale, setLocale } = useI18n();
   const [open, setOpen] = useState(false);
-  const [updating, setUpdating] = useState(false);
   const [updateFailed, setUpdateFailed] = useState(false);
+  const [ownUpdating, setOwnUpdating] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -82,16 +84,18 @@ export function UserMenu({
     onOpenSettings(section);
   };
 
+  const menuBusy = update?.busy === true || ownUpdating;
   const startUpdate = async (): Promise<void> => {
-    if (!update || updating) return;
-    setUpdating(true);
+    if (!update || menuBusy) return;
+    setOwnUpdating(true);
     setUpdateFailed(false);
     try {
       // On success the app installs and relaunches; the menu goes away.
       await update.onUpdate();
     } catch {
-      setUpdating(false);
       setUpdateFailed(true);
+    } finally {
+      setOwnUpdating(false);
     }
   };
 
@@ -110,17 +114,22 @@ export function UserMenu({
           </div>
           {update && (
             <div className="user-menu-update">
+              <p className="user-menu-update-version">
+                {t.updater.available(update.version)}
+              </p>
               <button
                 type="button"
                 role="menuitem"
                 className="btn btn-primary btn-sm"
-                title={t.updater.available(update.version)}
-                disabled={updating}
-                aria-busy={updating}
-                onClick={() => void startUpdate()}
+                aria-disabled={menuBusy}
+                aria-busy={menuBusy}
+                onClick={() => {
+                  if (menuBusy) return;
+                  void startUpdate();
+                }}
               >
                 <IconDownload size={14} />
-                {updating ? t.updater.updating : t.updater.update}
+                {menuBusy ? t.updater.updating : t.updater.update}
               </button>
               {updateFailed && (
                 <p className="user-menu-update-error" role="alert">

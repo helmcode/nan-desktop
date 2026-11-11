@@ -3302,3 +3302,19 @@ button:disabled {
 .team-skill-detail .grant-actions {
   margin-top: 0.5rem;
 }
+
+
+/* Round 14/S1: the user menu's update offer */
+.user-menu-update {
+  padding: 8px 12px 4px;
+}
+.user-menu-update-version {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin: 0 0 6px;
+}
+.user-menu-update-error {
+  font-size: 12px;
+  color: var(--color-danger, #f87171);
+  margin: 4px 0 0;
+}

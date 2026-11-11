@@ -285,7 +285,7 @@ describe("Settings as a surface (round 14, S2)", () => {
     expect(screen.queryByRole("button", { name: "New chat" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Image Studio" })).toBeNull();
     // Account is what About / sign out showed before the restructure.
-    expect(screen.getByRole("heading", { name: "About" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Account" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
   });
 

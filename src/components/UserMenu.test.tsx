@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { I18nProvider } from "../i18n";
 import { LOCALE_STORAGE_KEY } from "../i18n/locale";
 import { UserMenu } from "./UserMenu";
@@ -87,5 +87,97 @@ describe("UserMenu (S20)", () => {
     fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
     expect(onSignOut).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("UserMenu update button states (round 14 QA)", () => {
+  function renderWithUpdate(update: {
+    version: string;
+    onUpdate: () => Promise<void>;
+    busy: boolean;
+  }): void {
+    render(
+      <I18nProvider initial="en">
+        <UserMenu
+          accountName="cristian"
+          accountDetail="Max"
+          update={update}
+          onOpenSettings={vi.fn()}
+          onSignOut={vi.fn()}
+          signingOut={false}
+        />
+      </I18nProvider>,
+    );
+  }
+
+  it("a failed install shows the alert and re-enables the button", async () => {
+    const onUpdate = vi.fn().mockRejectedValue(new Error("boom"));
+    const { rerender } = render(
+      <I18nProvider initial="en">
+        <UserMenu
+          accountName="cristian"
+          accountDetail="Max"
+          update={{ version: "0.2.3", onUpdate, busy: false }}
+          onOpenSettings={vi.fn()}
+          onSignOut={vi.fn()}
+          signingOut={false}
+        />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    const button = await screen.findByRole("menuitem", { name: "Update" });
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    // The rerender mirrors the parent passing the non-busy state again.
+    rerender(
+      <I18nProvider initial="en">
+        <UserMenu
+          accountName="cristian"
+          accountDetail="Max"
+          update={{ version: "0.2.3", onUpdate, busy: false }}
+          onOpenSettings={vi.fn()}
+          onSignOut={vi.fn()}
+          signingOut={false}
+        />
+      </I18nProvider>,
+    );
+    expect(screen.getByRole("menuitem", { name: "Update" }).getAttribute("aria-disabled")).toBe("false");
+  });
+
+  it("while installing the button is busy and cannot fire twice", async () => {
+    let release: (() => void) | null = null;
+    const onUpdate = vi.fn(
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+    const { rerender } = render(
+      <I18nProvider initial="en">
+        <UserMenu
+          accountName="cristian"
+          accountDetail="Max"
+          update={{ version: "0.2.3", onUpdate, busy: false }}
+          onOpenSettings={vi.fn()}
+          onSignOut={vi.fn()}
+          signingOut={false}
+        />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    const button = await screen.findByRole("menuitem", { name: "Update" });
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(screen.getByRole("menuitem", { name: "Updating…" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Updating…" }).getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Updating…" }));
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    // Once the install settles, the component's own busy state clears.
+    await act(async () => {
+      release?.();
+    });
+    expect(screen.getByRole("menuitem", { name: "Update" }).getAttribute("aria-disabled")).toBe("false");
+    expect(onUpdate).toHaveBeenCalledTimes(1);
   });
 });

@@ -139,7 +139,7 @@ function setup(opts: Setup = {}) {
     skills_delete: () => undefined,
     ...core.handlers,
   });
-  return { core, rows, created: () => created };
+  return { core, rows, created: () => created, bump: () => { version += 1; } };
 }
 
 function renderApp(locale: Locale = "en") {
@@ -165,6 +165,13 @@ async function openTeamTab(name = "Team"): Promise<void> {
  * Captures the team sync delays (the short retries and the 15-minute
  * refresh) without firing them; everything else keeps the real timer.
  */
+function vi_timers_run(timers: Array<{ delay: number; run: () => void }>, delay: number): () => void {
+  const matches = timers.filter((t) => t.delay === delay);
+  const last = matches[matches.length - 1];
+  if (!last) throw new Error(`no timer for delay ${delay}`);
+  return last.run;
+}
+
 function captureSyncTimers(): Array<{ delay: number; run: () => void }> {
   const timers: Array<{ delay: number; run: () => void }> = [];
   const original = window.setTimeout.bind(window);
@@ -456,6 +463,54 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     expect(planNextSync("rate_limited", 0)).toEqual({ delayMs: 60_000, failures: 1 });
     expect(planNextSync("rate_limited", 1)).toEqual({ delayMs: 5 * 60_000, failures: 2 });
     expect(planNextSync("expired", 2)).toEqual({ delayMs: TEAM_SYNC_INTERVAL_MS, failures: 3 });
+  });
+
+  it("round 14 QA: the ladder escalates through App and resets after a success", async () => {
+    const timers = captureSyncTimers();
+    let failing = true;
+    const grab = setup({ rows: [meta("a", { title: "Alpha" })], bundle: () => (failing ? { status: 429 } : null) });
+    const rows = grab.rows as TeamMeta[];
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    await waitFor(() => expect(screen.getByText("Preparing…")).toBeTruthy());
+    const at = (delay: number) => timers.filter((t) => t.delay === delay);
+    const call = vi_timers_run(timers, 60_000);
+
+    // First failure schedules 60s; a second one escalates to 5 minutes.
+    await act(async () => {
+      call();
+    });
+    await waitFor(() => expect(screen.getByText("Preparing…")).toBeTruthy());
+    expect(at(5 * 60_000).length > 0).toBe(true);
+    const ladderAtFive = vi_timers_run(timers, 5 * 60_000);
+
+    // A success resets the ladder: the next timer is the normal refresh.
+    failing = false;
+    await act(async () => {
+      ladderAtFive();
+    });
+    await waitFor(() => expect(screen.queryByText("Preparing…")).toBeNull());
+    const totalAfterSuccess = timers.length;
+    expect(at(TEAM_SYNC_INTERVAL_MS).length > 0).toBe(true);
+
+    // A fresh failure starts the ladder over at 60 seconds (count reset).
+    // Give the sync something NEW to fetch: bump the list etag and the row
+    // version, so bundlesToFetch adds it again while the bundle keeps failing.
+    rows[0] = meta("a", { title: "Alpha", updated_at: "2026-11-12T00:00:00Z" });
+    grab.bump();
+    failing = true;
+    // Flush the async round inside act so its re-scheduling happens while
+    // React is settled; the run continues through list -> bundle -> plan.
+    const finalTimer = vi_timers_run(timers, TEAM_SYNC_INTERVAL_MS);
+    await act(async () => {
+      finalTimer();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.getByText("Preparing…")).toBeTruthy());
+    expect(timers.filter((t) => t.delay === 60_000).length).toBeGreaterThan(0);
+    expect(timers.length).toBeGreaterThan(totalAfterSuccess);
   });
 
   it("a completed round goes back to the normal interval and resets the count", () => {

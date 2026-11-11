@@ -210,6 +210,21 @@ describe("per-conversation active skill", () => {
 });
 
 describe("error texts", () => {
+  it("round 14: secret_detected names the file in en and es, defaulting to SKILL.md", () => {
+    expect(skillErrorText(en, { code: "secret_detected", path: "references/a.md" })).toBe(
+      en.skills.errors.secretDetected("references/a.md"),
+    );
+    expect(skillErrorText(es, { code: "secret_detected", path: "references/a.md" })).toBe(
+      es.skills.errors.secretDetected("references/a.md"),
+    );
+    expect(skillErrorText(en, { code: "secret_detected" })).toBe(
+      en.skills.errors.secretDetected("SKILL.md"),
+    );
+    expect(skillErrorText(es, { code: "secret_detected" })).toBe(
+      es.skills.errors.secretDetected("SKILL.md"),
+    );
+  });
+
   it("localizes the core's refusals and the local problems", () => {
     expect(skillErrorText(en, { code: "file_too_large", path: "SKILL.md" })).toBe(en.skills.errors.tooLarge);
     expect(skillErrorText(en, { code: "file_too_large", path: "references/a.md" })).toBe(

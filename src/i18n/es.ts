@@ -279,7 +279,7 @@ export const es: Strings = {
       lede: "La voz que lee en alto las respuestas.",
     },
     about: {
-      title: "Acerca de",
+      title: "Cuenta",
       product: "Helmcode Desktop",
       account: "Cuenta",
       version: "Versión",
