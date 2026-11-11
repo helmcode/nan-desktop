@@ -1088,7 +1088,7 @@ describe("the folder-grant refusal opens Settings", () => {
       expect(open.textContent).toBe("Open Settings");
 
       fireEvent.click(open);
-      expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
+      expect(await screen.findByRole("heading", { name: "Working folders" })).toBeTruthy();
       expect(queryStudio()).toBeNull();
       await waitFor(() =>
         expect(scrolled.some((el) => el.getAttribute("aria-labelledby") === "ws-title")).toBe(true),
@@ -1114,7 +1114,7 @@ describe("the folder-grant refusal opens Settings", () => {
     fireEvent.click(within(pane).getByRole("button", { name: "Edit image" }));
     await studio();
     fireEvent.click(await screen.findByRole("button", { name: "Open Settings to add a working folder" }));
-    expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Working folders" })).toBeTruthy();
   });
 
   it("other errors stay a plain message with no Settings action", async () => {

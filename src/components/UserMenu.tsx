@@ -7,10 +7,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { accountInitial } from "../copy";
+import { isTopLayer, useEscapeLayer } from "../escapeLayers";
 import { LOCALES, useI18n } from "../i18n";
 import {
   IconCheck,
-  IconDownload,
   IconChevronDown,
   IconFolder,
   IconGear,
@@ -18,6 +18,7 @@ import {
   IconLogout,
   IconMemory,
 } from "../icons";
+import { UpdateAction } from "./UpdateAction";
 
 /** One of the sections the Settings surface shows (its sidebar lists them). */
 export type SettingsPane = "account" | "folders" | "memory" | "language" | "skills";
@@ -34,6 +35,9 @@ export type UserMenuUpdate = {
   version: string;
   /** The banner's install flow: download, verify, install, relaunch. */
   onUpdate: () => Promise<void>;
+  /** Any update install in progress across surfaces, this menu's own
+   *  included (one install at a time); the row's own guard stops re-entry. */
+  busy: boolean;
 };
 
 export function UserMenu({
@@ -53,10 +57,9 @@ export function UserMenu({
 }) {
   const { t, locale, setLocale } = useI18n();
   const [open, setOpen] = useState(false);
-  const [updating, setUpdating] = useState(false);
-  const [updateFailed, setUpdateFailed] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const layer = useEscapeLayer(open);
 
   useEffect(() => {
     if (!open) return;
@@ -64,35 +67,29 @@ export function UserMenu({
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setOpen(false);
-        triggerRef.current?.focus();
-      }
+      // Round 14 review (F1/F2): an Escape that cancels an IME composition is
+      // not a dismissal, and with several surfaces open only the innermost one
+      // consumes the key (the skills form, say, keeps its draft).
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(layer)) return;
+      // Round 14 (B1): when it is the innermost surface the menu consumes
+      // Escape. The capture phase runs before the Settings surface's own
+      // Escape handler, whose first line checks `defaultPrevented`.
+      e.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
     };
     window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, { capture: true });
     return () => {
       window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onKey, { capture: true });
     };
-  }, [open]);
+  }, [open, layer]);
 
   const go = (section: SettingsTarget): void => {
     setOpen(false);
     onOpenSettings(section);
-  };
-
-  const startUpdate = async (): Promise<void> => {
-    if (!update || updating) return;
-    setUpdating(true);
-    setUpdateFailed(false);
-    try {
-      // On success the app installs and relaunches; the menu goes away.
-      await update.onUpdate();
-    } catch {
-      setUpdating(false);
-      setUpdateFailed(true);
-    }
   };
 
   return (
@@ -110,23 +107,15 @@ export function UserMenu({
           </div>
           {update && (
             <div className="user-menu-update">
-              <button
-                type="button"
-                role="menuitem"
-                className="btn btn-primary btn-sm"
-                title={t.updater.available(update.version)}
-                disabled={updating}
-                aria-busy={updating}
-                onClick={() => void startUpdate()}
-              >
-                <IconDownload size={14} />
-                {updating ? t.updater.updating : t.updater.update}
-              </button>
-              {updateFailed && (
-                <p className="user-menu-update-error" role="alert">
-                  {t.updater.failed}
-                </p>
-              )}
+              {/* Round 14 (C6): the same row the Settings Account section
+                  shows. It unmounts with the popover, so a failure from a
+                  previous attempt never survives a re-open (C7). */}
+              <UpdateAction
+                version={update.version}
+                onUpdate={update.onUpdate}
+                busy={update.busy}
+                menuItem
+              />
             </div>
           )}
           <div className="ws-menu-sep" role="separator" />

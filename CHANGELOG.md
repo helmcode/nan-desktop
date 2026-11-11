@@ -1,10 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 - Settings window, team skills, honest updates
 
 ### Platform
-- The user menu's account section also offers Update while a newer version
-  exists, so closing the banner does not hide it.
+- The account menu's account section and the Settings > Account section both
+  offer Update while a newer version exists, so closing the banner does not
+  hide it. One install runs at a time across the banner, the menu and
+  Settings, and a failure shows an alert where you started it.
+- Update copy is clearer: "Hay una versión nueva: {version}" instead of a
+  headline-style line.
+- Escape behaves predictably: it closes only the innermost open thing (the
+  account menu, a dialog, the skills form), closing a popup no longer also
+  exits Settings, and Escape while an IME composition is active never counts
+  as a dismissal. A half-filled skill draft can no longer be wiped by Escape:
+  only its Cancel button closes it.
+- Settings headings now match the section names (the section title is the
+  page heading), and the Account section labels the plan as "Tipo de cuenta".
+- Team skills: approved skills still downloading show "Preparando…" with a
+  tooltip explaining the wait, and badges no longer glue to the skill name
+  for screen readers.
+- Save as skill: the description field has a short example placeholder and a
+  persistent guide ("Describe qué hace y cuándo usarlo: empieza con «Úsala
+  cuando…»") that stays visible while you type.
 - Settings: opening Settings from the user menu now switches the whole window
   to a section layout (Account, Working folders, Memory, Language) with its
   own sidebar; leaving Settings returns to the chat exactly as it was.

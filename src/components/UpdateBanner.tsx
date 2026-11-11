@@ -18,12 +18,15 @@ type Phase = "idle" | "installing" | "failed";
 export function UpdateBanner({
   check = checkForUpdate,
   install = installUpdate,
+  externalBusy = false,
   intervalMs = UPDATE_CHECK_INTERVAL_MS,
 }: {
   check?: () => Promise<UpdateInfo | null>;
   install?: () => Promise<void>;
+  externalBusy?: boolean;
   intervalMs?: number;
 }) {
+
   const t = useT();
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [visible, setVisible] = useState(false);
@@ -49,7 +52,7 @@ export function UpdateBanner({
   }, [runCheck, intervalMs]);
 
   const onUpdate = async (): Promise<void> => {
-    if (phase === "installing") return;
+    if (phase === "installing" || externalBusy) return;
     setPhase("installing");
     try {
       // On success the app relaunches and this component goes away.
@@ -61,30 +64,47 @@ export function UpdateBanner({
 
   if (!update || !visible) return null;
   const installing = phase === "installing";
+  // Round 14 (C3): one install at a time across every surface. The buttons
+  // keep aria-disabled instead of `disabled` so the keyboard is not dropped
+  // while the download runs; the onClick guards below make them inert.
+  const busy = installing || externalBusy;
 
   return (
     <div className="update-banner" role="status" aria-live="polite">
       <IconDownload size={14} />
       <span className="update-banner-text">
         {t.updater.available(update.version)}
-        {phase === "failed" && <span className="update-banner-error"> {t.updater.failed}</span>}
+        {phase === "failed" && (
+          <span className="update-banner-error" role="alert">
+            {" "}
+            {t.updater.failed}
+          </span>
+        )}
       </span>
       <button
         type="button"
         className="btn btn-primary btn-sm"
-        disabled={installing}
-        aria-busy={installing}
-        onClick={() => void onUpdate()}
+        aria-disabled={busy}
+        aria-busy={busy}
+        onClick={() => {
+          if (busy) return;
+          void onUpdate();
+        }}
       >
-        {installing ? t.updater.updating : t.updater.update}
+        {busy ? t.updater.updating : t.updater.update}
       </button>
       <button
         type="button"
         className="toast-close"
         aria-label={t.updater.dismiss}
         title={t.updater.dismiss}
-        disabled={installing}
-        onClick={() => setVisible(false)}
+        aria-disabled={busy}
+        onClick={() => {
+          // Inert while installing: the banner is the only place that says
+          // what is happening (C3).
+          if (busy) return;
+          setVisible(false);
+        }}
       >
         <IconX size={12} />
       </button>

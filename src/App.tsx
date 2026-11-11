@@ -61,15 +61,16 @@ import {
   sendChat,
   type UpdateInfo,
 } from "./core";
+import { isTopLayer, useEscapeLayer } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
 import { useI18n, useT, type Strings } from "./i18n";
 import {
   IconArrowUp,
+  IconUser,
   IconBolt,
   IconChevronDown,
   IconFile,
   IconFolder,
-  IconGear,
   IconGlobe,
   IconMemory,
   IconMic,
@@ -214,7 +215,7 @@ function settingsSectionLabel(t: Strings, section: SettingsPane): string {
 function SettingsSectionIcon({ section }: { section: SettingsPane }) {
   switch (section) {
     case "account":
-      return <IconGear size={16} />;
+      return <IconUser size={16} />;
     case "folders":
       return <IconFolder size={16} />;
     case "memory":
@@ -450,17 +451,25 @@ function Authorizing({
 function ComputerWideDialog({ onCancel, onContinue }: { onCancel: () => void; onContinue: () => void }) {
   const t = useT();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const layer = useEscapeLayer(true);
   // Focus once on open; re-renders of the shell must not steal focus back.
   useEffect(() => {
     cancelRef.current?.focus();
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
+      // Round 14 review (F1/F2): an Escape that cancels an IME composition is
+      // not a dismissal, and only the innermost open surface consumes the key.
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(layer)) return;
+      // Round 14 (B1/B2): an open dialog is the innermost surface and
+      // consumes Escape, so the surface behind it stays where it is.
+      e.preventDefault();
+      onCancel();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [layer, onCancel]);
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
@@ -544,6 +553,19 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [inlineError, setInlineError] = useState("");
+  // One install at a time, shared by the banner and the user menu: the busy
+  // state lives here so the two surfaces cannot start a second install.
+  const [installing, setInstalling] = useState(false);
+  const startInstall = useCallback(async (): Promise<void> => {
+    if (installing) return;
+    setInstalling(true);
+    try {
+      await installUpdate();
+    } finally {
+      setInstalling(false);
+    }
+  }, [installing]);
+
   // Round 14/S1: the newer version the updater found. ONE check feeds the
   // banner and the user menu, so a dismissed banner never hides the update.
   const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
@@ -1621,6 +1643,24 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     settingsNavRef.current?.querySelector<HTMLButtonElement>('[aria-current="page"]')?.focus();
   }, [view]);
 
+  // Round 14 (C2): Escape leaves Settings from ANY section (Account, Folders,
+  // Memory, Language, Skills alike). Inner surfaces register their own Escape
+  // handler in the capture phase and call preventDefault (B1/B2), so only the
+  // innermost thing closes and this handler never fires for them.
+  useEffect(() => {
+    if (view !== "settings") return;
+    const onKey = (e: KeyboardEvent) => {
+      // Round 14 review (F1): an Escape that cancels an IME composition is not
+      // a dismissal here either.
+      if (e.isComposing) return;
+      if (e.defaultPrevented) return;
+      if (e.key !== "Escape") return;
+      leaveSettings();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view, leaveSettings]);
+
   const submit = (): void => {
     void (imageMode ? sendImage() : send());
   };
@@ -1939,7 +1979,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           <UserMenu
             accountName={accountName}
             accountDetail={activeProfile ? profileDescription(t, activeProfile.id) : ""}
-            update={availableUpdate ? { version: availableUpdate.version, onUpdate: installUpdate } : null}
+            update={
+              availableUpdate
+                ? { version: availableUpdate.version, onUpdate: startInstall, busy: installing }
+                : null
+            }
             onOpenSettings={openSettings}
             onSignOut={onSignOut}
             signingOut={busy}
@@ -1990,6 +2034,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
               onDeleted={onSkillDeleted}
               onUse={activateSkill}
               onBack={leaveSettings}
+              backLabel={settingsReturn === "studio" ? t.settings.backToStudio : t.settings.back}
               team={
                 teamProfile
                   ? {
@@ -2016,6 +2061,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
               onSignOut={onSignOut}
               signingOut={busy}
               focusSection={settingsSection}
+              update={
+                availableUpdate
+                  ? { version: availableUpdate.version, onUpdate: startInstall, busy: installing }
+                  : null
+              }
             />
           )}
         </div>
@@ -2077,7 +2127,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                 </button>
               )}
             </header>
-            <UpdateBanner check={runUpdateCheck} install={installUpdate} />
+            <UpdateBanner check={runUpdateCheck} install={startInstall} externalBusy={installing} />
 
             <div className="messages" ref={messagesRef}>
               <div className="messages-inner">

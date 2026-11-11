@@ -37,7 +37,7 @@ describe("UpdateBanner (round 7)", () => {
     const check = vi.fn(async () => NEXT);
     const install = vi.fn(async () => {});
     renderBanner({ check, install });
-    expect(await screen.findByText("Helmcode Desktop 0.3.0 is available")).toBeTruthy();
+    expect(await screen.findByText("A new version is available: 0.3.0")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Update" })).toBeTruthy();
     expect(check).toHaveBeenCalledTimes(1);
     // Never installs by itself.
@@ -46,7 +46,7 @@ describe("UpdateBanner (round 7)", () => {
 
   it("speaks Spanish", async () => {
     renderBanner({ check: async () => NEXT }, "es");
-    expect(await screen.findByText("Helmcode Desktop 0.3.0 disponible")).toBeTruthy();
+    expect(await screen.findByText("Hay una versión nueva: 0.3.0")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Actualizar" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Cerrar" })).toBeTruthy();
   });
@@ -72,8 +72,10 @@ describe("UpdateBanner (round 7)", () => {
     const install = vi.fn(() => new Promise<void>((resolve) => (finish = resolve)));
     renderBanner({ check: async () => NEXT, install });
     fireEvent.click(await screen.findByRole("button", { name: "Update" }));
-    const busy = (await screen.findByRole("button", { name: "Updating…" })) as HTMLButtonElement;
-    expect(busy.disabled).toBe(true);
+    const busy = await screen.findByRole("button", { name: "Updating…" });
+    // Round 14 (C3): aria-disabled, not `disabled`, so focus is not lost.
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect(busy.getAttribute("aria-busy")).toBe("true");
     fireEvent.click(busy);
     expect(install).toHaveBeenCalledTimes(1);
     await act(async () => finish());
@@ -86,9 +88,26 @@ describe("UpdateBanner (round 7)", () => {
       .mockResolvedValueOnce(undefined);
     renderBanner({ check: async () => NEXT, install });
     fireEvent.click(await screen.findByRole("button", { name: "Update" }));
-    expect(await screen.findByText(/Could not update\. Try again\./)).toBeTruthy();
+    // Round 14 (C3): the failure is a role="alert", not just status text.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Could not update. Try again.");
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
     await waitFor(() => expect(install).toHaveBeenCalledTimes(2));
+  });
+
+  it("round 14 QA: another surface installing keeps this banner inert", async () => {
+    const install = vi.fn(async () => {});
+    const { container } = renderBanner({ check: async () => NEXT, install, externalBusy: true });
+
+    const busy = await screen.findByRole("button", { name: "Updating…" });
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(busy);
+    expect(install).not.toHaveBeenCalled();
+
+    const dismiss = screen.getByRole("button", { name: "Dismiss" });
+    expect(dismiss.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(dismiss);
+    expect(container.querySelector(".update-banner")).not.toBeNull();
   });
 
   it("dismiss hides the banner until the next check, which brings it back", async () => {

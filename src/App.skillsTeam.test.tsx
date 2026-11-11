@@ -139,7 +139,7 @@ function setup(opts: Setup = {}) {
     skills_delete: () => undefined,
     ...core.handlers,
   });
-  return { core, rows, created: () => created };
+  return { core, rows, created: () => created, bump: () => { version += 1; } };
 }
 
 function renderApp(locale: Locale = "en") {
@@ -177,6 +177,14 @@ function captureSyncTimers(): Array<{ delay: number; run: () => void }> {
     return original(handler as () => void, timeout);
   }) as unknown as typeof window.setTimeout);
   return timers;
+}
+
+/** The most recent captured timer with that delay (throws when none exists). */
+function lastTimerFor(timers: Array<{ delay: number; run: () => void }>, delay: number): () => void {
+  const matches = timers.filter((t) => t.delay === delay);
+  const last = matches[matches.length - 1];
+  if (!last) throw new Error(`no timer for delay ${delay}`);
+  return last.run;
 }
 
 beforeEach(() => window.localStorage.clear());
@@ -458,6 +466,62 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     expect(planNextSync("expired", 2)).toEqual({ delayMs: TEAM_SYNC_INTERVAL_MS, failures: 3 });
   });
 
+  it("round 14 QA: the ladder escalates through App and resets after a success", async () => {
+    const timers = captureSyncTimers();
+    let failing = true;
+    const grab = setup({ rows: [meta("a", { title: "Alpha" })], bundle: () => (failing ? { status: 429 } : null) });
+    const rows = grab.rows as TeamMeta[];
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    await waitFor(() => expect(screen.getByText("Preparing…")).toBeTruthy());
+    const at = (delay: number) => timers.filter((t) => t.delay === delay);
+    /** The delays of the timers scheduled after `from` (a slice window). */
+    const delaysSince = (from: number) => timers.slice(from).map((t) => t.delay);
+    const call = lastTimerFor(timers, 60_000);
+
+    // First failure schedules 60s; a second one escalates to 5 minutes.
+    await act(async () => {
+      call();
+    });
+    await waitFor(() => expect(screen.getByText("Preparing…")).toBeTruthy());
+    expect(at(5 * 60_000).length > 0).toBe(true);
+    const ladderAtFive = lastTimerFor(timers, 5 * 60_000);
+
+    // A success resets the ladder: the timers that success round schedules are
+    // the normal 15-minute refresh only.
+    failing = false;
+    const beforeSuccess = timers.length;
+    await act(async () => {
+      ladderAtFive();
+    });
+    await waitFor(() => expect(screen.queryByText("Preparing…")).toBeNull());
+    const successRound = delaysSince(beforeSuccess);
+    expect(successRound).toContain(TEAM_SYNC_INTERVAL_MS);
+    expect(successRound.filter((delay) => delay === 60_000 || delay === 5 * 60_000)).toEqual([]);
+
+    // A fresh failure starts the ladder over at 60 seconds (count reset).
+    // Give the sync something NEW to fetch: bump the list etag and the row
+    // version, so bundlesToFetch adds it again while the bundle keeps failing.
+    rows[0] = meta("a", { title: "Alpha", updated_at: "2026-11-12T00:00:00Z" });
+    grab.bump();
+    failing = true;
+    const beforeFreshFailure = timers.length;
+    // Flush the async round inside act so its re-scheduling happens while
+    // React is settled; the run continues through list -> bundle -> plan.
+    const finalTimer = lastTimerFor(timers, TEAM_SYNC_INTERVAL_MS);
+    await act(async () => {
+      finalTimer();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.getByText("Preparing…")).toBeTruthy());
+    // The fresh round scheduled the first rung (60s), not the 5-minute one.
+    const freshRound = delaysSince(beforeFreshFailure);
+    expect(freshRound).toEqual([60_000]);
+    expect(freshRound).not.toContain(5 * 60_000);
+  });
+
   it("a completed round goes back to the normal interval and resets the count", () => {
     expect(planNextSync(null, 2)).toEqual({ delayMs: TEAM_SYNC_INTERVAL_MS, failures: 0 });
     // Only the two problems that stop a round early ask for a short retry.
@@ -474,6 +538,12 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     const item = within(list).getByRole("listitem");
     expect(item.textContent).toContain("Alpha");
     expect(within(item).getByText("Preparing…")).toBeTruthy();
+    // Round 14 (C10): a space keeps the accessible name "Alpha Preparing…".
+    expect(item.querySelector(".skill-title")?.textContent).toBe("Alpha Preparing…");
+    // Round 14 (C11): the badge explains what it is waiting for.
+    expect(within(item).getByText("Preparing…").getAttribute("title")).toBe(
+      "Downloading to this computer; ready in a few seconds.",
+    );
   });
 
   it("the retry in a minute caches the bundle and clears Preparing; cached rows keep their actions", async () => {
@@ -505,7 +575,119 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     renderApp("es");
     await openSkills("Ajustes", "Skills");
     await openTeamTab("Equipo");
-    expect(await screen.findByText("Se está preparando…")).toBeTruthy();
+    expect(await screen.findByText("Preparando…")).toBeTruthy();
+  });
+});
+
+describe("Escape inside the Skills section (round 14/C2)", () => {
+  it("with the form open it closes the form and stays in Skills", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    expect(await screen.findByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("heading", { name: "New skill" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Skills", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("round 14 (F1): with a half-filled form it keeps the draft and stays in the form", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    const name = await screen.findByRole("textbox", { name: "Name" });
+    fireEvent.change(name, { target: { value: "Standup notes" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Instructions" }), {
+      target: { value: "Use **bullets** for the standup" },
+    });
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    // Nothing typed is thrown away: the form is still open, with its content.
+    expect(screen.getByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Standup notes");
+    expect((screen.getByRole("textbox", { name: "Instructions" }) as HTMLTextAreaElement).value).toBe(
+      "Use **bullets** for the standup",
+    );
+    // And the key never reached the Settings surface.
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("round 14 (F1): Escape that cancels an IME composition does nothing", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    expect(await screen.findByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+
+    // macOS composition (Japanese/Chinese input): Escape cancels the
+    // composition, so it must not close anything -- not even an empty form.
+    fireEvent.keyDown(document.body, { key: "Escape", isComposing: true });
+
+    expect(screen.getByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("round 14 (F2): with the form and the account menu open, Escape closes only the menu", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    const name = await screen.findByRole("textbox", { name: "Name" });
+    fireEvent.change(name, { target: { value: "Standup notes" } });
+    // The account menu stays available in the Settings sidebar, so both
+    // surfaces are open at once: the menu was opened last.
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("heading", { name: "New skill", level: 1 })).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Standup notes");
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("with a team skill open it closes the detail and stays in Skills", async () => {
+    setup({ rows: [meta("a", { title: "Alpha" })] });
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    fireEvent.click(await screen.findByRole("button", { name: 'View "Alpha"' }));
+    expect(await screen.findByRole("heading", { name: "Alpha", level: 2 })).toBeTruthy();
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("heading", { name: "Alpha" })).toBeNull();
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+  });
+
+  it("with nothing open it leaves Settings, like every other section", async () => {
+    setup({ rows: [meta("a", { title: "Alpha" })], skills: [weekly()] });
+    renderApp();
+    await openSkills();
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(screen.queryByRole("navigation", { name: "Settings sections" })).toBeNull();
+    expect(await screen.findByRole("textbox", { name: "Message" })).toBeTruthy();
+  });
+
+  it("round 14 (C12): the purpose field keeps its activation guide visible", async () => {
+    setup({ skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    const purpose = await screen.findByRole("textbox", { name: "What it is for" });
+    expect(purpose.getAttribute("placeholder")).toBe("e.g. Write the weekly report from my notes");
+    expect(purpose.getAttribute("aria-describedby")).toBe("skill-purpose-hint");
+    expect(document.getElementById("skill-purpose-hint")?.textContent).toBe(
+      'Describe what it does and when to use it: start with "Use when…"',
+    );
   });
 });
 

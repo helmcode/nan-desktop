@@ -5,6 +5,7 @@
 // the user never sees the generated SKILL.md or its frontmatter.
 
 import { useEffect, useRef, useState } from "react";
+import { isTopLayer, useEscapeLayer } from "../escapeLayers";
 import { useI18n, useT, type Strings } from "../i18n";
 import { Markdown } from "../Markdown";
 import { IconArrowLeft, IconBolt, IconFile, IconPencil, IconPlus, IconTrash, IconX } from "../icons";
@@ -60,11 +61,23 @@ export type SkillsViewProps = {
   onDeleted: (id: string) => void;
   onUse: (skill: Skill) => void;
   onBack: () => void;
+  /** Where Back returns to (round 14/C1: the same label Settings uses). */
+  backLabel?: string;
   /** S4: the team library and sharing. `null` (NaN) hides both. */
   team?: TeamProps | null;
 };
 
 type Tab = "mine" | "team";
+
+/** True when the draft holds anything closing it would throw away. */
+function draftHasContent(form: SkillDraft): boolean {
+  return (
+    form.title.trim() !== "" ||
+    form.description.trim() !== "" ||
+    form.instructions.trim() !== "" ||
+    form.references.length > 0
+  );
+}
 
 export function SkillsView({
   skills,
@@ -75,6 +88,7 @@ export function SkillsView({
   onDeleted,
   onUse,
   onBack,
+  backLabel,
   team = null,
 }: SkillsViewProps) {
   const t = useT();
@@ -86,6 +100,29 @@ export function SkillsView({
   const [sharing, setSharing] = useState<{ skill: Skill; reshare: boolean } | null>(null);
   const showTabs = !form && team !== null;
   const activeTab: Tab = showTabs ? tab : "mine";
+  const formOpen = form !== null;
+  const formFilled = form !== null && draftHasContent(form);
+  const formLayer = useEscapeLayer(formOpen);
+
+  // Round 14 (C2): Esc closes the form before it reaches the Settings surface,
+  // which would otherwise exit Settings. Captured, so it runs before the
+  // surface's own handler (B1/B2). Round 14 review (F1): a draft that holds
+  // anything is never closed or wiped this way -- only its own Cancel/Back
+  // button closes it -- and an Escape that cancels an IME composition is not a
+  // dismissal at all. Round 14 review (F2): only the innermost open surface
+  // consumes the key (see escapeLayers).
+  useEffect(() => {
+    if (!formOpen) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(formLayer)) return;
+      // Consumed either way, so the Settings surface behind the form stays put.
+      e.preventDefault();
+      if (!formFilled) onFormChange(null);
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [formOpen, formFilled, formLayer, onFormChange]);
 
   const remove = async (skill: Skill): Promise<void> => {
     if (armedId !== skill.id) {
@@ -112,7 +149,7 @@ export function SkillsView({
       <header className="settings-header">
         <button type="button" className="btn btn-ghost btn-sm" onClick={form ? () => onFormChange(null) : onBack}>
           <IconArrowLeft size={16} />
-          {form ? s.title : s.back}
+          {form ? s.title : (backLabel ?? s.back)}
         </button>
         <h1 id="skills-title">{form ? (form.id ? s.formEditTitle : s.formNewTitle) : s.title}</h1>
         {!form && <p className="section-lede">{activeTab === "team" ? s.team.intro : s.intro}</p>}
@@ -345,15 +382,21 @@ function ShareDialog({
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<TeamProblem | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const layer = useEscapeLayer(true);
 
   useEffect(() => {
     cancelRef.current?.focus();
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") onCancel();
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(layer)) return;
+      // Round 14 (B1): the dialog is the innermost surface and consumes Esc
+      // (round 14 review F2: only the innermost one).
+      e.preventDefault();
+      onCancel();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [layer, onCancel]);
 
   const confirm = async (): Promise<void> => {
     if (busy) return;
@@ -444,6 +487,23 @@ function TeamPanel({
   const [duplicateError, setDuplicateError] = useState("");
   const library = teamLibrary(team.state.view);
   const syncProblem = team.state.problem;
+  const detailLayer = useEscapeLayer(viewing !== null);
+
+  // Round 14 (C2): Esc closes the open team skill before the Settings surface
+  // sees the key (the same rule as the form and the share dialog). Round 14
+  // review (F1/F2): never for an IME composition, and only when the detail is
+  // the innermost open surface.
+  useEffect(() => {
+    if (!viewing) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(detailLayer)) return;
+      e.preventDefault();
+      setViewing(null);
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [viewing, detailLayer]);
 
   /** The cached bundle (fetched and cached when missing). */
   const load = async (meta: TeamMeta): Promise<TeamSkill | null> => {
@@ -592,8 +652,21 @@ function TeamPanel({
                 <div className="skill-text">
                   <p className="skill-title">
                     {meta.title}
-                    {meta.featured && <span className="skill-badge skill-badge-featured">{s.featured}</span>}
-                    {preparing && <span className="skill-badge skill-badge-preparing">{s.preparing}</span>}
+                    {meta.featured && (
+                      <>
+                        {" "}
+                        <span className="skill-badge skill-badge-featured">{s.featured}</span>
+                      </>
+                    )}
+                    {preparing && (
+                      <>
+                        {" "}
+                        {/* Round 14 (C11): the badge explains what it waits for. */}
+                        <span className="skill-badge skill-badge-preparing" title={s.preparingHint}>
+                          {s.preparing}
+                        </span>
+                      </>
+                    )}
                   </p>
                   <p className="skill-description">{meta.description}</p>
                   <p className="skill-provenance">
@@ -705,10 +778,16 @@ function SkillForm({
           className="text-input"
           value={form.description}
           placeholder={s.purposePlaceholder}
+          aria-describedby="skill-purpose-hint"
           maxLength={1024}
           onChange={(e) => set({ description: e.currentTarget.value })}
         />
       </label>
+      {/* Round 14 (C12): the guide stays visible, wrapped like the
+          instructions hint, so it is described to assistive tech too. */}
+      <span className="skill-hint" id="skill-purpose-hint">
+        {s.purposeHint}
+      </span>
       <label className="skill-field">
         <span className="skill-label">{s.instructionsLabel}</span>
         <textarea
