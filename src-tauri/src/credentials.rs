@@ -40,6 +40,51 @@
 //!   silent: any failure just means "log in again"). A persisted flag inside
 //!   the vault makes this a one-time probe.
 //!
+//! # Signature stamp (round 13, S2)
+//!
+//! A macOS keychain item's ACL is bound to the code signature that created
+//! it. An item created by the ad-hoc-signed v0.2.0 build therefore stops
+//! matching the Developer ID signature that replaces it, and READING it
+//! raises the OS "enter your login keychain password" dialog (deleting it
+//! never does). Removing that dialog is what this section is for.
+//!
+//! * **Stamp.** Every vault records the code-signing identity of the build
+//!   that created it (`sig`): the identifier plus team from the signature of
+//!   the running executable, as reported by `codesign -d --verbose=4`. That
+//!   is the designated requirement a keychain item ACL is bound to, so an app
+//!   update signed by the same Developer ID keeps opening its own vault
+//!   without a prompt, while an item created by another identity (the
+//!   ad-hoc-signed v0.2.0, a different team) is recognised as foreign.
+//!   Builds without a signing identity (ad-hoc, Linux/Windows CI) fall back to
+//!   their code directory hash or to [`DEV_STAMP`]. The same token is mirrored
+//!   in the plaintext sidecar `vault.sig` (`0600`, fingerprint only, never a
+//!   secret) so it can be inspected BEFORE the master key item is touched at
+//!   all.
+//!
+//!   The per-BUILD hash is deliberately not the stamp on its own: it changes
+//!   with every release, so it would reset the vault (and sign the user out)
+//!   on every auto-update even though the ACL still matches. It is used only
+//!   when there is no identity to compare, which is precisely the case where
+//!   nothing stable exists to bind an item to.
+//! * **Gate.** The first credential access of a process decides from the
+//!   sidecar and the presence of the vault file alone whether the persisted
+//!   master key can belong to the running build. On a mismatch (including a
+//!   missing or corrupt stamp: a v0.2.0 vault has none) the stale master
+//!   item and the legacy per-secret items are DELETED without being read, the
+//!   vault file is dropped (its key is gone, so nothing in it is recoverable
+//!   anyway) and the process drops to a clean signed-out state. The next
+//!   access creates a fresh master item under the current signature, whose
+//!   ACL then matches for the whole life of that signature.
+//! * **Once per signature.** A matching stamp writes nothing: no item is
+//!   deleted, the master key is not recreated and existing credentials are
+//!   returned as they are.
+//! * **Conversations are not credentials.** They live in `chat.db`, outside
+//!   the vault, so a reset signs the user out but never deletes history.
+//! * **The one remaining read.** The pre-round-5 legacy probe (`Migration`
+//!   above) still reads per-secret items, but only when there is no vault
+//!   file yet, i.e. on an install that never ran round 5. An existing vault
+//!   written by another signature is always deleted, never probed.
+//!
 //! # Threat model (also in SECURITY.md)
 //!
 //! Protects against: other local users / processes running as another user
@@ -70,6 +115,10 @@ use crate::profile;
 
 /// Vault file name inside the app data dir.
 pub const VAULT_FILE: &str = "vault.bin";
+/// Plaintext fingerprint sidecar next to the vault (round 13, S2). Holds the
+/// code-signing stamp of the build that created the vault — never a secret —
+/// so the startup gate can decide without touching the OS keychain.
+pub const VAULT_STAMP_FILE: &str = "vault.sig";
 /// Debug-build master key file name inside the app data dir.
 pub const DEV_MASTER_KEY_FILE: &str = "vault.key";
 /// Keychain account holding the release-build master key (base64).
@@ -148,6 +197,15 @@ pub trait MasterKeyProvider: Send + Sync {
     /// when none exists yet. Must NEVER silently replace a key it merely
     /// failed to read (that would orphan a valid vault).
     fn load_or_create(&self) -> Result<[u8; KEY_LEN], CredError>;
+
+    /// Drop the persisted master key WITHOUT reading it (round 13, S2).
+    /// Deleting a keychain item never raises the OS password dialog, while
+    /// reading one written under another code signature always can, so the
+    /// stale-signature path must use this and nothing else. Discarding a
+    /// missing key is a no-op.
+    fn discard(&self) -> Result<(), CredError> {
+        Ok(())
+    }
 }
 
 fn random_bytes<const N: usize>() -> Result<[u8; N], CredError> {
@@ -184,6 +242,14 @@ impl MasterKeyProvider for FileMasterKey {
         let key = random_bytes::<KEY_LEN>()?;
         write_atomic(&self.path, &key).map_err(|err| CredError::MasterKey(err.to_string()))?;
         Ok(key)
+    }
+
+    fn discard(&self) -> Result<(), CredError> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(CredError::MasterKey(err.to_string())),
+        }
     }
 }
 
@@ -227,6 +293,122 @@ impl MasterKeyProvider for KeychainMasterKey {
             .map_err(|err| CredError::MasterKey(err.to_string()))?;
         Ok(key)
     }
+
+    /// Delete the item without reading it: `delete_credential` maps to
+    /// `SecItemDelete`, which does not consult the item ACL, so no dialog.
+    fn discard(&self) -> Result<(), CredError> {
+        let entry = keyring::Entry::new(&self.service, &self.account)
+            .map_err(|err| CredError::MasterKey(err.to_string()))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(err) => Err(CredError::MasterKey(err.to_string())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Code-signing stamp (round 13, S2)
+// ---------------------------------------------------------------------------
+
+/// Stamp used when the running executable has no readable code signature
+/// (Linux/Windows CI, unsigned dev builds). Every such build shares it, and
+/// it can never collide with a real fingerprint because those are prefixed.
+pub const DEV_STAMP: &str = "unsigned";
+
+/// Source of the running build's code-signing identity. Injected so tests
+/// can simulate an upgrade without re-signing a binary.
+pub trait StampSource: Send + Sync {
+    /// The current build's fingerprint. Must never prompt, block on a user
+    /// and never use the network.
+    fn current(&self) -> String;
+}
+
+/// Production source: the code-signing identity of the running executable.
+pub struct CodeSignStamp;
+
+impl StampSource for CodeSignStamp {
+    fn current(&self) -> String {
+        signing_stamp().to_string()
+    }
+}
+
+static SIGNING_STAMP: OnceLock<String> = OnceLock::new();
+
+/// The running build's code-signing identity, resolved once per process and
+/// never prompting: an identity change is exactly what has to be detected
+/// before the OS keychain is allowed to raise a dialog.
+pub fn signing_stamp() -> &'static str {
+    SIGNING_STAMP.get_or_init(|| code_sign_fingerprint().unwrap_or_else(|| DEV_STAMP.to_string()))
+}
+
+/// Read the signature dictionary of the running executable from `codesign`.
+/// The tool prints the dictionary only (no key material) and never raises a
+/// dialog; it is spawned once per process and only on macOS.
+fn code_sign_fingerprint() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let exe = std::env::current_exe().ok()?;
+        let output = std::process::Command::new("/usr/bin/codesign")
+            .arg("-d")
+            .arg("--verbose=4")
+            .arg(&exe)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .output()
+            .ok()?;
+        // The dictionary goes to stderr; a few versions also echo a summary
+        // on stdout, so accept either.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return parse_codesign_stamp(&stderr)
+            .or_else(|| parse_codesign_stamp(&String::from_utf8_lossy(&output.stdout)));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The stamp encoded by a `codesign -d --verbose=4` dictionary.
+///
+/// A keychain item ACL is bound to the designated requirement, whose stable
+/// parts are the signing identity: identifier plus team. That is the stamp, so
+/// a new release signed by the same Developer ID keeps unlocking its own item
+/// while an item created by another identity is recognised as foreign. A
+/// build with no identity has nothing stable to bind to, so it falls back to
+/// its own code directory hash (which then changes per build, exactly as an
+/// ad-hoc signature does).
+fn parse_codesign_stamp(dictionary: &str) -> Option<String> {
+    let field = |prefix: &str| {
+        dictionary
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(prefix))
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "not set")
+    };
+    if let (Some(identifier), Some(team)) = (field("Identifier="), field("TeamIdentifier=")) {
+        return Some(format!("id:{identifier}/team:{team}"));
+    }
+    parse_cdhash(dictionary)
+}
+
+/// Extract `CDHash=<hex>` from a `codesign -d --verbose=4` dictionary: the
+/// fallback identity of an ad-hoc signed build. The result is prefixed so a
+/// dev marker can never be mistaken for a fingerprint.
+fn parse_cdhash(text: &str) -> Option<String> {
+    let hash = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("CDHash="))?
+        .trim();
+    let identifiable =
+        (32..=128).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit());
+    identifiable.then(|| format!("cdhash:{hash}"))
+}
+
+/// Whether `stamp` is a token this module is willing to compare: short,
+/// printable, no whitespace. A corrupt sidecar then simply means "no stamp".
+fn valid_stamp(stamp: &str) -> bool {
+    !stamp.is_empty() && stamp.len() <= 128 && stamp.chars().all(|c| c.is_ascii_graphic())
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +470,51 @@ struct VaultData {
     /// so the keychain is never queried for them again.
     #[serde(default)]
     legacy_migrated: bool,
+    /// Code-signing fingerprint of the build that created this vault
+    /// (round 13, S2). Absent in vaults written before the stamp existed,
+    /// which reads as "another signature" and triggers a clean reset.
+    #[serde(default)]
+    sig: Option<String>,
+}
+
+impl VaultData {
+    /// An empty vault bound to `stamp`. `legacy_migrated` is `true` after a
+    /// reset (the legacy items were deleted without being read, so probing
+    /// them again could only raise a dialog) and `false` when seeding an
+    /// install that may still hold pre-round-5 items to migrate.
+    fn fresh(stamp: &str, legacy_migrated: bool) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            legacy_migrated,
+            sig: Some(stamp.to_string()),
+        }
+    }
+}
+
+/// What the startup stamp gate decided, from plaintext evidence only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// Vault present and stamped by this build: open it.
+    Open,
+    /// No vault file: seed one (dropping any master item, which protects
+    /// nothing). This is the first run and the pre-round-5 upgrade path.
+    Seed,
+    /// Vault present but stamped by another build, or not stamped at all:
+    /// delete the stale artifacts and seed a fresh vault.
+    Reset,
+}
+
+/// Pure decision behind the gate: no I/O, no secrets, so it can be pinned by
+/// tests. `stamp_file` is [`Vault::read_stamp`] (a missing or corrupt sidecar
+/// is `None`), `vault_exists` is whether a vault file is on disk at all.
+fn gate(stamp_file: Option<&str>, vault_exists: bool, stamp: &str) -> Gate {
+    if !vault_exists {
+        Gate::Seed
+    } else if stamp_file == Some(stamp) {
+        Gate::Open
+    } else {
+        Gate::Reset
+    }
 }
 
 /// Serializes every vault read-modify-write in the process (across `Vault`
@@ -305,6 +532,8 @@ struct Legacy {
 pub struct Vault {
     path: PathBuf,
     master: Box<dyn MasterKeyProvider>,
+    /// Code-signing fingerprint source for the startup gate (round 13, S2).
+    stamp: Box<dyn StampSource>,
     /// Cached after the first successful load: one keychain access per
     /// process at most.
     key: Mutex<Option<[u8; KEY_LEN]>>,
@@ -318,6 +547,7 @@ impl Vault {
         Self {
             path,
             master,
+            stamp: Box::new(CodeSignStamp),
             key: Mutex::new(None),
             legacy: None,
             migration_checked: Mutex::new(false),
@@ -330,6 +560,15 @@ impl Vault {
         self
     }
 
+    /// Replace the code-signing stamp source. Production always uses
+    /// [`CodeSignStamp`]; this seam exists so the tests can drive a signature
+    /// change without re-signing a binary.
+    #[cfg(test)]
+    pub fn with_stamp(mut self, stamp: Box<dyn StampSource>) -> Self {
+        self.stamp = stamp;
+        self
+    }
+
     fn master_key(&self) -> Result<[u8; KEY_LEN], CredError> {
         let mut cached = self.key.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(key) = *cached {
@@ -338,6 +577,75 @@ impl Vault {
         let key = self.master.load_or_create()?;
         *cached = Some(key);
         Ok(key)
+    }
+
+    /// Forget the cached master key so the next access re-derives it (used
+    /// after the persisted key was discarded).
+    fn clear_cached_key(&self) {
+        let mut cached = self.key.lock().unwrap_or_else(|p| p.into_inner());
+        *cached = None;
+    }
+
+    /// Path of the plaintext fingerprint sidecar next to the vault.
+    fn stamp_path(&self) -> PathBuf {
+        match self.path.parent() {
+            Some(dir) => dir.join(VAULT_STAMP_FILE),
+            None => PathBuf::from(VAULT_STAMP_FILE),
+        }
+    }
+
+    /// The stamp recorded by the build that created the vault, if the
+    /// sidecar exists and holds a well-formed token. `None` covers a missing
+    /// sidecar (every v0.2.0 install), a corrupt one and an empty one.
+    fn read_stamp(&self) -> Option<String> {
+        let raw = std::fs::read_to_string(self.stamp_path()).ok()?;
+        let stamp = raw.trim();
+        valid_stamp(stamp).then(|| stamp.to_string())
+    }
+
+    fn remove_stamp(&self) {
+        let _ = std::fs::remove_file(self.stamp_path());
+    }
+
+    /// Nothing persisted yet: drop any master item (it protects no vault, so
+    /// deleting it is free and saves a read that could raise a dialog) along
+    /// with the meaningless sidecar.
+    fn seed_clean(&self) -> Result<(), CredError> {
+        self.master.discard()?;
+        self.clear_cached_key();
+        self.remove_stamp();
+        Ok(())
+    }
+
+    /// Drop everything that belongs to another code signature, in the only
+    /// order that cannot raise a macOS dialog (round 13, S2):
+    ///
+    /// 1. DELETE the master key item and the legacy per-secret items without
+    ///    reading any of them (deleting never asks for the keychain password,
+    ///    reading does);
+    /// 2. drop the vault file, whose key is now gone and which can therefore
+    ///    never be decrypted again;
+    /// 3. drop the stale stamp sidecar.
+    ///
+    /// The caller then seeds a fresh vault whose key is created by THIS
+    /// signature. `chat.db` (conversations) is deliberately untouched: the
+    /// user signs in again, the history is still there.
+    fn discard_stale(&self) -> Result<(), CredError> {
+        self.master.discard()?;
+        self.clear_cached_key();
+        if let Some(legacy) = &self.legacy {
+            for account in &legacy.accounts {
+                let _ = legacy.store.delete(account);
+            }
+        }
+        let _ = std::fs::remove_file(&self.path);
+        self.remove_stamp();
+        // The legacy items are gone: never probe them again in this process.
+        *self
+            .migration_checked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = true;
+        Ok(())
     }
 
     /// Read + decrypt. Missing, unreadable or undecryptable → empty
@@ -354,12 +662,24 @@ impl Vault {
     fn store(&self, key: &[u8; KEY_LEN], data: &VaultData) -> Result<(), CredError> {
         let plain = serde_json::to_vec(data).map_err(|err| CredError::Io(err.to_string()))?;
         let sealed = seal_envelope(key, &plain)?;
-        write_atomic(&self.path, &sealed).map_err(|err| CredError::Io(err.to_string()))
+        write_atomic(&self.path, &sealed).map_err(|err| CredError::Io(err.to_string()))?;
+        // The sidecar carries the fingerprint only, never a secret. It is
+        // written LAST so a crash in between reads as "unstamped" next
+        // launch: that drops to a signed-out state instead of opening a
+        // vault this build cannot attribute.
+        if let Some(sig) = data.sig.as_deref().filter(|sig| valid_stamp(sig)) {
+            write_atomic(&self.stamp_path(), sig.as_bytes())
+                .map_err(|err| CredError::Io(err.to_string()))?;
+        }
+        Ok(())
     }
 
-    /// One-time, best-effort, silent migration of the legacy keychain items.
-    /// Called with `VAULT_IO` held.
-    fn ensure_migrated(&self, key: &[u8; KEY_LEN]) {
+    /// One-time, best-effort, silent migration of the legacy keychain items
+    /// into `data`. Runs with `VAULT_IO` held and only for a vault that
+    /// belongs to the CURRENT signature: a stale vault is deleted, never
+    /// probed. The old items are deleted only once their copies are safely
+    /// persisted.
+    fn ensure_migrated(&self, key: &[u8; KEY_LEN], data: &mut VaultData) {
         let Some(legacy) = &self.legacy else { return };
         let mut checked = self
             .migration_checked
@@ -369,8 +689,6 @@ impl Vault {
             return;
         }
         *checked = true;
-
-        let mut data = self.load(key);
         if data.legacy_migrated {
             return;
         }
@@ -390,7 +708,7 @@ impl Vault {
         }
         data.legacy_migrated = true;
         // Delete the old items only once their copies are safely persisted.
-        if self.store(key, &data).is_ok() {
+        if self.store(key, data).is_ok() {
             for account in &found {
                 let _ = legacy.store.delete(account);
             }
@@ -399,13 +717,56 @@ impl Vault {
 
     /// Run `f` on the decrypted data with the process-wide lock held; when
     /// `f` returns `true` the data is re-sealed and written atomically.
+    ///
+    /// The stamp gate runs FIRST and looks at plaintext evidence only (the
+    /// fingerprint sidecar plus whether a vault file exists), so a vault
+    /// created by another code signature is deleted without ever reading its
+    /// master key item — the read is the one operation macOS can turn into a
+    /// keychain dialog (round 13, S2).
     fn with_data<T>(&self, f: impl FnOnce(&mut VaultData) -> (T, bool)) -> Result<T, CredError> {
         let _guard = VAULT_IO.lock().unwrap_or_else(|p| p.into_inner());
-        let key = self.master_key()?;
-        self.ensure_migrated(&key);
-        let mut data = self.load(&key);
+        let stamp = self.stamp.current();
+        let on_disk_stamp = self.read_stamp();
+
+        // ---- Phase 1: plaintext evidence only, no keychain access --------
+        let mut fresh = false;
+        let mut data = match gate(on_disk_stamp.as_deref(), self.path.exists(), &stamp) {
+            Gate::Open => {
+                // The sidecar says this vault was created by THIS build, so
+                // reading the master key item cannot cross a signature
+                // boundary.
+                let key = self.master_key()?;
+                let mut loaded = self.load(&key);
+                // ---- Phase 2: the stamp inside the vault is authoritative --
+                // The sidecar is not secret, so it alone must never
+                // authorize opening a foreign vault.
+                if loaded.sig.as_deref() == Some(stamp.as_str()) {
+                    self.ensure_migrated(&key, &mut loaded);
+                    loaded
+                } else {
+                    self.discard_stale()?;
+                    fresh = true;
+                    VaultData::fresh(&stamp, true)
+                }
+            }
+            Gate::Seed => {
+                self.seed_clean()?;
+                fresh = true;
+                let mut seeded = VaultData::fresh(&stamp, false);
+                let key = self.master_key()?;
+                self.ensure_migrated(&key, &mut seeded);
+                seeded
+            }
+            Gate::Reset => {
+                self.discard_stale()?;
+                fresh = true;
+                VaultData::fresh(&stamp, true)
+            }
+        };
+
         let (out, dirty) = f(&mut data);
-        if dirty {
+        if dirty || fresh {
+            let key = self.master_key()?;
             self.store(&key, &data)?;
         }
         Ok(out)
@@ -562,8 +923,11 @@ pub fn production_vault(app_data_dir: &Path) -> Vault {
 }
 
 /// Install the process-wide vault (called once from the Tauri `setup`).
-/// Nothing touches the keychain or disk until the first credential access.
+/// Nothing touches the keychain or disk until the first credential access,
+/// and the build's code-signing fingerprint is resolved here so the startup
+/// stamp gate compares against a cached value.
 pub fn init(app_data_dir: &Path) {
+    let _ = signing_stamp();
     let _ = GLOBAL.set(production_vault(app_data_dir));
 }
 
@@ -623,6 +987,85 @@ mod tests {
         fn load_or_create(&self) -> Result<[u8; KEY_LEN], CredError> {
             Err(CredError::MasterKey("denied".into()))
         }
+    }
+
+    /// A fixed code-signing fingerprint, so a test can simulate an upgrade
+    /// without re-signing anything.
+    struct FixedStamp(&'static str);
+
+    impl StampSource for FixedStamp {
+        fn current(&self) -> String {
+            self.0.to_string()
+        }
+    }
+
+    /// In-memory stand-in for the release-build keychain item that holds the
+    /// master key. `reads` counts reads of an EXISTING item only and
+    /// `deletes` counts removed items only: those are the two operations that
+    /// can involve the item at all, and reading an existing one is the one
+    /// macOS can turn into a keychain dialog.
+    #[derive(Default, Clone)]
+    struct FakeMasterKey {
+        state: Arc<Mutex<FakeMasterState>>,
+    }
+
+    #[derive(Default)]
+    struct FakeMasterState {
+        item: Option<String>,
+        reads: u32,
+        deletes: u32,
+        creates: u32,
+    }
+
+    impl FakeMasterKey {
+        fn reads(&self) -> u32 {
+            self.state.lock().unwrap().reads
+        }
+        fn deletes(&self) -> u32 {
+            self.state.lock().unwrap().deletes
+        }
+        fn creates(&self) -> u32 {
+            self.state.lock().unwrap().creates
+        }
+        fn has_item(&self) -> bool {
+            self.state.lock().unwrap().item.is_some()
+        }
+    }
+
+    impl MasterKeyProvider for FakeMasterKey {
+        fn load_or_create(&self) -> Result<[u8; KEY_LEN], CredError> {
+            let mut state = self.state.lock().unwrap();
+            if let Some(encoded) = state.item.clone() {
+                state.reads += 1;
+                let bytes = BASE64_STANDARD
+                    .decode(encoded)
+                    .map_err(|err| CredError::MasterKey(err.to_string()))?;
+                let key: [u8; KEY_LEN] = bytes
+                    .try_into()
+                    .map_err(|_| CredError::MasterKey("malformed item".into()))?;
+                return Ok(key);
+            }
+            let key = random_bytes::<KEY_LEN>()?;
+            state.item = Some(BASE64_STANDARD.encode(key));
+            state.creates += 1;
+            Ok(key)
+        }
+
+        fn discard(&self) -> Result<(), CredError> {
+            let mut state = self.state.lock().unwrap();
+            // Only removing an item that is actually there counts: discarding
+            // a missing key is a no-op in production too.
+            if state.item.take().is_some() {
+                state.deletes += 1;
+            }
+            Ok(())
+        }
+    }
+
+    /// A vault in `dir` stamped with a fixed fingerprint.
+    fn stamped_vault(dir: &TempDir, stamp: &'static str, master: FakeMasterKey) -> Vault {
+        Vault::new(dir.path().join(VAULT_FILE), Box::new(master))
+            .with_stamp(Box::new(FixedStamp(stamp)))
     }
 
     #[test]
@@ -685,7 +1128,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = TempDir::new().unwrap();
         vault_in(&dir).set("a", "b").unwrap();
-        for file in [VAULT_FILE, DEV_MASTER_KEY_FILE] {
+        for file in [VAULT_FILE, VAULT_STAMP_FILE, DEV_MASTER_KEY_FILE] {
             let mode = std::fs::metadata(dir.path().join(file))
                 .unwrap()
                 .permissions()
@@ -950,6 +1393,285 @@ mod tests {
         assert_eq!(
             legacy_accounts(),
             vec!["nan", "nan.session", "helmcode", "helmcode.session"]
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Round 13 / S2: the code-signing stamp gate
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn stamp_gate_decides_from_plaintext_evidence_only() {
+        // No vault file: seed (first run, or a pre-round-5 install).
+        assert_eq!(gate(None, false, "cdhash:a"), Gate::Seed);
+        assert_eq!(gate(Some("cdhash:old"), false, "cdhash:a"), Gate::Seed);
+        // Vault + matching stamp: open, and nothing is reset.
+        assert_eq!(gate(Some("cdhash:a"), true, "cdhash:a"), Gate::Open);
+        // Vault but no / foreign stamp: the vault belongs to another build.
+        assert_eq!(gate(None, true, "cdhash:a"), Gate::Reset);
+        assert_eq!(gate(Some("cdhash:b"), true, "cdhash:a"), Gate::Reset);
+    }
+
+    #[test]
+    fn code_signing_stamp_prefers_the_signing_identity_over_the_build_hash() {
+        // A Developer ID release: identity = identifier + team, so the next
+        // release signed by the same team is the same stamp (no re-login on
+        // auto-update) while an ad-hoc v0.2.0 item is foreign.
+        let signed = [
+            "Executable=/Applications/Helmcode Desktop.app/Contents/MacOS/nan-desktop",
+            "Identifier=com.helmcode.nan.desktop",
+            "CDHash=2f8ab1c9d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0",
+            "TeamIdentifier=ABCDE12345",
+        ]
+        .join("\n");
+        assert_eq!(
+            parse_codesign_stamp(&signed).as_deref(),
+            Some("id:com.helmcode.nan.desktop/team:ABCDE12345")
+        );
+        // Same identity, different build bytes: still the same stamp.
+        let next_release = signed.replace(
+            "CDHash=2f8ab1c9d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0",
+            "CDHash=9999999999999999999999999999999999999999",
+        );
+        assert_eq!(
+            parse_codesign_stamp(&signed),
+            parse_codesign_stamp(&next_release)
+        );
+        // An ad-hoc build has no identity: its own hash is the whole stamp.
+        let ad_hoc = [
+            "Identifier=nan-desktop-8cf4746dcaa87e63",
+            "CDHash=2f8ab1c9d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0",
+            "TeamIdentifier=not set",
+        ]
+        .join("\n");
+        assert_eq!(
+            parse_codesign_stamp(&ad_hoc).as_deref(),
+            Some("cdhash:2f8ab1c9d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0")
+        );
+        // No signature dictionary, a truncated hash or a non-hex value.
+        assert_eq!(
+            parse_codesign_stamp("Identifier=com.helmcode.nan.desktop"),
+            None
+        );
+        assert_eq!(parse_cdhash("CDHash=deadbeef"), None);
+        assert_eq!(
+            parse_cdhash("CDHash=not-hex-not-hex-not-hex-not-hex-not"),
+            None
+        );
+        assert!(valid_stamp("cdhash:2f8a"));
+        assert!(valid_stamp(DEV_STAMP));
+        assert!(!valid_stamp(""));
+        assert!(!valid_stamp("two words"));
+        // The dev fallback can never collide with a real fingerprint.
+        assert!(!DEV_STAMP.starts_with("cdhash:"));
+        assert!(!DEV_STAMP.starts_with("id:"));
+    }
+
+    #[test]
+    fn the_process_stamp_is_a_comparable_token() {
+        // Whatever this build is (signed, ad-hoc or unsigned), the stamp the
+        // gate compares must be a well-formed token.
+        assert!(valid_stamp(signing_stamp()));
+    }
+
+    #[test]
+    fn t_a2_a_new_release_of_the_same_identity_does_not_reset_the_vault() {
+        // Same signing identity, different build: the stamp is unchanged, so
+        // an auto-update does not sign the user out.
+        let dir = TempDir::new().unwrap();
+        let master = FakeMasterKey::default();
+        stamped_vault(
+            &dir,
+            "id:com.helmcode.nan.desktop/team:ABCDE12345",
+            master.clone(),
+        )
+        .set("nan", "sk-1")
+        .unwrap();
+        let next_release = stamped_vault(
+            &dir,
+            "id:com.helmcode.nan.desktop/team:ABCDE12345",
+            master.clone(),
+        );
+        assert_eq!(next_release.get("nan").unwrap().as_deref(), Some("sk-1"));
+        assert_eq!(master.deletes(), 0);
+    }
+
+    #[test]
+    fn t_a_same_stamp_reopens_the_vault_and_keeps_credentials() {
+        let dir = TempDir::new().unwrap();
+        let master = FakeMasterKey::default();
+        let first = stamped_vault(&dir, "cdhash:aaaa", master.clone());
+        first.set("nan", "sk-1").unwrap();
+        first.set("nan.session", "jwt-1").unwrap();
+        assert_eq!(master.creates(), 1, "one master item per vault");
+        assert_eq!(master.deletes(), 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(VAULT_STAMP_FILE)).unwrap(),
+            "cdhash:aaaa"
+        );
+
+        // A later launch of the SAME signature: credentials intact, nothing
+        // recreated, nothing deleted.
+        let creates_before = master.creates();
+        let reopened = stamped_vault(&dir, "cdhash:aaaa", master.clone());
+        assert_eq!(reopened.get("nan").unwrap().as_deref(), Some("sk-1"));
+        assert_eq!(
+            reopened.get("nan.session").unwrap().as_deref(),
+            Some("jwt-1")
+        );
+        assert_eq!(master.deletes(), 0, "a normal start resets nothing");
+        assert_eq!(master.creates(), creates_before, "key not recreated");
+    }
+
+    #[test]
+    fn t_b_stamp_change_resets_the_vault_and_keeps_conversations() {
+        let dir = TempDir::new().unwrap();
+        let master = FakeMasterKey::default();
+        let old = stamped_vault(&dir, "cdhash:aaaa", master.clone());
+        old.set("nan", "sk-1").unwrap();
+        old.set("nan.session", "jwt-1").unwrap();
+        // Conversations live in `chat.db`, outside the vault.
+        let conversations = dir.path().join("chat.db");
+        std::fs::write(&conversations, b"conversation-history").unwrap();
+
+        // The upgraded build carries a different code-signing identity.
+        let upgraded = stamped_vault(&dir, "cdhash:bbbb", master.clone());
+        assert_eq!(
+            upgraded.get("nan").unwrap(),
+            None,
+            "clean signed-out state, not an error"
+        );
+        assert_eq!(
+            upgraded.get("nan.session").unwrap(),
+            None,
+            "the session is gone too"
+        );
+        assert!(
+            master.has_item(),
+            "a fresh item exists for the new signature"
+        );
+        assert_eq!(
+            std::fs::read(&conversations).unwrap(),
+            b"conversation-history",
+            "conversations are never wiped by a credential reset"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(VAULT_STAMP_FILE)).unwrap(),
+            "cdhash:bbbb"
+        );
+    }
+
+    #[test]
+    fn t_c_missing_or_corrupt_stamp_behaves_like_a_signature_change() {
+        let cases: [Option<&str>; 4] = [
+            None,              // v0.2.0 vault: no sidecar at all
+            Some(""),          // truncated write
+            Some("  \n\t  "),  // whitespace only
+            Some("two words"), // not a fingerprint token
+        ];
+        for case in cases {
+            let dir = TempDir::new().unwrap();
+            let master = FakeMasterKey::default();
+            stamped_vault(&dir, "cdhash:aaaa", master.clone())
+                .set("nan", "sk-1")
+                .unwrap();
+
+            let stamp_path = dir.path().join(VAULT_STAMP_FILE);
+            match case {
+                Some(content) => std::fs::write(&stamp_path, content).unwrap(),
+                None => std::fs::remove_file(&stamp_path).unwrap(),
+            }
+
+            // Same signature string, but the vault can no longer be
+            // attributed to it: reset instead of opening.
+            let vault = stamped_vault(&dir, "cdhash:aaaa", master.clone());
+            assert_eq!(vault.get("nan").unwrap(), None, "{case:?}");
+            assert_eq!(master.deletes(), 1, "{case:?}");
+        }
+    }
+
+    #[test]
+    fn t_c_in_vault_stamp_overrides_a_forged_sidecar() {
+        let dir = TempDir::new().unwrap();
+        let master = FakeMasterKey::default();
+        stamped_vault(&dir, "cdhash:aaaa", master.clone())
+            .set("nan", "sk-1")
+            .unwrap();
+        // The sidecar is not secret, so it can be copied from another build:
+        // the stamp INSIDE the encrypted vault still refuses to open.
+        std::fs::write(dir.path().join(VAULT_STAMP_FILE), "cdhash:bbbb").unwrap();
+
+        let vault = stamped_vault(&dir, "cdhash:bbbb", master.clone());
+        assert_eq!(vault.get("nan").unwrap(), None);
+        assert_eq!(master.deletes(), 1, "the foreign item is deleted");
+    }
+
+    #[test]
+    fn t_d_after_a_reset_a_new_session_persists_under_the_new_signature() {
+        let dir = TempDir::new().unwrap();
+        let master = FakeMasterKey::default();
+        stamped_vault(&dir, "cdhash:aaaa", master.clone())
+            .set("nan", "sk-old")
+            .unwrap();
+
+        let upgraded = stamped_vault(&dir, "cdhash:bbbb", master.clone());
+        assert_eq!(upgraded.get("nan").unwrap(), None);
+        // The user signs in again through the in-app device flow.
+        upgraded.set("nan", "sk-new").unwrap();
+        upgraded.set("nan.session", "jwt-new").unwrap();
+        assert_eq!(master.deletes(), 1, "the reset happens exactly once");
+        assert_eq!(master.creates(), 2, "a fresh key under the new signature");
+
+        let reopened = stamped_vault(&dir, "cdhash:bbbb", master.clone());
+        assert_eq!(reopened.get("nan").unwrap().as_deref(), Some("sk-new"));
+        assert_eq!(
+            reopened.get("nan.session").unwrap().as_deref(),
+            Some("jwt-new")
+        );
+        assert_eq!(master.deletes(), 1, "no second reset on the next start");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(VAULT_STAMP_FILE)).unwrap(),
+            "cdhash:bbbb"
+        );
+    }
+
+    #[test]
+    fn t_e_the_reset_deletes_without_reading_any_stale_item() {
+        let dir = TempDir::new().unwrap();
+        let master = FakeMasterKey::default();
+        stamped_vault(&dir, "cdhash:aaaa", master.clone())
+            .set("nan", "sk-1")
+            .unwrap();
+
+        // Pre-round-5 per-secret items that a stale signature left behind.
+        let legacy = FakeKeychain::default();
+        legacy.set("nan", "sk-legacy").unwrap();
+        legacy.set("nan.session", "jwt-legacy").unwrap();
+        let master_reads_before = master.reads();
+        let legacy_reads_before = *legacy.reads.lock().unwrap();
+
+        let upgraded = Vault::new(dir.path().join(VAULT_FILE), Box::new(master.clone()))
+            .with_stamp(Box::new(FixedStamp("cdhash:bbbb")))
+            .with_legacy(
+                Box::new(legacy.clone()),
+                vec!["nan".into(), "nan.session".into()],
+            );
+        assert_eq!(upgraded.get("nan").unwrap(), None);
+
+        assert_eq!(
+            master.reads() - master_reads_before,
+            0,
+            "the stale master item is never read (a read is what prompts)"
+        );
+        assert_eq!(master.deletes(), 1, "it is deleted instead");
+        assert_eq!(
+            *legacy.reads.lock().unwrap(),
+            legacy_reads_before,
+            "no legacy item is read either"
+        );
+        assert!(
+            legacy.items.lock().unwrap().is_empty(),
+            "the legacy items are deleted without being read"
         );
     }
 }

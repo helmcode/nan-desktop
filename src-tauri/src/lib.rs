@@ -4,6 +4,9 @@
 // renderer only invokes the commands registered below and listens to the
 // events they emit. Credentials live in the encrypted vault (`credentials`):
 // one AES-256-GCM file whose master key is the app's only keychain item.
+// Round 13 (S2): that item is stamped with the build's code-signing
+// fingerprint, so an item created by another signature is deleted (never
+// read) and macOS never asks for the login keychain password.
 //
 // Zero telemetry (S8): the app only talks to the two locked tenants' own
 // URLs (plus the debug-only mock overrides documented in `device_flow` and
@@ -162,10 +165,17 @@ pub fn run() {
         // origin (in-window phishing). Markdown links go through
         // links::open_external instead.
         .setup(|app| {
-            // Install the credential vault. Lazy: no disk or keychain access
-            // happens until the first credential read. An unresolvable app
-            // data dir leaves it uninitialized → every profile reads as
-            // logged out (never a panic).
+            // Install the credential vault (round 5): one AES-256-GCM file
+            // whose master key is the app's only keychain item. Round 13 (S2)
+            // adds the startup stamp gate inside `credentials::init`: the
+            // build's code-signing fingerprint is resolved here (one
+            // non-interactive `codesign` probe, no network, no UI) and a
+            // vault written by a different signature is deleted instead of
+            // read, so upgrading never raises the macOS keychain dialog.
+            // No disk or keychain access happens until the first credential
+            // read. An unresolvable app data dir leaves the vault
+            // uninitialized -> every profile reads as logged out (never a
+            // panic).
             if let Ok(dir) = app.path().app_data_dir() {
                 credentials::init(&dir);
                 // Round 6: best-effort cleanup of generated images no
