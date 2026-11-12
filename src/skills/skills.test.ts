@@ -11,12 +11,15 @@ import {
   adoptActiveSkill,
   checkDraft,
   draftFromConversation,
+  draftFromDistilled,
   draftFromSkill,
   emptyDraft,
   filterSkills,
   fold,
   preloadFromConversation,
   readReferenceFile,
+  resolvedTitle,
+  settleSkillDraft,
   skillErrorText,
   slashQuery,
   upsertSkill,
@@ -249,5 +252,64 @@ describe("error texts", () => {
     expect(skillErrorText(es, { code: "not_found" })).toBe(es.skills.errors.notFound);
     expect(skillErrorText(en, new Error("boom"))).toBe(en.skills.errors.generic);
     expect(skillErrorText(en, { code: "something_new" })).toBe(en.skills.errors.generic);
+  });
+});
+
+describe("resolvedTitle (round 15/F2, mirror of skills.rs unique_title)", () => {
+  const taken = [{ title: "Informe" }, { title: "Informe 2" }, { title: "Otro" }];
+
+  it("keeps a free title and suffixes a taken one past every taken suffix", () => {
+    expect(resolvedTitle("Nuevo", taken)).toBe("Nuevo");
+    expect(resolvedTitle("Informe", taken)).toBe("Informe 3");
+    expect(resolvedTitle("Info", taken)).toBe("Info");
+  });
+
+  it("compares like the core: any case, collapsed whitespace, NFC", () => {
+    expect(resolvedTitle("  otro ", taken)).toBe("otro 2");
+    expect(resolvedTitle("Informe   semanal", [{ title: "informe semanal" }])).toBe("Informe semanal 2");
+    expect(resolvedTitle("Revisión", [{ title: "Revisio\u0301n" }])).toBe("Revisión 2");
+  });
+
+  it("stays within the title limit and is empty for an empty title", () => {
+    const long = "a".repeat(120);
+    const out = resolvedTitle(long, [{ title: long }]);
+    expect([...out].length).toBe(120);
+    expect(out.endsWith(" 2")).toBe(true);
+    expect(resolvedTitle("   ", taken)).toBe("");
+  });
+});
+
+describe("save-as-skill drafts (round 15/F4)", () => {
+  const rows = [
+    { role: "assistant", content: "Hi" },
+    { role: "user", content: "Summarize my notes weekly" },
+  ];
+  const distilled = { title: "T", description: "D. Use when: x.", instructions: "1. Step." };
+
+  it("the model's draft prefills every field and is marked as distilled", () => {
+    expect(draftFromDistilled(distilled)).toEqual({
+      id: null,
+      title: "T",
+      description: "D. Use when: x.",
+      instructions: "1. Step.",
+      references: [],
+      fromChat: true,
+      distilled: true,
+    });
+  });
+
+  it("settles to the model's draft, else the template when asked, else nothing", () => {
+    expect(settleSkillDraft(distilled, true, rows)).toEqual(draftFromDistilled(distilled));
+    expect(settleSkillDraft(distilled, false, rows)).toEqual(draftFromDistilled(distilled));
+    expect(settleSkillDraft(undefined, true, rows)).toEqual(draftFromConversation(rows));
+    expect(settleSkillDraft(undefined, true, rows)?.distilled).toBeUndefined();
+    expect(settleSkillDraft(undefined, false, rows)).toBeNull();
+  });
+
+  it("has the request and the review hint in both languages", () => {
+    expect(en.skills.distillPrompt).toBe("Save this conversation as a reusable skill.");
+    expect(es.skills.distillPrompt).toBe("Guarda esta conversación como una skill reutilizable.");
+    expect(en.skills.reviewHintDistilled).toContain("AI summarized");
+    expect(es.skills.reviewHintDistilled).toContain("La IA ha resumido");
   });
 });

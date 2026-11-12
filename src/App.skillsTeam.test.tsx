@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invokedWith, resetTauri } from "./test/tauriMock";
-import { fakeTeamCore, localBundleOf, meta, wireSkill, type ApiReply, type ApiRequest } from "./test/teamMock";
+import { fakeTeamCore, localBundleOf, meta, skillRoute, wireSkill, type ApiReply, type ApiRequest } from "./test/teamMock";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("./test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).eventModule());
@@ -70,7 +70,15 @@ function setup(opts: Setup = {}) {
   const route = (req: ApiRequest): ApiReply => {
     if (req.path === "/api/auth/me") {
       if (opts.me) return { status: opts.me.status, body: opts.me.body ?? {} };
-      return { status: 200, body: { email: "ana@example.com", ...(opts.sharing ? { skills_sharing: true } : {}) } };
+      // The real enterprise-api /me shape (handlers/auth.go Me).
+      return {
+        status: 200,
+        body: {
+          email: "ana@example.com",
+          featureFlags: opts.sharing ? ["chat", "skills_sharing"] : ["chat"],
+          skillsSharing: opts.sharing === true,
+        },
+      };
     }
     if (req.method === "GET" && req.path === "/api/skills") {
       const override = opts.list?.(req);
@@ -79,7 +87,7 @@ function setup(opts: Setup = {}) {
       if (req.ifNoneMatch === etag) return { status: 304, etag };
       return { status: 200, etag, body: { skills: rows, etag } };
     }
-    const id = req.path.slice("/api/skills/".length);
+    const { id, query } = skillRoute(req.path) ?? { id: "", query: "" };
     if (req.method === "GET") {
       const override = opts.bundle?.(req);
       if (override) return override;
@@ -98,7 +106,7 @@ function setup(opts: Setup = {}) {
     }
     if (req.method === "GET") {
       const found = rows.find((r) => r.id === id);
-      return found ? { status: 200, body: wireSkill(found, opts.instructions?.[id]) } : { status: 404 };
+      return found ? { status: 200, body: wireSkill(found, opts.instructions?.[id], query) } : { status: 404 };
     }
     return { status: 500 };
   };
@@ -220,13 +228,53 @@ describe("Share with my team: gating", () => {
     expect(core.requests).toEqual([{ method: "GET", path: "/api/auth/me", body: null, ifNoneMatch: null }]);
   });
 
-  it("is hidden on Helmcode when the org flag is off (the Team tab still exists)", async () => {
+  it("round 15 (F3): on Helmcode with the org flag off it is visible but disabled and says why", async () => {
     const { core } = setup({ sharing: false, skills: [weekly()] });
     renderApp();
     await openSkills();
     await waitFor(() => expect(core.requests.some((r) => r.path === "/api/auth/me")).toBe(true));
     expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
+    const button = screen.getByRole("button", { name: 'Share "Weekly report" with my team' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    const why = "Sharing with your team is turned off for your organization. An admin can turn it on in the Helmcode console.";
+    expect(button.getAttribute("title")).toBe(why);
+    expect(document.getElementById(button.getAttribute("aria-describedby") ?? "")?.textContent).toBe(why);
+    fireEvent.click(button);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(core.requests.some((r) => r.method === "POST")).toBe(false);
+  });
+
+  it("round 15 (D6): with the org flag off and no own skills there is no share-off note", async () => {
+    const { core } = setup({ sharing: false, skills: [] });
+    renderApp();
+    await openSkills();
+    await waitFor(() => expect(core.requests.some((r) => r.path === "/api/auth/me")).toBe(true));
+    expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
+    expect(screen.queryByText(/turned off for your organization/)).toBeNull();
+    expect(document.getElementById("skills-share-off")).toBeNull();
+  });
+
+  it("round 15 (F3): with /me unreachable the flag is unknown: no share action and no off note", async () => {
+    const { core } = setup({ skills: [weekly()], me: { status: 500 } });
+    renderApp();
+    await openSkills();
+    await waitFor(() => expect(core.requests.some((r) => r.path === "/api/auth/me")).toBe(true));
+    expect(await screen.findByText("Weekly report")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /with my team/ })).toBeNull();
+    expect(screen.queryByText(/turned off for your organization/)).toBeNull();
+  });
+
+  it("round 15 (F3): the real /me reply (skillsSharing + featureFlags) enables it from Mine", async () => {
+    setup({ sharing: true, skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    // Mine is the default tab: the action is reachable without visiting Team.
+    expect(screen.getByRole("tab", { name: "Mine" }).getAttribute("aria-selected")).toBe("true");
+    const button = (await screen.findByRole("button", { name: 'Share "Weekly report" with my team' })) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(await screen.findByRole("dialog", { name: "Share with my team" })).toBeTruthy();
+    expect(screen.queryByText(/turned off for your organization/)).toBeNull();
   });
 
   it("is visible with the flag", async () => {
@@ -324,14 +372,29 @@ describe("Share with my team: the flow", () => {
     expect(screen.queryByRole("button", { name: /with my team/ })).toBeNull();
   });
 
+  it("round 15 (D7): Spanish says 'con el equipo' on Share again too", async () => {
+    setup({
+      sharing: true,
+      skills: [weekly({ updated_at: 10 })],
+      rows: [meta("sk_1", { status: "rejected", reject_reason: "Too vague", author_name: "Me" })],
+      links: { [LOCAL]: { remote_id: "sk_1", sha: "s", local_updated_at: 5 } },
+    });
+    renderApp("es");
+    await openSkills("Ajustes", "Skills");
+    expect(
+      await screen.findByRole("button", { name: "Compartir la nueva versión de «Weekly report» con el equipo" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/mi equipo/)).toBeNull();
+  });
+
   it("speaks Spanish: the button, the dialog warning and the tabs", async () => {
     setup({ sharing: true, skills: [weekly()] });
     renderApp("es");
     await openSkills("Ajustes", "Skills");
     expect(await screen.findByRole("tab", { name: "Mías" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Equipo" })).toBeTruthy();
-    fireEvent.click(await screen.findByRole("button", { name: "Compartir «Weekly report» con mi equipo" }));
-    const dialog = await screen.findByRole("dialog", { name: "Compartir con mi equipo" });
+    fireEvent.click(await screen.findByRole("button", { name: "Compartir «Weekly report» con el equipo" }));
+    const dialog = await screen.findByRole("dialog", { name: "Compartir con el equipo" });
     expect(within(dialog).getByText(WARNING_ES)).toBeTruthy();
   });
 });
@@ -568,6 +631,33 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     expect(within(item).getByRole("button", { name: 'Duplicate "Alpha" in my skills' })).toBeTruthy();
     // The next round is the normal refresh again.
     expect(timers[timers.length - 1].delay).toBe(TEAM_SYNC_INTERVAL_MS);
+  });
+
+  it("round 15 (F1): the real server reply caches the bundle; the badge clears and Use works", async () => {
+    setup({ rows: [meta("a", { title: "Alpha" })] });
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    const list = await screen.findByRole("list", { name: "Team" });
+    await waitFor(() => expect(within(list).getByRole("button", { name: 'Use "Alpha" in the chat' })).toBeTruthy());
+    expect(within(list).queryByText("Preparing…")).toBeNull();
+    const put = invokedWith("skills_team_cache_put")[0] as { skill: { id: string; files: unknown[] } };
+    expect(put.skill.id).toBe("a");
+    expect(put.skill.files).toHaveLength(2);
+  });
+
+  it("round 15 (F1): a reply without the bundle keeps Preparing and shows the problem", async () => {
+    setup({
+      rows: [meta("a", { title: "Alpha" })],
+      // What the app used to get: metadata only, bundle null.
+      bundle: () => ({ status: 200, body: wireSkill(meta("a", { title: "Alpha" }), undefined, "") }),
+    });
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    expect(await screen.findByText("Preparing…")).toBeTruthy();
+    expect(await screen.findByText("This skill has a file the app cannot accept.")).toBeTruthy();
+    expect(invokedWith("skills_team_cache_put")).toHaveLength(0);
   });
 
   it("speaks Spanish: the preparing badge", async () => {

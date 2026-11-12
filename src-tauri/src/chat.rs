@@ -356,10 +356,15 @@ fn file_tool_definitions(run_command: bool) -> Vec<serde_json::Value> {
     defs
 }
 
-/// Every tool offered to the model for one reply: web search and image
-/// generation always, file tools only when the user set up a workspace.
+/// Every tool offered to the model for one reply: web search, image
+/// generation and "save this chat as a skill" (round 15) always, file tools
+/// only when the user set up a workspace.
 pub fn tool_definitions(workspace: Option<&tools::Workspace>) -> Vec<serde_json::Value> {
-    let mut defs = vec![web_search::tool_definition(), images::tool_definition()];
+    let mut defs = vec![
+        web_search::tool_definition(),
+        images::tool_definition(),
+        tools::save_skill::tool_definition(),
+    ];
     if let Some(workspace) = workspace {
         defs.extend(file_tool_definitions(workspace.run_command));
     }
@@ -387,9 +392,10 @@ working folders; for any other place, ask the user to add that folder first.";
 /// The system message for one reply: the working rules, plus the
 /// workspace description when the user set one up.
 pub fn system_prompt(workspace: Option<&tools::Workspace>) -> String {
+    let rules = format!("{ASSISTANT_RULES}\n\n{}", tools::save_skill::GUIDANCE);
     match workspace {
-        Some(workspace) => format!("{ASSISTANT_RULES}\n\n{}", workspace_prompt(workspace)),
-        None => ASSISTANT_RULES.to_string(),
+        Some(workspace) => format!("{rules}\n\n{}", workspace_prompt(workspace)),
+        None => rules,
     }
 }
 
@@ -1443,6 +1449,21 @@ async fn run_tool_call(
         web_search::merge_sources(sources, &results);
         return (web_search::results_for_model(&results), Vec::new());
     }
+    if call.name == tools::save_skill::TOOL_NAME {
+        // Round 15 (F4): validated like a save (secrets refused), then handed
+        // to the renderer, which opens the save form when the turn ends.
+        let draft = tools::save_skill::parse_draft(&call.arguments);
+        if let Ok(draft) = &draft {
+            let _ = window.emit(
+                tools::save_skill::DRAFT_EVENT,
+                tools::save_skill::DraftPayload {
+                    conversation_id,
+                    draft: draft.clone(),
+                },
+            );
+        }
+        return (tools::save_skill::result_for_model(&draft), Vec::new());
+    }
     if call.name == images::TOOL_NAME {
         let Some((prompt, size)) = images::parse_tool_args(&call.arguments) else {
             return (
@@ -2085,8 +2106,9 @@ mod tests {
         };
         assert_eq!(
             names(tool_definitions(None)),
-            vec!["web_search", "generate_image"],
-            "round 3: the model can create images without a workspace"
+            vec!["web_search", "generate_image", "save_chat_as_skill"],
+            "round 3: the model can create images without a workspace; round 15: \
+             it can always distill the chat into a skill draft"
         );
         let ws = tools::Workspace {
             roots: vec![std::path::PathBuf::from("/Users/me/Proyecto")],
@@ -2099,6 +2121,7 @@ mod tests {
             vec![
                 "web_search",
                 "generate_image",
+                "save_chat_as_skill",
                 "list_files",
                 "read_file",
                 "write_file",
@@ -2500,6 +2523,8 @@ mod tests {
         assert!(bare.contains("absolute path of every one of them"));
         assert!(bare.contains("mkdir -p /abs/folder && cd /abs/folder"));
         assert!(bare.contains("generate_image"));
+        // Round 15 (F4): the distill-the-chat rule rides on every reply.
+        assert!(bare.contains(tools::save_skill::GUIDANCE));
         assert!(
             !bare.contains("Workspace folders"),
             "no workspace, no folders"

@@ -3,7 +3,7 @@
 // over the mocked Tauri IPC with a fake core (src/test/teamMock.ts).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke, resetTauri } from "../test/tauriMock";
-import { fakeTeamCore, localBundleOf, meta, wireSkill, type ApiRequest, type ApiReply } from "../test/teamMock";
+import { fakeTeamCore, localBundleOf, meta, skillRoute, wireSkill, type ApiRequest, type ApiReply } from "../test/teamMock";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).coreModule());
 
@@ -11,9 +11,11 @@ import type { Skill } from "./skills";
 import {
   EMPTY_VIEW,
   TEAM_PREFIX,
+  bundlePath,
   bundlesToFetch,
   fetchSkillsSharing,
   loadTeamSkill,
+  parseBundleResponse,
   parseList,
   parseSkillsSharing,
   problemForError,
@@ -58,8 +60,8 @@ function api(listReplies: ApiReply[], extra: (req: ApiRequest) => ApiReply | nul
       n += 1;
       return reply;
     }
-    const id = req.path.startsWith("/api/skills/") ? req.path.slice("/api/skills/".length) : null;
-    if (req.method === "GET" && id) return { status: 200, body: wireSkill(meta(id)) };
+    const item = skillRoute(req.path);
+    if (req.method === "GET" && item) return { status: 200, body: wireSkill(meta(item.id), undefined, item.query) };
     return { status: 500 };
   };
 }
@@ -83,8 +85,36 @@ describe("syncTeam", () => {
     expect(view.etag).toBe('"v1"');
     expect(Object.keys(view.cached).sort()).toEqual(["a", "b"]);
     const paths = core.requests.map((r) => `${r.method} ${r.path}`);
-    expect(paths).toEqual(["GET /api/skills", "GET /api/skills/a", "GET /api/skills/b"]);
+    expect(paths).toEqual(["GET /api/skills", "GET /api/skills/a?version=approved", "GET /api/skills/b?version=approved"]);
     expect(core.requests[0].ifNoneMatch).toBeNull();
+  });
+
+  it("round 15 (F1): asks for ?version=approved and caches the row plus bundle.files", async () => {
+    const core = fakeTeamCore(api([{ status: 200, etag: '"v1"', body: { skills: [meta("a")], etag: '"v1"' } }]));
+    resetTauri(core.handlers);
+    const { view, problem } = await syncTeam(P);
+    expect(problem).toBeNull();
+    expect(view.cached).toEqual({ a: meta("a").updated_at });
+    const put = invoke.mock.calls.find(([cmd]) => cmd === "skills_team_cache_put")?.[1] as {
+      skill: Record<string, unknown>;
+    };
+    // The core receives the metadata row flattened with the bundle's files.
+    expect(put.skill).toEqual({ ...meta("a"), files: wireSkill(meta("a")).bundle?.files });
+  });
+
+  it("round 15 (F1): a metadata-only reply (no bundle) is a problem, never cached or silent", async () => {
+    const core = fakeTeamCore(
+      api([{ status: 200, etag: '"v1"', body: { skills: [meta("a"), meta("b")], etag: '"v1"' } }], (req) =>
+        // The server's default branch: `skill` only, bundle null.
+        req.path.startsWith("/api/skills/a") ? { status: 200, body: wireSkill(meta("a"), undefined, "") } : null,
+      ),
+    );
+    resetTauri(core.handlers);
+    const { view, problem } = await syncTeam(P);
+    expect(problem).toBe("invalid");
+    // The bad row is not cached; the good one still is (the round goes on).
+    expect(Object.keys(view.cached)).toEqual(["b"]);
+    expect(core.calls.filter((c) => c === "put")).toHaveLength(1);
   });
 
   it("sends If-None-Match with the stored ETag; a 304 keeps the cache and refetches nothing", async () => {
@@ -138,7 +168,7 @@ describe("syncTeam", () => {
     await syncTeam(P);
     core.requests.length = 0;
     const { view } = await syncTeam(P);
-    expect(core.requests.map((r) => r.path)).toEqual(["/api/skills", "/api/skills/a"]);
+    expect(core.requests.map((r) => r.path)).toEqual(["/api/skills", "/api/skills/a?version=approved"]);
     expect(view.cached.a).toBe("2026-11-02T00:00:00Z");
   });
 
@@ -179,13 +209,13 @@ describe("syncTeam", () => {
   it("a rate limit while fetching bundles stops the round", async () => {
     const core = fakeTeamCore(
       api([{ status: 200, etag: '"v1"', body: { skills: [meta("a"), meta("b")] } }], (req) =>
-        req.path === "/api/skills/a" ? { status: 429 } : null,
+        req.path === "/api/skills/a?version=approved" ? { status: 429 } : null,
       ),
     );
     resetTauri(core.handlers);
     const { problem, view } = await syncTeam(P);
     expect(problem).toBe("rate_limited");
-    expect(core.requests.map((r) => r.path)).toEqual(["/api/skills", "/api/skills/a"]);
+    expect(core.requests.map((r) => r.path)).toEqual(["/api/skills", "/api/skills/a?version=approved"]);
     expect(view.cached).toEqual({});
   });
 });
@@ -267,6 +297,14 @@ describe("the org flag", () => {
     expect(parseSkillsSharing({ org: { skills_sharing: true } })).toBe(true);
     expect(parseSkillsSharing({ features: { skills_sharing: true } })).toBe(true);
     expect(parseSkillsSharing({ skills_sharing: "yes" })).toBe(false);
+  });
+
+  it("round 15 (F3): reads the real enterprise-api /me shape (skillsSharing + featureFlags)", () => {
+    expect(parseSkillsSharing({ email: "a@b.c", featureFlags: [], skillsSharing: true })).toBe(true);
+    expect(parseSkillsSharing({ featureFlags: ["chat", "skills_sharing"], skillsSharing: false })).toBe(true);
+    expect(parseSkillsSharing({ featureFlags: ["chat"], skillsSharing: false })).toBe(false);
+    expect(parseSkillsSharing({ featureFlags: "skills_sharing" })).toBe(false);
+    expect(parseSkillsSharing({ skillsSharing: "true" })).toBe(false);
     expect(parseSkillsSharing({ email: "a@b.c" })).toBe(false);
     expect(parseSkillsSharing(null)).toBe(false);
   });
@@ -280,11 +318,11 @@ describe("the org flag", () => {
     expect(core.requests[0]).toMatchObject({ method: "GET", path: "/api/auth/me" });
   });
 
-  it("is false when /api/auth/me fails", async () => {
+  it("is unknown (null), not off, when /api/auth/me fails", async () => {
     resetTauri(fakeTeamCore(() => ({ status: 401 })).handlers);
-    expect(await fetchSkillsSharing(P)).toBe(false);
+    expect(await fetchSkillsSharing(P)).toBeNull();
     resetTauri(fakeTeamCore(() => ({ fail: "offline" })).handlers);
-    expect(await fetchSkillsSharing(P)).toBe(false);
+    expect(await fetchSkillsSharing(P)).toBeNull();
   });
 });
 
@@ -353,5 +391,50 @@ describe("derived state", () => {
       cached: { a: meta("a").updated_at, b: "old" },
     });
     expect(bundlesToFetch(v).map((m) => m.id)).toEqual(["b"]);
+  });
+});
+
+describe("the bundle contract (round 15/F1)", () => {
+  const row = meta("sk_1");
+  const files = [{ path: "SKILL.md", content: "---\nname: x\n---\n\nBody\n" }];
+  const reply = (patch: Record<string, unknown> = {}) => ({
+    skill: row,
+    version: "approved",
+    sha256: "abc123",
+    bundle: { files },
+    ...patch,
+  });
+
+  it("requests the approved version by id, URL-encoded", () => {
+    expect(bundlePath("sk_1")).toBe("/api/skills/sk_1?version=approved");
+    expect(bundlePath("a b")).toBe("/api/skills/a%20b?version=approved");
+  });
+
+  it("parses {skill, version, sha256, bundle:{files}} into the row plus its files", () => {
+    expect(parseBundleResponse(reply())).toEqual({ ...row, files });
+  });
+
+  it("drops extra file fields so only {path, content} reach the core", () => {
+    const parsed = parseBundleResponse(reply({ bundle: { files: [{ ...files[0], mode: 420 }] } }));
+    expect(parsed?.files).toEqual(files);
+  });
+
+  it.each([
+    ["metadata only (no ?version)", { version: null, sha256: null, bundle: null }],
+    ["the pending version", { version: "pending" }],
+    ["no sha256", { sha256: null }],
+    ["an empty sha256", { sha256: "" }],
+    ["files inside skill instead of bundle", { skill: { ...row, files }, bundle: null }],
+    ["a bare array as bundle", { bundle: files }],
+    ["an empty bundle", { bundle: { files: [] } }],
+    ["a malformed file", { bundle: { files: [{ path: "SKILL.md" }] } }],
+    ["no skill row", { skill: null }],
+  ])("refuses %s", (_label, patch) => {
+    expect(parseBundleResponse(reply(patch))).toBeNull();
+  });
+
+  it("refuses non-object bodies", () => {
+    expect(parseBundleResponse(null)).toBeNull();
+    expect(parseBundleResponse("x")).toBeNull();
   });
 });

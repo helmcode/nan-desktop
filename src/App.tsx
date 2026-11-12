@@ -96,7 +96,7 @@ import type {
 } from "./types";
 import type { StudioSeed } from "./studio/studio";
 import { SkillPicker } from "./skills/SkillPicker";
-import { SkillsView } from "./skills/SkillsView";
+import { SkillsView, type SkillFormDraft } from "./skills/SkillsView";
 import {
   EMPTY_VIEW,
   TEAM_PROFILE,
@@ -117,6 +117,7 @@ import {
   activeSkillFor,
   adoptActiveSkill,
   draftFromConversation,
+  settleSkillDraft,
   emptyDraft,
   filterSkills,
   listSkills,
@@ -126,9 +127,10 @@ import {
   withoutSkill,
   type ActiveSkills,
   type Skill,
-  type SkillDraft,
+  type DistilledDraft,
 } from "./skills/skills";
 import { useWorkspace } from "./workspace";
+import { TurnIndicator, useTurnStarts } from "./chat/TurnIndicator";
 
 // The preview pane and its renderers load on first use (S21).
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
@@ -605,7 +607,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // picker opens from the "Use skill" button or a leading "/".
   const [skills, setSkills] = useState<Skill[]>([]);
   const [skillsLoadError, setSkillsLoadError] = useState(false);
-  const [skillForm, setSkillForm] = useState<SkillDraft | null>(null);
+  const [skillForm, setSkillForm] = useState<SkillFormDraft | null>(null);
   const [activeSkills, setActiveSkills] = useState<ActiveSkills>(() => new Map());
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
   const [slashDismissed, setSlashDismissed] = useState(false);
@@ -617,7 +619,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // local one; its id is `team:<id>` and the core reads the cached bundle.
   const teamProfile = overview.active_profile === TEAM_PROFILE ? TEAM_PROFILE : null;
   const [teamState, setTeamState] = useState<TeamState>({ view: EMPTY_VIEW, problem: null });
-  const [skillsSharing, setSkillsSharing] = useState(false);
+  const [skillsSharing, setSkillsSharing] = useState<boolean | null>(null);
   const teamSkills = useMemo(() => teamLibrary(teamState.view).map(teamAsSkill), [teamState.view]);
   const pickerSkills = useMemo(() => [...skills, ...usableTeamSkills(teamState.view)], [skills, teamState.view]);
   const knownSkills = useMemo(() => [...skills, ...teamSkills], [skills, teamSkills]);
@@ -738,6 +740,48 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     }
   }, []);
 
+  // Round 15 (F4): "Save as skill" drafts. The model's distilled draft per
+  // conversation (chat://skill_draft), the conversations whose "Save as
+  // skill" waits for one, and the drafts ready to open once their chat is
+  // on screen and idle (see the effect next to openSkills).
+  const distilledDraftsRef = useRef<Map<number, DistilledDraft>>(new Map());
+  const awaitingSkillRef = useRef<Set<number>>(new Set());
+  const [readySkillDrafts, setReadySkillDrafts] = useState<Map<number, SkillFormDraft>>(() => new Map());
+  const settleSkillTurn = useCallback(
+    (conversationId: number, rows: ReadonlyArray<{ role: string; content: string }>): void => {
+      const distilled = distilledDraftsRef.current.get(conversationId);
+      const awaiting = awaitingSkillRef.current.has(conversationId);
+      const settled = settleSkillDraft(distilled, awaiting, rows);
+      distilledDraftsRef.current.delete(conversationId);
+      awaitingSkillRef.current.delete(conversationId);
+      if (!settled) return;
+      // D3/D4: say why the form opened. A draft nobody asked for (the model
+      // called the tool on its own, e.g. steered by a web page or a file) is
+      // a proposal; an ask with no draft back is the copied-start fallback.
+      const draft: SkillFormDraft = distilled
+        ? awaiting
+          ? settled
+          : { ...settled, origin: "proposed" }
+        : { ...settled, origin: "fallback" };
+      setReadySkillDrafts((prev) => new Map(prev).set(conversationId, draft));
+    },
+    [],
+  );
+  /** A turn that failed: settle with the stored rows (nothing if none waits). */
+  const settleSkillAfterError = useCallback(
+    async (conversationId: number): Promise<void> => {
+      if (!distilledDraftsRef.current.has(conversationId) && !awaitingSkillRef.current.has(conversationId)) return;
+      let rows: ChatMessageRow[] = [];
+      try {
+        rows = await invoke<ChatMessageRow[]>("messages_list", { conversationId });
+      } catch {
+        // The template then starts empty; the form still opens.
+      }
+      settleSkillTurn(conversationId, rows);
+    },
+    [settleSkillTurn],
+  );
+
   // A reply (or a composer image) just finished in `conversationId`: reload
   // its rows and open what it produced in that conversation's preview pane
   // (round 4 auto-open; see chat/autoOpen.ts). Works for a conversation the
@@ -748,12 +792,14 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       rows = await invoke<ChatMessageRow[]>("messages_list", { conversationId });
     } catch {
       if (activeConvRef.current === conversationId) setMessages([]);
+      settleSkillTurn(conversationId, []);
       return;
     }
     if (activeConvRef.current === conversationId) setMessages(rows);
     const target = lastProducedTarget(rows);
     if (target) setPreviews((prev) => new Map(prev).set(conversationId, { target, open: true }));
-  }, []);
+    settleSkillTurn(conversationId, rows);
+  }, [settleSkillTurn]);
 
   // Account memory: reconcile with the account in the background. Silent
   // by design: any failure keeps the local copy; nothing is ever shown.
@@ -854,7 +900,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   useEffect(() => {
     if (!teamProfile) {
       setTeamState({ view: EMPTY_VIEW, problem: null });
-      setSkillsSharing(false);
+      setSkillsSharing(null);
       return;
     }
     let alive = true;
@@ -930,18 +976,30 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           return next;
         });
       }),
+      // Round 15 (F4): the model distilled the chat (save_chat_as_skill);
+      // the form opens with it when the turn ends.
+      listen<{ conversation_id: number; draft: DistilledDraft }>("chat://skill_draft", (event) => {
+        distilledDraftsRef.current.set(event.payload.conversation_id, event.payload.draft);
+      }),
       listen<ChatIdPayload>("chat://done", (event) => {
         finish(event.payload.conversation_id);
         void syncMemory();
       }),
       // The user pressed Stop: what arrived stays persisted.
+      // D1: Stop cancels a pending "Save as skill" too: forget the ask and
+      // any draft before the finish path settles, so no form opens and the
+      // view never jumps to Settings.
       listen<ChatIdPayload>("chat://stopped", (event) => {
-        finish(event.payload.conversation_id);
+        const id = event.payload.conversation_id;
+        awaitingSkillRef.current.delete(id);
+        distilledDraftsRef.current.delete(id);
+        finish(id);
       }),
       listen<ChatError>("chat://error", (event) => {
         const { conversation_id, kind } = event.payload;
         markStreaming(conversation_id, false);
         clearDraft(conversation_id);
+        void settleSkillAfterError(conversation_id);
         if (kind === "unauthorized") {
           setSessionExpired(true);
         } else if (activeConvRef.current === conversation_id) {
@@ -955,7 +1013,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         void promise.then((unlisten) => unlisten());
       });
     };
-  }, [reloadAfterReply, refreshConversations, syncMemory]);
+  }, [reloadAfterReply, refreshConversations, syncMemory, settleSkillAfterError]);
 
   // Approval transport (S14): the core asks, the card answers in place.
   useEffect(() => {
@@ -1300,6 +1358,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   );
 
   const streamingActive = activeConvId !== null && streamingIds.has(activeConvId);
+  const turnStarts = useTurnStarts(streamingIds);
+  const activeTurnStart = activeConvId !== null ? turnStarts.get(activeConvId) : undefined;
   const activeDraft = activeConvId !== null ? drafts.get(activeConvId) : undefined;
   const visibleDraft = activeDraft !== undefined ? stripToolMarkup(activeDraft, { streaming: true }) : undefined;
   const activeActivity = activeConvId !== null ? activities.get(activeConvId) : undefined;
@@ -1486,9 +1546,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     return created;
   }, []);
 
-  const send = useCallback(async (): Promise<void> => {
-    const text = composer.trim();
-    if (!text || streamingActive) return;
+  // `override` sends a fixed text (round 15: "Save as skill") without
+  // touching what the user is typing; the result says whether it went out.
+  const send = useCallback(async (override?: string): Promise<boolean> => {
+    const text = (override ?? composer).trim();
+    if (!text || streamingActive) return false;
     setSessionExpired(false);
     setInlineError("");
     let conversationId: number | null = null;
@@ -1498,7 +1560,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     const skillId = activeSkill?.id ?? null;
     try {
       conversationId = await ensureConversation();
-      if (conversationId === null) return;
+      if (conversationId === null) return false;
       const id = conversationId;
       // Optimistic user bubble; the core persists the real row first.
       setMessages((prev) => [
@@ -1515,7 +1577,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           sources: [],
         },
       ]);
-      setComposer("");
+      if (override === undefined) setComposer("");
       setStreamingIds((prev) => new Set(prev).add(id));
       setDrafts((prev) => new Map(prev).set(id, ""));
       // Round 5: a new chat is listed (streaming) right away, so switching
@@ -1524,6 +1586,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(text)));
       await sendChat({ conversationId: id, model, content: text, grantIds, ...(skillId ? { skillId } : {}) });
       void refreshConversations();
+      return true;
     } catch (err) {
       // The skill was deleted elsewhere: nothing was sent or stored. Turn it
       // off and give the text back so the user can resend.
@@ -1533,7 +1596,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         setSkills((prev) => prev.filter((skill) => skill.id !== skillId));
         // A team skill revoked since the last sync: refresh the library.
         if (isTeamSkillId(skillId)) void syncTeamLibrary();
-        setComposer(text);
+        if (override === undefined) setComposer(text);
         if (conversationId !== null) {
           const id = conversationId;
           setStreamingIds((prev) => withoutKey(prev, id));
@@ -1546,7 +1609,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         }
         setInlineError("skill");
         void refreshConversations();
-        return;
+        return false;
       }
       if (conversationId !== null) {
         const id = conversationId;
@@ -1563,6 +1626,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       }
       setInlineError("send");
       void refreshConversations();
+      return false;
     }
   }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary]);
 
@@ -1695,13 +1759,41 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   }, []);
 
   const openSkills = useCallback(
-    (form: SkillDraft | null): void => {
+    (form: SkillFormDraft | null): void => {
       setSkillPickerOpen(false);
       setSkillForm(form);
       openSettings("skills");
     },
     [openSettings],
   );
+
+  // Round 15 (F4): a settled "Save as skill" draft opens the save form once
+  // its conversation is on screen and no longer running.
+  useEffect(() => {
+    if (activeConvId === null || streamingIds.has(activeConvId)) return;
+    const draft = readySkillDrafts.get(activeConvId);
+    if (!draft) return;
+    setReadySkillDrafts((prev) => {
+      const next = new Map(prev);
+      next.delete(activeConvId);
+      return next;
+    });
+    openSkills(draft);
+  }, [activeConvId, streamingIds, readySkillDrafts, openSkills]);
+
+  // "Save as skill": ask the model to distill the whole chat (it answers by
+  // calling save_chat_as_skill); the template is the fallback when it does
+  // not, or when the request cannot even be sent.
+  const saveChatAsSkill = useCallback(async (): Promise<void> => {
+    const id = activeConvRef.current;
+    if (id === null || streamingActive) return;
+    awaitingSkillRef.current.add(id);
+    const sent = await send(t.skills.distillPrompt);
+    if (!sent) {
+      awaitingSkillRef.current.delete(id);
+      openSkills({ ...draftFromConversation(messages), origin: "fallback" });
+    }
+  }, [streamingActive, send, t, openSkills, messages]);
 
   const onSkillSaved = useCallback((saved: Skill): void => {
     setSkills((prev) => upsertSkill(prev, saved));
@@ -2108,7 +2200,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                 <button
                   type="button"
                   className="btn btn-ghost btn-sm save-skill-btn"
-                  onClick={() => openSkills(draftFromConversation(messages))}
+                  disabled={streamingActive}
+                  onClick={() => void saveChatAsSkill()}
                 >
                   <IconBolt size={14} />
                   {t.skills.saveFromChat}
@@ -2211,6 +2304,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             </div>
 
             <footer className="composer">
+              {streamingActive && activeTurnStart !== undefined && <TurnIndicator startedAt={activeTurnStart} />}
               {activeSkill && (
                 <div className="skill-pill-row">
                   <span className="skill-pill" role="status">

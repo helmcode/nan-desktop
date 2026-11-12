@@ -32,7 +32,12 @@ export type SkillInput = {
 };
 
 /** What the form starts from: empty, an existing skill, or a chat. */
-export type SkillDraft = SkillInput & { id: string | null; fromChat: boolean };
+export type SkillDraft = SkillInput & {
+  id: string | null;
+  fromChat: boolean;
+  /** Round 15 (F4): the model distilled it (save_chat_as_skill), not the template. */
+  distilled?: boolean;
+};
 
 export const MAX_REFERENCES = 5;
 export const MAX_REFERENCE_BYTES = 64 * 1024;
@@ -40,6 +45,34 @@ export const MAX_SKILL_MD_BYTES = 64 * 1024;
 export const MAX_BUNDLE_BYTES = 256 * 1024;
 export const MAX_TITLE_CHARS = 120;
 export const MAX_DESCRIPTION_CHARS = 1024;
+
+/** A title as the core stores it: whitespace collapsed to single spaces, NFC. */
+export function cleanTitle(title: string): string {
+  return title.split(/\s+/).filter(Boolean).join(" ").normalize("NFC");
+}
+
+/** How two titles compare for duplicates: clean and in any case. */
+function titleKey(title: string): string {
+  return cleanTitle(title).toLowerCase();
+}
+
+/**
+ * The title a NEW skill will be saved with (mirror of skills.rs
+ * `unique_title`): the title itself, or `Title 2`, `Title 3`... when another
+ * skill already shows it, so the picker never lists two identical entries.
+ * Shown in the form before saving; the core decides.
+ */
+export function resolvedTitle(title: string, existing: Array<Pick<Skill, "title">>): string {
+  const clean = cleanTitle(title);
+  const taken = new Set(existing.map((skill) => titleKey(skill.title)));
+  if (!clean || !taken.has(titleKey(clean))) return clean;
+  for (let n = 2; ; n += 1) {
+    const suffix = ` ${n}`;
+    const stem = [...clean].slice(0, MAX_TITLE_CHARS - suffix.length).join("").trimEnd();
+    const candidate = `${stem}${suffix}`;
+    if (!taken.has(titleKey(candidate))) return candidate;
+  }
+}
 export const REFERENCE_EXTENSIONS = ["md", "txt", "json", "yaml", "yml"] as const;
 /** The file input's `accept` attribute. */
 export const REFERENCE_ACCEPT = REFERENCE_EXTENSIONS.map((ext) => `.${ext}`).join(",");
@@ -92,6 +125,36 @@ export function preloadFromConversation(messages: ReadonlyArray<{ role: string; 
 
 export function draftFromConversation(messages: ReadonlyArray<{ role: string; content: string }>): SkillDraft {
   return { ...emptyDraft(), instructions: preloadFromConversation(messages), fromChat: true };
+}
+
+/** What the core sends on `chat://skill_draft` (tools/save_skill.rs). */
+export type DistilledDraft = { title: string; description: string; instructions: string };
+
+/** A draft the model distilled with `save_chat_as_skill`, for the save form. */
+export function draftFromDistilled(draft: DistilledDraft): SkillDraft {
+  return {
+    ...emptyDraft(),
+    title: draft.title,
+    description: draft.description,
+    instructions: draft.instructions,
+    fromChat: true,
+    distilled: true,
+  };
+}
+
+/**
+ * Round 15 (F4): the form a finished turn opens. The model's distilled
+ * draft wins; when "Save as skill" asked for one and the model never called
+ * the tool (or the turn failed), the deterministic template is the
+ * fallback; otherwise nothing opens.
+ */
+export function settleSkillDraft(
+  distilled: DistilledDraft | undefined,
+  awaiting: boolean,
+  messages: ReadonlyArray<{ role: string; content: string }>,
+): SkillDraft | null {
+  if (distilled) return draftFromDistilled(distilled);
+  return awaiting ? draftFromConversation(messages) : null;
 }
 
 // ------------------------------------------------- per-conversation state --

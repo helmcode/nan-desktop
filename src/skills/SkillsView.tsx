@@ -13,10 +13,12 @@ import {
   REFERENCE_ACCEPT,
   addReferenceFiles,
   checkDraft,
+  cleanTitle,
   createSkill,
   deleteSkill,
   draftFromSkill,
   emptyDraft,
+  resolvedTitle,
   skillErrorText,
   updateSkill,
   type Skill,
@@ -38,8 +40,9 @@ import {
 /** The team side of the view (Helmcode only; `null` hides all of it). */
 export type TeamProps = {
   profileId: string;
-  /** The org's `skills_sharing` flag: the share actions exist only with it. */
-  sharing: boolean;
+  /** The org's `skills_sharing` flag: share is enabled only with it, shown
+   *  disabled (with the reason) when it is off, and absent while unknown. */
+  sharing: boolean | null;
   state: TeamState;
   onState: (state: TeamState) => void;
   onRetry: () => void;
@@ -55,8 +58,8 @@ export type SkillsViewProps = {
   loadError: boolean;
   /** The open form (null shows the list). Owned by the shell so "Save as
    *  skill" in a chat can open it preloaded. */
-  form: SkillDraft | null;
-  onFormChange: (form: SkillDraft | null) => void;
+  form: SkillFormDraft | null;
+  onFormChange: (form: SkillFormDraft | null) => void;
   onSaved: (skill: Skill) => void;
   onDeleted: (id: string) => void;
   onUse: (skill: Skill) => void;
@@ -70,6 +73,24 @@ export type SkillsViewProps = {
 type Tab = "mine" | "team";
 
 /** True when the draft holds anything closing it would throw away. */
+/**
+ * Round 15 (D3/D4): a draft for the form plus why it opened from a chat,
+ * so the review hint can say it. `fallback`: "Save as skill" asked the model
+ * but no summary arrived (the chat's start was copied instead). `proposed`:
+ * the model called save_chat_as_skill without the user asking for it.
+ */
+export type SkillFormDraft = SkillDraft & { origin?: "fallback" | "proposed" };
+
+/** The review hint above a form opened from a chat. */
+export function reviewHintFor(
+  s: { reviewHint: string; reviewHintDistilled: string; reviewHintFallback: string; reviewHintProposed: string },
+  form: SkillFormDraft,
+): string {
+  if (form.origin === "proposed") return s.reviewHintProposed;
+  if (form.origin === "fallback") return s.reviewHintFallback;
+  return form.distilled ? s.reviewHintDistilled : s.reviewHint;
+}
+
 function draftHasContent(form: SkillDraft): boolean {
   return (
     form.title.trim() !== "" ||
@@ -182,7 +203,7 @@ export function SkillsView({
           </p>
         )}
         {form ? (
-          <SkillForm form={form} onChange={onFormChange} onSaved={onSaved} />
+          <SkillForm form={form} skills={skills} onChange={onFormChange} onSaved={onSaved} />
         ) : activeTab === "team" && team ? (
           <TeamPanel
             team={team}
@@ -223,12 +244,20 @@ export function SkillsView({
                     {s.newSkill}
                   </button>
                 </div>
+                {team !== null && team.sharing === false && (
+                  <p className="skill-hint" id="skills-share-off">
+                    {s.team.shareOff}
+                  </p>
+                )}
                 <ul className="grant-list skills-list" aria-label={s.title}>
                   {skills.map((skill) => {
                     const armed = armedId === skill.id;
                     const state: ShareState | null = team?.sharing ? shareStateFor(skill, team.state.view) : null;
                     const canShare = state !== null && state.kind === "local";
                     const canReshare = state !== null && state.kind !== "local" && state.edited;
+                    // Round 15 (F3): on Helmcode the action is always visible;
+                    // with the org flag off it is disabled and says why.
+                    const shareOff = team !== null && team.sharing === false;
                     return (
                       <li key={skill.id} className="grant-card skill-card">
                         <div className="skill-text">
@@ -259,6 +288,18 @@ export function SkillsView({
                               onClick={() => setSharing({ skill, reshare: canReshare })}
                             >
                               {canShare ? s.team.share : s.team.reshare}
+                            </button>
+                          )}
+                          {shareOff && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              disabled
+                              aria-label={s.team.shareLabel(skill.title)}
+                              aria-describedby="skills-share-off"
+                              title={s.team.shareOff}
+                            >
+                              {s.team.share}
                             </button>
                           )}
                           <button
@@ -699,11 +740,14 @@ function TeamPanel({
 
 function SkillForm({
   form,
+  skills,
   onChange,
   onSaved,
 }: {
-  form: SkillDraft;
-  onChange: (form: SkillDraft | null) => void;
+  form: SkillFormDraft;
+  /** Every local skill: a new one with a taken title shows its suffixed name. */
+  skills: Skill[];
+  onChange: (form: SkillFormDraft | null) => void;
   onSaved: (skill: Skill) => void;
 }) {
   const t = useT();
@@ -712,7 +756,10 @@ function SkillForm({
   const [saving, setSaving] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
-  const set = (patch: Partial<SkillDraft>): void => onChange({ ...form, ...patch });
+  const set = (patch: Partial<SkillFormDraft>): void => onChange({ ...form, ...patch });
+  // Round 15 (F2): only NEW skills are suffixed; an edit keeps its title.
+  const resolved = form.id ? "" : resolvedTitle(form.title, skills);
+  const renamed = resolved !== "" && resolved !== cleanTitle(form.title);
 
   const attach = async (list: FileList | null): Promise<void> => {
     if (!list || list.length === 0) return;
@@ -757,7 +804,7 @@ function SkillForm({
     >
       {form.fromChat && (
         <p className="skill-review-hint" role="note">
-          {s.reviewHint}
+          {reviewHintFor(s, form)}
         </p>
       )}
       <label className="skill-field">
@@ -768,9 +815,17 @@ function SkillForm({
           value={form.title}
           placeholder={s.namePlaceholder}
           maxLength={120}
+          aria-describedby={renamed ? "skill-name-resolved" : undefined}
           onChange={(e) => set({ title: e.currentTarget.value })}
         />
       </label>
+      {/* D8: a plain description wired to the input, not a live region:
+          role=status would announce it on every keystroke. */}
+      {renamed && (
+        <span className="skill-hint" id="skill-name-resolved">
+          {s.nameTaken(resolved)}
+        </span>
+      )}
       <label className="skill-field">
         <span className="skill-label">{s.purposeLabel}</span>
         <input

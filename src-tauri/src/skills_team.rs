@@ -212,15 +212,25 @@ pub fn is_valid_remote_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The only query a single-skill GET may carry: which bundle version to
+/// serve. Without it the server may answer metadata only (`bundle: null`),
+/// so the sync always asks for `approved` explicitly.
+pub const VERSION_QUERIES: [&str; 2] = ["version=approved", "version=pending"];
+
 /// The closed route allowlist of [`skills_team_request`].
 pub fn route_allowed(method: &str, path: &str) -> bool {
+    let item = |path: &str| {
+        path.strip_prefix(API_SKILLS)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(is_valid_remote_id)
+    };
     match (method, path) {
         ("GET", API_ME) => true,
         ("GET" | "POST", API_SKILLS) => true,
-        ("GET" | "PUT" | "DELETE", _) => path
-            .strip_prefix(API_SKILLS)
-            .and_then(|rest| rest.strip_prefix('/'))
-            .is_some_and(is_valid_remote_id),
+        ("GET", _) if path.contains('?') => path
+            .split_once('?')
+            .is_some_and(|(route, query)| item(route) && VERSION_QUERIES.contains(&query)),
+        ("GET" | "PUT" | "DELETE", _) => item(path),
         _ => false,
     }
 }
@@ -666,6 +676,8 @@ mod tests {
             ("GET", "/api/skills/sk_01"),
             ("PUT", "/api/skills/abc-DEF_9"),
             ("DELETE", "/api/skills/abc"),
+            ("GET", "/api/skills/sk_01?version=approved"),
+            ("GET", "/api/skills/sk_01?version=pending"),
         ] {
             assert!(route_allowed(method, path), "{method} {path}");
         }
@@ -678,6 +690,13 @@ mod tests {
             ("GET", "/api/skills/a/b"),
             ("GET", "/api/skills/"),
             ("GET", "/api/skills?x=1"),
+            ("GET", "/api/skills?version=approved"),
+            ("GET", "/api/skills/sk_01?version=draft"),
+            ("GET", "/api/skills/sk_01?version=approved&x=1"),
+            ("GET", "/api/skills/sk_01?"),
+            ("GET", "/api/skills/a/b?version=approved"),
+            ("PUT", "/api/skills/sk_01?version=approved"),
+            ("DELETE", "/api/skills/sk_01?version=approved"),
             ("GET", "/api/skillsx"),
             ("GET", "/api/memory/conversations"),
             ("GET", "https://evil.com/api/skills"),
@@ -875,6 +894,32 @@ mod tests {
         assert!(content.contains("Shared by Ana (team)."));
         assert!(content.contains("Use bullets."));
         assert!(content.ends_with("</skill>"));
+    }
+
+    /// Round 15 (F1): what the renderer sends to `skills_team_cache_put` is
+    /// the server's metadata row (with every extra field enterprise-api
+    /// adds) flattened with `bundle.files`. It must deserialize and cache.
+    #[test]
+    fn the_renderer_payload_from_the_real_reply_caches() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        store_list(dir, None, vec![meta(REMOTE, APPROVED, "t1")]).unwrap();
+        let mut payload = serde_json::to_value(meta(REMOTE, APPROVED, "t1")).unwrap();
+        let extra = serde_json::json!({
+            "author_user_id": "u1", "mine": false, "approved_sha256": "abc",
+            "reviewed_at": null, "created_at": "2026-11-01T00:00:00Z",
+            "files": files("From the server."),
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let wire: WireSkill = serde_json::from_value(payload).unwrap();
+        let cached = put(dir, wire).unwrap();
+        assert_eq!(cached.instructions, "From the server.");
+        // Metadata alone (the old bug) is refused at the boundary.
+        let bare = serde_json::to_value(meta(REMOTE, APPROVED, "t1")).unwrap();
+        assert!(serde_json::from_value::<WireSkill>(bare).is_err());
     }
 
     #[test]
