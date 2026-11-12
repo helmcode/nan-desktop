@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.5 - Sharing that works, and says why
+
+### Skills
+- Sharing a skill with your team now works: the request carries the name and
+  title the library requires (before, every share from the app failed with an
+  opaque error).
+- Re-sharing after renaming a skill keeps the library identity, so updates
+  land on the same team skill instead of failing.
+- The share dialog now explains each failure in plain words: which file holds
+  the problem, size limits, library full vs too many pending, a changed team
+  library, an expired session, or being offline.
+- Very long names are checked when the share dialog opens, with a clear limit
+  message and the button disabled.
+
+### Chat
+- The activity line ("Pensando...") sits inside the conversation under the
+  last message with a running elapsed time; the detached corner indicator is
+  gone.
+- The preview opens the document you asked for: page-render images (p1.png,
+  slide-2.png, probe files) no longer win over the requested deliverable, and
+  the file type you named (PDF, Excel, slides) is preferred.
+
 ## 0.2.4 - Team skills that work, distilled skills
 
 ### Skills

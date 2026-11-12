@@ -18,8 +18,12 @@ import {
   parseBundleResponse,
   parseList,
   parseSkillsSharing,
+  parseErrorDetail,
   problemForError,
   problemForStatus,
+  shareFailureForError,
+  shareFailureForReply,
+  remoteNameFor,
   shareSkill,
   shareStateFor,
   syncTeam,
@@ -46,6 +50,17 @@ function local(patch: Partial<Skill> = {}): Skill {
     created_at: 1,
     updated_at: 10,
     ...patch,
+  };
+}
+
+type SentBody = { name: string; title: string; files: Array<{ path: string; content: string }> };
+
+/** The core's skills_bundle with its optional frontmatter `name` override. */
+function bundleHonoringName(skills: () => Skill[]) {
+  return (args?: Record<string, unknown>) => {
+    const skill = skills().find((s) => s.id === args?.id);
+    if (!skill) throw { code: "not_found" };
+    return localBundleOf(typeof args?.name === "string" ? { ...skill, name: args.name } : skill);
   };
 }
 
@@ -234,12 +249,21 @@ describe("shareSkill", () => {
     expect(result.ok).toBe(true);
     const post = core.requests.find((r) => r.method === "POST");
     expect(post?.path).toBe("/api/skills");
-    const sent = post?.body as { files: Array<{ path: string; content: string }> };
-    expect(Object.keys(sent)).toEqual(["files"]);
+    const sent = post?.body as { name: string; title: string; files: Array<{ path: string; content: string }> };
+    // Round 16 (P3): enterprise-api's publish contract is {name, title, files};
+    // a body of files alone was a 400 invalid_title on every share.
+    expect(Object.keys(sent).sort()).toEqual(["files", "name", "title"]);
+    expect(sent.name).toBe("weekly-report");
+    expect(sent.title).toBe(skill.title);
     expect(sent.files).toEqual(localBundleOf(skill).files);
     expect(sent.files.map((f) => f.path)).toEqual(["SKILL.md", "references/a.txt", "references/z.md"]);
     expect(sent.files[0].content.startsWith("---\nname: weekly-report\ndescription: ")).toBe(true);
-    expect(core.state.links[LOCAL]).toEqual({ remote_id: "sk_new", sha: `sha-${LOCAL}-10`, local_updated_at: 10 });
+    expect(core.state.links[LOCAL]).toEqual({
+      remote_id: "sk_new",
+      remote_name: "weekly-report",
+      sha: `sha-${LOCAL}-10`,
+      local_updated_at: 10,
+    });
     if (result.ok) expect(result.view.skills.map((m) => m.id)).toContain("sk_new");
   });
 
@@ -258,6 +282,81 @@ describe("shareSkill", () => {
     expect(core.state.links[LOCAL].local_updated_at).toBe(20);
   });
 
+  it("round 16 (QA1): a title edit after the first share still reshares under the first slug", async () => {
+    // Share "Weekly report" -> the title becomes "Weekly report v2" (the core
+    // renames the local slug) -> share again. enterprise-api keeps the row's
+    // name forever, so the PUT must carry the ORIGINAL slug in the body and
+    // in the SKILL.md frontmatter, with the new title.
+    const first = local();
+    const row = meta("0b6c2f7e-1d1a-4c55-9a38-1f0a2b3c4d5e", { name: "weekly-report", status: "pending" });
+    let skills: Skill[] = [first];
+    const core = fakeTeamCore(
+      api([], (req) =>
+        req.method === "POST" ? { status: 201, body: { skill: row } } : req.method === "PUT" ? { status: 200, body: { skill: row } } : null,
+      ),
+      () => skills,
+    );
+    resetTauri({ ...core.handlers, skills_bundle: bundleHonoringName(() => skills) });
+    expect((await shareSkill(P, first, null)).ok).toBe(true);
+    const link = core.state.links[LOCAL];
+    expect(link.remote_name).toBe("weekly-report");
+
+    const edited = local({ name: "weekly-report-v2", title: "Weekly report v2", updated_at: 30 });
+    skills = [edited];
+    const result = await shareSkill(P, edited, link);
+    expect(result.ok).toBe(true);
+    const put = core.requests.find((r) => r.method === "PUT");
+    expect(put?.path).toBe(`/api/skills/${row.id}`);
+    const sent = put?.body as SentBody;
+    expect(sent.name).toBe("weekly-report");
+    expect(sent.title).toBe("Weekly report v2");
+    expect(sent.files[0].content.startsWith("---\nname: weekly-report\ndescription: ")).toBe(true);
+    expect(sent.files).toEqual(localBundleOf({ ...edited, name: "weekly-report" }).files);
+    expect(core.state.links[LOCAL]).toMatchObject({ remote_id: row.id, remote_name: "weekly-report", local_updated_at: 30 });
+  });
+
+  it("round 16: a link stored before remote_name reshares under the cached row's name", async () => {
+    const edited = local({ name: "weekly-report-v2", title: "Weekly report v2", updated_at: 30 });
+    const row = meta("0b6c2f7e-1d1a-4c55-9a38-1f0a2b3c4d5e", { name: "weekly-report", status: "approved" });
+    const core = fakeTeamCore(
+      api([], (req) => (req.method === "PUT" ? { status: 200, body: { skill: { ...row, status: "pending" } } } : null)),
+      () => [edited],
+    );
+    resetTauri({ ...core.handlers, skills_bundle: bundleHonoringName(() => [edited]) });
+    const legacy = { remote_id: row.id, sha: "old", local_updated_at: 10 };
+    expect((await shareSkill(P, edited, legacy, [row])).ok).toBe(true);
+    const sent = core.requests.find((r) => r.method === "PUT")?.body as SentBody;
+    expect(sent.name).toBe("weekly-report");
+    expect(sent.files[0].content.startsWith("---\nname: weekly-report\n")).toBe(true);
+    // The link is upgraded: the next reshare no longer needs the cached row.
+    expect(core.state.links[LOCAL].remote_name).toBe("weekly-report");
+  });
+
+  it("round 16: a legacy link with no cached row falls back to the local slug", () => {
+    const skill = local({ name: "weekly-report-v2" });
+    const legacy = { remote_id: "sk_1", sha: "s", local_updated_at: 1 };
+    expect(remoteNameFor(legacy, [], skill)).toBe("weekly-report-v2");
+    expect(remoteNameFor(legacy, [meta("sk_1", { name: "weekly-report" })], skill)).toBe("weekly-report");
+    expect(remoteNameFor({ ...legacy, remote_name: "first" }, [meta("sk_1", { name: "weekly-report" })], skill)).toBe("first");
+  });
+
+  it("round 16 (QA2): the PUT carries {name, title, files}", async () => {
+    const skill = local({ name: "weekly-report-v2", title: "Weekly report v2", updated_at: 20 });
+    const core = fakeTeamCore(
+      api([], (req) => (req.method === "PUT" ? { status: 200, body: { skill: meta("sk_1", { status: "pending" }) } } : null)),
+      () => [skill],
+    );
+    resetTauri({ ...core.handlers, skills_bundle: bundleHonoringName(() => [skill]) });
+    await shareSkill(P, skill, { remote_id: "sk_1", remote_name: "weekly-report", sha: "old", local_updated_at: 10 });
+    const sent = core.requests.find((r) => r.method === "PUT")?.body as SentBody;
+    expect(Object.keys(sent).sort()).toEqual(["files", "name", "title"]);
+    expect(sent).toEqual({
+      name: "weekly-report",
+      title: "Weekly report v2",
+      files: localBundleOf({ ...skill, name: "weekly-report" }).files,
+    });
+  });
+
   it("a PUT on a deleted row falls back to a new POST", async () => {
     const skill = local();
     const core = fakeTeamCore(
@@ -271,9 +370,21 @@ describe("shareSkill", () => {
       () => [skill],
     );
     resetTauri(core.handlers);
-    const result = await shareSkill(P, skill, { remote_id: "sk_gone", sha: "s", local_updated_at: 1 });
+    resetTauri({ ...core.handlers, skills_bundle: bundleHonoringName(() => [skill]) });
+    const result = await shareSkill(P, skill, { remote_id: "sk_gone", remote_name: "weekly-report-old", sha: "s", local_updated_at: 1 });
     expect(result.ok).toBe(true);
     expect(core.state.links[LOCAL].remote_id).toBe("sk_2");
+    // QA2: the POST after the 404 sends the same {name, title, files} as the PUT.
+    const [put, post] = core.requests.filter((r) => r.method === "PUT" || r.method === "POST");
+    expect(put.method).toBe("PUT");
+    expect(post.method).toBe("POST");
+    const expected = {
+      name: "weekly-report-old",
+      title: skill.title,
+      files: localBundleOf({ ...skill, name: "weekly-report-old" }).files,
+    };
+    expect(put.body).toEqual(expected);
+    expect(post.body).toEqual(expected);
   });
 
   it("maps 404, 429 and 401 to problems without linking", async () => {
@@ -285,7 +396,7 @@ describe("shareSkill", () => {
       const skill = local();
       const core = fakeTeamCore(api([], () => ({ status })), () => [skill]);
       resetTauri(core.handlers);
-      expect(await shareSkill(P, skill, null)).toEqual({ ok: false, problem });
+      expect(await shareSkill(P, skill, null)).toMatchObject({ ok: false, problem, reason: null });
       expect(core.state.links).toEqual({});
     }
   });
@@ -379,6 +490,90 @@ describe("derived state", () => {
     expect(problemForError({ code: "offline" })).toBe("offline");
     expect(problemForError({ code: "bundle", reason: { code: "too_many_files" } })).toBe("invalid");
     expect(problemForError("boom")).toBe("generic");
+  });
+
+  it("round 16: reads {code, detail} objects and falls back to substrings of a string error", () => {
+    expect(problemForError({ code: "no_session", detail: "NoSession" })).toBe("expired");
+    expect(problemForError({ code: "unavailable", detail: "Unavailable" })).toBe("offline");
+    expect(problemForError({ code: "request_invalid", detail: "RequestInvalid" })).toBe("generic");
+    expect(problemForError("NoSession")).toBe("expired");
+    expect(problemForError("no_session")).toBe("expired");
+    expect(problemForError("Offline")).toBe("offline");
+    expect(problemForError("Unavailable")).toBe("offline");
+    expect(problemForError("Bundle { reason: TooManyFiles }")).toBe("invalid");
+    expect(problemForError("bundle not cached")).toBe("invalid");
+    expect(problemForError(new Error("offline"))).toBe("offline");
+    expect(problemForError(null)).toBe("generic");
+  });
+
+  it("round 16: parseErrorDetail returns the core detail or the raw text", () => {
+    expect(parseErrorDetail({ code: "io", detail: "Io" })).toBe("Io");
+    expect(parseErrorDetail("invalid args `body` for command")).toBe("invalid args `body` for command");
+    expect(parseErrorDetail(new Error("boom"))).toBe("boom");
+    expect(parseErrorDetail({ code: "io" })).toBeNull();
+    expect(parseErrorDetail("")).toBeNull();
+    expect(parseErrorDetail(undefined)).toBeNull();
+  });
+
+  it("round 16: a thrown core refusal keeps its validator reason", () => {
+    expect(
+      shareFailureForError({ code: "bundle", detail: "d", reason: { code: "secret_detected", path: "references/a.md" } }),
+    ).toEqual({ problem: "invalid", reason: { code: "secret_detected", path: "references/a.md" }, detail: "d" });
+    expect(shareFailureForError({ code: "offline", detail: "Offline" })).toEqual({
+      problem: "offline",
+      reason: null,
+      detail: "Offline",
+    });
+  });
+
+  it("round 16: server publish errors map to problems with the reason and the path", () => {
+    expect(
+      shareFailureForReply(400, { error: "secret_detected", detail: '"references/brand.md" looks like it contains a credential' }),
+    ).toMatchObject({ problem: "invalid", reason: { code: "secret_detected", path: "references/brand.md" } });
+    expect(shareFailureForReply(400, { error: "invalid_title", detail: "title must be 1..80 characters" })).toMatchObject({
+      problem: "invalid",
+      reason: { code: "invalid_title" },
+    });
+    expect(shareFailureForReply(400, { error: "missing_skill_md" }).reason).toEqual({ code: "path_invalid", path: "SKILL.md" });
+    expect(shareFailureForReply(413, { error: "payload_too_large" }).reason).toEqual({ code: "bundle_too_large" });
+    expect(shareFailureForReply(400, { error: "invalid_body" })).toMatchObject({ problem: "invalid", reason: null });
+    expect(shareFailureForReply(409, { error: "name_taken" }).problem).toBe("name_taken");
+    expect(shareFailureForReply(409, { error: "sha256_mismatch" }).problem).toBe("stale");
+    expect(shareFailureForReply(409, { error: "skill_hidden" }).problem).toBe("stale");
+    expect(shareFailureForReply(429, { error: "skill_limit_reached" }).problem).toBe("library_full");
+    expect(shareFailureForReply(429, { error: "pending_limit_reached" }).problem).toBe("limit_reached");
+    // QA1: the row's name never changes; a mismatch has its own problem.
+    expect(shareFailureForReply(400, { error: "name_mismatch", detail: "a skill's name cannot change" })).toEqual({
+      problem: "name_mismatch",
+      reason: null,
+      detail: "HTTP 400 name_mismatch a skill's name cannot change",
+    });
+    expect(shareFailureForReply(429, { error: "rate_limited" }).problem).toBe("rate_limited");
+    expect(shareFailureForReply(403, { error: "not_author" }).problem).toBe("forbidden");
+    expect(shareFailureForReply(503, { error: "storage_unavailable" })).toEqual({
+      problem: "generic",
+      reason: null,
+      detail: "HTTP 503 storage_unavailable",
+    });
+    expect(shareFailureForReply(502, null).detail).toBe("HTTP 502");
+  });
+
+  it("round 16: a skill the core refuses to bundle never reaches the network and says why", async () => {
+    const skill = local();
+    const core = fakeTeamCore(api([]), () => [skill]);
+    resetTauri({
+      ...core.handlers,
+      skills_bundle: () => {
+        throw { code: "secret_detected", path: "references/a.txt" };
+      },
+    });
+    expect(await shareSkill(P, skill, null)).toEqual({
+      ok: false,
+      problem: "invalid",
+      reason: { code: "secret_detected", path: "references/a.txt" },
+      detail: null,
+    });
+    expect(core.requests).toHaveLength(0);
   });
 
   it("parses the list body and needs only missing or outdated approved bundles", () => {

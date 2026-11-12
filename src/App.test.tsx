@@ -144,6 +144,25 @@ describe("chat shell", () => {
     expect(container.textContent).not.toContain("function_calls");
   });
 
+  it("round 16: one activity line sits right under the last message; the composer has none", async () => {
+    resetTauri({ ...chatHandlers([row(1, "user", "Earlier"), row(2, "assistant", "Answer")]), chat_send: () => undefined });
+    const { container } = renderApp("es");
+    await screen.findByText("Answer");
+    const box = await screen.findByRole("textbox", { name: "Mensaje" });
+    fireEvent.change(box, { target: { value: "Haz el PDF" } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    const lines = container.querySelectorAll('[data-testid="turn-indicator"]');
+    expect(lines).toHaveLength(1);
+    const bubble = lines[0].closest("article.streaming");
+    expect(bubble).not.toBeNull();
+    // Directly after the newest message in the flow, not floating elsewhere.
+    expect(bubble?.previousElementSibling?.textContent).toContain("Haz el PDF");
+    expect(container.querySelector("footer.composer")?.textContent).not.toMatch(/En curso|Pensando/);
+    expect(lines[0].textContent).toMatch(/^Pensando· 0 s$/);
+  });
+
   it("shows an inline approval card and answers through the core (S14)", async () => {
     resetTauri(chatHandlers([row(1, "user", "Delete old.txt")]));
     renderApp("en");

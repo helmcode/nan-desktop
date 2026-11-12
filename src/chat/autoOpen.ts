@@ -10,13 +10,17 @@
 //   checks are treated as scratch only when other files exist;
 // - otherwise, within that reply the FINAL DELIVERABLE wins (round 15): a turn that
 //   builds a PDF also leaves scratch files behind (measure.js, debug.html,
-//   preview-p1.png), and following the last touched file opened those
-//   instead of the requested document. The order is:
+//   preview-p1.png, p1.png..p9.png), and following the last touched file
+//   opened those instead of the requested document. The order (round 16) is:
 //     1. a produced artifact the final message names (path or file name),
 //        when it is not a scratch file (the last such one);
-//     2. the last produced artifact that is not a scratch file;
-//     3. a scratch artifact the final message names (the user asked for it);
-//     4. nothing: pure intermediates never steal the pane (they stay chips);
+//     2. a produced non-scratch artifact whose extension matches the kind
+//        the USER asked for in the turn's message ("hazme un PDF", "an Excel
+//        sheet", "unas diapositivas"); specific kinds (pdf, xlsx, pptx, docx,
+//        png) are tried before generic ones (documento, imagen);
+//     3. the last produced artifact that is not a scratch file;
+//     4. a scratch artifact the final message names (the user asked for it);
+//     5. nothing: pure intermediates never steal the pane (they stay chips);
 // - a generated image (composer image row `media_path`, or an `image`
 //   artifact from the generate_image tool) opens as a `media` target ,
 //   it lives under app_data/images and is shown through the asset
@@ -38,10 +42,21 @@ const SCRATCH_PATTERNS: RegExp[] = [
   // Render checks of a document: preview-p1.png, page-2.png, render_3.jpg.
   /^(preview|page|render|snapshot|thumb|thumbnail|shot|screenshot)([-_]?p?\d+)?\.(png|jpe?g|webp)$/i,
   /^(preview|render|snapshot|thumb)[-_].*\.(png|jpe?g|webp|html?)$/i,
-  // Helper scripts and throwaway pages written along the way.
+  // Round 16: bare page renders by NAME shape, whatever the extension:
+  // p1.png..p9.png, p12.jpg, pg3.svg, page4.html, slide-2.png. A turn that
+  // rasterises a PDF page by page to check it leaves exactly these behind.
+  // Caveat: a real deliverable literally named page4.html or slide-2.png also
+  // matches and loses priority (it still opens when it is the turn's only
+  // file or the final message names it).
+  /^(p|pg|page|slide)[-_]?\d+\.[a-z0-9]+$/i,
+  // Helper scripts and throwaway pages written along the way, by stem prefix
+  // or suffix (probe.html, probe-fonts.html, debug_layout.html, out-tmp.txt).
   /^(debug|measure|scratch|tmp|temp|test|check|probe)[-_.]/i,
-  /[-_](debug|tmp|temp|scratch)\.[a-z0-9]+$/i,
-  /\.(js|mjs|cjs|ts|py|sh|log|tmp)$/i,
+  /[-_](debug|tmp|temp|scratch|probe)\.[a-z0-9]+$/i,
+  // Code, logs and supporting assets (stylesheets, source maps): they serve
+  // the deliverable, they are not it.
+  /\.(js|mjs|cjs|ts|py|sh|log|tmp|css|map)$/i,
+  // Hidden or underscore-prefixed files.
   /^[._]/,
 ];
 const SCRATCH_DIRS = /[\\/](\.cache|\.scratch|node_modules)[\\/]/i;
@@ -72,22 +87,74 @@ export function mentionsFile(text: string, path: string): boolean {
   return [text, decoded].some((body) => body.includes(path) || token.test(body));
 }
 
+/** Artifact kinds a user can ask for, specific before generic (rule 2). */
+const REQUESTED_KINDS: { words: RegExp; exts: string[] }[] = [
+  { words: /\bpdfs?\b/, exts: ["pdf"] },
+  {
+    words: /\b(excel|xlsx?|spreadsheets?|sheets?|hojas? de calculo|csv)\b/,
+    exts: ["xlsx", "xls", "csv", "ods"],
+  },
+  {
+    words: /\b(pptx?|powerpoint|slides?|diapositivas?|presentacion(es)?|presentations?|decks?)\b/,
+    exts: ["pptx", "ppt", "odp", "key"],
+  },
+  { words: /\b(word|docx?)\b/, exts: ["docx", "doc", "odt"] },
+  { words: /\b(png|jpe?g|webp|svg)\b/, exts: ["png", "jpg", "jpeg", "webp", "svg"] },
+  // Generic nouns: only when no specific kind above matched first.
+  { words: /\b(documentos?|documents?)\b/, exts: ["docx", "doc", "odt", "pdf", "md"] },
+  {
+    words: /\b(imagen(es)?|images?|fotos?|photos?|pictures?|ilustracion(es)?|illustrations?)\b/,
+    exts: ["png", "jpg", "jpeg", "webp", "svg", "gif"],
+  },
+];
+
+/**
+ * The extension groups the user's message asks for, in priority order
+ * (specific kinds first). Accent- and case-insensitive, Spanish and English.
+ */
+export function requestedExtensions(request: string): string[][] {
+  if (!request) return [];
+  const text = request
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  return REQUESTED_KINDS.filter((kind) => kind.words.test(text)).map((kind) => kind.exts);
+}
+
+function extensionOf(path: string): string {
+  const name = baseName(path);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
 /** The artifact a finished reply should open (see the rules above). */
-export function finalDeliverable(content: string, artifacts: Artifact[]): Artifact | null {
+export function finalDeliverable(content: string, artifacts: Artifact[], request = ""): Artifact | null {
   const usable = artifacts.filter((a) => typeof a.path === "string" && a.path.length > 0);
   const last = (list: Artifact[]): Artifact | null => list[list.length - 1] ?? null;
   // One file (written once or rewritten): it is the deliverable (D2).
   if (new Set(usable.map((a) => a.path)).size === 1) return last(usable);
   const named = usable.filter((a) => mentionsFile(content, a.path));
   const real = usable.filter((a) => !isScratchFile(a.path));
-  return last(named.filter((a) => !isScratchFile(a.path))) ?? last(real) ?? last(named);
+  const namedReal = last(named.filter((a) => !isScratchFile(a.path)));
+  if (namedReal) return namedReal;
+  for (const exts of requestedExtensions(request)) {
+    const asked = last(real.filter((a) => exts.includes(extensionOf(a.path))));
+    if (asked) return asked;
+  }
+  return last(real) ?? last(named);
 }
 
 export function lastProducedTarget(rows: ChatMessageRow[]): PreviewTarget | null {
-  const last = [...rows].reverse().find((row) => row.role === "assistant");
-  if (!last) return null;
+  let index = rows.length - 1;
+  while (index >= 0 && rows[index].role !== "assistant") index -= 1;
+  if (index < 0) return null;
+  const last = rows[index];
   if (last.media_path) return { kind: "media", ref: last.media_path };
-  const artifact = finalDeliverable(last.content ?? "", last.artifacts ?? []);
+  // The user's message that started this turn: what kind of file they asked for.
+  let ask = index - 1;
+  while (ask >= 0 && rows[ask].role !== "user") ask -= 1;
+  const request = ask >= 0 ? (rows[ask].content ?? "") : "";
+  const artifact = finalDeliverable(last.content ?? "", last.artifacts ?? [], request);
   if (!artifact) return null;
   return { kind: artifact.kind === "image" ? "media" : "file", ref: artifact.path };
 }

@@ -58,6 +58,10 @@ type Setup = {
   list?: (req: ApiRequest) => ApiReply | null;
   /** Overrides for `GET /api/skills/{id}` (a bundle), before the row lookup. */
   bundle?: (req: ApiRequest) => ApiReply | null;
+  /** Overrides for a publish (`POST /api/skills`, `PUT /api/skills/{id}`). */
+  publish?: (req: ApiRequest) => ApiReply | null;
+  /** Core command overrides, applied after the fake team core. */
+  core?: Record<string, (args: Record<string, unknown> | undefined) => unknown>;
 };
 
 /// The chat handlers, a local skills store and a stateful library API.
@@ -90,6 +94,10 @@ function setup(opts: Setup = {}) {
     const { id, query } = skillRoute(req.path) ?? { id: "", query: "" };
     if (req.method === "GET") {
       const override = opts.bundle?.(req);
+      if (override) return override;
+    }
+    if (req.method === "POST" || req.method === "PUT") {
+      const override = opts.publish?.(req);
       if (override) return override;
     }
     if (req.method === "POST") {
@@ -146,6 +154,7 @@ function setup(opts: Setup = {}) {
     skills_update: () => undefined,
     skills_delete: () => undefined,
     ...core.handlers,
+    ...(opts.core ?? {}),
   });
   return { core, rows, created: () => created, bump: () => { version += 1; } };
 }
@@ -311,7 +320,8 @@ describe("Share with my team: the flow", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     const post = core.requests.find((r) => r.method === "POST");
     expect(post?.path).toBe("/api/skills");
-    expect(post?.body).toEqual({ files: localBundleOf(skill).files });
+    // enterprise-api's publish contract: the slug, the title and the files.
+    expect(post?.body).toEqual({ name: "weekly-report", title: "Weekly report", files: localBundleOf(skill).files });
     expect((post?.body as { files: Array<{ path: string }> }).files.map((f) => f.path)).toEqual([
       "SKILL.md",
       "references/a.txt",
@@ -813,5 +823,178 @@ describe("Team library errors", () => {
     await openTeamTab();
     expect(await screen.findByText("Your session has expired.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Sign in again" })).toBeTruthy();
+  });
+});
+
+describe("Share with my team: failures say what went wrong (round 16, P3)", () => {
+  async function shareAndFail(opts: Setup, locale: Locale = "en"): Promise<HTMLElement> {
+    setup({ sharing: true, skills: [weekly()], ...opts });
+    renderApp(locale);
+    await openSkills(locale === "es" ? "Ajustes" : "Settings");
+    const share = locale === "es" ? "Compartir «Weekly report» con el equipo" : 'Share "Weekly report" with my team';
+    fireEvent.click(await screen.findByRole("button", { name: share }));
+    const dialog = await screen.findByRole("dialog");
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: locale === "es" ? "Compartir" : "Share" }));
+    });
+    return within(dialog).findByTestId("share-problem");
+  }
+
+  it("a server validation refusal names the file and the rule, like a local save", async () => {
+    const line = await shareAndFail({
+      publish: () => ({
+        status: 400,
+        body: {
+          error: "secret_detected",
+          detail: '"references/creds.md" looks like it contains a credential (credential_assignment); remove it and publish again',
+        },
+      }),
+    });
+    expect(line.textContent).toContain("references/creds.md seems to contain credentials");
+    expect(line.textContent).not.toContain("Could not reach your team");
+  });
+
+  it("a core bundle refusal reads its SkillError reason", async () => {
+    const line = await shareAndFail({
+      core: {
+        skills_team_request: (args) => {
+          if (args?.method === "POST") {
+            throw {
+              code: "bundle",
+              detail: "Bundle { reason: FileTooLarge }",
+              reason: { code: "file_too_large", path: "references/helmcode-brandbook.md" },
+            };
+          }
+          if (args?.path === "/api/auth/me") {
+            return { status: 200, etag: null, body: { featureFlags: ["skills_sharing"], skillsSharing: true } };
+          }
+          return { status: 200, etag: null, body: { skills: [] } };
+        },
+      },
+    });
+    expect(line.textContent).toContain("helmcode-brandbook.md is too large (64 KB at most).");
+  });
+
+  it("a title over the library cap says the cap", async () => {
+    const line = await shareAndFail({
+      publish: () => ({ status: 400, body: { error: "invalid_title", detail: "title must be 1..80 characters" } }),
+    });
+    expect(line.textContent).toBe("To share it, the name must be 80 characters at most.");
+  });
+
+  it("rate limited, stale and name taken have their own words", async () => {
+    expect((await shareAndFail({ publish: () => ({ status: 429, body: { error: "rate_limited" } }) })).textContent).toBe(
+      "Wait a moment and try again.",
+    );
+    cleanup();
+    expect(
+      (await shareAndFail({ publish: () => ({ status: 409, body: { error: "not_pending" } }) })).textContent,
+    ).toContain("changed in your team's library meanwhile");
+    cleanup();
+    expect(
+      (await shareAndFail({ publish: () => ({ status: 409, body: { error: "name_taken" } }) })).textContent,
+    ).toContain("already has a skill with this name");
+    cleanup();
+    expect(
+      (
+        await shareAndFail({
+          publish: () => ({ status: 429, body: { error: "pending_limit_reached", detail: "at most 20 skills can await review" } }),
+        })
+      ).textContent,
+    ).toContain("too many skills awaiting review");
+  });
+
+  it("an unknown failure says the SHARE failed (not 'loading') and shows the detail", async () => {
+    const line = await shareAndFail({ publish: () => ({ status: 500, body: { error: "internal_error" } }) }, "es");
+    expect(line.textContent).toContain("No se ha podido compartir la skill.");
+    expect(line.textContent).not.toContain("cargar las skills");
+    expect(line.querySelector(".share-problem-detail")?.textContent).toBe("Detalle: HTTP 500 internal_error");
+  });
+
+  it("round 16 (UX): a secret found while sharing says to remove it and share again, not 'not saved'", async () => {
+    const line = await shareAndFail(
+      { publish: () => ({ status: 400, body: { error: "secret_detected", detail: '"references/creds.md" looks like a credential' } }) },
+      "es",
+    );
+    expect(line.textContent).toBe(
+      "references/creds.md parece contener credenciales. Quítalas de la skill y vuelve a compartirla.",
+    );
+    expect(line.textContent).not.toContain("no se guarda");
+    cleanup();
+    // Without a path the skill itself is named.
+    const bare = await shareAndFail({ publish: () => ({ status: 400, body: { error: "secret_detected" } }) });
+    expect(bare.textContent).toBe(
+      "Weekly report seems to contain credentials. Remove them from the skill and share it again.",
+    );
+  });
+
+  it("round 16 (UX): a full library and too many pending reviews read differently", async () => {
+    const full = await shareAndFail({ publish: () => ({ status: 429, body: { error: "skill_limit_reached" } }) }, "es");
+    expect(full.textContent).toBe(
+      "La biblioteca de tu equipo está llena. Pide a un administrador que libere espacio eliminando skills.",
+    );
+    cleanup();
+    const pending = await shareAndFail({ publish: () => ({ status: 429, body: { error: "pending_limit_reached" } }) }, "es");
+    expect(pending.textContent).toBe(
+      "Tu equipo tiene demasiadas skills pendientes de revisión. Pide a un administrador que las revise.",
+    );
+  });
+
+  it("round 16 (QA1): a name the library no longer matches has its own words", async () => {
+    const line = await shareAndFail(
+      { publish: () => ({ status: 400, body: { error: "name_mismatch", detail: "a skill's name cannot change" } }) },
+      "es",
+    );
+    expect(line.textContent).toContain(
+      "El nombre de la skill en la biblioteca ya no coincide; elimínala de la cola y vuelve a compartirla.",
+    );
+    expect(line.textContent).not.toContain("No se ha podido compartir");
+  });
+
+  it("round 16 (UX): stale says to close this window", async () => {
+    const line = await shareAndFail({ publish: () => ({ status: 409, body: { error: "not_pending" } }) }, "es");
+    expect(line.textContent).toContain("Cierra esta ventana y vuelve a intentarlo.");
+  });
+
+  it("round 16 (UX): a title over the library cap is flagged as the dialog opens and Share is disabled", async () => {
+    const long = "W".repeat(81);
+    const publishes: string[] = [];
+    setup({
+      sharing: true,
+      skills: [weekly({ title: long })],
+      publish: (req) => {
+        publishes.push(req.method);
+        return null;
+      },
+    });
+    renderApp("es");
+    await openSkills("Ajustes");
+    fireEvent.click(await screen.findByRole("button", { name: `Compartir «${long}» con el equipo` }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByTestId("share-problem").textContent).toBe(
+      "Para compartirla, el nombre debe tener como máximo 80 caracteres.",
+    );
+    const share = within(dialog).getByRole("button", { name: "Compartir" });
+    expect((share as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      fireEvent.click(share);
+    });
+    expect(publishes).toEqual([]);
+  });
+
+  it("round 16 (UX): a title at the cap (80 characters, multi-byte too) opens with Share enabled", async () => {
+    const atCap = "á".repeat(80);
+    setup({ sharing: true, skills: [weekly({ title: atCap })] });
+    renderApp("es");
+    await openSkills("Ajustes");
+    fireEvent.click(await screen.findByRole("button", { name: `Compartir «${atCap}» con el equipo` }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByTestId("share-problem")).toBeNull();
+    expect((within(dialog).getByRole("button", { name: "Compartir" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("offline says to check the network, without the 'last saved copy' line of the library", async () => {
+    const line = await shareAndFail({ publish: () => ({ fail: "offline" }) });
+    expect(line.textContent).toBe("No connection. Check your network and try again.");
   });
 });

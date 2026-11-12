@@ -27,6 +27,8 @@ import {
 import {
   isBundleCached,
   loadTeamSkill,
+  MAX_SHARED_TITLE_CHARS,
+  type ShareFailure,
   shareSkill,
   shareStateFor,
   teamLibrary,
@@ -379,8 +381,58 @@ export function teamProblemText(t: Strings, problem: TeamProblem): string {
       return s.offline;
     case "invalid":
       return s.invalid;
+    case "stale":
+      return s.stale;
+    case "name_taken":
+      return s.nameTaken;
+    case "library_full":
+      return s.libraryFull;
+    case "limit_reached":
+      return s.limitReached;
+    case "name_mismatch":
+      return s.nameMismatch;
     default:
       return s.generic;
+  }
+}
+
+/**
+ * Round 16 (P3): what a failed share says. A validator refusal (the core's
+ * or the server's, same codes) reads through `skillErrorText`, exactly like
+ * a local save error; the share-only cases (title cap, offline, generic)
+ * have their own copy, and anything the app cannot name keeps the raw
+ * detail next to it so the next attempt shows the true reason. A secret is
+ * the exception: the save text ("not saved") is false when sharing, so it
+ * has share copy naming the file, or the skill (`title`) without a path.
+ */
+export function shareFailureText(
+  t: Strings,
+  failure: ShareFailure,
+  title = "SKILL.md",
+): { text: string; detail: string | null } {
+  const s = t.skills.team;
+  const { problem, reason, detail } = failure;
+  if (problem === "invalid" && reason) {
+    if (reason.code === "invalid_title" || reason.code === "title_too_long") {
+      return { text: s.titleTooLong(MAX_SHARED_TITLE_CHARS), detail: null };
+    }
+    if (reason.code === "title_empty") return { text: s.titleEmpty, detail: null };
+    if (reason.code === "secret_detected") {
+      return { text: s.shareSecretDetected(reason.path ?? title), detail: null };
+    }
+    const text = skillErrorText(t, reason);
+    if (text !== t.skills.errors.generic) return { text, detail: null };
+    return { text: s.invalid, detail };
+  }
+  switch (problem) {
+    case "invalid":
+      return { text: s.invalid, detail };
+    case "offline":
+      return { text: s.shareOffline, detail: null };
+    case "generic":
+      return { text: s.shareFailed, detail };
+    default:
+      return { text: teamProblemText(t, problem), detail: null };
   }
 }
 
@@ -395,6 +447,43 @@ function ProblemLine({ problem, onSignIn }: { problem: TeamProblem; onSignIn: ()
           <button type="button" className="btn btn-ghost btn-sm" onClick={onSignIn}>
             {t.skills.team.signIn}
           </button>
+        </>
+      )}
+    </p>
+  );
+}
+
+function ShareProblemLine({
+  failure,
+  title,
+  onSignIn,
+}: {
+  failure: ShareFailure;
+  title: string;
+  onSignIn: () => void;
+}) {
+  const t = useT();
+  const { text, detail } = shareFailureText(t, failure, title);
+  const { problem } = failure;
+  return (
+    <p
+      className={problem === "rate_limited" || problem === "offline" ? "skills-notice" : "inline-error"}
+      role="alert"
+      data-testid="share-problem"
+    >
+      {text}
+      {problem === "expired" && (
+        <>
+          {" "}
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onSignIn}>
+            {t.skills.team.signIn}
+          </button>
+        </>
+      )}
+      {detail && (
+        <>
+          <br />
+          <small className="share-problem-detail">{t.skills.team.problemDetail(detail)}</small>
         </>
       )}
     </p>
@@ -421,7 +510,10 @@ function ShareDialog({
   const t = useT();
   const s = t.skills.team;
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<TeamProblem | null>(null);
+  const [failure, setFailure] = useState<ShareFailure | null>(null);
+  // Round 16 (UX): the editor allows longer titles than the library; say so
+  // as the dialog opens and never offer a share the server will refuse.
+  const titleTooLong = [...skill.title].length > MAX_SHARED_TITLE_CHARS;
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const layer = useEscapeLayer(true);
 
@@ -440,18 +532,18 @@ function ShareDialog({
   }, [layer, onCancel]);
 
   const confirm = async (): Promise<void> => {
-    if (busy) return;
+    if (busy || titleTooLong) return;
     setBusy(true);
-    setProblem(null);
+    setFailure(null);
     const link = team.state.view.links[skill.id] ?? null;
-    const result = await shareSkill(team.profileId, skill, link);
+    const result = await shareSkill(team.profileId, skill, link, team.state.view.skills);
     setBusy(false);
     if (result.ok) {
       team.onState({ ...team.state, view: result.view });
       onShared(skill.title);
       return;
     }
-    setProblem(result.problem);
+    setFailure({ problem: result.problem, reason: result.reason, detail: result.detail });
   };
 
   return (
@@ -489,12 +581,18 @@ function ShareDialog({
         <p id="share-warning" className="share-warning">
           {s.warning}
         </p>
-        {problem && <ProblemLine problem={problem} onSignIn={team.onSignIn} />}
+        {titleTooLong ? (
+          <p className="inline-error" role="alert" data-testid="share-problem">
+            {s.titleTooLong(MAX_SHARED_TITLE_CHARS)}
+          </p>
+        ) : (
+          failure && <ShareProblemLine failure={failure} title={skill.title} onSignIn={team.onSignIn} />
+        )}
         <div className="modal-actions">
           <button ref={cancelRef} type="button" className="btn btn-ghost" onClick={onCancel}>
             {t.skills.cancel}
           </button>
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void confirm()}>
+          <button type="button" className="btn btn-primary" disabled={busy || titleTooLong} onClick={() => void confirm()}>
             {busy ? s.sharing : reshare ? s.reshare : s.confirm}
           </button>
         </div>
