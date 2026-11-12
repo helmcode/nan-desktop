@@ -1,8 +1,13 @@
 // Round 15 (F6): long tool-heavy turns must not look hung. While a turn runs
 // (awaiting the model or a tool, even with no stream chunk for a while) the
-// composer shows a persistent "Working" line with animated dots and the
+// composer shows a persistent "In progress" line with animated dots and the
 // elapsed seconds, ticking once a second. It goes away on done, stop or error
 // (the conversation leaves the streaming set).
+//
+// D5: the label is deliberately NOT "Working": the streaming bubble already
+// says what the assistant is doing ("Working…", "Searching…"); the composer
+// line only says the turn is still running and for how long, so the two
+// never read the same at once.
 
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";

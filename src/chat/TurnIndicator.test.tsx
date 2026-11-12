@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Round 15 (F6): the composer's "Working" line while a turn runs.
+// Round 15 (F6): the composer's "In progress" line while a turn runs.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { emit, resetTauri } from "../test/tauriMock";
@@ -37,8 +37,8 @@ describe("the turn clock", () => {
     expect(en.chat.turnElapsed(65)).toBe("1m 05s");
     expect(es.chat.turnElapsed(12)).toBe("12 s");
     expect(es.chat.turnElapsed(125)).toBe("2 min 05 s");
-    expect(es.chat.turnWorking).toBe("Trabajando");
-    expect(en.chat.turnWorking).toBe("Working");
+    expect(es.chat.turnWorking).toBe("En curso");
+    expect(en.chat.turnWorking).toBe("In progress");
   });
 });
 
@@ -96,7 +96,7 @@ describe("the Working indicator in the composer", () => {
     const line = indicator();
     expect(line).not.toBeNull();
     expect(line?.closest("footer.composer")).not.toBeNull();
-    expect(line?.textContent).toContain("Working");
+    expect(line?.textContent).toContain("In progress");
     expect(line?.querySelector(".turn-elapsed")?.textContent).toBe("0s");
     // A long tool call: nothing streams, the clock still moves.
     await act(async () => {
@@ -125,7 +125,20 @@ describe("the Working indicator in the composer", () => {
     renderApp("es");
     fireEvent.click(await screen.findByText("Notes"));
     await send("Hola");
-    expect(indicator()?.textContent).toContain("Trabajando");
+    expect(indicator()?.textContent).toContain("En curso");
     expect(indicator()?.querySelector(".turn-elapsed")?.textContent).toBe("0 s");
+  });
+
+  it("never reads like the bubble's working line during a tool call (round 15 D5)", async () => {
+    renderApp("es");
+    fireEvent.click(await screen.findByText("Notes"));
+    await send("Haz el informe");
+    await act(async () => emit("chat://activity", { conversation_id: 7, activity: "working" }));
+    // The streaming bubble says what the assistant does; the composer only
+    // says the turn is still running and for how long.
+    expect(screen.getAllByText(/Trabajando/)).toHaveLength(1);
+    expect(screen.getByText("Trabajando…").closest("article.streaming")).not.toBeNull();
+    expect(indicator()?.textContent).not.toContain("Trabajando");
+    expect(indicator()?.textContent).toContain("En curso");
   });
 });

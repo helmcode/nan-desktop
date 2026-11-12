@@ -95,6 +95,27 @@ describe("the final deliverable wins over intermediates (round 15/F5)", () => {
     expect(lastProducedTarget([reply])).toEqual({ kind: "file", ref: "/u/p/report.docx" });
   });
 
+  it("D2: a turn that produced exactly one file opens it even when it looks like scratch", () => {
+    for (const path of ["/u/p/measure.js", "/u/p/test.html", "/u/p/debug.html", "/u/p/preview-p1.png", "/u/p/build.sh"]) {
+      const reply = row(2, "assistant", { content: "Done.", artifacts: [file(path)] });
+      expect(lastProducedTarget([reply])).toEqual({ kind: "file", ref: path });
+    }
+    // Rewritten several times, it is still one file.
+    const rewritten = row(2, "assistant", {
+      content: "Done.",
+      artifacts: [file("/u/p/scrape.py"), file("/u/p/scrape.py")],
+    });
+    expect(lastProducedTarget([rewritten])).toEqual({ kind: "file", ref: "/u/p/scrape.py" });
+  });
+
+  it("D2: with two or more files a script is scratch again and a real file wins", () => {
+    const reply = row(2, "assistant", {
+      content: "Done.",
+      artifacts: [file("/u/p/scrape.py"), file("/u/p/results.csv"), file("/u/p/scrape.py")],
+    });
+    expect(lastProducedTarget([reply])).toEqual({ kind: "file", ref: "/u/p/results.csv" });
+  });
+
   it("pure intermediates never auto-open; a scratch-looking file opens only when the message names it", () => {
     const scratch = [file("/u/p/measure.js"), file("/u/p/preview-p2.png")];
     expect(lastProducedTarget([row(2, "assistant", { content: "Done.", artifacts: scratch })])).toBeNull();

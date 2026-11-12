@@ -4,7 +4,11 @@
 // Rules:
 // - only the reply that JUST finished counts (the newest assistant row);
 //   switching conversations never re-opens anything by itself;
-// - within that reply the FINAL DELIVERABLE wins (round 15): a turn that
+// - a reply that produced exactly ONE file opens it, whatever its name
+//   (D2): the user asked for that one artifact (a script, a test page) and
+//   there is nothing else it could be scratch FOR. Scripts and render
+//   checks are treated as scratch only when other files exist;
+// - otherwise, within that reply the FINAL DELIVERABLE wins (round 15): a turn that
 //   builds a PDF also leaves scratch files behind (measure.js, debug.html,
 //   preview-p1.png), and following the last touched file opened those
 //   instead of the requested document. The order is:
@@ -72,6 +76,8 @@ export function mentionsFile(text: string, path: string): boolean {
 export function finalDeliverable(content: string, artifacts: Artifact[]): Artifact | null {
   const usable = artifacts.filter((a) => typeof a.path === "string" && a.path.length > 0);
   const last = (list: Artifact[]): Artifact | null => list[list.length - 1] ?? null;
+  // One file (written once or rewritten): it is the deliverable (D2).
+  if (new Set(usable.map((a) => a.path)).size === 1) return last(usable);
   const named = usable.filter((a) => mentionsFile(content, a.path));
   const real = usable.filter((a) => !isScratchFile(a.path));
   return last(named.filter((a) => !isScratchFile(a.path))) ?? last(real) ?? last(named);
