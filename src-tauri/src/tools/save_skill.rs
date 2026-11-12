@@ -115,7 +115,8 @@ pub fn parse_draft(arguments: &str) -> Result<SkillDraft, String> {
         instructions: args.instructions,
         references: Vec::new(),
     };
-    let skill = skills::build(&input, "draft", &[], 0, 0).map_err(|err| refusal(&err).to_string())?;
+    let skill =
+        skills::build(&input, "draft", &[], 0, 0).map_err(|err| refusal(&err).to_string())?;
     Ok(SkillDraft {
         title: skill.title,
         description: skill.description,
@@ -159,7 +160,10 @@ mod tests {
             .collect();
         assert_eq!(required, ["name", "description", "instructions"]);
         for field in required {
-            assert_eq!(def["function"]["parameters"]["properties"][field]["type"], "string");
+            assert_eq!(
+                def["function"]["parameters"]["properties"][field]["type"],
+                "string"
+            );
         }
     }
 
@@ -170,7 +174,9 @@ mod tests {
         assert!(GUIDANCE.contains("Distill the WHOLE conversation"));
         // The description rule is the same one the form shows.
         assert!(GUIDANCE.contains("\"<What it does>. Use when: <trigger phrases>.\""));
-        assert!(skills::DESCRIPTION_GUIDE.ends_with("\"<What it does>. Use when: <trigger phrases>.\""));
+        assert!(
+            skills::DESCRIPTION_GUIDE.ends_with("\"<What it does>. Use when: <trigger phrases>.\"")
+        );
         // The body is the working order; the app adds the heading.
         assert!(GUIDANCE.contains("numbered steps (the working order)"));
         assert!(GUIDANCE.contains("Working order\" heading: the app adds it"));
@@ -186,7 +192,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(draft.title, "Informe semanal");
-        assert_eq!(draft.description, "Escribe el informe semanal. Use when: informe semanal.");
+        assert_eq!(
+            draft.description,
+            "Escribe el informe semanal. Use when: informe semanal."
+        );
         assert_eq!(draft.instructions, "1. Lee las notas.\n2. Escribe.");
         assert!(result_for_model(&Ok(draft)).contains("form_prefilled"));
     }
@@ -198,7 +207,10 @@ mod tests {
         assert!(err.contains("password, key or token"), "{err}");
         let fed_back = result_for_model(&Err(err));
         assert!(fed_back.contains("invalid_skill"));
-        assert!(!fed_back.contains("sk-ant-"), "the secret is never echoed back");
+        assert!(
+            !fed_back.contains("sk-ant-"),
+            "the secret is never echoed back"
+        );
         // In the name or the description too.
         assert!(parse_draft(&call("ghp_aaaaaaaaaaaaaaaaaaaaaaaa", "d", "i")).is_err());
         assert!(parse_draft(&call("t", "AKIAABCDEFGHIJKLMNOP", "i")).is_err());
@@ -208,9 +220,18 @@ mod tests {
     fn missing_or_empty_fields_are_refused() {
         assert!(parse_draft("{}").is_err());
         assert!(parse_draft("not json").is_err());
-        assert_eq!(parse_draft(&call("", "d", "i")).unwrap_err(), "name is empty");
-        assert_eq!(parse_draft(&call("t", " ", "i")).unwrap_err(), "description is empty");
-        assert_eq!(parse_draft(&call("t", "d", "\n")).unwrap_err(), "instructions are empty");
+        assert_eq!(
+            parse_draft(&call("", "d", "i")).unwrap_err(),
+            "name is empty"
+        );
+        assert_eq!(
+            parse_draft(&call("t", " ", "i")).unwrap_err(),
+            "description is empty"
+        );
+        assert_eq!(
+            parse_draft(&call("t", "d", "\n")).unwrap_err(),
+            "instructions are empty"
+        );
         assert_eq!(
             parse_draft(&call(&"x".repeat(121), "d", "i")).unwrap_err(),
             "name is longer than 120 characters"
