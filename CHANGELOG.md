@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.4 - Team skills that work, distilled skills
+
+### Skills
+- Team skills now download reliably: the library loads without the red
+  banner, "Usar" works, and the chat picker lists team skills. The sharing
+  switch is read from the server correctly (it was silently ignored before).
+- "Guardar como skill" asks the model to distill the whole conversation into
+  a quality skill (decisions, working order, gotchas) instead of copying the
+  first message; you review and edit the draft before saving. If the summary
+  fails, the app says so and copies the chat start instead.
+- A new skill whose name is taken is saved as "Nombre 2" instead of creating
+  a silent duplicate.
+- Share with your team from "Mias": the share action is visible on your own
+  skills when your organization has skills sharing on.
+- Escape and Stop behave: stopping a turn never opens the save-as-skill form,
+  and the assistant only proposes a skill draft with a clear hint.
+- Team rows show who shared each skill (the sharer's account email).
+
+### Chat and preview
+- The preview opens the document you asked for (the final deliverable), not
+  the last intermediate file a tool touched.
+- While the assistant works you always see a live "En curso" indicator with
+  elapsed seconds, so long tool turns never look frozen.
+
 ## 0.2.3 - Settings window, team skills, honest updates
 
 ### Platform
