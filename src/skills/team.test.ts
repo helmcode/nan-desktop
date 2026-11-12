@@ -297,6 +297,14 @@ describe("the org flag", () => {
     expect(parseSkillsSharing({ org: { skills_sharing: true } })).toBe(true);
     expect(parseSkillsSharing({ features: { skills_sharing: true } })).toBe(true);
     expect(parseSkillsSharing({ skills_sharing: "yes" })).toBe(false);
+  });
+
+  it("round 15 (F3): reads the real enterprise-api /me shape (skillsSharing + featureFlags)", () => {
+    expect(parseSkillsSharing({ email: "a@b.c", featureFlags: [], skillsSharing: true })).toBe(true);
+    expect(parseSkillsSharing({ featureFlags: ["chat", "skills_sharing"], skillsSharing: false })).toBe(true);
+    expect(parseSkillsSharing({ featureFlags: ["chat"], skillsSharing: false })).toBe(false);
+    expect(parseSkillsSharing({ featureFlags: "skills_sharing" })).toBe(false);
+    expect(parseSkillsSharing({ skillsSharing: "true" })).toBe(false);
     expect(parseSkillsSharing({ email: "a@b.c" })).toBe(false);
     expect(parseSkillsSharing(null)).toBe(false);
   });
@@ -310,11 +318,11 @@ describe("the org flag", () => {
     expect(core.requests[0]).toMatchObject({ method: "GET", path: "/api/auth/me" });
   });
 
-  it("is false when /api/auth/me fails", async () => {
+  it("is unknown (null), not off, when /api/auth/me fails", async () => {
     resetTauri(fakeTeamCore(() => ({ status: 401 })).handlers);
-    expect(await fetchSkillsSharing(P)).toBe(false);
+    expect(await fetchSkillsSharing(P)).toBeNull();
     resetTauri(fakeTeamCore(() => ({ fail: "offline" })).handlers);
-    expect(await fetchSkillsSharing(P)).toBe(false);
+    expect(await fetchSkillsSharing(P)).toBeNull();
   });
 });
 

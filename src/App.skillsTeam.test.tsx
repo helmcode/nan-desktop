@@ -70,7 +70,15 @@ function setup(opts: Setup = {}) {
   const route = (req: ApiRequest): ApiReply => {
     if (req.path === "/api/auth/me") {
       if (opts.me) return { status: opts.me.status, body: opts.me.body ?? {} };
-      return { status: 200, body: { email: "ana@example.com", ...(opts.sharing ? { skills_sharing: true } : {}) } };
+      // The real enterprise-api /me shape (handlers/auth.go Me).
+      return {
+        status: 200,
+        body: {
+          email: "ana@example.com",
+          featureFlags: opts.sharing ? ["chat", "skills_sharing"] : ["chat"],
+          skillsSharing: opts.sharing === true,
+        },
+      };
     }
     if (req.method === "GET" && req.path === "/api/skills") {
       const override = opts.list?.(req);
@@ -220,13 +228,43 @@ describe("Share with my team: gating", () => {
     expect(core.requests).toEqual([{ method: "GET", path: "/api/auth/me", body: null, ifNoneMatch: null }]);
   });
 
-  it("is hidden on Helmcode when the org flag is off (the Team tab still exists)", async () => {
+  it("round 15 (F3): on Helmcode with the org flag off it is visible but disabled and says why", async () => {
     const { core } = setup({ sharing: false, skills: [weekly()] });
     renderApp();
     await openSkills();
     await waitFor(() => expect(core.requests.some((r) => r.path === "/api/auth/me")).toBe(true));
     expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
+    const button = screen.getByRole("button", { name: 'Share "Weekly report" with my team' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    const why = "Sharing with your team is turned off for your organization. An admin can turn it on in the Helmcode console.";
+    expect(button.getAttribute("title")).toBe(why);
+    expect(document.getElementById(button.getAttribute("aria-describedby") ?? "")?.textContent).toBe(why);
+    fireEvent.click(button);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(core.requests.some((r) => r.method === "POST")).toBe(false);
+  });
+
+  it("round 15 (F3): with /me unreachable the flag is unknown: no share action and no off note", async () => {
+    const { core } = setup({ skills: [weekly()], me: { status: 500 } });
+    renderApp();
+    await openSkills();
+    await waitFor(() => expect(core.requests.some((r) => r.path === "/api/auth/me")).toBe(true));
+    expect(await screen.findByText("Weekly report")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /with my team/ })).toBeNull();
+    expect(screen.queryByText(/turned off for your organization/)).toBeNull();
+  });
+
+  it("round 15 (F3): the real /me reply (skillsSharing + featureFlags) enables it from Mine", async () => {
+    setup({ sharing: true, skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    // Mine is the default tab: the action is reachable without visiting Team.
+    expect(screen.getByRole("tab", { name: "Mine" }).getAttribute("aria-selected")).toBe("true");
+    const button = (await screen.findByRole("button", { name: 'Share "Weekly report" with my team' })) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(await screen.findByRole("dialog", { name: "Share with my team" })).toBeTruthy();
+    expect(screen.queryByText(/turned off for your organization/)).toBeNull();
   });
 
   it("is visible with the flag", async () => {
@@ -330,7 +368,7 @@ describe("Share with my team: the flow", () => {
     await openSkills("Ajustes", "Skills");
     expect(await screen.findByRole("tab", { name: "Mías" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Equipo" })).toBeTruthy();
-    fireEvent.click(await screen.findByRole("button", { name: "Compartir «Weekly report» con mi equipo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Compartir «Weekly report» con el equipo" }));
     const dialog = await screen.findByRole("dialog", { name: "Compartir con mi equipo" });
     expect(within(dialog).getByText(WARNING_ES)).toBeTruthy();
   });

@@ -167,15 +167,21 @@ export function problemForError(err: unknown): TeamProblem {
 
 // ----------------------------------------------------------------- flag --
 
+/** The enterprise-api feature flag that gates the whole library. */
+export const SKILLS_SHARING_FLAG = "skills_sharing";
+
 /**
- * The org's `skills_sharing` flag from `GET /api/auth/me`. Optional: a
- * missing field (or any shape we do not know) is false. Accepted at the top
- * level or under `org`, `organization`, `features` or `flags`.
+ * The org's `skills_sharing` flag from `GET /api/auth/me`. enterprise-api
+ * answers `{skillsSharing: bool, featureFlags: ["skills_sharing", ...]}`
+ * (handlers/auth.go Me); either one turns it on. Legacy snake_case shapes
+ * (top level or under `org`, `organization`, `features`, `flags`,
+ * `feature_flags`) are still accepted. Anything else is false.
  */
 export function parseSkillsSharing(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
   const me = body as Record<string, unknown>;
-  if (me.skills_sharing === true) return true;
+  if (me.skillsSharing === true || me.skills_sharing === true) return true;
+  if (Array.isArray(me.featureFlags) && me.featureFlags.includes(SKILLS_SHARING_FLAG)) return true;
   for (const key of ["org", "organization", "features", "flags", "feature_flags"]) {
     const nested = me[key];
     if (nested && typeof nested === "object" && (nested as Record<string, unknown>).skills_sharing === true) {
@@ -185,14 +191,18 @@ export function parseSkillsSharing(body: unknown): boolean {
   return false;
 }
 
-/** Whether the share button exists: helmcode AND the org flag on. */
-export async function fetchSkillsSharing(profileId: string): Promise<boolean> {
+/**
+ * Whether the share action is enabled: helmcode AND the org flag on.
+ * `null` when /api/auth/me could not answer (offline, expired, ...): the
+ * flag is unknown, so the UI neither enables nor explains a disabled share.
+ */
+export async function fetchSkillsSharing(profileId: string): Promise<boolean | null> {
   if (profileId !== TEAM_PROFILE) return false;
   try {
     const res = await request(profileId, "GET", ME_PATH);
-    return res.status === 200 && parseSkillsSharing(res.body);
+    return res.status === 200 ? parseSkillsSharing(res.body) : null;
   } catch {
-    return false;
+    return null;
   }
 }
 

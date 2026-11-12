@@ -436,6 +436,7 @@ export const en = {
       intro: "Skills your organization approved for everyone. Use them as they are, or duplicate one to make it yours.",
       share: "Share with my team",
       shareLabel: (title: string) => `Share "${title}" with my team`,
+      shareOff: "Sharing with your team is turned off for your organization. An admin can turn it on in the Helmcode console.",
       reshare: "Share again",
       reshareLabel: (title: string) => `Share the new version of "${title}" with my team`,
       statusLocal: "Local",

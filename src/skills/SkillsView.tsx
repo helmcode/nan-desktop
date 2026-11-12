@@ -38,8 +38,9 @@ import {
 /** The team side of the view (Helmcode only; `null` hides all of it). */
 export type TeamProps = {
   profileId: string;
-  /** The org's `skills_sharing` flag: the share actions exist only with it. */
-  sharing: boolean;
+  /** The org's `skills_sharing` flag: share is enabled only with it, shown
+   *  disabled (with the reason) when it is off, and absent while unknown. */
+  sharing: boolean | null;
   state: TeamState;
   onState: (state: TeamState) => void;
   onRetry: () => void;
@@ -223,12 +224,20 @@ export function SkillsView({
                     {s.newSkill}
                   </button>
                 </div>
+                {team !== null && team.sharing === false && (
+                  <p className="skill-hint" id="skills-share-off">
+                    {s.team.shareOff}
+                  </p>
+                )}
                 <ul className="grant-list skills-list" aria-label={s.title}>
                   {skills.map((skill) => {
                     const armed = armedId === skill.id;
                     const state: ShareState | null = team?.sharing ? shareStateFor(skill, team.state.view) : null;
                     const canShare = state !== null && state.kind === "local";
                     const canReshare = state !== null && state.kind !== "local" && state.edited;
+                    // Round 15 (F3): on Helmcode the action is always visible;
+                    // with the org flag off it is disabled and says why.
+                    const shareOff = team !== null && team.sharing === false;
                     return (
                       <li key={skill.id} className="grant-card skill-card">
                         <div className="skill-text">
@@ -259,6 +268,18 @@ export function SkillsView({
                               onClick={() => setSharing({ skill, reshare: canReshare })}
                             >
                               {canShare ? s.team.share : s.team.reshare}
+                            </button>
+                          )}
+                          {shareOff && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              disabled
+                              aria-label={s.team.shareLabel(skill.title)}
+                              aria-describedby="skills-share-off"
+                              title={s.team.shareOff}
+                            >
+                              {s.team.share}
                             </button>
                           )}
                           <button

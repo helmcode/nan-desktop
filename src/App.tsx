@@ -617,7 +617,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // local one; its id is `team:<id>` and the core reads the cached bundle.
   const teamProfile = overview.active_profile === TEAM_PROFILE ? TEAM_PROFILE : null;
   const [teamState, setTeamState] = useState<TeamState>({ view: EMPTY_VIEW, problem: null });
-  const [skillsSharing, setSkillsSharing] = useState(false);
+  const [skillsSharing, setSkillsSharing] = useState<boolean | null>(null);
   const teamSkills = useMemo(() => teamLibrary(teamState.view).map(teamAsSkill), [teamState.view]);
   const pickerSkills = useMemo(() => [...skills, ...usableTeamSkills(teamState.view)], [skills, teamState.view]);
   const knownSkills = useMemo(() => [...skills, ...teamSkills], [skills, teamSkills]);
@@ -854,7 +854,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   useEffect(() => {
     if (!teamProfile) {
       setTeamState({ view: EMPTY_VIEW, problem: null });
-      setSkillsSharing(false);
+      setSkillsSharing(null);
       return;
     }
     let alive = true;
