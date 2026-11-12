@@ -385,6 +385,7 @@ export const es: Strings = {
     formEditTitle: "Editar skill",
     nameLabel: "Nombre",
     namePlaceholder: "Por ejemplo: Informe semanal",
+    nameTaken: (resolved: string) => `Ya tienes una skill con este nombre. Se guardará como «${resolved}».`,
     purposeLabel: "Para qué sirve",
     purposePlaceholder: "Ej: Escribe el informe semanal a partir de mis notas",
     purposeHint: "Describe qué hace y cuándo usarlo: empieza con «Úsala cuando…»",

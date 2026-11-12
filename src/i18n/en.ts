@@ -386,6 +386,7 @@ export const en = {
     formEditTitle: "Edit skill",
     nameLabel: "Name",
     namePlaceholder: "For example: Weekly report",
+    nameTaken: (resolved: string) => `You already have a skill with this name. It will be saved as "${resolved}".`,
     purposeLabel: "What it is for",
     purposePlaceholder: "e.g. Write the weekly report from my notes",
     purposeHint: 'Describe what it does and when to use it: start with "Use when…"',

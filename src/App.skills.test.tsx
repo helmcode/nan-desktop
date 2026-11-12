@@ -187,6 +187,42 @@ describe("Skills view", () => {
     expect(screen.getByText("Writes the weekly report")).toBeTruthy();
   });
 
+  it("round 15 (F2): a new skill with a taken name shows the suffixed name it will get", async () => {
+    resetTauri(handlers([skill("a".repeat(32), "Weekly report", "Writes it")]));
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    const name = screen.getByRole("textbox", { name: "Name" });
+    fireEvent.change(name, { target: { value: "weekly  report" } });
+    const hint = screen.getByText(/already have a skill with this name/);
+    expect(hint.getAttribute("role")).toBe("status");
+    expect(hint.textContent).toBe('You already have a skill with this name. It will be saved as "weekly report 2".');
+    expect(name.getAttribute("aria-describedby")).toBe(hint.id);
+    fireEvent.change(name, { target: { value: "Monthly report" } });
+    expect(screen.queryByText(/already have a skill with this name/)).toBeNull();
+    expect(name.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("round 15 (F2): editing a skill never shows the duplicate-name hint", async () => {
+    resetTauri(
+      handlers([skill("a".repeat(32), "Weekly report", "Writes it"), skill("b".repeat(32), "Weekly report 2", "Other")]),
+    );
+    renderApp();
+    await openSkills();
+    fireEvent.click(await screen.findByRole("button", { name: 'Edit skill "Weekly report 2"' }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Weekly report" } });
+    expect(screen.queryByText(/already have a skill with this name/)).toBeNull();
+  });
+
+  it("round 15 (F2): speaks Spanish: the duplicate-name hint", async () => {
+    resetTauri(handlers([skill("a".repeat(32), "Informe", "Hace informes")]));
+    renderApp("es");
+    await openSkills("Ajustes", "Skills");
+    fireEvent.click(await screen.findByRole("button", { name: "Nueva skill" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Nombre" }), { target: { value: "Informe" } });
+    expect(screen.getByText("Ya tienes una skill con este nombre. Se guardará como «Informe 2».")).toBeTruthy();
+  });
+
   it("asks for the missing fields before saving", async () => {
     resetTauri(handlers([]));
     renderApp();

@@ -17,6 +17,7 @@ import {
   fold,
   preloadFromConversation,
   readReferenceFile,
+  resolvedTitle,
   skillErrorText,
   slashQuery,
   upsertSkill,
@@ -249,5 +250,29 @@ describe("error texts", () => {
     expect(skillErrorText(es, { code: "not_found" })).toBe(es.skills.errors.notFound);
     expect(skillErrorText(en, new Error("boom"))).toBe(en.skills.errors.generic);
     expect(skillErrorText(en, { code: "something_new" })).toBe(en.skills.errors.generic);
+  });
+});
+
+describe("resolvedTitle (round 15/F2, mirror of skills.rs unique_title)", () => {
+  const taken = [{ title: "Informe" }, { title: "Informe 2" }, { title: "Otro" }];
+
+  it("keeps a free title and suffixes a taken one past every taken suffix", () => {
+    expect(resolvedTitle("Nuevo", taken)).toBe("Nuevo");
+    expect(resolvedTitle("Informe", taken)).toBe("Informe 3");
+    expect(resolvedTitle("Info", taken)).toBe("Info");
+  });
+
+  it("compares like the core: any case, collapsed whitespace, NFC", () => {
+    expect(resolvedTitle("  otro ", taken)).toBe("otro 2");
+    expect(resolvedTitle("Informe   semanal", [{ title: "informe semanal" }])).toBe("Informe semanal 2");
+    expect(resolvedTitle("Revisión", [{ title: "Revisio\u0301n" }])).toBe("Revisión 2");
+  });
+
+  it("stays within the title limit and is empty for an empty title", () => {
+    const long = "a".repeat(120);
+    const out = resolvedTitle(long, [{ title: long }]);
+    expect([...out].length).toBe(120);
+    expect(out.endsWith(" 2")).toBe(true);
+    expect(resolvedTitle("   ", taken)).toBe("");
   });
 });

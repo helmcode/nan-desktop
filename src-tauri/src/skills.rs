@@ -269,6 +269,29 @@ pub fn unique_name(base: &str, taken: &[String]) -> String {
         .expect("an unbounded range always yields a free name")
 }
 
+/// The title a NEW skill gets so the picker stays unambiguous: `title`, or
+/// `title 2`, `title 3`... until no other skill shows the same title
+/// (compared trimmed, whitespace-collapsed, NFC and case-insensitively). At
+/// most [`MAX_TITLE_CHARS`]; the slug then follows the suffixed title
+/// (`Informe 2` -> `informe-2`). Edits never pass through here.
+pub fn unique_title(title: &str, taken: &[String]) -> String {
+    let key = |text: &str| to_nfc(&one_line(text)).to_lowercase();
+    let taken: Vec<String> = taken.iter().map(|other| key(other)).collect();
+    let free = |candidate: &str| !taken.contains(&key(candidate));
+    if free(title) {
+        return title.to_string();
+    }
+    (2..)
+        .map(|n| {
+            let suffix = format!(" {n}");
+            let room = MAX_TITLE_CHARS - suffix.chars().count();
+            let stem: String = title.chars().take(room).collect();
+            format!("{}{suffix}", stem.trim_end())
+        })
+        .find(|candidate| free(candidate))
+        .expect("an unbounded range always yields a free title")
+}
+
 // ----------------------------------------------------- pure: the bundle --
 
 /// One file of a bundle: its path relative to the bundle root and its bytes.
@@ -1024,9 +1047,20 @@ fn persist(dir: &Path, skill: &Skill) -> Result<(), SkillError> {
 }
 
 /// Create a skill at `now` (unix ms).
+///
+/// A new skill whose title another skill already shows is saved as
+/// `Title 2` (`title-2`), `Title 3`... ([`unique_title`]), so two entries
+/// never look identical in the picker.
 pub fn create_at(dir: &Path, input: &SkillInput, now: i64) -> Result<Skill, SkillError> {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let skill = build(input, &id, &names_except(dir, None)?, now, now)?;
+    let existing = list(dir)?;
+    let titles: Vec<String> = existing.iter().map(|skill| skill.title.clone()).collect();
+    let input = SkillInput {
+        title: unique_title(&to_nfc(&one_line(&input.title)), &titles),
+        ..input.clone()
+    };
+    let names: Vec<String> = existing.into_iter().map(|skill| skill.name).collect();
+    let skill = build(&input, &id, &names, now, now)?;
     persist(dir, &skill)?;
     Ok(skill)
 }
@@ -1201,6 +1235,40 @@ mod tests {
         assert!(is_valid_name(&slug));
         assert_eq!(slugify(&"word ".repeat(40)).len(), 64);
         assert!(is_valid_name(&slugify(&"word ".repeat(40))));
+    }
+
+    #[test]
+    fn unique_title_suffixes_only_real_collisions() {
+        let taken = vec!["Informe".to_string(), "Informe 2".to_string(), "Otro".to_string()];
+        assert_eq!(unique_title("Nuevo", &taken), "Nuevo");
+        assert_eq!(unique_title("Informe", &taken), "Informe 3");
+        // Case, outer/inner whitespace and NFC/NFD do not make it different.
+        assert_eq!(unique_title("informe", &taken), "informe 3");
+        assert_eq!(unique_title("otro", &taken), "otro 2");
+        let nfd = vec!["Revisio\u{301}n".to_string()];
+        assert_eq!(unique_title("Revisión", &nfd), "Revisión 2");
+        let spaced = vec!["Informe  semanal".to_string()];
+        assert_eq!(unique_title("Informe semanal", &spaced), "Informe semanal 2");
+        // A prefix is not a collision.
+        assert_eq!(unique_title("Info", &taken), "Info");
+        // Long titles stay within the limit.
+        let long = "a".repeat(MAX_TITLE_CHARS);
+        let suffixed = unique_title(&long, std::slice::from_ref(&long));
+        assert_eq!(suffixed.chars().count(), MAX_TITLE_CHARS);
+        assert!(suffixed.ends_with(" 2"));
+    }
+
+    #[test]
+    fn three_new_skills_with_one_title_stay_distinct() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(SKILLS_DIR);
+        let made: Vec<Skill> = (0..3)
+            .map(|n| create_at(&dir, &input("Weekly report", "Writes it", "Step"), n).unwrap())
+            .collect();
+        let titles: Vec<&str> = made.iter().map(|s| s.title.as_str()).collect();
+        let names: Vec<&str> = made.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(titles, ["Weekly report", "Weekly report 2", "Weekly report 3"]);
+        assert_eq!(names, ["weekly-report", "weekly-report-2", "weekly-report-3"]);
     }
 
     #[test]
@@ -1745,6 +1813,9 @@ mod tests {
         assert!(is_valid_id(&a.id));
         assert_eq!(a.name, "informe");
         assert_eq!(b.name, "informe-2");
+        // Round 15 (F2): the duplicate title is suffixed too, matching its slug.
+        assert_eq!(a.title, "Informe");
+        assert_eq!(b.title, "Informe 2");
         assert_eq!(
             list(&dir)
                 .unwrap()
@@ -1762,9 +1833,11 @@ mod tests {
         assert_eq!(edited.updated_at, 30);
         assert_eq!(list(&dir).unwrap()[0], edited);
 
-        // Re-saving keeps its own name (not "informe-3" against itself).
+        // Re-saving keeps its own name (not "informe-3" against itself), and
+        // an edit is never re-titled (name_kept semantics stay).
         let same = update_at(&dir, &b.id, &input("Informe", "Otro", "Paso 2"), 40).unwrap();
         assert_eq!(same.name, "informe-2");
+        assert_eq!(same.title, "Informe");
 
         delete(&dir, &a.id).unwrap();
         assert_eq!(get(&dir, &a.id), Err(SkillError::NotFound));

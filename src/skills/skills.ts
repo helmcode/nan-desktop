@@ -40,6 +40,34 @@ export const MAX_SKILL_MD_BYTES = 64 * 1024;
 export const MAX_BUNDLE_BYTES = 256 * 1024;
 export const MAX_TITLE_CHARS = 120;
 export const MAX_DESCRIPTION_CHARS = 1024;
+
+/** A title as the core stores it: whitespace collapsed to single spaces, NFC. */
+export function cleanTitle(title: string): string {
+  return title.split(/\s+/).filter(Boolean).join(" ").normalize("NFC");
+}
+
+/** How two titles compare for duplicates: clean and in any case. */
+function titleKey(title: string): string {
+  return cleanTitle(title).toLowerCase();
+}
+
+/**
+ * The title a NEW skill will be saved with (mirror of skills.rs
+ * `unique_title`): the title itself, or `Title 2`, `Title 3`... when another
+ * skill already shows it, so the picker never lists two identical entries.
+ * Shown in the form before saving; the core decides.
+ */
+export function resolvedTitle(title: string, existing: Array<Pick<Skill, "title">>): string {
+  const clean = cleanTitle(title);
+  const taken = new Set(existing.map((skill) => titleKey(skill.title)));
+  if (!clean || !taken.has(titleKey(clean))) return clean;
+  for (let n = 2; ; n += 1) {
+    const suffix = ` ${n}`;
+    const stem = [...clean].slice(0, MAX_TITLE_CHARS - suffix.length).join("").trimEnd();
+    const candidate = `${stem}${suffix}`;
+    if (!taken.has(titleKey(candidate))) return candidate;
+  }
+}
 export const REFERENCE_EXTENSIONS = ["md", "txt", "json", "yaml", "yml"] as const;
 /** The file input's `accept` attribute. */
 export const REFERENCE_ACCEPT = REFERENCE_EXTENSIONS.map((ext) => `.${ext}`).join(",");

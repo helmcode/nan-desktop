@@ -13,10 +13,12 @@ import {
   REFERENCE_ACCEPT,
   addReferenceFiles,
   checkDraft,
+  cleanTitle,
   createSkill,
   deleteSkill,
   draftFromSkill,
   emptyDraft,
+  resolvedTitle,
   skillErrorText,
   updateSkill,
   type Skill,
@@ -183,7 +185,7 @@ export function SkillsView({
           </p>
         )}
         {form ? (
-          <SkillForm form={form} onChange={onFormChange} onSaved={onSaved} />
+          <SkillForm form={form} skills={skills} onChange={onFormChange} onSaved={onSaved} />
         ) : activeTab === "team" && team ? (
           <TeamPanel
             team={team}
@@ -720,10 +722,13 @@ function TeamPanel({
 
 function SkillForm({
   form,
+  skills,
   onChange,
   onSaved,
 }: {
   form: SkillDraft;
+  /** Every local skill: a new one with a taken title shows its suffixed name. */
+  skills: Skill[];
   onChange: (form: SkillDraft | null) => void;
   onSaved: (skill: Skill) => void;
 }) {
@@ -734,6 +739,9 @@ function SkillForm({
   const fileInput = useRef<HTMLInputElement | null>(null);
 
   const set = (patch: Partial<SkillDraft>): void => onChange({ ...form, ...patch });
+  // Round 15 (F2): only NEW skills are suffixed; an edit keeps its title.
+  const resolved = form.id ? "" : resolvedTitle(form.title, skills);
+  const renamed = resolved !== "" && resolved !== cleanTitle(form.title);
 
   const attach = async (list: FileList | null): Promise<void> => {
     if (!list || list.length === 0) return;
@@ -789,9 +797,15 @@ function SkillForm({
           value={form.title}
           placeholder={s.namePlaceholder}
           maxLength={120}
+          aria-describedby={renamed ? "skill-name-resolved" : undefined}
           onChange={(e) => set({ title: e.currentTarget.value })}
         />
       </label>
+      {renamed && (
+        <span className="skill-hint" id="skill-name-resolved" role="status">
+          {s.nameTaken(resolved)}
+        </span>
+      )}
       <label className="skill-field">
         <span className="skill-label">{s.purposeLabel}</span>
         <input
