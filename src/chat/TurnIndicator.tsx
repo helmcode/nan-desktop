@@ -1,15 +1,17 @@
 // Round 15 (F6): long tool-heavy turns must not look hung. While a turn runs
 // (awaiting the model or a tool, even with no stream chunk for a while) the
-// composer shows a persistent "In progress" line with animated dots and the
-// elapsed seconds, ticking once a second. It goes away on done, stop or error
-// (the conversation leaves the streaming set).
+// chat shows animated dots and the elapsed seconds, ticking once a second.
+// It goes away on done, stop or error (the conversation leaves the
+// streaming set).
 //
-// D5: the label is deliberately NOT "Working": the streaming bubble already
-// says what the assistant is doing ("Working…", "Searching…"); the composer
-// line only says the turn is still running and for how long, so the two
-// never read the same at once.
+// Round 16: ONE activity line, inside the chat flow, directly under the last
+// message (where the streaming "Thinking" line lives): "Thinking · 4 s",
+// "Working · 1 min 05 s". The old composer-footer line floated far from both
+// the message and the composer and duplicated the bubble's activity; it is
+// gone. The label says what the assistant does, the dots say it is alive,
+// the clock says for how long. While text streams the caret replaces it.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useT } from "../i18n";
 
 /** Whole seconds between `startedAt` and `now`, never negative. */
@@ -39,27 +41,45 @@ export function useTurnStarts(running: ReadonlySet<number>): ReadonlyMap<number,
   return starts.current;
 }
 
-export function TurnIndicator({ startedAt }: { startedAt: number }) {
+/** Drops a trailing ellipsis: the animated dots already say "ongoing". */
+export function activityLabel(label: string): string {
+  return label.replace(/(…|\.\.\.)\s*$/, "");
+}
+
+export function TurnIndicator({
+  label,
+  icon,
+  startedAt,
+}: {
+  label: string;
+  icon?: ReactNode;
+  startedAt?: number;
+}) {
   const t = useT();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (startedAt === undefined) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [startedAt]);
   return (
-    <p className="turn-indicator" data-testid="turn-indicator">
-      <span className="turn-indicator-label">{t.chat.turnWorking}</span>
+    <p className="activity turn-activity" role="status" data-testid="turn-indicator">
+      {icon}
+      <span className="turn-indicator-label">{activityLabel(label)}</span>
       <span className="turn-dots" aria-hidden="true">
         <span />
         <span />
         <span />
       </span>
-      {/* Ticks every second: hidden from assistive tech so it is not read
-          out on each tick; the label above says what is happening. */}
-      <span className="turn-elapsed" aria-hidden="true">
-        {t.chat.turnElapsed(elapsedSeconds(startedAt, now))}
-      </span>
+      {/* Ticks every second: hidden from assistive tech so the polite status
+          is not re-read on each tick; the label says what is happening. */}
+      {startedAt !== undefined && (
+        <span className="turn-elapsed" aria-hidden="true">
+          {"· "}
+          {t.chat.turnElapsed(elapsedSeconds(startedAt, now))}
+        </span>
+      )}
     </p>
   );
 }

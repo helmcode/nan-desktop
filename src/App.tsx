@@ -2257,26 +2257,26 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                 {streamingActive && visibleDraft !== undefined && (
                   <article className="msg msg-assistant streaming" aria-live="polite">
                     {visibleDraft.length > 0 && <Markdown text={visibleDraft} onOpenLink={openWebPreview} />}
-                    {activeActivity ? (
-                      <p className="activity" role="status">
-                        {activeActivity === "searching" ? (
-                          <IconGlobe size={15} />
-                        ) : activeActivity === "generating_image" ? (
-                          <span className="pulse-dot" aria-hidden="true" />
-                        ) : (
-                          <IconFolder size={15} />
-                        )}
-                        {activeActivity === "searching"
-                          ? t.chat.searching
-                          : activeActivity === "generating_image"
-                            ? t.chat.generatingImage
-                            : t.chat.working}
-                      </p>
-                    ) : visibleDraft.length === 0 ? (
-                      <p className="activity" role="status">
-                        <span className="pulse-dot" aria-hidden="true" />
-                        {t.chat.thinking}
-                      </p>
+                    {activeActivity || visibleDraft.length === 0 ? (
+                      <TurnIndicator
+                        startedAt={activeTurnStart}
+                        icon={
+                          activeActivity === "searching" ? (
+                            <IconGlobe size={15} />
+                          ) : activeActivity && activeActivity !== "generating_image" ? (
+                            <IconFolder size={15} />
+                          ) : undefined
+                        }
+                        label={
+                          activeActivity === "searching"
+                            ? t.chat.searching
+                            : activeActivity === "generating_image"
+                              ? t.chat.generatingImage
+                              : activeActivity
+                                ? t.chat.working
+                                : t.chat.thinking
+                        }
+                      />
                     ) : (
                       <span className="caret" aria-hidden="true" />
                     )}
@@ -2304,7 +2304,6 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             </div>
 
             <footer className="composer">
-              {streamingActive && activeTurnStart !== undefined && <TurnIndicator startedAt={activeTurnStart} />}
               {activeSkill && (
                 <div className="skill-pill-row">
                   <span className="skill-pill" role="status">

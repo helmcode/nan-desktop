@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Round 15 (F6): the composer's "In progress" line while a turn runs.
+// Round 15 (F6) + round 16: the single in-chat activity line while a turn runs.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { emit, resetTauri } from "../test/tauriMock";
@@ -11,7 +11,7 @@ import App from "../App";
 import { I18nProvider, type Locale } from "../i18n";
 import { en } from "../i18n/en";
 import { es } from "../i18n/es";
-import { elapsedSeconds, trackTurnStarts } from "./TurnIndicator";
+import { activityLabel, elapsedSeconds, trackTurnStarts } from "./TurnIndicator";
 
 describe("the turn clock", () => {
   it("counts whole seconds and never goes negative", () => {
@@ -37,8 +37,12 @@ describe("the turn clock", () => {
     expect(en.chat.turnElapsed(65)).toBe("1m 05s");
     expect(es.chat.turnElapsed(12)).toBe("12 s");
     expect(es.chat.turnElapsed(125)).toBe("2 min 05 s");
-    expect(es.chat.turnWorking).toBe("En curso");
-    expect(en.chat.turnWorking).toBe("In progress");
+  });
+
+  it("drops the trailing ellipsis: the animated dots carry it", () => {
+    expect(activityLabel("Pensando…")).toBe("Pensando");
+    expect(activityLabel("Thinking...")).toBe("Thinking");
+    expect(activityLabel("Working")).toBe("Working");
   });
 });
 
@@ -86,8 +90,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("the Working indicator in the composer", () => {
-  it("is absent when idle, appears on send, ticks with no stream chunks, and clears on done", async () => {
+describe("the in-chat activity line (round 16: one indicator, under the last message)", () => {
+  const elapsed = () => indicator()?.querySelector(".turn-elapsed")?.textContent;
+
+  it("is absent when idle, appears in the chat flow on send, ticks with no chunks, and clears on done", async () => {
     renderApp();
     fireEvent.click(await screen.findByText("Notes"));
     expect(indicator()).toBeNull();
@@ -95,17 +101,44 @@ describe("the Working indicator in the composer", () => {
     await send("Build the report");
     const line = indicator();
     expect(line).not.toBeNull();
-    expect(line?.closest("footer.composer")).not.toBeNull();
-    expect(line?.textContent).toContain("In progress");
-    expect(line?.querySelector(".turn-elapsed")?.textContent).toBe("0s");
-    // A long tool call: nothing streams, the clock still moves.
+    // Inside the streaming bubble in the messages list, never in the composer.
+    expect(line?.closest("article.streaming")).not.toBeNull();
+    expect(line?.closest(".messages")).not.toBeNull();
+    expect(line?.closest("footer.composer")).toBeNull();
+    expect(line?.querySelector(".turn-indicator-label")?.textContent).toBe("Thinking");
+    expect(elapsed()).toBe("· 0s");
+    // A long tool call: nothing streams, the same line keeps counting.
+    await act(async () => emit("chat://activity", { conversation_id: 7, activity: "working" }));
     await act(async () => {
       vi.advanceTimersByTime(12_000);
     });
-    expect(indicator()?.querySelector(".turn-elapsed")?.textContent).toBe("12s");
-    expect(indicator()?.querySelector(".turn-dots")?.getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getAllByTestId("turn-indicator")).toHaveLength(1);
+    expect(indicator()?.querySelector(".turn-indicator-label")?.textContent).toBe("Working");
+    expect(elapsed()).toBe("· 12s");
     await act(async () => emit("chat://done", { conversation_id: 7 }));
     expect(indicator()).toBeNull();
+  });
+
+  it("is accessible: a polite status whose ticking clock and dots are hidden from assistive tech", async () => {
+    renderApp();
+    fireEvent.click(await screen.findByText("Notes"));
+    await send("Build the report");
+    const line = indicator();
+    expect(line?.getAttribute("role")).toBe("status");
+    expect(line?.querySelector(".turn-dots")?.getAttribute("aria-hidden")).toBe("true");
+    expect(line?.querySelector(".turn-elapsed")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("gives way to the caret while text streams, and comes back for the next tool phase", async () => {
+    renderApp();
+    fireEvent.click(await screen.findByText("Notes"));
+    await send("Build the report");
+    await act(async () => emit("chat://delta", { conversation_id: 7, delta: "Sure, " }));
+    expect(indicator()).toBeNull();
+    expect(document.querySelector("article.streaming .caret")).not.toBeNull();
+    await act(async () => emit("chat://activity", { conversation_id: 7, activity: "searching" }));
+    expect(screen.getAllByTestId("turn-indicator")).toHaveLength(1);
+    expect(indicator()?.textContent).toContain("Searching the web");
   });
 
   it("clears on error and on stop", async () => {
@@ -121,24 +154,16 @@ describe("the Working indicator in the composer", () => {
     expect(indicator()).toBeNull();
   });
 
-  it("speaks Spanish", async () => {
-    renderApp("es");
-    fireEvent.click(await screen.findByText("Notes"));
-    await send("Hola");
-    expect(indicator()?.textContent).toContain("En curso");
-    expect(indicator()?.querySelector(".turn-elapsed")?.textContent).toBe("0 s");
-  });
-
-  it("never reads like the bubble's working line during a tool call (round 15 D5)", async () => {
+  it("speaks Spanish and never shows two activity lines during a tool call", async () => {
     renderApp("es");
     fireEvent.click(await screen.findByText("Notes"));
     await send("Haz el informe");
+    expect(indicator()?.querySelector(".turn-indicator-label")?.textContent).toBe("Pensando");
+    expect(elapsed()).toBe("· 0 s");
     await act(async () => emit("chat://activity", { conversation_id: 7, activity: "working" }));
-    // The streaming bubble says what the assistant does; the composer only
-    // says the turn is still running and for how long.
     expect(screen.getAllByText(/Trabajando/)).toHaveLength(1);
-    expect(screen.getByText("Trabajando…").closest("article.streaming")).not.toBeNull();
-    expect(indicator()?.textContent).not.toContain("Trabajando");
-    expect(indicator()?.textContent).toContain("En curso");
+    expect(screen.queryByText(/Pensando/)).toBeNull();
+    expect(screen.queryByText(/En curso/)).toBeNull();
+    expect(document.querySelectorAll("p.activity")).toHaveLength(1);
   });
 });
