@@ -45,6 +45,9 @@ const SCRATCH_PATTERNS: RegExp[] = [
   // Round 16: bare page renders by NAME shape, whatever the extension:
   // p1.png..p9.png, p12.jpg, pg3.svg, page4.html, slide-2.png. A turn that
   // rasterises a PDF page by page to check it leaves exactly these behind.
+  // Caveat: a real deliverable literally named page4.html or slide-2.png also
+  // matches and loses priority (it still opens when it is the turn's only
+  // file or the final message names it).
   /^(p|pg|page|slide)[-_]?\d+\.[a-z0-9]+$/i,
   // Helper scripts and throwaway pages written along the way, by stem prefix
   // or suffix (probe.html, probe-fonts.html, debug_layout.html, out-tmp.txt).

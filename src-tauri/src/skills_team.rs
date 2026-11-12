@@ -165,7 +165,7 @@ pub struct ShareLink {
     /// The slug the row was first published under: the library keeps it for
     /// the row's lifetime, so a reshare sends it even after a title edit
     /// renamed the local slug. Links stored before it existed have none (the
-    /// renderer then falls back to `remote_id`, which equals it).
+    /// renderer falls back to the cached row's name, then the local one;
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_name: Option<String>,
     pub sha: String,
