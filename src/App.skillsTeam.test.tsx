@@ -911,6 +911,88 @@ describe("Share with my team: failures say what went wrong (round 16, P3)", () =
     expect(line.querySelector(".share-problem-detail")?.textContent).toBe("Detalle: HTTP 500 internal_error");
   });
 
+  it("round 16 (UX): a secret found while sharing says to remove it and share again, not 'not saved'", async () => {
+    const line = await shareAndFail(
+      { publish: () => ({ status: 400, body: { error: "secret_detected", detail: '"references/creds.md" looks like a credential' } }) },
+      "es",
+    );
+    expect(line.textContent).toBe(
+      "references/creds.md parece contener credenciales. Quítalas de la skill y vuelve a compartirla.",
+    );
+    expect(line.textContent).not.toContain("no se guarda");
+    cleanup();
+    // Without a path the skill itself is named.
+    const bare = await shareAndFail({ publish: () => ({ status: 400, body: { error: "secret_detected" } }) });
+    expect(bare.textContent).toBe(
+      "Weekly report seems to contain credentials. Remove them from the skill and share it again.",
+    );
+  });
+
+  it("round 16 (UX): a full library and too many pending reviews read differently", async () => {
+    const full = await shareAndFail({ publish: () => ({ status: 429, body: { error: "skill_limit_reached" } }) }, "es");
+    expect(full.textContent).toBe(
+      "La biblioteca de tu equipo está llena. Pide a un administrador que libere espacio eliminando skills.",
+    );
+    cleanup();
+    const pending = await shareAndFail({ publish: () => ({ status: 429, body: { error: "pending_limit_reached" } }) }, "es");
+    expect(pending.textContent).toBe(
+      "Tu equipo tiene demasiadas skills pendientes de revisión. Pide a un administrador que las revise.",
+    );
+  });
+
+  it("round 16 (QA1): a name the library no longer matches has its own words", async () => {
+    const line = await shareAndFail(
+      { publish: () => ({ status: 400, body: { error: "name_mismatch", detail: "a skill's name cannot change" } }) },
+      "es",
+    );
+    expect(line.textContent).toContain(
+      "El nombre de la skill en la biblioteca ya no coincide; elimínala de la cola y vuelve a compartirla.",
+    );
+    expect(line.textContent).not.toContain("No se ha podido compartir");
+  });
+
+  it("round 16 (UX): stale says to close this window", async () => {
+    const line = await shareAndFail({ publish: () => ({ status: 409, body: { error: "not_pending" } }) }, "es");
+    expect(line.textContent).toContain("Cierra esta ventana y vuelve a intentarlo.");
+  });
+
+  it("round 16 (UX): a title over the library cap is flagged as the dialog opens and Share is disabled", async () => {
+    const long = "W".repeat(81);
+    const publishes: string[] = [];
+    setup({
+      sharing: true,
+      skills: [weekly({ title: long })],
+      publish: (req) => {
+        publishes.push(req.method);
+        return null;
+      },
+    });
+    renderApp("es");
+    await openSkills("Ajustes");
+    fireEvent.click(await screen.findByRole("button", { name: `Compartir «${long}» con el equipo` }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByTestId("share-problem").textContent).toBe(
+      "Para compartirla, el nombre debe tener como máximo 80 caracteres.",
+    );
+    const share = within(dialog).getByRole("button", { name: "Compartir" });
+    expect((share as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      fireEvent.click(share);
+    });
+    expect(publishes).toEqual([]);
+  });
+
+  it("round 16 (UX): a title at the cap (80 characters, multi-byte too) opens with Share enabled", async () => {
+    const atCap = "á".repeat(80);
+    setup({ sharing: true, skills: [weekly({ title: atCap })] });
+    renderApp("es");
+    await openSkills("Ajustes");
+    fireEvent.click(await screen.findByRole("button", { name: `Compartir «${atCap}» con el equipo` }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByTestId("share-problem")).toBeNull();
+    expect((within(dialog).getByRole("button", { name: "Compartir" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("offline says to check the network, without the 'last saved copy' line of the library", async () => {
     const line = await shareAndFail({ publish: () => ({ fail: "offline" }) });
     expect(line.textContent).toBe("No connection. Check your network and try again.");
