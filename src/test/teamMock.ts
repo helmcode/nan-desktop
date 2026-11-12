@@ -42,16 +42,34 @@ export function skillMd(name: string, description: string, instructions: string)
   return `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n\n${instructions}\n`;
 }
 
-/** The wire bundle `GET /api/skills/{id}` returns for a row. */
-export function wireSkill(row: TeamMeta, instructions = `Instructions of ${row.id}`) {
+/** The bundle files of a row (SKILL.md + one reference). */
+export function bundleFiles(row: TeamMeta, instructions = `Instructions of ${row.id}`) {
+  return [
+    { path: "SKILL.md", content: skillMd(row.name, row.description, instructions) },
+    { path: "references/notes.md", content: "Notes" },
+  ];
+}
+
+/** `/api/skills/{id}?version=approved` -> `{id, query}`; `null` off the item route. */
+export function skillRoute(path: string): { id: string; query: string } | null {
+  if (!path.startsWith("/api/skills/")) return null;
+  const [id, query = ""] = path.slice("/api/skills/".length).split("?");
+  return { id, query };
+}
+
+/**
+ * `GET /api/skills/{id}` exactly as enterprise-api answers it
+ * (handlers/skills.go Get): `skill` is metadata only; the bundle comes
+ * under `bundle: {files}` with its `version` and `sha256`, and only with an
+ * explicit `?version=approved` here (the default branch is not relied on).
+ */
+export function wireSkill(row: TeamMeta, instructions = `Instructions of ${row.id}`, query = "version=approved") {
+  if (query !== "version=approved") return { skill: { ...row }, version: null, sha256: null, bundle: null };
   return {
-    skill: {
-      ...row,
-      files: [
-        { path: "SKILL.md", content: skillMd(row.name, row.description, instructions) },
-        { path: "references/notes.md", content: "Notes" },
-      ],
-    },
+    skill: { ...row },
+    version: "approved",
+    sha256: `sha256-${row.id}`,
+    bundle: { files: bundleFiles(row, instructions) },
   };
 }
 
@@ -123,7 +141,9 @@ export function fakeTeamCore(api: ApiRoute, localSkills: () => Skill[] = () => [
     },
     skills_team_cache_put: (args: Args) => {
       calls.push("put");
-      const wire = args?.skill as TeamMeta & { files: Array<{ path: string; content: string }> };
+      const wire = args?.skill as TeamMeta & { files?: Array<{ path: string; content: string }> };
+      // Rust deserializes a WireSkill: no `files` is an argument error.
+      if (!Array.isArray(wire?.files)) throw "invalid args `skill` for command `skills_team_cache_put`: missing field `files`";
       const listed = approved(wire.id);
       if (!listed) throw { code: "not_found" };
       const md = wire.files.find((f) => f.path === "SKILL.md")?.content ?? "";

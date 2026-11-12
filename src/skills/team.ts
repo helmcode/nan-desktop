@@ -110,7 +110,7 @@ function storeList(profileId: string, etag: string | null, skills: TeamMeta[]): 
   return invoke<CacheView>("skills_team_cache_store_list", { profileId, etag, skills });
 }
 
-function cachePut(profileId: string, skill: unknown): Promise<TeamSkill> {
+function cachePut(profileId: string, skill: WireSkill): Promise<TeamSkill> {
   return invoke<TeamSkill>("skills_team_cache_put", { profileId, skill });
 }
 
@@ -277,20 +277,59 @@ export function planNextSync(problem: TeamProblem | null, failures: number): Tea
   return { delayMs: retry ?? TEAM_SYNC_INTERVAL_MS, failures: count };
 }
 
+/** The bundle version the sync serves: only what an admin approved. */
+export const APPROVED_VERSION = "approved";
+
+/** `GET /api/skills/{id}?version=approved`: the one bundle request. */
+export function bundlePath(id: string): string {
+  return `${SKILLS_PATH}/${encodeURIComponent(id)}?version=${APPROVED_VERSION}`;
+}
+
+/** What `skills_team_cache_put` receives: the row plus its bundle files. */
+export type WireSkill = TeamMeta & { files: Array<{ path: string; content: string }> };
+
+function isWireFile(value: unknown): value is { path: string; content: string } {
+  if (!value || typeof value !== "object") return false;
+  const file = value as Record<string, unknown>;
+  return typeof file.path === "string" && typeof file.content === "string";
+}
+
+/**
+ * The single-skill reply of enterprise-api (`handlers/skills.go` Get):
+ * `{skill, version, sha256, bundle: {files: [{path, content}]}}`. The
+ * metadata (`skill`) never carries the files; the bundle only comes with an
+ * explicit `?version=`, and `version`/`sha256`/`bundle` are null otherwise.
+ * Anything but an approved bundle with its hash is `null` (never cached).
+ */
+export function parseBundleResponse(body: unknown): { wire: WireSkill; sha256: string } | null {
+  if (!body || typeof body !== "object") return null;
+  const reply = body as Record<string, unknown>;
+  const meta = asMeta(reply.skill);
+  if (!meta || reply.version !== APPROVED_VERSION) return null;
+  if (typeof reply.sha256 !== "string" || !reply.sha256) return null;
+  const bundle = reply.bundle;
+  if (!bundle || typeof bundle !== "object") return null;
+  const files = (bundle as { files?: unknown }).files;
+  if (!Array.isArray(files) || files.length === 0 || !files.every(isWireFile)) return null;
+  return { wire: { ...meta, files: files.map(({ path, content }) => ({ path, content })) }, sha256: reply.sha256 };
+}
+
 /** Fetch and cache one approved bundle. */
 async function fetchBundle(profileId: string, id: string): Promise<{ skill: TeamSkill } | { problem: TeamProblem }> {
   let res: TeamResponse;
   try {
-    res = await request(profileId, "GET", `${SKILLS_PATH}/${encodeURIComponent(id)}`);
+    res = await request(profileId, "GET", bundlePath(id));
   } catch (err) {
     return { problem: problemForError(err) };
   }
   const problem = problemForStatus(res.status);
   if (problem) return { problem };
-  const skill = res.body && typeof res.body === "object" ? (res.body as { skill?: unknown }).skill : undefined;
-  if (!skill) return { problem: "generic" };
+  // A reply without the bundle is a contract problem, never a silent skip:
+  // the row stays "Preparing" and the banner says the library failed.
+  const parsed = parseBundleResponse(res.body);
+  if (!parsed || parsed.wire.id !== id) return { problem: "invalid" };
   try {
-    return { skill: await cachePut(profileId, skill) };
+    return { skill: await cachePut(profileId, parsed.wire) };
   } catch (err) {
     return { problem: problemForError(err) };
   }
@@ -327,11 +366,14 @@ export async function syncTeam(profileId: string): Promise<TeamState> {
     const fetched = await fetchBundle(profileId, meta.id);
     if ("problem" in fetched) {
       // A rate limit or an expired session stops the round; a single bad
-      // bundle does not.
+      // bundle does not stop it.
       if (fetched.problem === "rate_limited" || fetched.problem === "expired") {
         problem = fetched.problem;
         break;
       }
+      // The others still report (the first one wins) so a missing bundle is
+      // never silent: the row keeps "Preparing" and the banner explains.
+      problem = problem ?? fetched.problem;
       continue;
     }
     view = { ...view, cached: { ...view.cached, [meta.id]: meta.updated_at } };

@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invokedWith, resetTauri } from "./test/tauriMock";
-import { fakeTeamCore, localBundleOf, meta, wireSkill, type ApiReply, type ApiRequest } from "./test/teamMock";
+import { fakeTeamCore, localBundleOf, meta, skillRoute, wireSkill, type ApiReply, type ApiRequest } from "./test/teamMock";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("./test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).eventModule());
@@ -79,7 +79,7 @@ function setup(opts: Setup = {}) {
       if (req.ifNoneMatch === etag) return { status: 304, etag };
       return { status: 200, etag, body: { skills: rows, etag } };
     }
-    const id = req.path.slice("/api/skills/".length);
+    const { id, query } = skillRoute(req.path) ?? { id: "", query: "" };
     if (req.method === "GET") {
       const override = opts.bundle?.(req);
       if (override) return override;
@@ -98,7 +98,7 @@ function setup(opts: Setup = {}) {
     }
     if (req.method === "GET") {
       const found = rows.find((r) => r.id === id);
-      return found ? { status: 200, body: wireSkill(found, opts.instructions?.[id]) } : { status: 404 };
+      return found ? { status: 200, body: wireSkill(found, opts.instructions?.[id], query) } : { status: 404 };
     }
     return { status: 500 };
   };
@@ -568,6 +568,33 @@ describe("An interrupted bundle round (round 14/S3)", () => {
     expect(within(item).getByRole("button", { name: 'Duplicate "Alpha" in my skills' })).toBeTruthy();
     // The next round is the normal refresh again.
     expect(timers[timers.length - 1].delay).toBe(TEAM_SYNC_INTERVAL_MS);
+  });
+
+  it("round 15 (F1): the real server reply caches the bundle; the badge clears and Use works", async () => {
+    setup({ rows: [meta("a", { title: "Alpha" })] });
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    const list = await screen.findByRole("list", { name: "Team" });
+    await waitFor(() => expect(within(list).getByRole("button", { name: 'Use "Alpha" in the chat' })).toBeTruthy());
+    expect(within(list).queryByText("Preparing…")).toBeNull();
+    const put = invokedWith("skills_team_cache_put")[0] as { skill: { id: string; files: unknown[] } };
+    expect(put.skill.id).toBe("a");
+    expect(put.skill.files).toHaveLength(2);
+  });
+
+  it("round 15 (F1): a reply without the bundle keeps Preparing and shows the problem", async () => {
+    setup({
+      rows: [meta("a", { title: "Alpha" })],
+      // What the app used to get: metadata only, bundle null.
+      bundle: () => ({ status: 200, body: wireSkill(meta("a", { title: "Alpha" }), undefined, "") }),
+    });
+    renderApp();
+    await openSkills();
+    await openTeamTab();
+    expect(await screen.findByText("Preparing…")).toBeTruthy();
+    expect(await screen.findByText("This skill has a file the app cannot accept.")).toBeTruthy();
+    expect(invokedWith("skills_team_cache_put")).toHaveLength(0);
   });
 
   it("speaks Spanish: the preparing badge", async () => {
