@@ -93,6 +93,27 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("auto-open of produced artifacts (round 4)", () => {
+  it("round 15 (F5): the requested PDF opens, not the scratch preview-p1.png written after it", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await screen.findByText("hola");
+    await sendMessage("hazme el informe en pdf");
+    store.get(7)!.push(
+      row(2, 7, "assistant", "Tu informe está listo: /Users/ana/Proyecto/informe.pdf", {
+        artifacts: [
+          { path: "/Users/ana/Proyecto/measure.js", kind: "file" },
+          { path: "/Users/ana/Proyecto/informe.pdf", kind: "file" },
+          { path: "/Users/ana/Proyecto/debug.html", kind: "file" },
+          { path: "/Users/ana/Proyecto/preview-p1.png", kind: "file" },
+        ],
+      }),
+    );
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const pane = await previewPane();
+    await waitFor(() => expect(within(pane).getByTitle("/Users/ana/Proyecto/informe.pdf")).toBeTruthy());
+    expect(within(pane).queryByTitle("/Users/ana/Proyecto/preview-p1.png")).toBeNull();
+  });
+
   it("opens the file a reply produced, replaces it with a later one, and respects a close", async () => {
     resetTauri(handlers());
     renderApp();
