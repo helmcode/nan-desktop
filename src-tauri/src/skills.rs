@@ -76,8 +76,9 @@ pub const BODY_ORDER_HEADING: &str = "## Working order";
 /// trigger phrases the user actually types. Generation never invents those
 /// phrases (the description is the user's text); it only keeps the result on
 /// one physical line inside [`MAX_DESCRIPTION_CHARS`]. This is the copy
-/// contract for the form in `src/skills`, which reads it as a literal: only
-/// the tests use it on this side today.
+/// contract for the form in `src/skills`, which reads it as a literal, and
+/// for the `save_chat_as_skill` guidance (`tools::save_skill::GUIDANCE`
+/// repeats it verbatim; a test pins the two together).
 #[cfg_attr(not(test), allow(dead_code))]
 pub const DESCRIPTION_GUIDE: &str = "Say what it does, then when to use it, with the \
 trigger phrases the user actually types: \"<What it does>. Use when: <trigger phrases>.\"";

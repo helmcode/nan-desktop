@@ -38,6 +38,7 @@ pub mod approvals;
 pub mod audit;
 pub mod diff;
 pub mod grants;
+pub mod save_skill;
 pub mod trash;
 
 use std::collections::HashMap;
