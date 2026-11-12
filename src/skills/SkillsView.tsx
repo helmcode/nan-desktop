@@ -786,7 +786,7 @@ function SkillForm({
     >
       {form.fromChat && (
         <p className="skill-review-hint" role="note">
-          {s.reviewHint}
+          {form.distilled ? s.reviewHintDistilled : s.reviewHint}
         </p>
       )}
       <label className="skill-field">

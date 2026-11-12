@@ -432,16 +432,58 @@ describe("Using a skill in the chat", () => {
 });
 
 describe("Save as skill", () => {
-  it("preloads the chat's first user message for review before saving", async () => {
-    resetTauri(
-      handlers(
-        [],
-        [row(1, "assistant", "Hi"), row(2, "user", "Summarize my notes weekly"), row(3, "user", "later")],
-      ),
-    );
-    renderApp();
+  const chatRows = () => [row(1, "assistant", "Hi"), row(2, "user", "Summarize my notes weekly"), row(3, "user", "later")];
+  const distilled = {
+    title: "Weekly notes summary",
+    description: "Summarizes the week's notes in bullets. Use when: weekly summary, resume my notes.",
+    instructions: "Summarize the notes so they can be skimmed.\n\n1. Read every note of the week.\n2. Group by project.\n3. Write bullets.",
+  };
+
+  async function clickSave(): Promise<void> {
     await screen.findByText("Summarize my notes weekly");
-    fireEvent.click(screen.getByRole("button", { name: "Save as skill" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save as skill" }));
+    });
+  }
+
+  it("round 15 (F4): asks the model to distill the chat and opens the form with its draft when the turn ends", async () => {
+    resetTauri(handlers([], chatRows()));
+    renderApp();
+    const box = await composer();
+    fireEvent.change(box, { target: { value: "half-typed idea" } });
+    await clickSave();
+    // The request goes to the model as a normal turn; the composer keeps its text.
+    expect(invokedWith("chat_send")).toHaveLength(1);
+    expect(invokedWith("chat_send")[0]).toMatchObject({ conversationId: 7, content: "Save this conversation as a reusable skill." });
+    expect((box as HTMLTextAreaElement).value).toBe("half-typed idea");
+    // While the turn runs nothing opens and the button cannot be pressed again.
+    expect(screen.queryByRole("heading", { name: "New skill" })).toBeNull();
+    expect((screen.getByRole("button", { name: "Save as skill" }) as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => emit("chat://skill_draft", { conversation_id: 7, draft: distilled }));
+    expect(screen.queryByRole("heading", { name: "New skill" })).toBeNull();
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+
+    expect(await screen.findByRole("heading", { name: "New skill" })).toBeTruthy();
+    expect(
+      screen.getByText("The AI summarized this conversation as a skill. Review and adjust the text before saving."),
+    ).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(distilled.title);
+    expect((screen.getByRole("textbox", { name: "What it is for" }) as HTMLInputElement).value).toBe(distilled.description);
+    expect((screen.getByRole("textbox", { name: "Instructions" }) as HTMLTextAreaElement).value).toBe(distilled.instructions);
+    // Nothing is saved until the user does.
+    expect(invokedWith("skills_create")).toEqual([]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save skill" }));
+    });
+    expect(invokedWith("skills_create")[0]).toEqual({ input: { ...distilled, references: [] } });
+  });
+
+  it("round 15 (F4): without a tool call the deterministic template is the fallback", async () => {
+    resetTauri(handlers([], chatRows()));
+    renderApp();
+    await clickSave();
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
     expect(await screen.findByRole("heading", { name: "New skill" })).toBeTruthy();
     // The form lives in the Skills section of the Settings surface (round 14).
     const nav = screen.getByRole("navigation", { name: "Settings sections" });
@@ -465,6 +507,59 @@ describe("Save as skill", () => {
         references: [],
       },
     });
+  });
+
+  it("round 15 (F4): a failed turn and an unsendable request both fall back to the template", async () => {
+    resetTauri(handlers([], chatRows()));
+    renderApp();
+    await clickSave();
+    await act(async () => emit("chat://error", { conversation_id: 7, kind: "network" }));
+    expect(await screen.findByRole("heading", { name: "New skill" })).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Instructions" }) as HTMLTextAreaElement).value).toBe(
+      "Summarize my notes weekly",
+    );
+    cleanup();
+
+    resetTauri({
+      ...handlers([], chatRows()),
+      chat_send: () => {
+        throw "offline";
+      },
+    });
+    renderApp();
+    await clickSave();
+    expect(await screen.findByRole("heading", { name: "New skill" })).toBeTruthy();
+    expect(screen.getByText("We copied the start of this chat. Review the text before saving.")).toBeTruthy();
+  });
+
+  it("round 15 (F4): a draft from a request the user typed also opens the form; a plain turn opens nothing", async () => {
+    resetTauri(handlers([], chatRows()));
+    renderApp();
+    await screen.findByText("Summarize my notes weekly");
+    await sendMessage("thanks");
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    expect(screen.queryByRole("heading", { name: "New skill" })).toBeNull();
+
+    await sendMessage("guarda esto como skill");
+    await act(async () => emit("chat://skill_draft", { conversation_id: 7, draft: distilled }));
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    expect(await screen.findByRole("heading", { name: "New skill" })).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(distilled.title);
+  });
+
+  it("round 15 (F4): speaks Spanish: the request and the review hint", async () => {
+    resetTauri(handlers([], chatRows()));
+    renderApp("es");
+    await screen.findByText("Summarize my notes weekly");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Guardar como skill" }));
+    });
+    expect(invokedWith("chat_send")[0]).toMatchObject({ content: "Guarda esta conversación como una skill reutilizable." });
+    await act(async () => emit("chat://skill_draft", { conversation_id: 7, draft: distilled }));
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    expect(
+      await screen.findByText("La IA ha resumido esta conversación como skill. Revisa y ajusta el texto antes de guardar."),
+    ).toBeTruthy();
   });
 
   it("is not offered on an empty chat", async () => {

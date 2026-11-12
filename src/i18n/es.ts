@@ -396,6 +396,8 @@ export const es: Strings = {
     instructionsPlaceholder: "Escribe qué debe hacer el asistente, paso a paso.",
     instructionsHint: "Este es el texto que recibe el asistente mientras la skill está activa.",
     reviewHint: "Hemos copiado el inicio de este chat. Revisa el texto antes de guardar.",
+    distillPrompt: "Guarda esta conversación como una skill reutilizable.",
+    reviewHintDistilled: "La IA ha resumido esta conversación como skill. Revisa y ajusta el texto antes de guardar.",
     filesLabel: "Archivos de referencia (opcional)",
     filesHint: "Hasta 5 archivos de texto (.md, .txt, .json, .yaml), de 64 KB cada uno.",
     addFiles: "Adjuntar archivos",

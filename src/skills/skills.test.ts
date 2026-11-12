@@ -11,6 +11,7 @@ import {
   adoptActiveSkill,
   checkDraft,
   draftFromConversation,
+  draftFromDistilled,
   draftFromSkill,
   emptyDraft,
   filterSkills,
@@ -18,6 +19,7 @@ import {
   preloadFromConversation,
   readReferenceFile,
   resolvedTitle,
+  settleSkillDraft,
   skillErrorText,
   slashQuery,
   upsertSkill,
@@ -274,5 +276,40 @@ describe("resolvedTitle (round 15/F2, mirror of skills.rs unique_title)", () => 
     expect([...out].length).toBe(120);
     expect(out.endsWith(" 2")).toBe(true);
     expect(resolvedTitle("   ", taken)).toBe("");
+  });
+});
+
+describe("save-as-skill drafts (round 15/F4)", () => {
+  const rows = [
+    { role: "assistant", content: "Hi" },
+    { role: "user", content: "Summarize my notes weekly" },
+  ];
+  const distilled = { title: "T", description: "D. Use when: x.", instructions: "1. Step." };
+
+  it("the model's draft prefills every field and is marked as distilled", () => {
+    expect(draftFromDistilled(distilled)).toEqual({
+      id: null,
+      title: "T",
+      description: "D. Use when: x.",
+      instructions: "1. Step.",
+      references: [],
+      fromChat: true,
+      distilled: true,
+    });
+  });
+
+  it("settles to the model's draft, else the template when asked, else nothing", () => {
+    expect(settleSkillDraft(distilled, true, rows)).toEqual(draftFromDistilled(distilled));
+    expect(settleSkillDraft(distilled, false, rows)).toEqual(draftFromDistilled(distilled));
+    expect(settleSkillDraft(undefined, true, rows)).toEqual(draftFromConversation(rows));
+    expect(settleSkillDraft(undefined, true, rows)?.distilled).toBeUndefined();
+    expect(settleSkillDraft(undefined, false, rows)).toBeNull();
+  });
+
+  it("has the request and the review hint in both languages", () => {
+    expect(en.skills.distillPrompt).toBe("Save this conversation as a reusable skill.");
+    expect(es.skills.distillPrompt).toBe("Guarda esta conversación como una skill reutilizable.");
+    expect(en.skills.reviewHintDistilled).toContain("AI summarized");
+    expect(es.skills.reviewHintDistilled).toContain("La IA ha resumido");
   });
 });

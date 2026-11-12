@@ -32,7 +32,12 @@ export type SkillInput = {
 };
 
 /** What the form starts from: empty, an existing skill, or a chat. */
-export type SkillDraft = SkillInput & { id: string | null; fromChat: boolean };
+export type SkillDraft = SkillInput & {
+  id: string | null;
+  fromChat: boolean;
+  /** Round 15 (F4): the model distilled it (save_chat_as_skill), not the template. */
+  distilled?: boolean;
+};
 
 export const MAX_REFERENCES = 5;
 export const MAX_REFERENCE_BYTES = 64 * 1024;
@@ -120,6 +125,36 @@ export function preloadFromConversation(messages: ReadonlyArray<{ role: string; 
 
 export function draftFromConversation(messages: ReadonlyArray<{ role: string; content: string }>): SkillDraft {
   return { ...emptyDraft(), instructions: preloadFromConversation(messages), fromChat: true };
+}
+
+/** What the core sends on `chat://skill_draft` (tools/save_skill.rs). */
+export type DistilledDraft = { title: string; description: string; instructions: string };
+
+/** A draft the model distilled with `save_chat_as_skill`, for the save form. */
+export function draftFromDistilled(draft: DistilledDraft): SkillDraft {
+  return {
+    ...emptyDraft(),
+    title: draft.title,
+    description: draft.description,
+    instructions: draft.instructions,
+    fromChat: true,
+    distilled: true,
+  };
+}
+
+/**
+ * Round 15 (F4): the form a finished turn opens. The model's distilled
+ * draft wins; when "Save as skill" asked for one and the model never called
+ * the tool (or the turn failed), the deterministic template is the
+ * fallback; otherwise nothing opens.
+ */
+export function settleSkillDraft(
+  distilled: DistilledDraft | undefined,
+  awaiting: boolean,
+  messages: ReadonlyArray<{ role: string; content: string }>,
+): SkillDraft | null {
+  if (distilled) return draftFromDistilled(distilled);
+  return awaiting ? draftFromConversation(messages) : null;
 }
 
 // ------------------------------------------------- per-conversation state --
