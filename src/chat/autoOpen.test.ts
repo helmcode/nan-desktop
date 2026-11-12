@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { baseName, isScratchFile, lastProducedTarget, mentionsFile } from "./autoOpen";
+import { baseName, isScratchFile, lastProducedTarget, mentionsFile, requestedExtensions } from "./autoOpen";
 import type { ChatMessageRow } from "../types";
 
 function row(id: number, role: string, extra: Partial<ChatMessageRow> = {}): ChatMessageRow {
@@ -169,5 +169,113 @@ describe("scratch detection and mentions (round 15/F5)", () => {
   it("baseName handles both separators", () => {
     expect(baseName("/a/b/c.pdf")).toBe("c.pdf");
     expect(baseName("C:\\a\\c.pdf")).toBe("c.pdf");
+  });
+});
+
+describe("page renders and the kind the user asked for (round 16)", () => {
+  const file = (path: string) => ({ path, kind: "file" as const });
+  const ownerTurn = [
+    "gs.html",
+    "home.html",
+    "docs.html",
+    "fonts.css",
+    "nan-builders.html",
+    "NaN-builders.pdf",
+    ...Array.from({ length: 9 }, (_, i) => `p${i + 1}.png`),
+    "probe.html",
+  ].map((name) => file(`/u/nan/${name}`));
+
+  it("owner case: p1..p9.png and probe.html never win over the requested PDF", () => {
+    const rows = [
+      row(1, "user", { content: "Genera un PDF con la web de nan.builders" }),
+      row(2, "assistant", { content: "Listo, ya lo tienes.", artifacts: ownerTurn }),
+    ];
+    expect(lastProducedTarget(rows)).toEqual({ kind: "file", ref: "/u/nan/NaN-builders.pdf" });
+  });
+
+  it("owner case with the PDF NOT last among real files: the asked kind still wins", () => {
+    const shuffled = [file("/u/nan/NaN-builders.pdf"), ...ownerTurn.filter((a) => !a.path.endsWith(".pdf"))];
+    const rows = [
+      row(1, "user", { content: "Make me a pdf of the landing" }),
+      row(2, "assistant", { content: "Done.", artifacts: shuffled }),
+    ];
+    expect(lastProducedTarget(rows)).toEqual({ kind: "file", ref: "/u/nan/NaN-builders.pdf" });
+  });
+
+  it("Spanish keywords pick the asked kind over a later real file", () => {
+    const artifacts = [file("/u/p/ventas.xlsx"), file("/u/p/resumen.md")];
+    const asked = (content: string) =>
+      lastProducedTarget([row(1, "user", { content }), row(2, "assistant", { content: "Hecho.", artifacts })]);
+    expect(asked("Prepárame una hoja de cálculo con las ventas")).toEqual({ kind: "file", ref: "/u/p/ventas.xlsx" });
+    expect(asked("Pásalo a Excel")).toEqual({ kind: "file", ref: "/u/p/ventas.xlsx" });
+    const deck = [file("/u/p/charla.pptx"), file("/u/p/notas.md")];
+    expect(
+      lastProducedTarget([
+        row(1, "user", { content: "Hazme unas diapositivas para la presentación" }),
+        row(2, "assistant", { content: "Hecho.", artifacts: deck }),
+      ]),
+    ).toEqual({ kind: "file", ref: "/u/p/charla.pptx" });
+  });
+
+  it("no keyword: falls back to the last non-scratch artifact", () => {
+    const rows = [
+      row(1, "user", { content: "Hazlo" }),
+      row(2, "assistant", { content: "Hecho.", artifacts: [file("/u/p/a.pdf"), file("/u/p/b.md"), file("/u/p/p3.png")] }),
+    ];
+    expect(lastProducedTarget(rows)).toEqual({ kind: "file", ref: "/u/p/b.md" });
+  });
+
+  it("a file the final message names still beats the asked kind", () => {
+    const rows = [
+      row(1, "user", { content: "Quiero un PDF" }),
+      row(2, "assistant", {
+        content: "He dejado el borrador en borrador.docx",
+        artifacts: [file("/u/p/informe.pdf"), file("/u/p/borrador.docx")],
+      }),
+    ];
+    expect(lastProducedTarget(rows)).toEqual({ kind: "file", ref: "/u/p/borrador.docx" });
+  });
+
+  it("the asked kind never reaches scratch: a requested PNG ignores page renders", () => {
+    const rows = [
+      row(1, "user", { content: "Dame una imagen del logo" }),
+      row(2, "assistant", { content: "Ok.", artifacts: [file("/u/p/logo.png"), file("/u/p/p1.png"), file("/u/p/notes.md")] }),
+    ];
+    expect(lastProducedTarget(rows)).toEqual({ kind: "file", ref: "/u/p/logo.png" });
+  });
+
+  it("only the user message of THIS turn counts", () => {
+    const rows = [
+      row(1, "user", { content: "Hazme un PDF" }),
+      row(2, "assistant", { content: "Ok.", artifacts: [] }),
+      row(3, "user", { content: "Ahora otra cosa" }),
+      row(4, "assistant", { content: "Ok.", artifacts: [file("/u/p/x.pdf"), file("/u/p/y.md")] }),
+    ];
+    expect(lastProducedTarget(rows)).toEqual({ kind: "file", ref: "/u/p/y.md" });
+  });
+
+  it.each(["/u/p/p1.png", "/u/p/p9.png", "/u/p/p12.jpg", "/u/p/P3.PNG", "/u/p/pg2.svg", "/u/p/page4.html", "/u/p/slide-2.png", "/u/p/probe.html", "/u/p/probe-fonts.html", "/u/p/layout-probe.html", "/u/p/fonts.css"])(
+    "%s is scratch",
+    (path) => {
+      expect(isScratchFile(path)).toBe(true);
+    },
+  );
+
+  it.each(["/u/p/NaN-builders.pdf", "/u/p/nan-builders.html", "/u/p/plan.png", "/u/p/p1-report.pdf", "/u/p/gs.html"])(
+    "%s is not scratch",
+    (path) => {
+      expect(isScratchFile(path)).toBe(false);
+    },
+  );
+
+  it("maps Spanish and English keywords to extension groups, specific before generic", () => {
+    expect(requestedExtensions("")).toEqual([]);
+    expect(requestedExtensions("hola")).toEqual([]);
+    expect(requestedExtensions("un documento PDF")[0]).toEqual(["pdf"]);
+    expect(requestedExtensions("un documento PDF")).toHaveLength(2);
+    expect(requestedExtensions("an Excel sheet")).toEqual([["xlsx", "xls", "csv", "ods"]]);
+    expect(requestedExtensions("en Word")).toEqual([["docx", "doc", "odt"]]);
+    expect(requestedExtensions("una imagen")[0]).toContain("png");
+    expect(requestedExtensions("PRESENTACIÓN")[0]).toContain("pptx");
   });
 });
