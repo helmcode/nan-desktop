@@ -162,6 +162,12 @@ pub struct CacheEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareLink {
     pub remote_id: String,
+    /// The slug the row was first published under: the library keeps it for
+    /// the row's lifetime, so a reshare sends it even after a title edit
+    /// renamed the local slug. Links stored before it existed have none (the
+    /// renderer then falls back to `remote_id`, which equals it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_name: Option<String>,
     pub sha: String,
     pub local_updated_at: i64,
 }
@@ -566,7 +572,13 @@ pub fn set_link(
     }
     let mut index = load_index(dir);
     match link {
-        Some(link) if is_valid_remote_id(&link.remote_id) => {
+        Some(link)
+            if is_valid_remote_id(&link.remote_id)
+                && link
+                    .remote_name
+                    .as_deref()
+                    .is_none_or(skills::is_valid_name) =>
+        {
             index.links.insert(local_id.to_string(), link);
         }
         Some(_) => return Err(TeamError::RequestInvalid),
@@ -1183,6 +1195,7 @@ mod tests {
             local,
             Some(ShareLink {
                 remote_id: REMOTE.into(),
+                remote_name: None,
                 sha: "s".into(),
                 local_updated_at: 5,
             }),
@@ -1222,11 +1235,25 @@ mod tests {
     }
 
     #[test]
+    fn a_link_stored_before_remote_name_still_loads() {
+        // Links written by an older app have no `remote_name`: they load as
+        // `None` (the renderer falls back to `remote_id`) and round-trip
+        // without inventing one.
+        let old: ShareLink =
+            serde_json::from_str(r#"{"remote_id":"weekly-report","sha":"s","local_updated_at":3}"#)
+                .unwrap();
+        assert_eq!(old.remote_name, None);
+        let json = serde_json::to_value(&old).unwrap();
+        assert!(json.get("remote_name").is_none());
+    }
+
+    #[test]
     fn links_validate_ids_and_unlink() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
         let link = ShareLink {
             remote_id: REMOTE.into(),
+            remote_name: Some("weekly-report".into()),
             sha: "s".into(),
             local_updated_at: 1,
         };
@@ -1241,7 +1268,18 @@ mod tests {
             set_link(dir, local, Some(bad)),
             Err(TeamError::RequestInvalid)
         );
-        assert_eq!(set_link(dir, local, Some(link)).unwrap().links.len(), 1);
+        let mut bad_name = link.clone();
+        bad_name.remote_name = Some("../Weekly".into());
+        assert_eq!(
+            set_link(dir, local, Some(bad_name)),
+            Err(TeamError::RequestInvalid)
+        );
+        let view = set_link(dir, local, Some(link)).unwrap();
+        assert_eq!(view.links.len(), 1);
+        assert_eq!(
+            view.links[local].remote_name.as_deref(),
+            Some("weekly-report")
+        );
         assert!(set_link(dir, local, None).unwrap().links.is_empty());
     }
 
