@@ -129,6 +129,7 @@ import {
   type SkillDraft,
 } from "./skills/skills";
 import { useWorkspace } from "./workspace";
+import { TurnIndicator, useTurnStarts } from "./chat/TurnIndicator";
 
 // The preview pane and its renderers load on first use (S21).
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
@@ -1300,6 +1301,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   );
 
   const streamingActive = activeConvId !== null && streamingIds.has(activeConvId);
+  const turnStarts = useTurnStarts(streamingIds);
+  const activeTurnStart = activeConvId !== null ? turnStarts.get(activeConvId) : undefined;
   const activeDraft = activeConvId !== null ? drafts.get(activeConvId) : undefined;
   const visibleDraft = activeDraft !== undefined ? stripToolMarkup(activeDraft, { streaming: true }) : undefined;
   const activeActivity = activeConvId !== null ? activities.get(activeConvId) : undefined;
@@ -2211,6 +2214,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             </div>
 
             <footer className="composer">
+              {streamingActive && activeTurnStart !== undefined && <TurnIndicator startedAt={activeTurnStart} />}
               {activeSkill && (
                 <div className="skill-pill-row">
                   <span className="skill-pill" role="status">

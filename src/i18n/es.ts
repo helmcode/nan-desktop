@@ -120,6 +120,9 @@ export const es: Strings = {
     thinking: "Pensando…",
     searching: "Buscando en internet…",
     working: "Trabajando…",
+    turnWorking: "Trabajando",
+    turnElapsed: (seconds: number) =>
+      seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min ${String(seconds % 60).padStart(2, "0")} s`,
     generatingImage: "Creando la imagen. Suele tardar alrededor de un minuto.",
     sendFailed: "No se ha podido enviar el mensaje. Vuelve a intentarlo.",
     placeholder: "Escribe tu mensaje",
