@@ -8,8 +8,10 @@
 //!   library API. The session JWT never leaves the core, so the renderer
 //!   asks for a route and the core adds the Bearer. The route allowlist is
 //!   closed: `GET /api/auth/me`, `GET|POST /api/skills`, `GET|PUT|DELETE
-//!   /api/skills/{id}`; a POST/PUT body must be exactly `{files:[{path,
-//!   content}]}` and pass the SAME bundle validator as a local save. The
+//!   /api/skills/{id}`; a POST/PUT body must be exactly `{name, title,
+//!   files:[{path, content}]}` (enterprise-api's publish contract: it
+//!   refuses a body without the slug and the title) and the files must pass
+//!   the SAME bundle validator as a local save. The
 //!   reply is handed back as `{status, etag, body}`; the renderer owns the
 //!   sync decisions (ETag, 304, purge), which keeps them unit-testable.
 //! - The offline cache: `app_data/skills-cache/<profile>/index.json` (the
@@ -53,12 +55,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// The status a library row has once an admin approved it.
 pub const APPROVED: &str = "approved";
+/// Longest title the library accepts (enterprise-api `maxSkillTitleRunes`).
+/// Local titles may be longer (`skills::MAX_TITLE_CHARS`), so sharing one
+/// is refused here with `title_too_long` instead of a server 400.
+pub const MAX_SHARED_TITLE_CHARS: usize = 80;
 
 // ---------------------------------------------------------------- types --
 
-/// Why a team operation was refused. `{ "code": "..." }` for the renderer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "code", rename_all = "snake_case")]
+/// Why a team operation was refused. Reaches the renderer as
+/// `{ "code": "...", "detail": "<Display>" }` (plus `reason`, the
+/// [`SkillError`], for `bundle`) so the UI can say exactly what failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TeamError {
     /// A route, method or body outside the allowlist.
     RequestInvalid,
@@ -71,13 +78,47 @@ pub enum TeamError {
     /// Not cached, or no longer listed as approved.
     NotFound,
     /// A bundle that fails the shared validator.
-    Bundle { reason: SkillError },
+    Bundle {
+        reason: SkillError,
+    },
     Io,
+}
+
+impl TeamError {
+    /// The stable machine code the renderer matches on.
+    pub fn code(&self) -> &'static str {
+        match self {
+            TeamError::RequestInvalid => "request_invalid",
+            TeamError::Unavailable => "unavailable",
+            TeamError::NoSession => "no_session",
+            TeamError::Offline => "offline",
+            TeamError::NotFound => "not_found",
+            TeamError::Bundle { .. } => "bundle",
+            TeamError::Io => "io",
+        }
+    }
 }
 
 impl std::fmt::Display for TeamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
+    }
+}
+
+impl Serialize for TeamError {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let reason = match self {
+            TeamError::Bundle { reason } => Some(reason),
+            _ => None,
+        };
+        let mut map = serializer.serialize_map(Some(if reason.is_some() { 3 } else { 2 }))?;
+        map.serialize_entry("code", self.code())?;
+        map.serialize_entry("detail", &self.to_string())?;
+        if let Some(reason) = reason {
+            map.serialize_entry("reason", reason)?;
+        }
+        map.end()
     }
 }
 
@@ -236,7 +277,10 @@ pub fn route_allowed(method: &str, path: &str) -> bool {
 }
 
 /// The body sent upstream: POST/PUT carry exactly a validated
-/// `{files:[{path,content}]}` (canonical order); every other method none.
+/// `{name, title, files:[{path,content}]}` (canonical file order); every
+/// other method none. enterprise-api reads the slug and the title from the
+/// body (`skillPublishRequest`), so both are required and checked here with
+/// the server's rules; a refusal says which rule, never a bare 400.
 pub fn checked_body(
     method: &str,
     body: Option<serde_json::Value>,
@@ -244,6 +288,8 @@ pub fn checked_body(
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Upload {
+        name: String,
+        title: String,
         files: Vec<WireFile>,
     }
     match method {
@@ -251,11 +297,23 @@ pub fn checked_body(
             let upload: Upload = body
                 .and_then(|value| serde_json::from_value(value).ok())
                 .ok_or(TeamError::RequestInvalid)?;
+            let bundle_error = |reason| TeamError::Bundle { reason };
+            if !skills::is_valid_name(&upload.name) {
+                return Err(bundle_error(SkillError::NameInvalid));
+            }
+            let title = upload.title.trim();
+            if title.is_empty() || title.chars().any(char::is_control) {
+                return Err(bundle_error(SkillError::TitleEmpty));
+            }
+            if title.chars().count() > MAX_SHARED_TITLE_CHARS {
+                return Err(bundle_error(SkillError::TitleTooLong));
+            }
             let mut files = upload.files;
-            skills::validate_bundle(&skills::wire_to_bundle(&files))
-                .map_err(|reason| TeamError::Bundle { reason })?;
+            skills::validate_bundle(&skills::wire_to_bundle(&files)).map_err(bundle_error)?;
             skills::canonical_order(&mut files);
-            Ok(Some(serde_json::json!({ "files": files })))
+            Ok(Some(
+                serde_json::json!({ "name": upload.name, "title": title, "files": files }),
+            ))
         }
         _ if body.is_some() => Err(TeamError::RequestInvalid),
         _ => Ok(None),
@@ -557,7 +615,15 @@ pub async fn skills_team_request(
     }
     let base = crate::device_flow::platform_base(&profile_id).ok_or(TeamError::Unavailable)?;
     let token = crate::chat::read_session_token(&profile_id).ok_or(TeamError::NoSession)?;
-    send(&base, &token, &method, &path, body, if_none_match.as_deref()).await
+    send(
+        &base,
+        &token,
+        &method,
+        &path,
+        body,
+        if_none_match.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -642,7 +708,11 @@ mod tests {
             },
             WireFile {
                 path: skills::SKILL_MD.into(),
-                content: skills::skill_md("weekly-report", "Writes the weekly report", instructions),
+                content: skills::skill_md(
+                    "weekly-report",
+                    "Writes the weekly report",
+                    instructions,
+                ),
             },
         ]
     }
@@ -707,30 +777,42 @@ mod tests {
         }
     }
 
+    fn upload(instructions: &str) -> serde_json::Value {
+        serde_json::json!({ "name": "weekly-report", "title": "Weekly report", "files": files(instructions) })
+    }
+
     #[test]
     fn uploads_must_be_a_valid_bundle_and_nothing_else() {
-        let ok = checked_body("POST", Some(serde_json::json!({ "files": files("Do it.") })))
+        let ok = checked_body("POST", Some(upload("Do it.")))
             .unwrap()
             .unwrap();
         // Canonical order: SKILL.md first.
         assert_eq!(ok["files"][0]["path"], "SKILL.md");
         assert_eq!(ok["files"][1]["path"], "references/b.md");
         assert_eq!(
-            checked_body("PUT", Some(serde_json::json!({ "files": [], "x": 1 }))),
+            checked_body(
+                "PUT",
+                Some(serde_json::json!({ "name": "a", "title": "A", "files": [], "x": 1 }))
+            ),
             Err(TeamError::RequestInvalid)
         );
         assert_eq!(checked_body("POST", None), Err(TeamError::RequestInvalid));
+        let with_files = |files: serde_json::Value| serde_json::json!({ "name": "weekly-report", "title": "Weekly report", "files": files });
         assert!(matches!(
             checked_body(
                 "POST",
-                Some(serde_json::json!({ "files": [{ "path": "../x.md", "content": "" }] }))
+                Some(with_files(
+                    serde_json::json!([{ "path": "../x.md", "content": "" }])
+                ))
             ),
             Err(TeamError::Bundle { .. })
         ));
         assert!(matches!(
             checked_body(
                 "POST",
-                Some(serde_json::json!({ "files": [{ "path": "run.sh", "content": "rm -rf" }] }))
+                Some(with_files(
+                    serde_json::json!([{ "path": "run.sh", "content": "rm -rf" }])
+                ))
             ),
             Err(TeamError::Bundle { .. })
         ));
@@ -739,6 +821,94 @@ mod tests {
             Err(TeamError::RequestInvalid)
         );
         assert_eq!(checked_body("GET", None), Ok(None));
+    }
+
+    /// Round 16 (P3): enterprise-api's publish contract is `{name, title,
+    /// files}`. The core used to forward `{files}` only, so EVERY share was a
+    /// server 400 `invalid_title` that the renderer showed as a generic error.
+    #[test]
+    fn uploads_carry_the_slug_and_title_the_server_requires() {
+        let ok = checked_body("POST", Some(upload("Do it.")))
+            .unwrap()
+            .unwrap();
+        let mut keys: Vec<&str> = ok.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["files", "name", "title"]);
+        assert_eq!(ok["name"], "weekly-report");
+        assert_eq!(ok["title"], "Weekly report");
+        // The title is sent trimmed, like the server stores it.
+        let padded = serde_json::json!({ "name": "weekly-report", "title": "  Brand Kit  ", "files": files("x") });
+        assert_eq!(
+            checked_body("PUT", Some(padded)).unwrap().unwrap()["title"],
+            "Brand Kit"
+        );
+        // A body with only files (the old shape) is refused before the network.
+        assert_eq!(
+            checked_body("POST", Some(serde_json::json!({ "files": files("x") }))),
+            Err(TeamError::RequestInvalid)
+        );
+    }
+
+    #[test]
+    fn uploads_refuse_titles_and_names_the_server_would_refuse_with_the_reason() {
+        let with = |name: &str, title: &str| {
+            checked_body(
+                "POST",
+                Some(serde_json::json!({ "name": name, "title": title, "files": files("x") })),
+            )
+        };
+        assert_eq!(
+            with("weekly-report", "   "),
+            Err(TeamError::Bundle {
+                reason: SkillError::TitleEmpty
+            })
+        );
+        assert_eq!(
+            with("weekly-report", "a\u{7}b"),
+            Err(TeamError::Bundle {
+                reason: SkillError::TitleEmpty
+            })
+        );
+        assert_eq!(
+            with("weekly-report", &"t".repeat(MAX_SHARED_TITLE_CHARS + 1)),
+            Err(TeamError::Bundle {
+                reason: SkillError::TitleTooLong
+            })
+        );
+        assert!(with("weekly-report", &"t".repeat(MAX_SHARED_TITLE_CHARS)).is_ok());
+        // 80 characters, not bytes: accents count once.
+        assert!(with("weekly-report", &"á".repeat(MAX_SHARED_TITLE_CHARS)).is_ok());
+        assert_eq!(
+            with("Weekly Report", "T"),
+            Err(TeamError::Bundle {
+                reason: SkillError::NameInvalid
+            })
+        );
+        assert_eq!(
+            with("", "T"),
+            Err(TeamError::Bundle {
+                reason: SkillError::NameInvalid
+            })
+        );
+    }
+
+    /// The owner's case: a SKILL.md plus one ~24 KB brand-book reference full
+    /// of hex colours, font names and CSS-like tokens passes every rule.
+    #[test]
+    fn a_brand_kit_with_a_large_reference_passes() {
+        let mut book = String::from("# Helmcode brand book\n\n");
+        while book.len() < 24 * 1024 {
+            book.push_str("- Primary: #0B0F14, accent: #7C5CFF; token: color-primary-500; font: Inter Tight, 600.\n");
+        }
+        let body = serde_json::json!({
+            "name": "brand-kit",
+            "title": "Brand Kit",
+            "files": [
+                { "path": "SKILL.md", "content": skills::skill_md("brand-kit", "Applies the Helmcode brand.", "Use the brand book.") },
+                { "path": "references/helmcode-brandbook.md", "content": book },
+            ],
+        });
+        assert!(checked_body("POST", Some(body)).unwrap().is_some());
     }
 
     // ---- wire contract (loopback HTTP) ----------------------------------
@@ -805,7 +975,9 @@ mod tests {
         ]);
         let (list, not_modified, created, limited) = tauri::async_runtime::block_on(async {
             (
-                send(&base, "jwt-canary", "GET", API_SKILLS, None, None).await.unwrap(),
+                send(&base, "jwt-canary", "GET", API_SKILLS, None, None)
+                    .await
+                    .unwrap(),
                 send(&base, "jwt-canary", "GET", API_SKILLS, None, Some("\"v1\""))
                     .await
                     .unwrap(),
@@ -814,12 +986,14 @@ mod tests {
                     "jwt-canary",
                     "POST",
                     API_SKILLS,
-                    Some(serde_json::json!({ "files": files("Do it.") })),
+                    Some(upload("Do it.")),
                     None,
                 )
                 .await
                 .unwrap(),
-                send(&base, "jwt-canary", "GET", API_SKILLS, None, None).await.unwrap(),
+                send(&base, "jwt-canary", "GET", API_SKILLS, None, None)
+                    .await
+                    .unwrap(),
             )
         });
         assert_eq!(list.status, 200);
@@ -834,20 +1008,30 @@ mod tests {
         let requests = server.join().unwrap();
         assert!(requests[0].starts_with("GET /api/skills "));
         assert!(!requests[0].to_ascii_lowercase().contains("if-none-match"));
-        assert!(requests[1].to_ascii_lowercase().contains("if-none-match: \"v1\""));
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("if-none-match: \"v1\"")
+        );
         assert!(requests[2].starts_with("POST /api/skills "));
         let body = &requests[2][requests[2].find("\r\n\r\n").unwrap() + 4..];
         let sent: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(sent["name"], "weekly-report");
+        assert_eq!(sent["title"], "Weekly report");
         assert_eq!(sent["files"][0]["path"], "SKILL.md");
-        assert!(sent["files"][0]["content"]
-            .as_str()
-            .unwrap()
-            .starts_with("---\nname: weekly-report\n"));
+        assert!(
+            sent["files"][0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("---\nname: weekly-report\n")
+        );
         assert_eq!(sent["files"][1]["path"], "references/b.md");
         for request in &requests {
-            assert!(request
-                .to_ascii_lowercase()
-                .contains("authorization: bearer jwt-canary"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer jwt-canary")
+            );
         }
     }
 
@@ -872,7 +1056,12 @@ mod tests {
     fn put_get_and_active_roundtrip_with_provenance() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
-        store_list(dir, Some("\"v1\"".into()), vec![meta(REMOTE, APPROVED, "t1")]).unwrap();
+        store_list(
+            dir,
+            Some("\"v1\"".into()),
+            vec![meta(REMOTE, APPROVED, "t1")],
+        )
+        .unwrap();
         let cached = put(dir, wire(REMOTE, "Use bullets.")).unwrap();
         assert_eq!(cached.title, "Weekly report");
         assert_eq!(cached.author_name, "Ana");
@@ -944,7 +1133,10 @@ mod tests {
         store_list(
             dir,
             None,
-            vec![meta(REMOTE, APPROVED, "t1"), meta("sk_other", APPROVED, "t1")],
+            vec![
+                meta(REMOTE, APPROVED, "t1"),
+                meta("sk_other", APPROVED, "t1"),
+            ],
         )
         .unwrap();
         put(dir, wire(REMOTE, "gone soon")).unwrap();
@@ -978,7 +1170,12 @@ mod tests {
     fn clear_drops_everything_but_the_links() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
-        store_list(dir, Some("\"e\"".into()), vec![meta(REMOTE, APPROVED, "t1")]).unwrap();
+        store_list(
+            dir,
+            Some("\"e\"".into()),
+            vec![meta(REMOTE, APPROVED, "t1")],
+        )
+        .unwrap();
         put(dir, wire(REMOTE, "x")).unwrap();
         let local = "0123456789abcdef0123456789abcdef";
         set_link(
@@ -1017,7 +1214,9 @@ mod tests {
         put(dir, wire(REMOTE, "honest")).unwrap();
         let name = cached_files(dir, REMOTE).remove(0);
         let path = dir.join(REMOTE).join(name);
-        let raw = std::fs::read_to_string(&path).unwrap().replace("honest", "evil");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("honest", "evil");
         std::fs::write(&path, raw).unwrap();
         assert_eq!(get(dir, REMOTE), Err(TeamError::NotFound));
     }
@@ -1038,7 +1237,10 @@ mod tests {
         let local = "0123456789abcdef0123456789abcdef";
         let mut bad = link.clone();
         bad.remote_id = "a/b".into();
-        assert_eq!(set_link(dir, local, Some(bad)), Err(TeamError::RequestInvalid));
+        assert_eq!(
+            set_link(dir, local, Some(bad)),
+            Err(TeamError::RequestInvalid)
+        );
         assert_eq!(set_link(dir, local, Some(link)).unwrap().links.len(), 1);
         assert!(set_link(dir, local, None).unwrap().links.is_empty());
     }
@@ -1052,15 +1254,19 @@ mod tests {
             cache_dir_in(tmp.path(), "../etc"),
             Err(TeamError::Unavailable)
         );
-        assert!(cache_dir_in(tmp.path(), "helmcode")
-            .unwrap()
-            .ends_with("skills-cache/helmcode"));
+        assert!(
+            cache_dir_in(tmp.path(), "helmcode")
+                .unwrap()
+                .ends_with("skills-cache/helmcode")
+        );
     }
 
     #[test]
     fn resolve_active_only_handles_team_ids() {
         let tmp = TempDir::new().unwrap();
-        assert!(resolve_active(tmp.path(), "helmcode", "0123456789abcdef0123456789abcdef").is_none());
+        assert!(
+            resolve_active(tmp.path(), "helmcode", "0123456789abcdef0123456789abcdef").is_none()
+        );
         let dir = cache_dir_in(tmp.path(), "helmcode").unwrap();
         store_list(&dir, None, vec![meta(REMOTE, APPROVED, "t1")]).unwrap();
         put(&dir, wire(REMOTE, "x")).unwrap();
@@ -1075,17 +1281,43 @@ mod tests {
     }
 
     #[test]
-    fn errors_serialize_as_codes() {
+    fn errors_serialize_as_codes_with_a_detail() {
         assert_eq!(
             serde_json::to_value(TeamError::NoSession).unwrap(),
-            serde_json::json!({ "code": "no_session" })
+            serde_json::json!({ "code": "no_session", "detail": "NoSession" })
         );
         assert_eq!(
             serde_json::to_value(TeamError::Bundle {
                 reason: SkillError::TooManyFiles
             })
             .unwrap(),
-            serde_json::json!({ "code": "bundle", "reason": { "code": "too_many_files" } })
+            serde_json::json!({
+                "code": "bundle",
+                "detail": "Bundle { reason: TooManyFiles }",
+                "reason": { "code": "too_many_files" }
+            })
         );
+        let secret = serde_json::to_value(TeamError::Bundle {
+            reason: SkillError::SecretDetected {
+                path: "references/creds.md".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            secret["reason"],
+            serde_json::json!({ "code": "secret_detected", "path": "references/creds.md" })
+        );
+        for (error, code) in [
+            (TeamError::RequestInvalid, "request_invalid"),
+            (TeamError::Unavailable, "unavailable"),
+            (TeamError::Offline, "offline"),
+            (TeamError::NotFound, "not_found"),
+            (TeamError::Io, "io"),
+        ] {
+            let value = serde_json::to_value(&error).unwrap();
+            assert_eq!(value["code"], code);
+            assert_eq!(value["detail"], error.to_string());
+            assert!(value.get("reason").is_none());
+        }
     }
 }

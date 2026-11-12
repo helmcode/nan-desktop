@@ -18,8 +18,11 @@ import {
   parseBundleResponse,
   parseList,
   parseSkillsSharing,
+  parseErrorDetail,
   problemForError,
   problemForStatus,
+  shareFailureForError,
+  shareFailureForReply,
   shareSkill,
   shareStateFor,
   syncTeam,
@@ -234,8 +237,12 @@ describe("shareSkill", () => {
     expect(result.ok).toBe(true);
     const post = core.requests.find((r) => r.method === "POST");
     expect(post?.path).toBe("/api/skills");
-    const sent = post?.body as { files: Array<{ path: string; content: string }> };
-    expect(Object.keys(sent)).toEqual(["files"]);
+    const sent = post?.body as { name: string; title: string; files: Array<{ path: string; content: string }> };
+    // Round 16 (P3): enterprise-api's publish contract is {name, title, files};
+    // a body of files alone was a 400 invalid_title on every share.
+    expect(Object.keys(sent).sort()).toEqual(["files", "name", "title"]);
+    expect(sent.name).toBe("weekly-report");
+    expect(sent.title).toBe(skill.title);
     expect(sent.files).toEqual(localBundleOf(skill).files);
     expect(sent.files.map((f) => f.path)).toEqual(["SKILL.md", "references/a.txt", "references/z.md"]);
     expect(sent.files[0].content.startsWith("---\nname: weekly-report\ndescription: ")).toBe(true);
@@ -285,7 +292,7 @@ describe("shareSkill", () => {
       const skill = local();
       const core = fakeTeamCore(api([], () => ({ status })), () => [skill]);
       resetTauri(core.handlers);
-      expect(await shareSkill(P, skill, null)).toEqual({ ok: false, problem });
+      expect(await shareSkill(P, skill, null)).toMatchObject({ ok: false, problem, reason: null });
       expect(core.state.links).toEqual({});
     }
   });
@@ -379,6 +386,83 @@ describe("derived state", () => {
     expect(problemForError({ code: "offline" })).toBe("offline");
     expect(problemForError({ code: "bundle", reason: { code: "too_many_files" } })).toBe("invalid");
     expect(problemForError("boom")).toBe("generic");
+  });
+
+  it("round 16: reads {code, detail} objects and falls back to substrings of a string error", () => {
+    expect(problemForError({ code: "no_session", detail: "NoSession" })).toBe("expired");
+    expect(problemForError({ code: "unavailable", detail: "Unavailable" })).toBe("offline");
+    expect(problemForError({ code: "request_invalid", detail: "RequestInvalid" })).toBe("generic");
+    expect(problemForError("NoSession")).toBe("expired");
+    expect(problemForError("no_session")).toBe("expired");
+    expect(problemForError("Offline")).toBe("offline");
+    expect(problemForError("Unavailable")).toBe("offline");
+    expect(problemForError("Bundle { reason: TooManyFiles }")).toBe("invalid");
+    expect(problemForError("bundle not cached")).toBe("invalid");
+    expect(problemForError(new Error("offline"))).toBe("offline");
+    expect(problemForError(null)).toBe("generic");
+  });
+
+  it("round 16: parseErrorDetail returns the core detail or the raw text", () => {
+    expect(parseErrorDetail({ code: "io", detail: "Io" })).toBe("Io");
+    expect(parseErrorDetail("invalid args `body` for command")).toBe("invalid args `body` for command");
+    expect(parseErrorDetail(new Error("boom"))).toBe("boom");
+    expect(parseErrorDetail({ code: "io" })).toBeNull();
+    expect(parseErrorDetail("")).toBeNull();
+    expect(parseErrorDetail(undefined)).toBeNull();
+  });
+
+  it("round 16: a thrown core refusal keeps its validator reason", () => {
+    expect(
+      shareFailureForError({ code: "bundle", detail: "d", reason: { code: "secret_detected", path: "references/a.md" } }),
+    ).toEqual({ problem: "invalid", reason: { code: "secret_detected", path: "references/a.md" }, detail: "d" });
+    expect(shareFailureForError({ code: "offline", detail: "Offline" })).toEqual({
+      problem: "offline",
+      reason: null,
+      detail: "Offline",
+    });
+  });
+
+  it("round 16: server publish errors map to problems with the reason and the path", () => {
+    expect(
+      shareFailureForReply(400, { error: "secret_detected", detail: '"references/brand.md" looks like it contains a credential' }),
+    ).toMatchObject({ problem: "invalid", reason: { code: "secret_detected", path: "references/brand.md" } });
+    expect(shareFailureForReply(400, { error: "invalid_title", detail: "title must be 1..80 characters" })).toMatchObject({
+      problem: "invalid",
+      reason: { code: "invalid_title" },
+    });
+    expect(shareFailureForReply(400, { error: "missing_skill_md" }).reason).toEqual({ code: "path_invalid", path: "SKILL.md" });
+    expect(shareFailureForReply(413, { error: "payload_too_large" }).reason).toEqual({ code: "bundle_too_large" });
+    expect(shareFailureForReply(400, { error: "invalid_body" })).toMatchObject({ problem: "invalid", reason: null });
+    expect(shareFailureForReply(409, { error: "name_taken" }).problem).toBe("name_taken");
+    expect(shareFailureForReply(409, { error: "sha256_mismatch" }).problem).toBe("stale");
+    expect(shareFailureForReply(409, { error: "skill_hidden" }).problem).toBe("stale");
+    expect(shareFailureForReply(429, { error: "skill_limit_reached" }).problem).toBe("limit_reached");
+    expect(shareFailureForReply(429, { error: "rate_limited" }).problem).toBe("rate_limited");
+    expect(shareFailureForReply(403, { error: "not_author" }).problem).toBe("forbidden");
+    expect(shareFailureForReply(503, { error: "storage_unavailable" })).toEqual({
+      problem: "generic",
+      reason: null,
+      detail: "HTTP 503 storage_unavailable",
+    });
+    expect(shareFailureForReply(502, null).detail).toBe("HTTP 502");
+  });
+
+  it("round 16: a skill the core refuses to bundle never reaches the network and says why", async () => {
+    const skill = local();
+    const core = fakeTeamCore(api([]), () => [skill]);
+    resetTauri({
+      ...core.handlers,
+      skills_bundle: () => {
+        throw { code: "secret_detected", path: "references/a.txt" };
+      },
+    });
+    expect(await shareSkill(P, skill, null)).toEqual({
+      ok: false,
+      problem: "invalid",
+      reason: { code: "secret_detected", path: "references/a.txt" },
+      detail: null,
+    });
+    expect(core.requests).toHaveLength(0);
   });
 
   it("parses the list body and needs only missing or outdated approved bundles", () => {

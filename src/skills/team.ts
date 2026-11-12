@@ -78,10 +78,23 @@ export type TeamResponse = { status: number; etag: string | null; body: unknown 
  * - forbidden: 403
  * - rate_limited: 429, a gentle "wait a moment"
  * - offline: the request did not complete (the cache keeps working)
- * - invalid: the bundle failed the validator
+ * - invalid: the bundle failed the validator (the core's or the server's)
+ * - stale: 409, the shared row changed meanwhile (hidden, no longer pending)
+ * - name_taken: 409, the org already has a skill with this slug
+ * - limit_reached: 429 with a library cap (skills or pending reviews)
  * - generic: anything else
  */
-export type TeamProblem = "disabled" | "expired" | "forbidden" | "rate_limited" | "offline" | "invalid" | "generic";
+export type TeamProblem =
+  | "disabled"
+  | "expired"
+  | "forbidden"
+  | "rate_limited"
+  | "offline"
+  | "invalid"
+  | "stale"
+  | "name_taken"
+  | "limit_reached"
+  | "generic";
 
 export type TeamState = { view: CacheView; problem: TeamProblem | null };
 
@@ -149,7 +162,12 @@ export function problemForStatus(status: number): TeamProblem | null {
   }
 }
 
-/** A core refusal (`{code}`) as a problem. */
+/**
+ * A core refusal as a problem. The core sends `{code, detail, reason?}`
+ * (skills_team.rs `TeamError`); a bare string (an older core, or Tauri's
+ * own argument errors) is matched by substring so it never reads generic
+ * when it does say what failed.
+ */
 export function problemForError(err: unknown): TeamProblem {
   const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
   switch (code) {
@@ -160,9 +178,94 @@ export function problemForError(err: unknown): TeamProblem {
       return "offline";
     case "bundle":
       return "invalid";
+    case undefined:
+      break;
     default:
       return "generic";
   }
+  const text = typeof err === "string" ? err : err instanceof Error ? err.message : "";
+  if (/no_?session/i.test(text)) return "expired";
+  if (/offline|unavailable/i.test(text)) return "offline";
+  if (/bundle|not cached/i.test(text)) return "invalid";
+  return "generic";
+}
+
+/** The human detail of a failure: the core's `detail`, or the raw text. */
+export function parseErrorDetail(err: unknown): string | null {
+  if (typeof err === "string") return err || null;
+  if (err instanceof Error) return err.message || null;
+  if (err && typeof err === "object") {
+    const detail = (err as { detail?: unknown }).detail;
+    if (typeof detail === "string" && detail) return detail;
+  }
+  return null;
+}
+
+/** The validator refusal (`SkillError`-shaped) carried by a bundle error. */
+function bundleReason(err: unknown): { code: string; path?: string } | null {
+  if (!err || typeof err !== "object") return null;
+  const { code, reason } = err as { code?: unknown; reason?: unknown };
+  if (code !== "bundle" || !reason || typeof reason !== "object") return null;
+  return typeof (reason as { code?: unknown }).code === "string" ? (reason as { code: string; path?: string }) : null;
+}
+
+/** Longest title the library accepts (enterprise-api `maxSkillTitleRunes`,
+ * mirrored by skills_team.rs `MAX_SHARED_TITLE_CHARS`). */
+export const MAX_SHARED_TITLE_CHARS = 80;
+
+/** Why a share failed: the problem, the validator reason when there is one,
+ * and the raw detail for anything the UI cannot name. */
+export type ShareFailure = {
+  problem: TeamProblem;
+  reason: { code: string; path?: string } | null;
+  detail: string | null;
+};
+
+/** enterprise-api validation codes (internal/skills/validate.go) as the
+ * core's `SkillError` codes, so one localized mapping covers both. */
+const SERVER_REASONS: Record<string, string> = {
+  secret_detected: "secret_detected",
+  file_too_large: "file_too_large",
+  bundle_too_large: "bundle_too_large",
+  payload_too_large: "bundle_too_large",
+  too_many_files: "too_many_files",
+  duplicate_path: "duplicate_file",
+  invalid_path: "path_invalid",
+  invalid_layout: "path_invalid",
+  missing_skill_md: "path_invalid",
+  invalid_extension: "extension_not_allowed",
+  invalid_encoding: "not_utf8",
+  invalid_description: "description_too_long",
+  invalid_title: "invalid_title",
+  invalid_name: "name_invalid",
+  name_mismatch: "name_invalid",
+};
+
+/** A non-2xx publish reply (`{error, detail}`) as a share failure. */
+export function shareFailureForReply(status: number, body: unknown): ShareFailure {
+  const reply = body && typeof body === "object" ? (body as { error?: unknown; detail?: unknown }) : {};
+  const code = typeof reply.error === "string" ? reply.error : "";
+  const serverDetail = typeof reply.detail === "string" ? reply.detail : "";
+  const detail = [`HTTP ${status}`, code, serverDetail].filter(Boolean).join(" ");
+  const mapped = SERVER_REASONS[code];
+  if (mapped && (status === 400 || status === 413)) {
+    // The server quotes the offending path in its detail: "\"references/a.md\" ...".
+    const path = /"([^"]+)"/.exec(serverDetail)?.[1] ?? (code === "missing_skill_md" ? "SKILL.md" : undefined);
+    return { problem: "invalid", reason: path ? { code: mapped, path } : { code: mapped }, detail };
+  }
+  if (status === 409) {
+    return { problem: code === "name_taken" ? "name_taken" : "stale", reason: null, detail };
+  }
+  if (status === 429 && (code === "skill_limit_reached" || code === "pending_limit_reached")) {
+    return { problem: "limit_reached", reason: null, detail };
+  }
+  if (status === 400) return { problem: "invalid", reason: null, detail };
+  return { problem: problemForStatus(status) ?? "generic", reason: null, detail };
+}
+
+/** A thrown core refusal as a share failure. */
+export function shareFailureForError(err: unknown): ShareFailure {
+  return { problem: problemForError(err), reason: bundleReason(err), detail: parseErrorDetail(err) };
 }
 
 // ----------------------------------------------------------------- flag --
@@ -407,27 +510,40 @@ export async function loadTeamSkill(
 
 // ---------------------------------------------------------------- share --
 
-export type ShareResult = { ok: true; meta: TeamMeta; view: CacheView } | { ok: false; problem: TeamProblem };
+export type ShareResult =
+  | { ok: true; meta: TeamMeta; view: CacheView }
+  | ({ ok: false } & ShareFailure);
 
 /**
  * "Share with my team" (POST) or "Share again" (PUT, back to pending): the
  * core builds the canonical bundle {files:[SKILL.md, references...]} with
- * the SAME generator as every local save; this sends it and records the
- * link. A PUT on a row the admin deleted (404) falls back to a new POST; a
- * POST 404 means the org has sharing off.
+ * the SAME generator as every local save; this sends it with the skill's
+ * slug and title (enterprise-api's publish contract is `{name, title,
+ * files}`) and records the link. A PUT on a row the admin deleted (404)
+ * falls back to a new POST; a POST 404 means the org has sharing off.
+ * A failure carries what went wrong (round 16), never just "generic".
  */
 export async function shareSkill(profileId: string, skill: Skill, link: ShareLink | null): Promise<ShareResult> {
+  let bundle: Awaited<ReturnType<typeof localBundle>>;
   try {
-    const bundle = await localBundle(skill.id);
-    const body = { files: bundle.files };
+    bundle = await localBundle(skill.id);
+  } catch (err) {
+    // The core refused to build the bundle (skills_bundle re-validates a
+    // record saved before a rule landed): a `SkillError` `{code, path?}`.
+    const reason = err && typeof err === "object" && typeof (err as { code?: unknown }).code === "string"
+      ? (err as { code: string; path?: string })
+      : null;
+    return { ok: false, problem: reason ? "invalid" : "generic", reason, detail: parseErrorDetail(err) };
+  }
+  try {
+    const body = { name: skill.name, title: skill.title, files: bundle.files };
     let res = link
       ? await request(profileId, "PUT", `${SKILLS_PATH}/${encodeURIComponent(link.remote_id)}`, body)
       : await request(profileId, "POST", SKILLS_PATH, body);
     if (link && res.status === 404) res = await request(profileId, "POST", SKILLS_PATH, body);
-    const problem = problemForStatus(res.status);
-    if (problem) return { ok: false, problem };
+    if (problemForStatus(res.status)) return { ok: false, ...shareFailureForReply(res.status, res.body) };
     const meta = asMeta(res.body && typeof res.body === "object" ? (res.body as { skill?: unknown }).skill : null);
-    if (!meta) return { ok: false, problem: "generic" };
+    if (!meta) return { ok: false, problem: "generic", reason: null, detail: `HTTP ${res.status} unexpected reply` };
     const view = await setLink(profileId, skill.id, {
       remote_id: meta.id,
       sha: bundle.sha,
@@ -435,7 +551,7 @@ export async function shareSkill(profileId: string, skill: Skill, link: ShareLin
     });
     return { ok: true, meta, view: withRow(view, meta) };
   } catch (err) {
-    return { ok: false, problem: problemForError(err) };
+    return { ok: false, ...shareFailureForError(err) };
   }
 }
 
