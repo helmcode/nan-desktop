@@ -310,8 +310,10 @@ function isWireFile(value: unknown): value is { path: string; content: string } 
  * metadata (`skill`) never carries the files; the bundle only comes with an
  * explicit `?version=`, and `version`/`sha256`/`bundle` are null otherwise.
  * Anything but an approved bundle with its hash is `null` (never cached).
+ * The hash is part of the contract (a reply without it is refused) but the
+ * caller has no use for its value, so only the skill is returned.
  */
-export function parseBundleResponse(body: unknown): { wire: WireSkill; sha256: string } | null {
+export function parseBundleResponse(body: unknown): WireSkill | null {
   if (!body || typeof body !== "object") return null;
   const reply = body as Record<string, unknown>;
   const meta = asMeta(reply.skill);
@@ -321,7 +323,7 @@ export function parseBundleResponse(body: unknown): { wire: WireSkill; sha256: s
   if (!bundle || typeof bundle !== "object") return null;
   const files = (bundle as { files?: unknown }).files;
   if (!Array.isArray(files) || files.length === 0 || !files.every(isWireFile)) return null;
-  return { wire: { ...meta, files: files.map(({ path, content }) => ({ path, content })) }, sha256: reply.sha256 };
+  return { ...meta, files: files.map(({ path, content }) => ({ path, content })) };
 }
 
 /** Fetch and cache one approved bundle. */
@@ -336,10 +338,10 @@ async function fetchBundle(profileId: string, id: string): Promise<{ skill: Team
   if (problem) return { problem };
   // A reply without the bundle is a contract problem, never a silent skip:
   // the row stays "Preparing" and the banner says the library failed.
-  const parsed = parseBundleResponse(res.body);
-  if (!parsed || parsed.wire.id !== id) return { problem: "invalid" };
+  const wire = parseBundleResponse(res.body);
+  if (!wire || wire.id !== id) return { problem: "invalid" };
   try {
-    return { skill: await cachePut(profileId, parsed.wire) };
+    return { skill: await cachePut(profileId, wire) };
   } catch (err) {
     return { problem: problemForError(err) };
   }

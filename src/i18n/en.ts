@@ -121,7 +121,7 @@ export const en = {
     thinking: "Thinking…",
     searching: "Searching the web…",
     working: "Working…",
-    turnWorking: "Working",
+    turnWorking: "In progress",
     turnElapsed: (seconds: number) =>
       seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`,
     generatingImage: "Creating the image. It usually takes about a minute.",
@@ -398,6 +398,8 @@ export const en = {
     instructionsHint: "This is the text the assistant receives while the skill is on.",
     reviewHint: "We copied the start of this chat. Review the text before saving.",
     distillPrompt: "Save this conversation as a reusable skill.",
+    reviewHintFallback: "We could not summarize this chat, so we copied its start. Review it before saving.",
+    reviewHintProposed: "The assistant suggests saving this skill. Review it before saving.",
     reviewHintDistilled: "The AI summarized this conversation as a skill. Review and adjust the text before saving.",
     filesLabel: "Reference files (optional)",
     filesHint: "Up to 5 text files (.md, .txt, .json, .yaml), 64 KB each.",

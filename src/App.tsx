@@ -96,7 +96,7 @@ import type {
 } from "./types";
 import type { StudioSeed } from "./studio/studio";
 import { SkillPicker } from "./skills/SkillPicker";
-import { SkillsView } from "./skills/SkillsView";
+import { SkillsView, type SkillFormDraft } from "./skills/SkillsView";
 import {
   EMPTY_VIEW,
   TEAM_PROFILE,
@@ -128,7 +128,6 @@ import {
   type ActiveSkills,
   type Skill,
   type DistilledDraft,
-  type SkillDraft,
 } from "./skills/skills";
 import { useWorkspace } from "./workspace";
 import { TurnIndicator, useTurnStarts } from "./chat/TurnIndicator";
@@ -608,7 +607,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // picker opens from the "Use skill" button or a leading "/".
   const [skills, setSkills] = useState<Skill[]>([]);
   const [skillsLoadError, setSkillsLoadError] = useState(false);
-  const [skillForm, setSkillForm] = useState<SkillDraft | null>(null);
+  const [skillForm, setSkillForm] = useState<SkillFormDraft | null>(null);
   const [activeSkills, setActiveSkills] = useState<ActiveSkills>(() => new Map());
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
   const [slashDismissed, setSlashDismissed] = useState(false);
@@ -747,17 +746,24 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // on screen and idle (see the effect next to openSkills).
   const distilledDraftsRef = useRef<Map<number, DistilledDraft>>(new Map());
   const awaitingSkillRef = useRef<Set<number>>(new Set());
-  const [readySkillDrafts, setReadySkillDrafts] = useState<Map<number, SkillDraft>>(() => new Map());
+  const [readySkillDrafts, setReadySkillDrafts] = useState<Map<number, SkillFormDraft>>(() => new Map());
   const settleSkillTurn = useCallback(
     (conversationId: number, rows: ReadonlyArray<{ role: string; content: string }>): void => {
-      const draft = settleSkillDraft(
-        distilledDraftsRef.current.get(conversationId),
-        awaitingSkillRef.current.has(conversationId),
-        rows,
-      );
+      const distilled = distilledDraftsRef.current.get(conversationId);
+      const awaiting = awaitingSkillRef.current.has(conversationId);
+      const settled = settleSkillDraft(distilled, awaiting, rows);
       distilledDraftsRef.current.delete(conversationId);
       awaitingSkillRef.current.delete(conversationId);
-      if (draft) setReadySkillDrafts((prev) => new Map(prev).set(conversationId, draft));
+      if (!settled) return;
+      // D3/D4: say why the form opened. A draft nobody asked for (the model
+      // called the tool on its own, e.g. steered by a web page or a file) is
+      // a proposal; an ask with no draft back is the copied-start fallback.
+      const draft: SkillFormDraft = distilled
+        ? awaiting
+          ? settled
+          : { ...settled, origin: "proposed" }
+        : { ...settled, origin: "fallback" };
+      setReadySkillDrafts((prev) => new Map(prev).set(conversationId, draft));
     },
     [],
   );
@@ -980,8 +986,14 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         void syncMemory();
       }),
       // The user pressed Stop: what arrived stays persisted.
+      // D1: Stop cancels a pending "Save as skill" too: forget the ask and
+      // any draft before the finish path settles, so no form opens and the
+      // view never jumps to Settings.
       listen<ChatIdPayload>("chat://stopped", (event) => {
-        finish(event.payload.conversation_id);
+        const id = event.payload.conversation_id;
+        awaitingSkillRef.current.delete(id);
+        distilledDraftsRef.current.delete(id);
+        finish(id);
       }),
       listen<ChatError>("chat://error", (event) => {
         const { conversation_id, kind } = event.payload;
@@ -1747,7 +1759,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   }, []);
 
   const openSkills = useCallback(
-    (form: SkillDraft | null): void => {
+    (form: SkillFormDraft | null): void => {
       setSkillPickerOpen(false);
       setSkillForm(form);
       openSettings("skills");
@@ -1779,7 +1791,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     const sent = await send(t.skills.distillPrompt);
     if (!sent) {
       awaitingSkillRef.current.delete(id);
-      openSkills(draftFromConversation(messages));
+      openSkills({ ...draftFromConversation(messages), origin: "fallback" });
     }
   }, [streamingActive, send, t, openSkills, messages]);
 

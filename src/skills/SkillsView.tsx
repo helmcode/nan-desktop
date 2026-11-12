@@ -58,8 +58,8 @@ export type SkillsViewProps = {
   loadError: boolean;
   /** The open form (null shows the list). Owned by the shell so "Save as
    *  skill" in a chat can open it preloaded. */
-  form: SkillDraft | null;
-  onFormChange: (form: SkillDraft | null) => void;
+  form: SkillFormDraft | null;
+  onFormChange: (form: SkillFormDraft | null) => void;
   onSaved: (skill: Skill) => void;
   onDeleted: (id: string) => void;
   onUse: (skill: Skill) => void;
@@ -73,6 +73,24 @@ export type SkillsViewProps = {
 type Tab = "mine" | "team";
 
 /** True when the draft holds anything closing it would throw away. */
+/**
+ * Round 15 (D3/D4): a draft for the form plus why it opened from a chat,
+ * so the review hint can say it. `fallback`: "Save as skill" asked the model
+ * but no summary arrived (the chat's start was copied instead). `proposed`:
+ * the model called save_chat_as_skill without the user asking for it.
+ */
+export type SkillFormDraft = SkillDraft & { origin?: "fallback" | "proposed" };
+
+/** The review hint above a form opened from a chat. */
+export function reviewHintFor(
+  s: { reviewHint: string; reviewHintDistilled: string; reviewHintFallback: string; reviewHintProposed: string },
+  form: SkillFormDraft,
+): string {
+  if (form.origin === "proposed") return s.reviewHintProposed;
+  if (form.origin === "fallback") return s.reviewHintFallback;
+  return form.distilled ? s.reviewHintDistilled : s.reviewHint;
+}
+
 function draftHasContent(form: SkillDraft): boolean {
   return (
     form.title.trim() !== "" ||
@@ -726,10 +744,10 @@ function SkillForm({
   onChange,
   onSaved,
 }: {
-  form: SkillDraft;
+  form: SkillFormDraft;
   /** Every local skill: a new one with a taken title shows its suffixed name. */
   skills: Skill[];
-  onChange: (form: SkillDraft | null) => void;
+  onChange: (form: SkillFormDraft | null) => void;
   onSaved: (skill: Skill) => void;
 }) {
   const t = useT();
@@ -738,7 +756,7 @@ function SkillForm({
   const [saving, setSaving] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
-  const set = (patch: Partial<SkillDraft>): void => onChange({ ...form, ...patch });
+  const set = (patch: Partial<SkillFormDraft>): void => onChange({ ...form, ...patch });
   // Round 15 (F2): only NEW skills are suffixed; an edit keeps its title.
   const resolved = form.id ? "" : resolvedTitle(form.title, skills);
   const renamed = resolved !== "" && resolved !== cleanTitle(form.title);
@@ -786,7 +804,7 @@ function SkillForm({
     >
       {form.fromChat && (
         <p className="skill-review-hint" role="note">
-          {form.distilled ? s.reviewHintDistilled : s.reviewHint}
+          {reviewHintFor(s, form)}
         </p>
       )}
       <label className="skill-field">
@@ -801,8 +819,10 @@ function SkillForm({
           onChange={(e) => set({ title: e.currentTarget.value })}
         />
       </label>
+      {/* D8: a plain description wired to the input, not a live region:
+          role=status would announce it on every keystroke. */}
       {renamed && (
-        <span className="skill-hint" id="skill-name-resolved" role="status">
+        <span className="skill-hint" id="skill-name-resolved">
           {s.nameTaken(resolved)}
         </span>
       )}

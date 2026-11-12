@@ -244,6 +244,16 @@ describe("Share with my team: gating", () => {
     expect(core.requests.some((r) => r.method === "POST")).toBe(false);
   });
 
+  it("round 15 (D6): with the org flag off and no own skills there is no share-off note", async () => {
+    const { core } = setup({ sharing: false, skills: [] });
+    renderApp();
+    await openSkills();
+    await waitFor(() => expect(core.requests.some((r) => r.path === "/api/auth/me")).toBe(true));
+    expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
+    expect(screen.queryByText(/turned off for your organization/)).toBeNull();
+    expect(document.getElementById("skills-share-off")).toBeNull();
+  });
+
   it("round 15 (F3): with /me unreachable the flag is unknown: no share action and no off note", async () => {
     const { core } = setup({ skills: [weekly()], me: { status: 500 } });
     renderApp();
@@ -362,6 +372,21 @@ describe("Share with my team: the flow", () => {
     expect(screen.queryByRole("button", { name: /with my team/ })).toBeNull();
   });
 
+  it("round 15 (D7): Spanish says 'con el equipo' on Share again too", async () => {
+    setup({
+      sharing: true,
+      skills: [weekly({ updated_at: 10 })],
+      rows: [meta("sk_1", { status: "rejected", reject_reason: "Too vague", author_name: "Me" })],
+      links: { [LOCAL]: { remote_id: "sk_1", sha: "s", local_updated_at: 5 } },
+    });
+    renderApp("es");
+    await openSkills("Ajustes", "Skills");
+    expect(
+      await screen.findByRole("button", { name: "Compartir la nueva versión de «Weekly report» con el equipo" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/mi equipo/)).toBeNull();
+  });
+
   it("speaks Spanish: the button, the dialog warning and the tabs", async () => {
     setup({ sharing: true, skills: [weekly()] });
     renderApp("es");
@@ -369,7 +394,7 @@ describe("Share with my team: the flow", () => {
     expect(await screen.findByRole("tab", { name: "Mías" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Equipo" })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "Compartir «Weekly report» con el equipo" }));
-    const dialog = await screen.findByRole("dialog", { name: "Compartir con mi equipo" });
+    const dialog = await screen.findByRole("dialog", { name: "Compartir con el equipo" });
     expect(within(dialog).getByText(WARNING_ES)).toBeTruthy();
   });
 });

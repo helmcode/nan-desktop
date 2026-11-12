@@ -411,18 +411,19 @@ describe("the bundle contract (round 15/F1)", () => {
   });
 
   it("parses {skill, version, sha256, bundle:{files}} into the row plus its files", () => {
-    expect(parseBundleResponse(reply())).toEqual({ wire: { ...row, files }, sha256: "abc123" });
+    expect(parseBundleResponse(reply())).toEqual({ ...row, files });
   });
 
   it("drops extra file fields so only {path, content} reach the core", () => {
     const parsed = parseBundleResponse(reply({ bundle: { files: [{ ...files[0], mode: 420 }] } }));
-    expect(parsed?.wire.files).toEqual(files);
+    expect(parsed?.files).toEqual(files);
   });
 
   it.each([
     ["metadata only (no ?version)", { version: null, sha256: null, bundle: null }],
     ["the pending version", { version: "pending" }],
     ["no sha256", { sha256: null }],
+    ["an empty sha256", { sha256: "" }],
     ["files inside skill instead of bundle", { skill: { ...row, files }, bundle: null }],
     ["a bare array as bundle", { bundle: files }],
     ["an empty bundle", { bundle: { files: [] } }],
