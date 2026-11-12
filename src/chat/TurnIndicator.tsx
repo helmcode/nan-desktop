@@ -41,9 +41,10 @@ export function useTurnStarts(running: ReadonlySet<number>): ReadonlyMap<number,
   return starts.current;
 }
 
-/** Drops a trailing ellipsis: the animated dots already say "ongoing". */
+/** Drops a trailing ellipsis or full stop: the animated dots already say
+ * "ongoing", and a stop before them reads "minute. ••• · 12 s". */
 export function activityLabel(label: string): string {
-  return label.replace(/(…|\.\.\.)\s*$/, "");
+  return label.replace(/(…|\.+)\s*$/, "");
 }
 
 export function TurnIndicator({

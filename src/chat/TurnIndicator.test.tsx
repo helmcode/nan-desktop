@@ -43,6 +43,13 @@ describe("the turn clock", () => {
     expect(activityLabel("Pensando…")).toBe("Pensando");
     expect(activityLabel("Thinking...")).toBe("Thinking");
     expect(activityLabel("Working")).toBe("Working");
+    // A sentence label (the image one) keeps no stop before the dots.
+    expect(activityLabel("Creando la imagen. Suele tardar alrededor de un minuto.")).toBe(
+      "Creando la imagen. Suele tardar alrededor de un minuto",
+    );
+    expect(activityLabel("Creating the image. It usually takes about a minute. ")).toBe(
+      "Creating the image. It usually takes about a minute",
+    );
   });
 });
 
