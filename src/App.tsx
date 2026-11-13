@@ -192,6 +192,10 @@ const RECORDING_MIME_CANDIDATES = ["audio/webm", "audio/mp4"];
 // Preview state key for a chat that has no conversation row yet.
 const NEW_CHAT_KEY = -1;
 
+// Longest conversation title the rename field accepts; mirrors the core's
+// `RENAME_MAX_CHARS` (src-tauri/src/chat.rs), which enforces it on save.
+const RENAME_MAX_CHARS = 100;
+
 // Round 14 (S2): the Settings surface lists its sections in the sidebar that
 // normally holds the chats, and shows one section at a time. Order is the
 // reading order of the owner's reference; Account comes first because it is
@@ -2229,7 +2233,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                       aria-label={t.sidebar.renameLabel(c.title)}
                       title={t.sidebar.renameHint}
                       value={renaming.draft}
-                      maxLength={100}
+                      maxLength={RENAME_MAX_CHARS}
                       autoFocus
                       onFocus={(e) => e.currentTarget.select()}
                       onChange={(e) => setRenaming({ id: c.id, draft: e.target.value })}

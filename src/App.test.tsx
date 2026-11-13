@@ -669,6 +669,34 @@ describe("round 17 (S1): the turn's declared deliverable opens in the preview", 
     await screen.findByText("Checked.");
     expect(screen.queryByRole("complementary", { name: "Preview" })).toBeNull();
   });
+
+  it("a stopped turn keeps what it already declared: the declared PDF opens, not a later byproduct", async () => {
+    const messages = [row(1, "user", "hola")];
+    resetTauri({ ...chatHandlers(messages), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hola");
+    await sendText("crea una presentacion");
+    await act(async () => {
+      output(`${W}/Deck.pdf`, "deliverable", "document");
+      output(`${W}/Deck.pdf.png`, "byproduct");
+    });
+    // The user presses Stop after the PDF was declared; what arrived stays.
+    // Without the declaration the heuristics would pick a later file.
+    messages.push(row(2, "user", "crea una presentacion"), {
+      ...row(3, "assistant", "Rendering"),
+      partial: true,
+      artifacts: [
+        { path: `${W}/index.html`, kind: "file" },
+        { path: `${W}/Deck.pdf`, kind: "file" },
+        { path: `${W}/preview.html`, kind: "file" },
+        { path: `${W}/Deck.pdf.png`, kind: "file" },
+      ],
+    });
+    await act(async () => emit("chat://stopped", { conversation_id: 7 }));
+    const pane = await screen.findByRole("complementary", { name: "Preview" });
+    await waitFor(() => expect(within(pane).getByTitle(`${W}/Deck.pdf`)).toBeTruthy());
+    expect(within(pane).queryByTitle(`${W}/Deck.pdf.png`)).toBeNull();
+  });
 });
 
 describe("round 17 (S4): the conversation row menu", () => {
@@ -868,5 +896,41 @@ describe("round 17 (S5): unread replies are bold in the sidebar", () => {
     await waitFor(() => expect(item("Other")?.classList.contains("unread")).toBe(false));
     await act(async () => emit("images://done", { conversation_id: 7, media_path: "/d/images/a.png" }));
     await waitFor(() => expect(item("Report")?.classList.contains("unread")).toBe(true));
+  });
+
+  it("deleting an unread chat drops its mark: a new chat that reuses the id is not bold", async () => {
+    let list = [
+      { id: 7, title: "Report", updated_at: "", last_message: null },
+      { id: 8, title: "Other", updated_at: "", last_message: null },
+    ];
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hola")]),
+      conversation_list: () => list,
+      conversation_delete: (args: Record<string, unknown> | undefined) => {
+        list = list.filter((c) => c.id !== args?.conversationId);
+      },
+      chat_send: () => undefined,
+    });
+    renderApp("en");
+    await screen.findByText("hola");
+    await act(async () => emit("chat://done", { conversation_id: 8 }));
+    await waitFor(() => expect(item("Other")?.classList.contains("unread")).toBe(true));
+    // The two-step delete: arm, then confirm.
+    fireEvent.click(screen.getByRole("button", { name: 'Options for "Other"' }));
+    fireEvent.click(screen.getByRole("menuitem", { name: 'Delete chat "Other"' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitem", { name: 'Click again to delete "Other" forever' }));
+    });
+    expect(invokedWith("conversation_delete")).toEqual([{ conversationId: 8 }]);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Other" })).toBeNull());
+    expect(document.querySelector(".conv-item.unread")).toBeNull();
+    // The store hands id 8 to a fresh chat with no reply yet; a refresh
+    // (a reply in the chat on screen) brings it into the list.
+    list = [...list, { id: 8, title: "Fresh", updated_at: "", last_message: null }];
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const fresh = await screen.findByRole("button", { name: "Fresh" });
+    expect(fresh.closest(".conv-item")?.classList.contains("unread")).toBe(false);
+    expect(fresh.getAttribute("aria-describedby")).toBeNull();
+    expect(document.querySelector(".conv-item.unread")).toBeNull();
   });
 });
