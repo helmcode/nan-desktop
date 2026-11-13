@@ -21,6 +21,15 @@
 //     3. the last produced artifact that is not a scratch file;
 //     4. a scratch artifact the final message names (the user asked for it);
 //     5. nothing: pure intermediates never steal the pane (they stay chips);
+// - round 17: tools DECLARE what they produced (`chat://output`): a render
+//   command declares its document the DELIVERABLE and what it left behind
+//   (page and cover rasterisations, fonts, helper scripts) a BYPRODUCT; the
+//   image tool declares the image a deliverable. The priority is now:
+//     1. a single produced file (D2, unchanged);
+//     2. the LAST tool-declared deliverable of the turn;
+//     3. a file the final message names (not scratch, not a byproduct);
+//     4. the round 15/16 name heuristics above (2..5), last resort, with
+//        declared byproducts treated as scratch;
 // - a generated image (composer image row `media_path`, or an `image`
 //   artifact from the generate_image tool) opens as a `media` target ,
 //   it lives under app_data/images and is shown through the asset
@@ -30,6 +39,13 @@
 
 import type { Artifact, ChatMessageRow } from "../types";
 import type { PreviewTarget } from "../preview/kind";
+
+/** A file a tool produced, with the role it declared (`chat://output`). */
+export interface DeclaredOutput {
+  path: string;
+  role: "deliverable" | "byproduct";
+  kind: "document" | "image" | null;
+}
 
 /** The file name of a POSIX or Windows path. */
 export function baseName(path: string): string {
@@ -127,16 +143,42 @@ function extensionOf(path: string): string {
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
+/**
+ * A rasterisation of another produced file (deck.pdf.png, report.pdf.jpg):
+ * a cover or page render of the document, never the document itself.
+ */
+function isRenderOfSibling(path: string, paths: ReadonlySet<string>): boolean {
+  const stripped = path.replace(/\.(png|jpe?g|webp)$/i, "");
+  return stripped !== path && paths.has(stripped);
+}
+
 /** The artifact a finished reply should open (see the rules above). */
-export function finalDeliverable(content: string, artifacts: Artifact[], request = ""): Artifact | null {
+export function finalDeliverable(
+  content: string,
+  artifacts: Artifact[],
+  request = "",
+  declared: DeclaredOutput[] = [],
+): Artifact | null {
   const usable = artifacts.filter((a) => typeof a.path === "string" && a.path.length > 0);
-  const last = (list: Artifact[]): Artifact | null => list[list.length - 1] ?? null;
-  // One file (written once or rewritten): it is the deliverable (D2).
+  const last = <T>(list: T[]): T | null => list[list.length - 1] ?? null;
+  // 1. One file (written once or rewritten): it is the deliverable (D2).
   if (new Set(usable.map((a) => a.path)).size === 1) return last(usable);
+  // 2. The last deliverable a tool declared this turn.
+  const deliverable = last(declared.filter((d) => d.role === "deliverable" && d.path.length > 0));
+  if (deliverable) {
+    const produced = last(usable.filter((a) => a.path === deliverable.path));
+    return produced ?? { path: deliverable.path, kind: deliverable.kind === "image" ? "image" : "file" };
+  }
+  const byproducts = new Set(declared.filter((d) => d.role === "byproduct").map((d) => d.path));
+  const paths = new Set(usable.map((a) => a.path));
+  const scratch = (a: Artifact): boolean =>
+    byproducts.has(a.path) || isScratchFile(a.path) || isRenderOfSibling(a.path, paths);
+  // 3. A file the final message names.
   const named = usable.filter((a) => mentionsFile(content, a.path));
-  const real = usable.filter((a) => !isScratchFile(a.path));
-  const namedReal = last(named.filter((a) => !isScratchFile(a.path)));
+  const namedReal = last(named.filter((a) => !scratch(a)));
   if (namedReal) return namedReal;
+  // 4. Last resort: the name heuristics.
+  const real = usable.filter((a) => !scratch(a));
   for (const exts of requestedExtensions(request)) {
     const asked = last(real.filter((a) => exts.includes(extensionOf(a.path))));
     if (asked) return asked;
@@ -144,7 +186,7 @@ export function finalDeliverable(content: string, artifacts: Artifact[], request
   return last(real) ?? last(named);
 }
 
-export function lastProducedTarget(rows: ChatMessageRow[]): PreviewTarget | null {
+export function lastProducedTarget(rows: ChatMessageRow[], declared: DeclaredOutput[] = []): PreviewTarget | null {
   let index = rows.length - 1;
   while (index >= 0 && rows[index].role !== "assistant") index -= 1;
   if (index < 0) return null;
@@ -154,7 +196,7 @@ export function lastProducedTarget(rows: ChatMessageRow[]): PreviewTarget | null
   let ask = index - 1;
   while (ask >= 0 && rows[ask].role !== "user") ask -= 1;
   const request = ask >= 0 ? (rows[ask].content ?? "") : "";
-  const artifact = finalDeliverable(last.content ?? "", last.artifacts ?? [], request);
+  const artifact = finalDeliverable(last.content ?? "", last.artifacts ?? [], request, declared);
   if (!artifact) return null;
   return { kind: artifact.kind === "image" ? "media" : "file", ref: artifact.path };
 }

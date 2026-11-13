@@ -13,7 +13,7 @@ import {
   type Nudge,
 } from "./chat/allowNudge";
 import { approvalsReducer, placeCards, type ApprovalCardState } from "./chat/approvals";
-import { lastProducedTarget } from "./chat/autoOpen";
+import { lastProducedTarget, type DeclaredOutput } from "./chat/autoOpen";
 import { rowsForDisplay, titleFromFirstMessage, withConversation } from "./chat/conversationList";
 import { messageFiles } from "./chat/filePaths";
 import {
@@ -786,7 +786,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // its rows and open what it produced in that conversation's preview pane
   // (round 4 auto-open; see chat/autoOpen.ts). Works for a conversation the
   // user is not looking at too: the pane is open when they come back.
+  // Round 17 (S1): what the turn's tools declared they produced
+  // (chat://output), per conversation, consumed when the turn finishes.
+  const declaredOutputsRef = useRef<Map<number, DeclaredOutput[]>>(new Map());
   const reloadAfterReply = useCallback(async (conversationId: number): Promise<void> => {
+    const declared = declaredOutputsRef.current.get(conversationId) ?? [];
+    declaredOutputsRef.current.delete(conversationId);
     let rows: ChatMessageRow[];
     try {
       rows = await invoke<ChatMessageRow[]>("messages_list", { conversationId });
@@ -796,7 +801,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       return;
     }
     if (activeConvRef.current === conversationId) setMessages(rows);
-    const target = lastProducedTarget(rows);
+    const target = lastProducedTarget(rows, declared);
     if (target) setPreviews((prev) => new Map(prev).set(conversationId, { target, open: true }));
     settleSkillTurn(conversationId, rows);
   }, [settleSkillTurn]);
@@ -976,6 +981,12 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           return next;
         });
       }),
+      // Round 17 (S1): a tool declared a produced file deliverable or byproduct.
+      listen<DeclaredOutput & { conversation_id: number }>("chat://output", (event) => {
+        const { conversation_id, path, role, kind } = event.payload;
+        const list = declaredOutputsRef.current.get(conversation_id) ?? [];
+        declaredOutputsRef.current.set(conversation_id, [...list, { path, role, kind }]);
+      }),
       // Round 15 (F4): the model distilled the chat (save_chat_as_skill);
       // the form opens with it when the turn ends.
       listen<{ conversation_id: number; draft: DistilledDraft }>("chat://skill_draft", (event) => {
@@ -999,6 +1010,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         const { conversation_id, kind } = event.payload;
         markStreaming(conversation_id, false);
         clearDraft(conversation_id);
+        declaredOutputsRef.current.delete(conversation_id);
         void settleSkillAfterError(conversation_id);
         if (kind === "unauthorized") {
           setSessionExpired(true);
@@ -1580,6 +1592,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       if (override === undefined) setComposer("");
       setStreamingIds((prev) => new Set(prev).add(id));
       setDrafts((prev) => new Map(prev).set(id, ""));
+      declaredOutputsRef.current.delete(id);
       // Round 5: a new chat is listed (streaming) right away, so switching
       // away mid-reply never hides it; the refresh after `chat_send` swaps
       // in the core's stored title and ordering.

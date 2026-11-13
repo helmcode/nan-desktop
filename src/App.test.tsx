@@ -602,3 +602,71 @@ describe("folder selection and allow-mode suggestion", () => {
     expect(screen.queryByText(/You are approving many actions/)).toBeNull();
   });
 });
+
+describe("round 17 (S1): the turn's declared deliverable opens in the preview", () => {
+  const W = "/Users/ana/Proyecto";
+  async function sendText(text: string): Promise<void> {
+    const box = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: text } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+  }
+  const output = (path: string, role: "deliverable" | "byproduct", kind: "document" | "image" | null = null) =>
+    emit("chat://output", { conversation_id: 7, path, role, kind });
+
+  it("owner case: the rendered PDF opens, not the cover render produced after it", async () => {
+    const messages = [row(1, "user", "hola")];
+    resetTauri({ ...chatHandlers(messages), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hola");
+    await sendText("crea una presentacion");
+    await act(async () => {
+      output(`${W}/fonts/Inter.ttf`, "byproduct");
+      output(`${W}/Deck.pdf`, "deliverable", "document");
+      output(`${W}/s0.png`, "byproduct");
+      output(`${W}/Deck.pdf.png`, "byproduct");
+    });
+    messages.push(row(2, "user", "crea una presentacion"), {
+      ...row(3, "assistant", "Listo."),
+      artifacts: [
+        { path: `${W}/fonts/Inter.ttf`, kind: "file" },
+        { path: `${W}/index.html`, kind: "file" },
+        { path: `${W}/Deck.pdf`, kind: "file" },
+        { path: `${W}/s0.png`, kind: "file" },
+        { path: `${W}/check.js`, kind: "file" },
+        { path: `${W}/preview.html`, kind: "file" },
+        { path: `${W}/Deck.pdf.png`, kind: "file" },
+      ],
+    });
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const pane = await screen.findByRole("complementary", { name: "Preview" });
+    await waitFor(() => expect(within(pane).getByTitle(`${W}/Deck.pdf`)).toBeTruthy());
+    expect(within(pane).queryByTitle(`${W}/Deck.pdf.png`)).toBeNull();
+  });
+
+  it("declarations do not leak into the next turn: a byproduct-only turn opens nothing", async () => {
+    const messages = [row(1, "user", "hola")];
+    resetTauri({ ...chatHandlers(messages), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hola");
+    await sendText("render it");
+    await act(async () => output(`${W}/old.pdf`, "deliverable", "document"));
+    await act(async () => emit("chat://error", { conversation_id: 7, kind: "network" }));
+    await sendText("check the pages");
+    await act(async () => {
+      output(`${W}/s1.png`, "byproduct");
+      output(`${W}/s2.png`, "byproduct");
+    });
+    messages.push({
+      ...row(3, "assistant", "Checked."),
+      artifacts: [
+        { path: `${W}/s1.png`, kind: "file" },
+        { path: `${W}/s2.png`, kind: "file" },
+      ],
+    });
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    await screen.findByText("Checked.");
+    expect(screen.queryByRole("complementary", { name: "Preview" })).toBeNull();
+  });
+});

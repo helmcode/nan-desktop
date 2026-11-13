@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { baseName, isScratchFile, lastProducedTarget, mentionsFile, requestedExtensions } from "./autoOpen";
+import { baseName, isScratchFile, lastProducedTarget, mentionsFile, requestedExtensions, type DeclaredOutput } from "./autoOpen";
 import type { ChatMessageRow } from "../types";
 
 function row(id: number, role: string, extra: Partial<ChatMessageRow> = {}): ChatMessageRow {
@@ -277,5 +277,106 @@ describe("page renders and the kind the user asked for (round 16)", () => {
     expect(requestedExtensions("en Word")).toEqual([["docx", "doc", "odt"]]);
     expect(requestedExtensions("una imagen")[0]).toContain("png");
     expect(requestedExtensions("PRESENTACIÓN")[0]).toContain("pptx");
+  });
+});
+
+describe("tool-declared deliverables win over name heuristics (round 17/S1)", () => {
+  const file = (path: string) => ({ path, kind: "file" as const });
+  const deliverable = (path: string, kind: "document" | "image" = "document"): DeclaredOutput => ({
+    path,
+    role: "deliverable",
+    kind,
+  });
+  const byproduct = (path: string): DeclaredOutput => ({ path, role: "byproduct", kind: null });
+  const W = "/u/w";
+  const slides = Array.from({ length: 11 }, (_, i) => `${W}/s${i}.png`);
+  // The owner's turn, in production order: fonts, the page, the render, the
+  // slide checks, the helper scripts, a preview page and finally the cover
+  // rasterisation named after the PDF (the file the old heuristics opened).
+  const ownerArtifacts = [
+    file(`${W}/fonts/Inter-Regular.ttf`),
+    file(`${W}/fonts/Inter-Bold.ttf`),
+    file(`${W}/index.html`),
+    file(`${W}/Cristian-Cordova-Helmcode.pdf`),
+    ...slides.map(file),
+    file(`${W}/check.js`),
+    file(`${W}/check-slides.js`),
+    file(`${W}/preview.html`),
+    file(`${W}/Cristian-Cordova-Helmcode.pdf.png`),
+  ];
+  const ownerDeclared: DeclaredOutput[] = [
+    byproduct(`${W}/fonts/Inter-Regular.ttf`),
+    byproduct(`${W}/fonts/Inter-Bold.ttf`),
+    deliverable(`${W}/Cristian-Cordova-Helmcode.pdf`),
+    ...slides.map(byproduct),
+    byproduct(`${W}/Cristian-Cordova-Helmcode.pdf.png`),
+  ];
+  const turn = (artifacts: ReturnType<typeof file>[], content = "Listo.") => [
+    row(1, "user", { content: "crea una presentacion" }),
+    row(2, "assistant", { content, artifacts }),
+  ];
+
+  it("owner case: 'crea una presentacion' with fonts, html, slide renders, scripts and a cover opens the PDF", () => {
+    expect(lastProducedTarget(turn(ownerArtifacts), ownerDeclared)).toEqual({
+      kind: "file",
+      ref: `${W}/Cristian-Cordova-Helmcode.pdf`,
+    });
+  });
+
+  it("owner case without declarations (legacy core): the cover render of the PDF is not the deliverable", () => {
+    expect(lastProducedTarget(turn(ownerArtifacts))).not.toEqual({
+      kind: "file",
+      ref: `${W}/Cristian-Cordova-Helmcode.pdf.png`,
+    });
+  });
+
+  it("the LAST declared deliverable wins when a turn renders twice", () => {
+    const artifacts = [file(`${W}/draft.pdf`), file(`${W}/final.pdf`), file(`${W}/notes.md`)];
+    const declared = [deliverable(`${W}/draft.pdf`), deliverable(`${W}/final.pdf`)];
+    expect(lastProducedTarget(turn(artifacts), declared)).toEqual({ kind: "file", ref: `${W}/final.pdf` });
+  });
+
+  it("a declared deliverable beats a file the final message names", () => {
+    const artifacts = [file(`${W}/deck.pdf`), file(`${W}/index.html`)];
+    const reply = turn(artifacts, "He generado index.html y lo he renderizado.");
+    expect(lastProducedTarget(reply, [deliverable(`${W}/deck.pdf`)])).toEqual({ kind: "file", ref: `${W}/deck.pdf` });
+  });
+
+  it("image generation: the declared image opens as media among other files", () => {
+    const artifacts = [file(`${W}/prompt.txt`), { path: "/d/images/9a.png", kind: "image" as const }, file(`${W}/9a.png`)];
+    expect(lastProducedTarget(turn(artifacts), [deliverable("/d/images/9a.png", "image")])).toEqual({
+      kind: "media",
+      ref: "/d/images/9a.png",
+    });
+  });
+
+  it("a byproduct-only turn opens nothing", () => {
+    const artifacts = [file(`${W}/cover.png`), file(`${W}/fonts/A.ttf`), file(`${W}/thumb-wide.webp`)];
+    const declared = artifacts.map((a) => byproduct(a.path));
+    expect(lastProducedTarget(turn(artifacts, "Done."), declared)).toBeNull();
+  });
+
+  it("a byproduct still opens when the final message names it (the user asked for it)", () => {
+    const artifacts = [file(`${W}/cover.png`), file(`${W}/fonts/A.ttf`)];
+    const declared = artifacts.map((a) => byproduct(a.path));
+    expect(lastProducedTarget(turn(artifacts, "Aquí tienes cover.png"), declared)).toEqual({
+      kind: "file",
+      ref: `${W}/cover.png`,
+    });
+  });
+
+  it("model-written files are undeclared: the file the final message names wins over the heuristics", () => {
+    const artifacts = [file(`${W}/informe.md`), file(`${W}/datos.csv`)];
+    expect(lastProducedTarget(turn(artifacts, "Te dejo el resumen en informe.md"), [])).toEqual({
+      kind: "file",
+      ref: `${W}/informe.md`,
+    });
+  });
+
+  it("a single produced file still opens first, even when declared a byproduct", () => {
+    expect(lastProducedTarget(turn([file(`${W}/shot.png`)]), [byproduct(`${W}/shot.png`)])).toEqual({
+      kind: "file",
+      ref: `${W}/shot.png`,
+    });
   });
 });
