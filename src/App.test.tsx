@@ -821,3 +821,52 @@ describe("round 17 (S4): a rename saves once", () => {
     ]);
   });
 });
+
+describe("round 17 (S5): unread replies are bold in the sidebar", () => {
+  function twoChats() {
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hola")]),
+      conversation_list: () => [
+        { id: 7, title: "Report", updated_at: "", last_message: null },
+        { id: 8, title: "Other", updated_at: "", last_message: null },
+      ],
+      chat_send: () => undefined,
+    });
+  }
+  const item = (name: string) => screen.getByRole("button", { name }).closest(".conv-item");
+
+  it("a reply that finishes in a chat not on screen bolds it until it is opened", async () => {
+    twoChats();
+    renderApp("en");
+    await screen.findByText("hola");
+    fireEvent.click(screen.getByRole("button", { name: "Other" }));
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    await waitFor(() => expect(item("Report")?.classList.contains("unread")).toBe(true));
+    const report = screen.getByRole("button", { name: "Report" });
+    expect(report.getAttribute("aria-describedby")).toBe("conv-unread-hint");
+    expect(document.getElementById("conv-unread-hint")?.textContent).toBe("New reply");
+    // The chat on screen is never marked.
+    expect(item("Other")?.classList.contains("unread")).toBe(false);
+    // Opening it clears the mark.
+    fireEvent.click(report);
+    await waitFor(() => expect(item("Report")?.classList.contains("unread")).toBe(false));
+    expect(screen.getByRole("button", { name: "Report" }).getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("a reply in the chat on screen is not unread; each chat keeps its own mark", async () => {
+    twoChats();
+    renderApp("es");
+    await screen.findByText("hola");
+    fireEvent.click(screen.getByRole("button", { name: "Report" }));
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    await act(async () => emit("chat://done", { conversation_id: 8 }));
+    await waitFor(() => expect(item("Other")?.classList.contains("unread")).toBe(true));
+    expect(item("Report")?.classList.contains("unread")).toBe(false);
+    expect(document.getElementById("conv-unread-hint")?.textContent).toBe("Respuesta nueva");
+    // A finished image in a background chat counts too.
+    fireEvent.click(screen.getByRole("button", { name: "Other" }));
+    await waitFor(() => expect(item("Other")?.classList.contains("unread")).toBe(false));
+    await act(async () => emit("images://done", { conversation_id: 7, media_path: "/d/images/a.png" }));
+    await waitFor(() => expect(item("Report")?.classList.contains("unread")).toBe(true));
+  });
+});

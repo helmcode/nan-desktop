@@ -610,6 +610,12 @@ button:disabled {
   color: var(--text);
 }
 
+/* Round 17 (S5): a reply arrived while another chat was on screen. */
+.conv-item.unread .conv-title {
+  font-weight: 650;
+  color: var(--text);
+}
+
 /* Round 17 (S4): the row menu (three dots) replaces the hover trash. */
 .conv-menu {
   position: relative;

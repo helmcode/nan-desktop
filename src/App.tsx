@@ -916,7 +916,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // Round 17 (S1): what the turn's tools declared they produced
   // (chat://output), per conversation, consumed when the turn finishes.
   const declaredOutputsRef = useRef<Map<number, DeclaredOutput[]>>(new Map());
+  // Round 17 (S5): conversations whose reply finished while another one was
+  // on screen; their sidebar title is bold until they are opened.
+  const [unreadIds, setUnreadIds] = useState<Set<number>>(() => new Set());
   const reloadAfterReply = useCallback(async (conversationId: number): Promise<void> => {
+    if (activeConvRef.current !== conversationId) setUnreadIds((prev) => new Set(prev).add(conversationId));
     const declared = declaredOutputsRef.current.get(conversationId) ?? [];
     declaredOutputsRef.current.delete(conversationId);
     let rows: ChatMessageRow[];
@@ -1323,6 +1327,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       if (studioJobsRef.current.size > 0) return;
       setView("chat");
       setActiveConvId(conversationId);
+      setUnreadIds((prev) => (prev.has(conversationId) ? withoutKey(prev, conversationId) : prev));
       setInlineError("");
       setSessionExpired(false);
       void loadMessages(conversationId);
@@ -1470,6 +1475,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         return next;
       });
       setImageModes((prev) => withoutKey(prev, conversationId));
+      setUnreadIds((prev) => (prev.has(conversationId) ? withoutKey(prev, conversationId) : prev));
       await refreshConversations();
       void syncMemory();
     },
@@ -2202,15 +2208,20 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         ) : (
           <nav className="conv-list" aria-label={t.sidebar.history}>
             {conversations.length === 0 && <p className="conv-empty">{t.sidebar.empty}</p>}
+            {/* Round 17 (S5): what a bold (unread) chat means, for assistive tech. */}
+            <span id="conv-unread-hint" className="visually-hidden">
+              {t.sidebar.unread}
+            </span>
             {conversations.map((c) => {
               const armed = pendingDeleteId === c.id;
+              const unread = unreadIds.has(c.id) && c.id !== activeConvId;
               const live = streamingIds.has(c.id) || imageGeneratingIds.has(c.id);
               // A Studio edit writing to this conversation also locks its delete.
               const editLocked = studioBusy && studioJobsRef.current.has(c.id);
               return (
                 <div
                   key={c.id}
-                  className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}${live ? " streaming" : ""}`}
+                  className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}${live ? " streaming" : ""}${unread ? " unread" : ""}`}
                 >
                   {renaming?.id === c.id ? (
                     <input
@@ -2243,6 +2254,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                       aria-disabled={studioBusy ? "true" : undefined}
                       title={studioBusy ? t.sidebar.switchBlocked : c.title}
                       aria-current={c.id === activeConvId ? "page" : undefined}
+                      aria-describedby={unread ? "conv-unread-hint" : undefined}
                     >
                       <span className="conv-title">{c.title}</span>
                       {live && (
