@@ -362,6 +362,17 @@ function ShareBadge({ state }: { state: ShareState }) {
           : state.kind === "rejected"
             ? s.statusRejected
             : s.statusHidden;
+  // Round 17 (S3): a share still awaiting an admin says so, with the why in
+  // a tooltip (and in the badge's text for assistive tech). The next sync
+  // that brings the row approved or rejected replaces it.
+  if (state.kind === "pending") {
+    return (
+      <span className="skill-badge skill-badge-pending" title={s.pendingHint} data-testid="share-pending">
+        {label}
+        <span className="visually-hidden">. {s.pendingHint}</span>
+      </span>
+    );
+  }
   return <span className={`skill-badge skill-badge-${state.kind}`}>{label}</span>;
 }
 
