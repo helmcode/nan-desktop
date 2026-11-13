@@ -426,6 +426,102 @@ pub struct ToolsSettingsView {
     pub tools_allow_run_command: bool,
 }
 
+// -------------------------------------------------------- output roles --
+//
+// Round 17: the tool that PRODUCES a file declares what it is for the turn,
+// so the preview pane opens the file the user asked for instead of guessing
+// from names. A command that renders a document (html -> PDF, a docx/xlsx
+// generator) declares that document the DELIVERABLE; everything else a
+// command leaves behind (page and cover rasterisations, downloaded fonts,
+// screenshots, helper output) is a BYPRODUCT. A moved/renamed document stays
+// the deliverable. Generated images are declared by the chat core (the
+// generate_image tool). Files the model writes itself (write_file,
+// replace_file) are NOT declared: they are byproducts unless the final
+// message names them, which the renderer already checks.
+
+/// What a produced file is for the turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputRole {
+    Deliverable,
+    Byproduct,
+}
+
+/// The kind of a declared deliverable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverableKind {
+    Document,
+    Image,
+}
+
+/// One produced file with its declared role (`kind` only for deliverables).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeclaredOutput {
+    pub path: String,
+    pub role: OutputRole,
+    pub kind: Option<DeliverableKind>,
+}
+
+impl DeclaredOutput {
+    pub fn deliverable(path: impl Into<String>, kind: DeliverableKind) -> Self {
+        Self {
+            path: path.into(),
+            role: OutputRole::Deliverable,
+            kind: Some(kind),
+        }
+    }
+
+    pub fn byproduct(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            role: OutputRole::Byproduct,
+            kind: None,
+        }
+    }
+}
+
+/// Final-document formats: what a render/convert step exists to produce.
+const DOCUMENT_EXTENSIONS: &[&str] = &[
+    "pdf", "docx", "doc", "odt", "rtf", "pptx", "ppt", "odp", "key", "xlsx", "xls", "ods", "epub",
+    "pages", "numbers",
+];
+
+/// Whether `path` is a final-document format (case-insensitive extension).
+pub fn is_document_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            DOCUMENT_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        })
+}
+
+/// The roles the tool `action_kind` (`ToolAction::kind`) declares for the
+/// files it produced. See the section comment for the contract.
+pub fn declare_outputs(action_kind: &str, produced: &[String]) -> Vec<DeclaredOutput> {
+    match action_kind {
+        "run_command" => produced
+            .iter()
+            .map(|path| {
+                if is_document_path(path) {
+                    DeclaredOutput::deliverable(path.clone(), DeliverableKind::Document)
+                } else {
+                    DeclaredOutput::byproduct(path.clone())
+                }
+            })
+            .collect(),
+        "move_path" => produced
+            .iter()
+            .filter(|path| is_document_path(path))
+            .map(|path| DeclaredOutput::deliverable(path.clone(), DeliverableKind::Document))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 // --------------------------------------------------------------- utils --
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -3007,6 +3103,102 @@ pub(crate) fn workspace_for(
 mod tests {
     use super::*;
     use std::fs;
+
+    // ---- round 17: output roles ------------------------------------------
+
+    #[test]
+    fn a_command_declares_its_document_the_deliverable_and_the_rest_byproducts() {
+        // The owner's slide deck turn: the render command leaves the PDF,
+        // a cover rasterisation named after it, and slide renders.
+        let produced: Vec<String> = [
+            "/w/Cristian-Cordova-Helmcode.pdf",
+            "/w/Cristian-Cordova-Helmcode.pdf.png",
+            "/w/s0.png",
+            "/w/fonts/Roboto-Regular.ttf",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+        assert_eq!(
+            declare_outputs("run_command", &produced),
+            vec![
+                DeclaredOutput::deliverable(
+                    "/w/Cristian-Cordova-Helmcode.pdf",
+                    DeliverableKind::Document
+                ),
+                DeclaredOutput::byproduct("/w/Cristian-Cordova-Helmcode.pdf.png"),
+                DeclaredOutput::byproduct("/w/s0.png"),
+                DeclaredOutput::byproduct("/w/fonts/Roboto-Regular.ttf"),
+            ]
+        );
+    }
+
+    #[test]
+    fn document_formats_are_recognised_case_insensitively() {
+        for path in [
+            "/a/x.pdf",
+            "/a/X.PDF",
+            "/a/deck.pptx",
+            "/a/q.xlsx",
+            "/a/r.docx",
+            "/a/b.odt",
+        ] {
+            assert!(is_document_path(path), "{path}");
+        }
+        for path in [
+            "/a/x.pdf.png",
+            "/a/index.html",
+            "/a/check.js",
+            "/a/pdf",
+            "/a/notes.md",
+        ] {
+            assert!(!is_document_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_renamed_document_stays_the_deliverable_and_writes_are_undeclared() {
+        assert_eq!(
+            declare_outputs("move_path", &["/w/final.pdf".to_string()]),
+            vec![DeclaredOutput::deliverable(
+                "/w/final.pdf",
+                DeliverableKind::Document
+            )]
+        );
+        assert!(declare_outputs("move_path", &["/w/a.png".to_string()]).is_empty());
+        // write_file / replace_file: byproduct unless the final message
+        // names the file (the renderer's rule), so nothing is declared.
+        for kind in [
+            "write_file",
+            "replace_file",
+            "save_image",
+            "read_file",
+            "delete_path",
+        ] {
+            assert!(
+                declare_outputs(kind, &["/w/report.pdf".to_string()]).is_empty(),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_outputs_serialize_as_the_renderer_expects() {
+        let value = serde_json::to_value(DeclaredOutput::deliverable(
+            "/w/a.pdf",
+            DeliverableKind::Document,
+        ))
+        .expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({ "path": "/w/a.pdf", "role": "deliverable", "kind": "document" })
+        );
+        let value = serde_json::to_value(DeclaredOutput::byproduct("/w/p1.png")).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({ "path": "/w/p1.png", "role": "byproduct", "kind": null })
+        );
+    }
 
     /// Tempdir whose guard stays alive: callers MUST keep the returned
     /// TempDir bound for the whole test.
