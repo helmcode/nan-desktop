@@ -96,6 +96,12 @@ export const en = {
     deleteArmedTitle: "Click again to delete",
     deleteTitle: "Delete",
     deleteArmed: "Delete?",
+    optionsLabel: (title: string) => `Options for "${title}"`,
+    options: "Options",
+    rename: "Rename",
+    renameLabel: (title: string) => `New name for "${title}"`,
+    renameHint: "Enter saves, Esc cancels",
+    unread: "New reply",
     noAccount: "No account",
     /** Screen-reader text on a chat whose reply is still streaming. */
     replying: "Replying",

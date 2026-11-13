@@ -670,3 +670,154 @@ describe("round 17 (S1): the turn's declared deliverable opens in the preview", 
     expect(screen.queryByRole("complementary", { name: "Preview" })).toBeNull();
   });
 });
+
+describe("round 17 (S4): the conversation row menu", () => {
+  function setupRows() {
+    let title = "Report";
+    const messages = [row(1, "user", "hola")];
+    resetTauri({
+      ...chatHandlers(messages),
+      conversation_list: () => [{ id: 7, title, updated_at: "", last_message: null }],
+      conversation_rename: (args: Record<string, unknown> | undefined) => {
+        title = String(args?.title);
+        return title;
+      },
+      conversation_delete: () => undefined,
+    });
+  }
+  const kebab = (title = "Report") => screen.findByRole("button", { name: `Options for "${title}"` });
+
+  it("replaces the trash with a menu button that opens Rename and Delete, and Escape gives focus back", async () => {
+    setupRows();
+    renderApp("en");
+    const button = await kebab();
+    expect(screen.queryByRole("button", { name: 'Delete chat "Report"' })).toBeNull();
+    expect(button.getAttribute("aria-haspopup")).toBe("menu");
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(button);
+    const menu = screen.getByRole("menu", { name: 'Options for "Report"' });
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual(["Rename", "Delete"]);
+    // The first item takes focus; arrows move between items and wrap.
+    expect(document.activeElement).toBe(items[0]);
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(items[0]);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("Rename edits inline: Enter saves through the core and focus returns to the menu button", async () => {
+    setupRows();
+    renderApp("en");
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = screen.getByRole("textbox", { name: 'New name for "Report"' });
+    expect(document.activeElement).toBe(input);
+    expect((input as HTMLInputElement).value).toBe("Report");
+    fireEvent.change(input, { target: { value: "  Q3 board deck " } });
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+    expect(invokedWith("conversation_rename")).toEqual([{ conversationId: 7, title: "Q3 board deck" }]);
+    const renamed = await kebab("Q3 board deck");
+    expect(screen.queryByRole("textbox", { name: /New name/ })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(renamed));
+  });
+
+  it("Escape cancels a rename: nothing is sent and the title stays", async () => {
+    setupRows();
+    renderApp("en");
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = screen.getByRole("textbox", { name: 'New name for "Report"' });
+    fireEvent.change(input, { target: { value: "Nope" } });
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Escape" });
+    });
+    expect(invokedWith("conversation_rename")).toEqual([]);
+    expect(screen.queryByRole("textbox", { name: /New name/ })).toBeNull();
+    expect(screen.getByText("Report")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: 'Options for "Report"' })));
+  });
+
+  it("an empty or unchanged name sends nothing", async () => {
+    setupRows();
+    renderApp("en");
+    for (const value of ["   ", "Report"]) {
+      fireEvent.click(await kebab());
+      fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+      const input = screen.getByRole("textbox", { name: 'New name for "Report"' });
+      fireEvent.change(input, { target: { value } });
+      await act(async () => {
+        fireEvent.keyDown(input, { key: "Enter" });
+      });
+    }
+    expect(invokedWith("conversation_rename")).toEqual([]);
+  });
+
+  it("Delete keeps the destructive two-step confirmation", async () => {
+    setupRows();
+    renderApp("en");
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: 'Delete chat "Report"' }));
+    expect(invokedWith("conversation_delete")).toEqual([]);
+    const armed = screen.getByRole("menuitem", { name: 'Click again to delete "Report" forever' });
+    expect(armed.textContent).toBe("Delete?");
+    await act(async () => {
+      fireEvent.click(armed);
+    });
+    expect(invokedWith("conversation_delete")).toEqual([{ conversationId: 7 }]);
+  });
+
+  it("speaks Spanish", async () => {
+    setupRows();
+    renderApp("es");
+    fireEvent.click(await screen.findByRole("button", { name: "Opciones de «Report»" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Renombrar", "Eliminar"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Eliminar la conversación «Report»" }));
+    expect(screen.getByRole("menuitem", { name: "Pulsa otra vez para eliminar «Report» para siempre" }).textContent).toBe(
+      "¿Eliminar?",
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Renombrar" }));
+    expect(screen.getByRole("textbox", { name: "Nuevo nombre para «Report»" })).toBeTruthy();
+  });
+});
+
+describe("round 17 (S4): a rename saves once", () => {
+  it("a blur fired after Enter (webviews that blur on removal) does not save twice; leaving the field saves", async () => {
+    let title = "Report";
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hola")]),
+      conversation_list: () => [{ id: 7, title, updated_at: "", last_message: null }],
+      conversation_rename: (args: Record<string, unknown> | undefined) => {
+        title = String(args?.title);
+        return title;
+      },
+    });
+    renderApp("en");
+    fireEvent.click(await screen.findByRole("button", { name: 'Options for "Report"' }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = screen.getByRole("textbox", { name: 'New name for "Report"' });
+    fireEvent.change(input, { target: { value: "Deck" } });
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+      fireEvent.blur(input);
+    });
+    expect(invokedWith("conversation_rename")).toHaveLength(1);
+    fireEvent.click(await screen.findByRole("button", { name: 'Options for "Deck"' }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const again = screen.getByRole("textbox", { name: 'New name for "Deck"' });
+    fireEvent.change(again, { target: { value: "Deck v2" } });
+    await act(async () => {
+      fireEvent.blur(again);
+    });
+    expect(invokedWith("conversation_rename")).toEqual([
+      { conversationId: 7, title: "Deck" },
+      { conversationId: 7, title: "Deck v2" },
+    ]);
+  });
+});

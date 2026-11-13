@@ -75,6 +75,7 @@ import {
   IconMemory,
   IconMic,
   IconPanel,
+  IconPencil,
   IconImage,
   IconPlus,
   IconSparkles,
@@ -440,6 +441,132 @@ function Authorizing({
         </>
       )}
     </CenterScreen>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Conversation row menu (round 17, S4): the three dots on hover or focus
+// ---------------------------------------------------------------------------
+
+/// "Rename" and "Delete" for one conversation. Delete keeps the two-step
+/// confirmation (the first click arms it, the second deletes); Escape or a
+/// click outside closes the menu and gives focus back to its button.
+function ConversationMenu({
+  id,
+  title,
+  armed,
+  deleteLocked,
+  onRename,
+  onDelete,
+}: {
+  id: number;
+  title: string;
+  armed: boolean;
+  deleteLocked: boolean;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const layer = useEscapeLayer(open);
+
+  useEffect(() => {
+    if (!open) return;
+    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(layer)) return;
+      e.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey, { capture: true });
+    };
+  }, [open, layer]);
+
+  /** Up/Down move between the items, Home/End jump, Tab closes. */
+  const onMenuKey = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const move = (index: number): void => {
+      e.preventDefault();
+      items[(index + items.length) % items.length]?.focus();
+    };
+    if (e.key === "ArrowDown") move(at + 1);
+    else if (e.key === "ArrowUp") move(at - 1);
+    else if (e.key === "Home") move(0);
+    else if (e.key === "End") move(items.length - 1);
+    else if (e.key === "Tab") setOpen(false);
+  };
+
+  return (
+    <div className={`conv-menu${open || armed ? " open" : ""}`} ref={rootRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="conv-menu-btn"
+        data-conv-menu={id}
+        aria-label={t.sidebar.optionsLabel(title)}
+        title={t.sidebar.options}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <IconDots size={15} />
+      </button>
+      {open && (
+        <div className="conv-menu-pop" role="menu" aria-label={t.sidebar.optionsLabel(title)} ref={menuRef} onKeyDown={onMenuKey}>
+          <button
+            type="button"
+            role="menuitem"
+            className="ws-menu-item"
+            onClick={() => {
+              setOpen(false);
+              onRename();
+            }}
+          >
+            <IconPencil size={15} />
+            <span className="ws-menu-text">{t.sidebar.rename}</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className={`ws-menu-item conv-menu-delete${armed ? " armed" : ""}`}
+            aria-label={armed ? t.sidebar.deleteArmedLabel(title) : t.sidebar.deleteLabel(title)}
+            aria-disabled={deleteLocked ? "true" : undefined}
+            title={deleteLocked ? t.sidebar.switchBlocked : armed ? t.sidebar.deleteArmedTitle : t.sidebar.deleteTitle}
+            onClick={() => {
+              if (deleteLocked) return;
+              onDelete();
+            }}
+          >
+            <IconTrash size={15} />
+            <span className="ws-menu-text">{armed ? t.sidebar.deleteArmed : t.sidebar.deleteTitle}</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/// Three vertical dots (the row menu button).
+function IconDots({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="5" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <circle cx="12" cy="19" r="1.6" />
+    </svg>
   );
 }
 
@@ -1369,6 +1496,44 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     [pendingDeleteId, deleteConversation],
   );
 
+  // Round 17 (S4): rename a conversation inline from its row menu. Enter
+  // (or leaving the field) saves, Escape cancels; focus goes back to the
+  // row's menu button either way.
+  const [renaming, setRenaming] = useState<{ id: number; draft: string } | null>(null);
+  const [focusMenuOf, setFocusMenuOf] = useState<number | null>(null);
+  useEffect(() => {
+    if (focusMenuOf === null) return;
+    document.querySelector<HTMLButtonElement>(`[data-conv-menu="${focusMenuOf}"]`)?.focus();
+    setFocusMenuOf(null);
+  }, [focusMenuOf]);
+  // The live edit, read synchronously: Enter unmounts the field, and a
+  // webview that fires blur on removal must not save it a second time.
+  const renamingRef = useRef<{ id: number; draft: string } | null>(null);
+  renamingRef.current = renaming;
+  const finishRename = useCallback(
+    async (save: boolean): Promise<void> => {
+      const current = renamingRef.current;
+      if (!current) return;
+      renamingRef.current = null;
+      setRenaming(null);
+      setFocusMenuOf(current.id);
+      const before = conversations.find((c) => c.id === current.id)?.title ?? "";
+      const title = current.draft.trim();
+      if (!save || title.length === 0 || title === before) return;
+      // Optimistic: the list shows the new title at once; the core's stored
+      // (normalized) one replaces it, a failure restores the old one.
+      setConversations((prev) => prev.map((c) => (c.id === current.id ? { ...c, title } : c)));
+      try {
+        await invoke<string>("conversation_rename", { conversationId: current.id, title });
+      } catch {
+        // The refresh below brings the stored title back.
+      }
+      await refreshConversations();
+      void syncMemory();
+    },
+    [conversations, refreshConversations, syncMemory],
+  );
+
   const streamingActive = activeConvId !== null && streamingIds.has(activeConvId);
   const turnStarts = useTurnStarts(streamingIds);
   const activeTurnStart = activeConvId !== null ? turnStarts.get(activeConvId) : undefined;
@@ -2047,34 +2212,57 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   key={c.id}
                   className={`conv-item${c.id === activeConvId && view === "chat" ? " active" : ""}${live ? " streaming" : ""}`}
                 >
-                  <button
-                    type="button"
-                    className="conv-main"
-                    onClick={() => selectConversation(c.id)}
-                    aria-disabled={studioBusy ? "true" : undefined}
-                    title={studioBusy ? t.sidebar.switchBlocked : c.title}
-                    aria-current={c.id === activeConvId ? "page" : undefined}
-                  >
-                    <span className="conv-title">{c.title}</span>
-                    {live && (
-                      <>
-                        <span className="pulse-dot" aria-hidden="true" />
-                        {/* Inline spans concatenate in the accessible name:
-                            the space keeps it "Fox Replying", not "FoxReplying". */}{" "}
-                        <span className="visually-hidden">{t.sidebar.replying}</span>
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    className={`conv-delete${armed ? " armed" : ""}`}
-                    aria-label={armed ? t.sidebar.deleteArmedLabel(c.title) : t.sidebar.deleteLabel(c.title)}
-                    aria-disabled={editLocked ? "true" : undefined}
-                    title={editLocked ? t.sidebar.switchBlocked : armed ? t.sidebar.deleteArmedTitle : t.sidebar.deleteTitle}
-                    onClick={() => confirmDeleteConversation(c.id)}
-                  >
-                    {armed ? t.sidebar.deleteArmed : <IconTrash size={15} />}
-                  </button>
+                  {renaming?.id === c.id ? (
+                    <input
+                      className="conv-rename"
+                      aria-label={t.sidebar.renameLabel(c.title)}
+                      title={t.sidebar.renameHint}
+                      value={renaming.draft}
+                      maxLength={100}
+                      autoFocus
+                      onFocus={(e) => e.currentTarget.select()}
+                      onChange={(e) => setRenaming({ id: c.id, draft: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.nativeEvent.isComposing) return;
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void finishRename(true);
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          void finishRename(false);
+                        }
+                      }}
+                      onBlur={() => void finishRename(true)}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="conv-main"
+                      onClick={() => selectConversation(c.id)}
+                      aria-disabled={studioBusy ? "true" : undefined}
+                      title={studioBusy ? t.sidebar.switchBlocked : c.title}
+                      aria-current={c.id === activeConvId ? "page" : undefined}
+                    >
+                      <span className="conv-title">{c.title}</span>
+                      {live && (
+                        <>
+                          <span className="pulse-dot" aria-hidden="true" />
+                          {/* Inline spans concatenate in the accessible name:
+                              the space keeps it "Fox Replying", not "FoxReplying". */}{" "}
+                          <span className="visually-hidden">{t.sidebar.replying}</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                  <ConversationMenu
+                    id={c.id}
+                    title={c.title}
+                    armed={armed}
+                    deleteLocked={editLocked}
+                    onRename={() => setRenaming({ id: c.id, draft: c.title })}
+                    onDelete={() => confirmDeleteConversation(c.id)}
+                  />
                 </div>
               );
             })}

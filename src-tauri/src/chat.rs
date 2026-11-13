@@ -1626,6 +1626,52 @@ pub fn conversation_delete(app: AppHandle, conversation_id: i64) -> Result<(), S
     chat_store::delete_conversation(&conn, conversation_id).map_err(|err| err.to_string())
 }
 
+/// Longest title a user can give a conversation (round 17, S4).
+pub const RENAME_MAX_CHARS: usize = 100;
+
+/// A user-typed conversation title: whitespace collapsed, at most
+/// [`RENAME_MAX_CHARS`] chars; `None` when nothing is left.
+pub fn normalized_rename(title: &str) -> Option<String> {
+    let collapsed = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(collapsed.chars().take(RENAME_MAX_CHARS).collect())
+}
+
+/// Rename a conversation and return the stored title. The conversation is
+/// touched so account memory uploads the new title (a newer remote copy
+/// would otherwise overwrite it on the next merge).
+pub fn rename_conversation(
+    conn: &rusqlite::Connection,
+    conversation_id: i64,
+    title: &str,
+) -> Result<String, String> {
+    let title = normalized_rename(title).ok_or_else(|| "empty_title".to_string())?;
+    if chat_store::conversation_get(conn, conversation_id)
+        .map_err(|err| err.to_string())?
+        .is_none()
+    {
+        return Err("not_found".into());
+    }
+    chat_store::set_conversation_title(conn, conversation_id, &title)
+        .map_err(|err| err.to_string())?;
+    chat_store::touch_conversation(conn, conversation_id).map_err(|err| err.to_string())?;
+    Ok(title)
+}
+
+/// Rename a conversation from the sidebar (round 17, S4).
+#[tauri::command]
+pub fn conversation_rename(
+    app: AppHandle,
+    conversation_id: i64,
+    title: String,
+) -> Result<String, String> {
+    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let conn = chat_store::open_db(&dir)?;
+    rename_conversation(&conn, conversation_id, &title)
+}
+
 /// Load a conversation's transcript (ascending id order).
 #[tauri::command]
 pub fn messages_list(app: AppHandle, conversation_id: i64) -> Result<Vec<ChatMessageRow>, String> {
@@ -2665,6 +2711,60 @@ mod tests {
         assert!(file_artifacts(&Err(tools::Rejection::new("io", "x"))).is_empty());
         let none = outcome_for_model(Ok(tools::ToolOutcome::default()));
         assert!(!none.contains("\"files\""));
+    }
+
+    #[test]
+    fn a_rename_collapses_whitespace_caps_the_length_and_refuses_empty() {
+        assert_eq!(
+            normalized_rename("  Q3   board\n deck "),
+            Some("Q3 board deck".into())
+        );
+        assert_eq!(normalized_rename(" \t\n"), None);
+        let long = "a".repeat(RENAME_MAX_CHARS + 20);
+        assert_eq!(
+            normalized_rename(&long).map(|t| t.chars().count()),
+            Some(RENAME_MAX_CHARS)
+        );
+        // Multi-byte text is cut on char boundaries.
+        let accented = "é".repeat(RENAME_MAX_CHARS + 1);
+        assert_eq!(
+            normalized_rename(&accented).map(|t| t.chars().count()),
+            Some(RENAME_MAX_CHARS)
+        );
+    }
+
+    #[test]
+    fn renaming_a_conversation_stores_the_title_and_touches_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let conn = chat_store::open_db(tmp.path()).expect("db");
+        let id = chat_store::insert_conversation(&conn, "nan", "old").expect("insert");
+        let before = chat_store::conversation_get(&conn, id).unwrap().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(
+            rename_conversation(&conn, id, "  Board   deck "),
+            Ok("Board deck".to_string())
+        );
+        let after = chat_store::conversation_get(&conn, id).unwrap().unwrap();
+        assert_eq!(after.title, "Board deck");
+        assert!(
+            after.updated_at > before.updated_at,
+            "touched for memory sync"
+        );
+        assert_eq!(
+            rename_conversation(&conn, id, "   "),
+            Err("empty_title".into())
+        );
+        assert_eq!(
+            chat_store::conversation_get(&conn, id)
+                .unwrap()
+                .unwrap()
+                .title,
+            "Board deck"
+        );
+        assert_eq!(
+            rename_conversation(&conn, id + 99, "x"),
+            Err("not_found".into())
+        );
     }
 
     #[test]
