@@ -37,3 +37,9 @@ vault.bin
 chat.db
 chat.db-*
 tools-audit.log
+# Signing material (audit C5): Apple .p12 / App Store Connect .p8, Windows
+# .pfx / .cer. They belong in the GitHub secrets, never in the tree.
+*.p12
+*.p8
+*.pfx
+*.cer

@@ -1,12 +1,20 @@
 name: Release
 
-# Builds installers for the 3 desktop OSes on a vX.Y.Z tag and fills a DRAFT
-# GitHub release with the artifacts (publishing stays a human decision).
+# Builds installers for the 3 desktop OSes on a strict vX.Y.Z tag, fills a
+# DRAFT GitHub release with the artifacts, smoke-tests the installers, and
+# publishes the release only after a human approves the `release`
+# environment (the required reviewer is the publish gate).
 #
 #   macOS arm64  -> dmg + .app.tar.gz  (aarch64-apple-darwin)
 #   macOS x64    -> dmg + .app.tar.gz  (x86_64-apple-darwin, cross-compiled)
 #   Windows      -> msi + nsis exe
 #   Linux        -> AppImage + deb + rpm
+#
+# Job graph:
+#
+#   prepare -> build (4 legs) -> rename-assets (stable names + latest.json) -+
+#                            \-> smoke (Windows / Linux / macOS installers) --+-> publish
+#                                                                                (env: release)
 #
 # Code signing (see SIGNING.md) turns itself on when the secrets exist:
 #
@@ -14,7 +22,8 @@ name: Release
 #            (APPLE_API_ISSUER/APPLE_API_KEY_ID/APPLE_API_KEY) -> Developer ID
 #            signature + hardened runtime + notarization + stapling.
 #            Without them: ad-hoc bundle seal (verifies, but Gatekeeper still
-#            blocks quarantined downloads).
+#            blocks quarantined downloads). publish REFUSES an ad-hoc macOS
+#            build unless the run was dispatched with allow_unsigned=true.
 #   Windows  WINDOWS_CERTIFICATE + WINDOWS_CERTIFICATE_PASSWORD -> Authenticode
 #            on the app exe, the setup exe and the msi. Without: unsigned.
 #   Updater  TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD
@@ -23,11 +32,29 @@ name: Release
 #            latest.json (the in-app "Update" banner feed). Without: no
 #            latest.json, installed apps simply see no update.
 #
+# Secret scoping (audit H2): NO signing secret is present while third-party
+# code runs (pnpm install, vite, cargo build scripts, proc macros). The
+# compile step of every leg runs without secrets; the Windows certificate is
+# only given to the `tauri bundle` step (bundler + windows-sign.ps1), and the
+# updater key only to the dedicated "Sign updater bundles" steps, which call
+# `tauri signer sign` on the finished installers.
+#
 # The release body and each job summary state which path was taken.
 
 on:
   push:
-    tags: [ 'v*' ]
+    # Strict semver only (audit H5): v1.2.3. Pre-release / odd tags never
+    # build a release. The prepare guard re-checks the shape (dispatch path).
+    tags: [ 'v[0-9]+.[0-9]+.[0-9]+' ]
+  # Manual re-run on an existing tag (choose the tag as the ref). The only
+  # reason to use it is allow_unsigned: shipping a macOS build without
+  # Developer ID + notarization is an explicit, recorded decision.
+  workflow_dispatch:
+    inputs:
+      allow_unsigned:
+        description: 'Allow publishing when macOS is NOT Developer ID signed + notarized'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -44,18 +71,53 @@ jobs:
     outputs:
       release-id: ${{ steps.release.outputs.id }}
       updater-signed: ${{ steps.release.outputs.updater-signed }}
+      macos-signed: ${{ steps.release.outputs.macos-signed }}
+      version: ${{ steps.guard.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: "Guard: tag version matches the manifests"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Guard: strict vX.Y.Z tag that matches the 3 manifests"
+        id: guard
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::releases run from a tag ref only (got $GITHUB_REF_TYPE $GITHUB_REF_NAME)"; exit 1
+          fi
+          tag="$GITHUB_REF_NAME"
+          if ! [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::tag $tag is not a strict vMAJOR.MINOR.PATCH version"; exit 1
+          fi
+          want="${tag#v}"
           fail=0
-          grep -Fq "\"version\": \"$tag\"" src-tauri/tauri.conf.json || { echo "::error::src-tauri/tauri.conf.json version != $tag"; fail=1; }
-          grep -Fq "version = \"$tag\"" src-tauri/Cargo.toml || { echo "::error::src-tauri/Cargo.toml version != $tag"; fail=1; }
-          grep -Fq "\"version\": \"$tag\"" package.json || { echo "::error::package.json version != $tag"; fail=1; }
+          check() { # <file> <found>
+            if [ -z "$2" ]; then
+              echo "::error::$1: version field missing or unreadable"; fail=1
+            elif [ "$2" != "$want" ]; then
+              echo "::error::$1 version $2 != tag $want"; fail=1
+            else
+              echo "$1: $2"
+            fi
+          }
+          # Parsed, not grepped: a dependency line such as `foo = { version =
+          # "0.3.0" }` must never satisfy the guard. jq -e fails on null.
+          check src-tauri/tauri.conf.json "$(jq -er '.version | strings' src-tauri/tauri.conf.json || true)"
+          check package.json "$(jq -er '.version | strings' package.json || true)"
+          # Only the `version` key of the [package] table of Cargo.toml.
+          cargo_version=$(awk '
+            /^[[:space:]]*\[/ { in_pkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*(#.*)?$/); next }
+            in_pkg && /^[[:space:]]*version[[:space:]]*=/ {
+              line = $0
+              sub(/^[[:space:]]*version[[:space:]]*=[[:space:]]*"/, "", line)
+              if (line == $0) exit
+              sub(/".*$/, "", line)
+              print line
+              exit
+            }' src-tauri/Cargo.toml)
+          check src-tauri/Cargo.toml "$cargo_version"
           [ "$fail" -eq 0 ] || exit 1
+          echo "version=$want" >> "$GITHUB_OUTPUT"
       - name: Create or reuse draft release
         id: release
         env:
@@ -88,7 +150,7 @@ jobs:
             else
               echo "- **Windows:** NOT code-signed yet. SmartScreen will show \"Windows protected your PC\": click \"More info\" -> \"Run anyway\"."
             fi
-            echo "- **Linux:** packages are not signed (standard for AppImage/deb/rpm from GitHub releases)."
+            echo "- **Linux:** packages are not signed (standard for AppImage/deb/rpm from GitHub releases). Signing in requires a Secret Service provider (GNOME Keyring or KWallet) to store the session."
             echo
             echo "Verify the SHA-256 of your download against the value GitHub shows next to each asset before installing. See [SIGNING.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/SIGNING.md) and [SECURITY.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/SECURITY.md)."
           } > "$body"
@@ -105,11 +167,14 @@ jobs:
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$id" -F body=@"$body" >/dev/null
             echo "reusing release $id (body refreshed)"
           fi
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-          echo "updater-signed=$UPDATER_SIGNED" >> "$GITHUB_OUTPUT"
+          {
+            echo "id=$id"
+            echo "updater-signed=$UPDATER_SIGNED"
+            echo "macos-signed=$MACOS_SIGNED"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "### Signing plan for $TAG"
-            echo "- macOS: $([ "$MACOS_SIGNED" = true ] && echo 'Developer ID + notarization' || echo 'ad-hoc fallback (no Apple secrets)')"
+            echo "- macOS: $([ "$MACOS_SIGNED" = true ] && echo 'Developer ID + notarization' || echo 'ad-hoc fallback (no Apple secrets): publish refuses unless allow_unsigned')"
             echo "- Windows: $([ "$WINDOWS_SIGNED" = true ] && echo 'Authenticode' || echo 'unsigned (no certificate secret)')"
             echo "- Auto-update feed: $([ "$UPDATER_SIGNED" = true ] && echo 'signed latest.json' || echo 'OFF (no TAURI_SIGNING_PRIVATE_KEY secret): installed apps see no update')"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -123,20 +188,29 @@ jobs:
           - os: macos-latest
             args: --target aarch64-apple-darwin
             rust-target: aarch64-apple-darwin
+            artifact: macos-aarch64
           - os: macos-latest
             args: --target x86_64-apple-darwin
             rust-target: x86_64-apple-darwin
+            artifact: macos-x64
           - os: ubuntu-22.04
             args: ''
             rust-target: ''
+            artifact: linux
           - os: windows-latest
             args: ''
             rust-target: ''
+            artifact: windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
+    env:
+      # Every installer that leaves this job is staged here first; the upload
+      # and artifact steps read ONLY this directory. Relative to the
+      # workspace on purpose: Git Bash on Windows mangles backslash paths.
+      STAGE: release-stage
     steps:
       - name: Checkout
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -153,7 +227,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2.9.3
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 
@@ -169,58 +243,59 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev
 
       # ----------------------------------------------- Windows + Linux ----
-      # One build-config overlay for both:
-      # - Windows + certificate secret: register scripts/windows-sign.ps1 as
-      #   Tauri's signCommand so the app exe AND both installers get signed
-      #   during bundling. Without it, the build is unsigned.
-      # - Updater key secret: createUpdaterArtifacts, so the bundler writes a
-      #   minisign .sig next to every installer (uploaded with it). Kept out
-      #   of tauri.conf.json so local builds never need the private key.
-      #   (macOS signs its re-packed .app.tar.gz itself after the Apple
-      #   signature, see the macOS upload step.)
-      - name: Configure build overlay (Windows / Linux)
+      # The compile runs with NO signing secret in its environment (audit H2).
+      # Updater signatures are NOT produced by the bundler any more (the
+      # createUpdaterArtifacts overlay would need the private key during the
+      # whole build): the "Sign updater bundles" step below signs the
+      # finished installers with `tauri signer sign`, which writes the same
+      # <installer>.sig the bundler used to write, bound to the app version.
+      - name: Configure Authenticode signing (Windows)
         id: overlay
-        if: runner.os != 'macOS'
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           HAS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
-          HAS_UPDATER_KEY: ${{ needs.prepare.outputs.updater-signed }}
         run: |
-          $bundle = @{}
-          if ($env:RUNNER_OS -eq 'Windows') {
-            if ($env:HAS_CERT -eq 'true') {
-              $script = Join-Path $env:GITHUB_WORKSPACE 'scripts\windows-sign.ps1'
-              $bundle.windows = @{ signCommand = @{ cmd = 'pwsh'; args = @('-NoProfile', '-File', $script, '%1') } }
-              "mode=authenticode" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-            } else {
-              "mode=unsigned" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-            }
-          }
-          if ($env:HAS_UPDATER_KEY -eq 'true') { $bundle.createUpdaterArtifacts = $true }
-          if ($bundle.Count -gt 0) {
+          # Certificate secret present: register scripts/windows-sign.ps1 as
+          # Tauri's signCommand so the app exe AND both installers get signed
+          # while bundling. Without it, the build is unsigned.
+          if ($env:HAS_CERT -eq 'true') {
+            $script = Join-Path $env:GITHUB_WORKSPACE 'scripts\windows-sign.ps1'
+            $bundle = @{ windows = @{ signCommand = @{ cmd = 'pwsh'; args = @('-NoProfile', '-File', $script, '%1') } } }
             $path = Join-Path $env:RUNNER_TEMP 'tauri.release-overlay.json'
             @{ bundle = $bundle } | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 $path
             Get-Content $path
-            "config-arg=--config `"$path`"" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+            "mode=authenticode" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+            "config=$path" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } else {
+            "mode=unsigned" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           }
 
-      # ------------------------------------------- Windows + Linux build ----
-      - name: Build and upload to draft release (Windows / Linux)
+      - name: Build (Windows / Linux, no secrets)
         if: runner.os != 'macOS'
-        uses: tauri-apps/tauri-action@a6e90ddc4ba4721f294e52b856d3d50e645edc07
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Compile only; the installers are produced by the bundle step,
+            # the only one that sees the certificate.
+            pnpm tauri build --ci --no-bundle ${{ matrix.args }}
+          else
+            pnpm tauri build --ci ${{ matrix.args }}
+          fi
+
+      - name: Bundle and Authenticode-sign (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WINDOWS_CERTIFICATE: ${{ runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || '' }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
-          # Updater signatures (.sig) when the overlay enabled them.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          releaseId: ${{ needs.prepare.outputs.release-id }}
-          args: ${{ matrix.args }} ${{ steps.overlay.outputs.config-arg }}
-          # latest.json is built by rename-assets AFTER the stable rename
-          # (tauri-action's own one would point at the versioned names).
-          includeUpdaterJson: false
+          CONFIG: ${{ steps.overlay.outputs.config }}
+          WINDOWS_CERTIFICATE: ${{ steps.overlay.outputs.mode == 'authenticode' && secrets.WINDOWS_CERTIFICATE || '' }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ steps.overlay.outputs.mode == 'authenticode' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
+          args=(--ci)
+          if [ -n "$CONFIG" ]; then args+=(--config "$CONFIG"); fi
+          pnpm tauri bundle "${args[@]}"
 
       - name: Verify Authenticode signatures (Windows)
         if: runner.os == 'Windows'
@@ -244,14 +319,60 @@ jobs:
             "- Windows: **unsigned fallback** (no WINDOWS_CERTIFICATE secret); SmartScreen will warn. See SIGNING.md." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           }
 
+      - name: Stage installers (Windows / Linux)
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$STAGE"
+          bundle="src-tauri/target/release/bundle"
+          shopt -s nullglob
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            files=("$bundle"/msi/*.msi "$bundle"/nsis/*-setup.exe)
+            expected=2
+          else
+            files=("$bundle"/appimage/*.AppImage "$bundle"/deb/*.deb "$bundle"/rpm/*.rpm)
+            expected=3
+          fi
+          [ "${#files[@]}" -eq "$expected" ] || { echo "expected $expected installers, found: ${files[*]:-none}"; exit 1; }
+          for f in "${files[@]}"; do
+            # GitHub turns spaces into dots in asset names; do it explicitly
+            # so rename-assets sees predictable (unchanged) names.
+            cp "$f" "$STAGE/$(basename "$f" | tr ' ' '.')"
+          done
+          ls -la "$STAGE"
+
+      # Separate, hardened step: the ONLY place the updater key exists on the
+      # Windows/Linux legs. It runs after every build step, touches nothing
+      # but the staged installers, and writes <installer>.sig next to each
+      # (the exact names rename-assets and latest.json expect).
+      - name: Sign updater bundles (Windows / Linux)
+        if: runner.os != 'macOS' && needs.prepare.outputs.updater-signed == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in "$STAGE"/*.msi "$STAGE"/*-setup.exe "$STAGE"/*.AppImage "$STAGE"/*.deb "$STAGE"/*.rpm; do
+            pnpm tauri signer sign "$f" --app-version "$VERSION"
+            [ -s "$f.sig" ] || { echo "updater signature missing for $f"; exit 1; }
+          done
+
       # --------------------------------------------------------- macOS ----
-      # Build only (no upload): the dmg must be repacked with the signed app
-      # before it is published, so signing and upload happen in the next steps.
+      # Build only (no upload, no secrets): the dmg must be repacked with the
+      # signed app before it is published, so signing happens in the next
+      # steps. tauri-action never creates a latest.json here
+      # (includeUpdaterJson: false); rename-assets builds it after the
+      # stable rename (tauri-action's own one would point at versioned names).
       - name: Build (macOS)
         if: runner.os == 'macOS'
         uses: tauri-apps/tauri-action@a6e90ddc4ba4721f294e52b856d3d50e645edc07
         with:
           args: ${{ matrix.args }}
+          includeUpdaterJson: false
 
       - name: Sign, notarize and verify (macOS)
         id: macsign
@@ -278,20 +399,19 @@ jobs:
           echo "dmg=${dmgs[0]}" >> "$GITHUB_OUTPUT"
           echo "app=$app" >> "$GITHUB_OUTPUT"
 
-      - name: Upload to draft release (macOS)
+      - name: Stage and sign updater payload (macOS)
         if: runner.os == 'macOS'
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
           DMG: ${{ steps.macsign.outputs.dmg }}
           APP: ${{ steps.macsign.outputs.app }}
+          VERSION: ${{ needs.prepare.outputs.version }}
           UPDATER_SIGNED: ${{ needs.prepare.outputs.updater-signed }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/upload"
+          out="$STAGE"
           mkdir -p "$out"
           # GitHub turns spaces into dots in asset names; do it explicitly so
           # the rename job sees predictable names.
@@ -304,14 +424,26 @@ jobs:
           # updater's tar extractor and invalidate the signature of the UPDATED
           # app: strip macOS metadata + extended attributes (Opus review, B3).
           COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf "$out/$tar_name" -C "$(dirname "$APP")" "$(basename "$APP")"
-          files=("$out/$dmg_name" "$out/$tar_name")
           if [ "$UPDATER_SIGNED" = "true" ]; then
             # minisign signature for the auto-updater (reads the key and its
-            # password from TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]).
-            pnpm tauri signer sign "$out/$tar_name"
+            # password from TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]), bound to
+            # the release version like the bundler's own signatures.
+            pnpm tauri signer sign "$out/$tar_name" --app-version "$VERSION"
             [ -s "$out/$tar_name.sig" ] || { echo "updater signature missing"; exit 1; }
-            files+=("$out/$tar_name.sig")
           fi
+          ls -la "$out"
+
+      # ------------------------------------------------------ all legs ----
+      - name: Upload to draft release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$STAGE"/*)
+          [ "${#files[@]}" -gt 0 ] || { echo "nothing staged"; exit 1; }
           for f in "${files[@]}"; do
             name=$(basename "$f")
             # Re-runs: replace an asset with the same name.
@@ -322,6 +454,15 @@ jobs:
               "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name" \
               --input "$f" --jq .name
           done
+
+      # The smoke job installs exactly these files (same bytes as the release).
+      - name: Upload installers for the smoke job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installers-${{ matrix.artifact }}
+          path: ${{ env.STAGE }}
+          if-no-files-found: error
+          retention-days: 7
 
   rename-assets:
     # Stable asset names: every release ships the SAME file names, so
@@ -342,6 +483,8 @@ jobs:
           rename_asset() { gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$1" -f name="$2" --jq .name; }
           for id in $(gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --paginate --jq '.[].id'); do
             n=$(gh api "repos/$GITHUB_REPOSITORY/releases/assets/$id" --jq .name)
+            # Keep in sync with the "Apply the stable release names" step of
+            # .github/workflows/release-dryrun.yml.
             case "$n" in
               # Updater signatures follow their installer's stable name.
               *aarch64.app.tar.gz.sig) rename_asset "$id" "Helmcode.Desktop-macOS-AppleSilicon.app.tar.gz.sig" ;;
@@ -367,12 +510,13 @@ jobs:
 
       # Auto-update feed. Built AFTER the rename so every URL is a stable
       # name under this tag; each platform entry inlines the minisign
-      # signature of its installer. Fails (instead of publishing a partial
+      # signature of its installer (written by the "Sign updater bundles"
+      # steps of the build job). Fails (instead of publishing a partial
       # feed) when a required signature is missing. Goes live for installed
-      # apps when this draft is PUBLISHED (releases/latest/download/...).
+      # apps when publish turns the draft into the latest release.
       - name: Checkout (updater manifest script)
         if: needs.prepare.outputs.updater-signed == 'true'
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -403,3 +547,229 @@ jobs:
             "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$rid/assets?name=latest.json" \
             --input "$manifest" --jq .name
           echo "- Auto-update: **signed latest.json** uploaded (live once the release is published)." >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    # Installs/launches the exact installers of this run (workflow artifacts,
+    # same bytes as the draft assets) on clean machines before anyone can
+    # approve the publish. Authenticode is verified in the build job, the
+    # macOS signature chain by scripts/macos-sign.sh; this job checks what a
+    # user experiences on first install.
+    needs: [ prepare, build ]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-latest, ubuntu-22.04, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Download installers (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installers-windows
+          path: installers
+
+      - name: Download installers (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installers-linux
+          path: installers
+
+      - name: Download installers (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: installers-macos-*
+          path: installers
+          merge-multiple: true
+
+      - name: "Smoke: silent msi install (Windows)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $msi = @(Get-ChildItem -Path installers -Filter *.msi -File)
+          if ($msi.Count -ne 1) { throw "expected exactly one msi, found $($msi.Count)" }
+          $log = Join-Path $env:RUNNER_TEMP 'msi-install.log'
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', "`"$($msi[0].FullName)`"", '/qn', '/norestart', '/l*v', "`"$log`"")
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            Get-Content $log -Tail 80
+            throw "msiexec /i failed with exit code $($p.ExitCode)"
+          }
+          $dir = Join-Path $env:ProgramFiles 'Helmcode Desktop'
+          $exe = @(Get-ChildItem -Path $dir -Filter *.exe -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike 'uninstall*' })
+          if (-not $exe) { Get-Content $log -Tail 80; throw "no app exe installed under $dir" }
+          Write-Host "installed: $($exe.FullName -join ', ')"
+          $u = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/x', "`"$($msi[0].FullName)`"", '/qn', '/norestart')
+          if ($u.ExitCode -ne 0 -and $u.ExitCode -ne 3010) { throw "msiexec /x failed with exit code $($u.ExitCode)" }
+          "- Windows: msi installs and uninstalls silently (``msiexec /qn``)." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: "Smoke: deb on Ubuntu 22.04 and 24.04 (Linux)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(installers/*.deb)
+          [ "${#debs[@]}" -eq 1 ] || { echo "expected exactly one deb, found: ${debs[*]:-none}"; exit 1; }
+          deb=$(basename "${debs[0]}")
+          for image in ubuntu:22.04 ubuntu:24.04; do
+            echo "::group::$image"
+            docker run --rm -e DEBIAN_FRONTEND=noninteractive -e DEB="$deb" \
+              -v "$PWD/installers:/pkg:ro" "$image" bash -euo pipefail -c '
+                apt-get update -qq
+                apt-get install -y -qq "/pkg/$DEB" >/dev/null
+                pkg=$(dpkg-deb -f "/pkg/$DEB" Package)
+                dpkg -s "$pkg" | grep -q "^Status: install ok installed"
+                bin=$(dpkg -L "$pkg" | grep -E "^/usr/bin/[^/]+$" | head -n1)
+                [ -n "$bin" ] && [ -x "$bin" ] || { echo "no executable in /usr/bin"; exit 1; }
+                # Every shared library the binary links must resolve from the
+                # dependencies the deb declares.
+                if ldd "$bin" | grep "not found"; then exit 1; fi
+                echo "ok: $pkg installs, $bin links cleanly"
+              '
+            echo "::endgroup::"
+          done
+          echo "- Linux: deb installs and links cleanly on Ubuntu 22.04 and 24.04." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Smoke: AppImage starts (Linux)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb dbus-x11 >/dev/null
+          shopt -s nullglob
+          imgs=(installers/*.AppImage)
+          [ "${#imgs[@]}" -eq 1 ] || { echo "expected exactly one AppImage, found: ${imgs[*]:-none}"; exit 1; }
+          chmod +x "${imgs[0]}"
+          log="$RUNNER_TEMP/appimage.log"
+          # Software rendering under Xvfb (no GPU / DMA-BUF on the runner).
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1
+          # Still running after 30s (timeout exit 124) = it started. Any
+          # earlier exit is a startup crash.
+          set +e
+          timeout -k 5 30 xvfb-run -a dbus-run-session -- "${imgs[0]}" --appimage-extract-and-run > "$log" 2>&1
+          rc=$?
+          set -e
+          tail -n 40 "$log" || true
+          if [ "$rc" -ne 124 ]; then
+            echo "::error::AppImage exited early with code $rc"; exit 1
+          fi
+          echo "- Linux: AppImage starts (--appimage-extract-and-run, alive after 30s under Xvfb)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Smoke: Gatekeeper assessment (macOS)"
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_SIGNED: ${{ needs.prepare.outputs.macos-signed }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tars=(installers/*.app.tar.gz)
+          [ "${#tars[@]}" -eq 2 ] || { echo "expected 2 .app.tar.gz (arm64 + x64), found: ${tars[*]:-none}"; exit 1; }
+          for t in "${tars[@]}"; do
+            dir="$RUNNER_TEMP/smoke-$(basename "$t" .app.tar.gz)"
+            mkdir -p "$dir"
+            tar -xzf "$t" -C "$dir"
+            app="$dir/Helmcode Desktop.app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            if [ "$MACOS_SIGNED" = "true" ]; then
+              spctl --assess --type execute --verbose=2 "$app"
+              xcrun stapler validate "$app"
+            else
+              # Ad-hoc builds are expected to be rejected by Gatekeeper; the
+              # publish job refuses them unless allow_unsigned is set.
+              if spctl --assess --type execute --verbose=2 "$app"; then
+                echo "::error::ad-hoc app unexpectedly accepted by Gatekeeper"; exit 1
+              fi
+            fi
+          done
+          for d in installers/*.dmg; do
+            hdiutil verify "$d"
+            if [ "$MACOS_SIGNED" = "true" ]; then
+              spctl --assess --type open --context context:primary-signature --verbose=2 "$d"
+            fi
+          done
+          if [ "$MACOS_SIGNED" = "true" ]; then
+            echo "- macOS: Gatekeeper accepts both apps (spctl), tickets stapled, dmgs verified." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- macOS: ad-hoc seal verifies (codesign); Gatekeeper rejects as expected (not Developer ID)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  publish:
+    # The human gate: the `release` environment has a required reviewer, so
+    # this job waits for an approval after smoke + rename-assets are green.
+    # It replaces the old manual "Publish release" click on the draft.
+    needs: [ prepare, rename-assets, smoke ]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Refuse unsigned macOS unless explicitly allowed
+        env:
+          MACOS_SIGNED: ${{ needs.prepare.outputs.macos-signed }}
+          ALLOW_UNSIGNED: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_unsigned && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ "$MACOS_SIGNED" != "true" ]; then
+            if [ "$ALLOW_UNSIGNED" = "true" ]; then
+              echo "::warning::publishing an ad-hoc (NOT Developer ID / notarized) macOS build: allow_unsigned=true"
+              echo "- macOS: **published unsigned** (allow_unsigned=true)." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::macOS is not Developer ID signed + notarized. Re-run this workflow on the tag via workflow_dispatch with allow_unsigned=true to publish anyway."
+              exit 1
+            fi
+          fi
+
+      - name: Refuse when the release environment has no required reviewer
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # GitHub silently creates a missing environment WITHOUT protection,
+          # which would turn this job into an automatic publish.
+          n=$(gh api "repos/$GITHUB_REPOSITORY/environments/release" \
+                --jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length') || {
+            echo "::error::cannot read the release environment (see CONTRIBUTING.md, Releasing)"; exit 1; }
+          if [ "$n" -lt 1 ]; then
+            echo "::error::the release environment has no required reviewer: configure it (Settings > Environments > release) before publishing"; exit 1
+          fi
+
+      - name: Check the stable assets are all present
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
+          UPDATER_SIGNED: ${{ needs.prepare.outputs.updater-signed }}
+        run: |
+          set -euo pipefail
+          names=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate --jq '.[].name')
+          required=(
+            Helmcode.Desktop-macOS-AppleSilicon.dmg Helmcode.Desktop-macOS-Intel.dmg
+            Helmcode.Desktop-macOS-AppleSilicon.app.tar.gz Helmcode.Desktop-macOS-Intel.app.tar.gz
+            Helmcode.Desktop-Windows-x64.msi Helmcode.Desktop-Windows-x64-setup.exe
+            Helmcode.Desktop-Linux-amd64.AppImage Helmcode.Desktop-Linux-amd64.deb Helmcode.Desktop-Linux-x86_64.rpm
+          )
+          if [ "$UPDATER_SIGNED" = "true" ]; then required+=(latest.json); fi
+          missing=0
+          for r in "${required[@]}"; do
+            grep -qxF "$r" <<<"$names" || { echo "::error::missing asset $r"; missing=1; }
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Publish the release (draft=false, make_latest=true)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # make_latest is explicit: /releases/latest/download/* (installers
+          # and the auto-update feed) must point at this release.
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -f make_latest=true --jq '"published \(.tag_name) draft=\(.draft) \(.html_url)"'
+          echo "- **Published** $TAG as the latest release." >> "$GITHUB_STEP_SUMMARY"
