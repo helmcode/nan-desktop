@@ -1263,7 +1263,7 @@ async fn run_chat_stream(
     release_stream(&state, conversation_id, generation);
 }
 
-/// `chat://output` (round 17) — a file a tool produced, with the role that
+/// `chat://output` (round 17): a file a tool produced, with the role that
 /// tool declared for it: `deliverable` (`kind` `document` or `image`) or
 /// `byproduct` (`kind` null). Emitted as each tool call finishes, so a
 /// stopped turn keeps what it declared. See `tools::declare_outputs`.
