@@ -1454,6 +1454,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
     composerRef.current?.focus();
   }, []);
 
+  const newChatBtnRef = useRef<HTMLButtonElement | null>(null);
   const deleteConversation = useCallback(
     async (conversationId: number): Promise<void> => {
       try {
@@ -1481,6 +1482,10 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       setImageModes((prev) => withoutKey(prev, conversationId));
       setUnreadIds((prev) => (prev.has(conversationId) ? withoutKey(prev, conversationId) : prev));
       await refreshConversations();
+      // Round 17 review (U4): the deleted row (and the menu that had focus)
+      // is gone; focus lands on "New chat", a stable control at the top of
+      // the sidebar, instead of falling back to <body>.
+      newChatBtnRef.current?.focus();
       void syncMemory();
     },
     [refreshConversations, syncMemory],
@@ -1510,6 +1515,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   // (or leaving the field) saves, Escape cancels; focus goes back to the
   // row's menu button either way.
   const [renaming, setRenaming] = useState<{ id: number; draft: string } | null>(null);
+  // Round 17 review (U3): a rename the core rejected says so inline (the
+  // optimistic title flips back); the next attempt clears it.
+  const [renameError, setRenameError] = useState(false);
   const [focusMenuOf, setFocusMenuOf] = useState<number | null>(null);
   useEffect(() => {
     if (focusMenuOf === null) return;
@@ -1530,13 +1538,16 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
       const before = conversations.find((c) => c.id === current.id)?.title ?? "";
       const title = current.draft.trim();
       if (!save || title.length === 0 || title === before) return;
+      setRenameError(false);
       // Optimistic: the list shows the new title at once; the core's stored
       // (normalized) one replaces it, a failure restores the old one.
       setConversations((prev) => prev.map((c) => (c.id === current.id ? { ...c, title } : c)));
       try {
         await invoke<string>("conversation_rename", { conversationId: current.id, title });
       } catch {
-        // The refresh below brings the stored title back.
+        // The refresh below brings the stored title back; the inline error
+        // explains why it flipped.
+        setRenameError(true);
       }
       await refreshConversations();
       void syncMemory();
@@ -2173,6 +2184,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           {view !== "settings" && (
             <>
               <button
+                ref={newChatBtnRef}
                 type="button"
                 className="btn btn-primary new-chat-btn"
                 onClick={newChat}
@@ -2212,6 +2224,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         ) : (
           <nav className="conv-list" aria-label={t.sidebar.history}>
             {conversations.length === 0 && <p className="conv-empty">{t.sidebar.empty}</p>}
+            {renameError && (
+              <p className="inline-error conv-error" role="alert">
+                {t.sidebar.renameFailed}
+              </p>
+            )}
             {/* Round 17 (S5): what a bold (unread) chat means, for assistive tech. */}
             <span id="conv-unread-hint" className="visually-hidden">
               {t.sidebar.unread}

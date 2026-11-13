@@ -555,6 +555,13 @@ button:disabled {
   padding: 0.75rem 0.5rem;
 }
 
+/* Round 17 review (U3): a failed rename, above the list, sidebar-sized. */
+.conv-error {
+  font-size: 0.82rem;
+  padding: 0.5rem 0.65rem;
+  margin: 0 0.25rem 0.4rem;
+}
+
 .conv-item {
   position: relative;
   display: flex;

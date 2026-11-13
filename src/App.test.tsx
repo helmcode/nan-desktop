@@ -799,19 +799,92 @@ describe("round 17 (S4): the conversation row menu", () => {
       fireEvent.click(armed);
     });
     expect(invokedWith("conversation_delete")).toEqual([{ conversationId: 7 }]);
+    // Round 17 review (U4): focus lands on "New chat", not on <body>.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "New chat" })));
+  });
+
+  it("round 17 review (U3): a failed rename says so inline, and the next successful one clears it", async () => {
+    let title = "Report";
+    let fail = true;
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hola")]),
+      conversation_list: () => [{ id: 7, title, updated_at: "", last_message: null }],
+      conversation_rename: (args: Record<string, unknown> | undefined) => {
+        if (fail) throw new Error("db locked");
+        title = String(args?.title);
+        return title;
+      },
+    });
+    renderApp("en");
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    fireEvent.change(screen.getByRole("textbox", { name: 'New name for "Report"' }), { target: { value: "Deck" } });
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("textbox", { name: 'New name for "Report"' }), { key: "Enter" });
+    });
+    // The optimistic title flips back, and the user is told why.
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Could not rename the chat. Try again.");
+    expect(await kebab("Report")).toBeTruthy();
+
+    fail = false;
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    fireEvent.change(screen.getByRole("textbox", { name: 'New name for "Report"' }), { target: { value: "Deck" } });
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("textbox", { name: 'New name for "Report"' }), { key: "Enter" });
+    });
+    expect(await kebab("Deck")).toBeTruthy();
+    expect(screen.queryByText("Could not rename the chat. Try again.")).toBeNull();
   });
 
   it("speaks Spanish", async () => {
     setupRows();
     renderApp("es");
     fireEvent.click(await screen.findByRole("button", { name: "Opciones de «Report»" }));
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Renombrar", "Eliminar"]);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Eliminar la conversación «Report»" }));
-    expect(screen.getByRole("menuitem", { name: "Pulsa otra vez para eliminar «Report» para siempre" }).textContent).toBe(
-      "¿Eliminar?",
+    // Round 17 review (U2): "Borrar", like the skills list and v0.2.5.
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Renombrar", "Borrar"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Borrar la conversación «Report»" }));
+    expect(screen.getByRole("menuitem", { name: "Pulsa otra vez para borrar «Report» para siempre" }).textContent).toBe(
+      "¿Borrar?",
     );
     fireEvent.click(screen.getByRole("menuitem", { name: "Renombrar" }));
-    expect(screen.getByRole("textbox", { name: "Nuevo nombre para «Report»" })).toBeTruthy();
+    const input = screen.getByRole("textbox", { name: "Nuevo nombre para «Report»" });
+    // Round 17 review (U5): the tooltip reads as a sentence.
+    expect(input.getAttribute("title")).toBe("Intro para guardar, Esc para cancelar");
+  });
+});
+
+describe("round 17 review (U1): Escape with the preview open", () => {
+  it("a row menu opened over the preview takes Escape: only the menu closes, the preview stays", async () => {
+    const W = "/Users/ana/Proyecto";
+    const messages = [row(1, "user", "hola")];
+    resetTauri({ ...chatHandlers(messages), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hola");
+    const box = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "crea el informe" } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await act(async () => emit("chat://output", { conversation_id: 7, path: `${W}/Report.pdf`, role: "deliverable", kind: "document" }));
+    messages.push(row(2, "user", "crea el informe"), {
+      ...row(3, "assistant", "Listo."),
+      artifacts: [{ path: `${W}/Report.pdf`, kind: "file" }],
+    });
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    await screen.findByRole("complementary", { name: "Preview" });
+
+    const button = screen.getByRole("button", { name: 'Options for "Report"' });
+    fireEvent.click(button);
+    expect(screen.getByRole("menu")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(button);
+    expect(screen.getByRole("complementary", { name: "Preview" })).toBeTruthy();
+
+    // With nothing above it, the next Escape is the preview's.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("complementary", { name: "Preview" })).toBeNull());
   });
 });
 

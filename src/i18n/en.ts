@@ -101,6 +101,8 @@ export const en = {
     rename: "Rename",
     renameLabel: (title: string) => `New name for "${title}"`,
     renameHint: "Enter saves, Esc cancels",
+    /** Inline error under the list when a rename did not reach the core. */
+    renameFailed: "Could not rename the chat. Try again.",
     unread: "New reply",
     noAccount: "No account",
     /** Screen-reader text on a chat whose reply is still streaming. */
