@@ -1896,6 +1896,12 @@ button:disabled {
   color: var(--text-3);
 }
 
+/* Round 17 (S2): under the streaming caret the clock gets its own line. */
+.caret + .turn-activity {
+  display: flex;
+  width: fit-content;
+}
+
 .caret {
   display: inline-block;
   width: 8px;

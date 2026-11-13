@@ -9,7 +9,12 @@
 // "Working · 1 min 05 s". The old composer-footer line floated far from both
 // the message and the composer and duplicated the bubble's activity; it is
 // gone. The label says what the assistant does, the dots say it is alive,
-// the clock says for how long. While text streams the caret replaces it.
+// the clock says for how long.
+//
+// Round 17 (S2): the clock never disappears during a turn. While text
+// streams the line stays under the caret as "Writing · 12 s" without the
+// dots (the caret is the live cue); it clears only on done, stop or error
+// and keeps counting across phases (thinking, tools, writing).
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useT } from "../i18n";
@@ -51,10 +56,13 @@ export function TurnIndicator({
   label,
   icon,
   startedAt,
+  dots = true,
 }: {
   label: string;
   icon?: ReactNode;
   startedAt?: number;
+  /** Animated dots; off while text streams (the caret already says "alive"). */
+  dots?: boolean;
 }) {
   const t = useT();
   const [now, setNow] = useState(() => Date.now());
@@ -68,11 +76,13 @@ export function TurnIndicator({
     <p className="activity turn-activity" role="status" data-testid="turn-indicator">
       {icon}
       <span className="turn-indicator-label">{activityLabel(label)}</span>
-      <span className="turn-dots" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </span>
+      {dots && (
+        <span className="turn-dots" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+      )}
       {/* Ticks every second: hidden from assistive tech so the polite status
           is not re-read on each tick; the label says what is happening. */}
       {startedAt !== undefined && (

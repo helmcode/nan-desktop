@@ -2291,7 +2291,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                         }
                       />
                     ) : (
-                      <span className="caret" aria-hidden="true" />
+                      <>
+                        <span className="caret" aria-hidden="true" />
+                        {/* Round 17 (S2): the clock stays while text streams. */}
+                        <TurnIndicator startedAt={activeTurnStart} label={t.chat.writing} dots={false} />
+                      </>
                     )}
                   </article>
                 )}
