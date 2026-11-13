@@ -327,7 +327,7 @@ describe("Share with my team: the flow", () => {
       "references/a.txt",
       "references/z.md",
     ]);
-    expect(await screen.findByText("In review")).toBeTruthy();
+    expect(await screen.findByText("Pending approval")).toBeTruthy();
     expect(
       screen.getByText('"Weekly report" was sent for review. Your team will see it once an administrator approves it.'),
     ).toBeTruthy();
@@ -365,7 +365,7 @@ describe("Share with my team: the flow", () => {
     });
     await waitFor(() => expect(core.requests.some((r) => r.method === "PUT")).toBe(true));
     expect(core.requests.find((r) => r.method === "PUT")?.path).toBe("/api/skills/sk_1");
-    expect(await screen.findByText("In review")).toBeTruthy();
+    expect(await screen.findByText("Pending approval")).toBeTruthy();
     expect(core.state.links[LOCAL].local_updated_at).toBe(10);
   });
 
@@ -996,5 +996,62 @@ describe("Share with my team: failures say what went wrong (round 16, P3)", () =
   it("offline says to check the network, without the 'last saved copy' line of the library", async () => {
     const line = await shareAndFail({ publish: () => ({ fail: "offline" }) });
     expect(line.textContent).toBe("No connection. Check your network and try again.");
+  });
+});
+
+describe("round 17 (S3): an own share awaiting approval says so in Mine", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("shows Pending approval with the admin tooltip, and the next sync that approves it clears it", async () => {
+    const timers = captureSyncTimers();
+    // The server list carries the member's own skills in any state.
+    const grab = setup({
+      sharing: true,
+      skills: [weekly({ updated_at: 5 })],
+      rows: [meta("sk_1", { status: "pending", author_name: "Me" })],
+      links: { [LOCAL]: { remote_id: "sk_1", sha: "s", local_updated_at: 5 } },
+    });
+    renderApp();
+    await openSkills();
+    const badge = await screen.findByTestId("share-pending");
+    expect(screen.getByText("Pending approval")).toBe(badge);
+    expect(badge.getAttribute("title")).toBe("An administrator must approve it before your team sees it.");
+    expect(badge.textContent).toContain("An administrator must approve it before your team sees it.");
+    expect(badge.querySelector(".visually-hidden")).not.toBeNull();
+    // Nothing to do meanwhile: no duplicate share offered.
+    expect(screen.queryByRole("button", { name: /with my team/ })).toBeNull();
+
+    // An admin approves it on the console; the next background sync clears it.
+    (grab.rows as TeamMeta[])[0] = meta("sk_1", { status: "approved", author_name: "Me" });
+    grab.bump();
+    const refresh = lastTimerFor(timers, TEAM_SYNC_INTERVAL_MS);
+    await act(async () => {
+      refresh();
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("Shared")).toBeTruthy();
+    expect(screen.queryByTestId("share-pending")).toBeNull();
+  });
+
+  it("speaks Spanish", async () => {
+    setup({
+      sharing: true,
+      skills: [weekly({ updated_at: 5 })],
+      rows: [meta("sk_1", { status: "pending", author_name: "Me" })],
+      links: { [LOCAL]: { remote_id: "sk_1", sha: "s", local_updated_at: 5 } },
+    });
+    renderApp("es");
+    await openSkills("Ajustes", "Skills");
+    const badge = await screen.findByTestId("share-pending");
+    expect(screen.getByText("Pendiente de aprobación")).toBe(badge);
+    expect(badge.getAttribute("title")).toBe("Un administrador debe aprobarla antes de que la vea tu equipo.");
+  });
+
+  it("a local skill with no share link shows no pending badge", async () => {
+    setup({ sharing: true, skills: [weekly()] });
+    renderApp();
+    await openSkills();
+    await screen.findByRole("button", { name: 'Share "Weekly report" with my team' });
+    expect(screen.queryByTestId("share-pending")).toBeNull();
   });
 });

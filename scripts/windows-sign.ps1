@@ -1,9 +1,15 @@
 # Authenticode signing hook for Helmcode Desktop (Windows release builds).
 #
 # Wired as Tauri's `bundle.windows.signCommand` by the release workflow ONLY
-# when the WINDOWS_CERTIFICATE secret exists. Tauri calls it once per file it
-# produces (the app exe, the NSIS setup exe, the MSI), so the binary INSIDE
-# the installers is signed too, not just the installer wrappers.
+# when the WINDOWS_CERTIFICATE secret exists ("Configure Authenticode
+# signing" step). Tauri calls it once per file it produces (the app exe, the
+# NSIS setup exe, the MSI), so the binary INSIDE the installers is signed
+# too, not just the installer wrappers.
+#
+# The release compiles with `tauri build --no-bundle` and NO secret in the
+# environment, then runs `tauri bundle` with the certificate: this hook only
+# ever runs inside that bundle step, never while third-party build code
+# (cargo build scripts, vite plugins) executes.
 #
 #   pwsh -NoProfile -File scripts/windows-sign.ps1 <file>
 #

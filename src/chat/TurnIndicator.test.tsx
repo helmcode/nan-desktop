@@ -136,16 +136,52 @@ describe("the in-chat activity line (round 16: one indicator, under the last mes
     expect(line?.querySelector(".turn-elapsed")?.getAttribute("aria-hidden")).toBe("true");
   });
 
-  it("gives way to the caret while text streams, and comes back for the next tool phase", async () => {
+  it("round 17 (S2): keeps the clock while text streams, next to the caret, counting across phases", async () => {
     renderApp();
     fireEvent.click(await screen.findByText("Notes"));
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setInterval", "clearInterval", "Date"] });
     await send("Build the report");
+    await act(async () => {
+      vi.advanceTimersByTime(3_000);
+    });
     await act(async () => emit("chat://delta", { conversation_id: 7, delta: "Sure, " }));
-    expect(indicator()).toBeNull();
+    // The caret is the live cue; the clock stays under it, without dots.
     expect(document.querySelector("article.streaming .caret")).not.toBeNull();
+    expect(screen.getAllByTestId("turn-indicator")).toHaveLength(1);
+    expect(indicator()?.querySelector(".turn-indicator-label")?.textContent).toBe("Writing");
+    expect(indicator()?.querySelector(".turn-dots")).toBeNull();
+    expect(elapsed()).toBe("· 3s");
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    await act(async () => emit("chat://delta", { conversation_id: 7, delta: "here it is." }));
+    expect(elapsed()).toBe("· 8s");
+    // The next tool phase: the same clock, not a restart.
     await act(async () => emit("chat://activity", { conversation_id: 7, activity: "searching" }));
     expect(screen.getAllByTestId("turn-indicator")).toHaveLength(1);
     expect(indicator()?.textContent).toContain("Searching the web");
+    expect(indicator()?.querySelector(".turn-dots")).not.toBeNull();
+    expect(elapsed()).toBe("· 8s");
+    await act(async () => emit("chat://activity", { conversation_id: 7, activity: null }));
+    expect(indicator()?.querySelector(".turn-indicator-label")?.textContent).toBe("Writing");
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    expect(indicator()).toBeNull();
+  });
+
+  it("round 17 (S2): the streaming clock clears on stop and on error too, and speaks Spanish", async () => {
+    renderApp("es");
+    fireEvent.click(await screen.findByText("Notes"));
+    await send("Primero");
+    await act(async () => emit("chat://delta", { conversation_id: 7, delta: "Vale" }));
+    expect(indicator()?.querySelector(".turn-indicator-label")?.textContent).toBe("Escribiendo");
+    expect(elapsed()).toBe("· 0 s");
+    await act(async () => emit("chat://stopped", { conversation_id: 7 }));
+    expect(indicator()).toBeNull();
+    await send("Segundo");
+    await act(async () => emit("chat://delta", { conversation_id: 7, delta: "Vale" }));
+    expect(indicator()).not.toBeNull();
+    await act(async () => emit("chat://error", { conversation_id: 7, kind: "network" }));
+    expect(indicator()).toBeNull();
   });
 
   it("clears on error and on stop", async () => {

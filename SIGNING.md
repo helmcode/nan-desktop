@@ -14,6 +14,52 @@ edit is needed.
 Each release run states which path it took: the job summary of every build
 job, and the **Code signing status** section of the draft release body.
 
+## Release pipeline at a glance
+
+```
+prepare -> build (macOS arm64, macOS x64, Windows, Linux) -> rename-assets -+
+                                                       \-> smoke ----------+-> publish
+                                                                              (environment: release)
+```
+
+- **prepare**: strict `vX.Y.Z` tag guard (the version of `tauri.conf.json`,
+  `package.json` and the `[package]` table of `Cargo.toml` must equal the
+  tag), draft release, honest signing statement.
+- **build**: compiles with **no signing secret in the environment**, then
+  signs in dedicated steps (see "Secret scoping" below), uploads to the
+  draft and as a workflow artifact.
+- **rename-assets**: stable asset names + signed `latest.json`.
+- **smoke**: installs the exact artifacts of the run on clean runners.
+  Windows: silent `msiexec /qn` install + uninstall of the msi. Linux: the
+  deb installs (and its binary links cleanly) in `ubuntu:22.04` and
+  `ubuntu:24.04` containers, and the AppImage starts under Xvfb
+  (`--appimage-extract-and-run`, still alive after 30 s). macOS:
+  `codesign --verify` on both apps; with Developer ID also
+  `spctl --assess`, `stapler validate` and the dmg Gatekeeper check (an
+  ad-hoc build must be rejected by `spctl`).
+- **publish**: waits for a required reviewer of the GitHub environment
+  `release` (this approval replaces the old manual "Publish release" click),
+  then sets `draft=false` and `make_latest=true`. It **refuses** when macOS
+  is not Developer ID signed + notarized, unless the run was started with
+  the `allow_unsigned` input (Actions -> Release -> Run workflow on the tag).
+  It also refuses when the `release` environment has no required reviewer
+  (GitHub silently creates a missing environment unprotected) or when a
+  stable asset is missing.
+
+`release-dryrun.yml` rehearses build -> naming -> `latest.json` every night
+with no secret at all (throwaway minisign key, ad-hoc macOS seal).
+
+### Secret scoping
+
+No signing secret is present while third-party code runs (`pnpm install`,
+vite, cargo build scripts, proc macros):
+
+| Secret | Only visible to |
+|--------|-----------------|
+| `WINDOWS_CERTIFICATE[_PASSWORD]` | *Bundle and Authenticode-sign (Windows)*: `pnpm tauri bundle` after a secret-free `pnpm tauri build --no-bundle` |
+| `TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]` | *Sign updater bundles (Windows / Linux)* and *Stage and sign updater payload (macOS)* |
+| `APPLE_*` | *Sign, notarize and verify (macOS)* |
+
 ## Why v0.2.0 shows "damaged and can't be opened" on macOS
 
 The Tauri bundler had no signing identity configured, so the only signature
@@ -116,8 +162,9 @@ GitHub shows next to the release asset.
 
 6. **Re-run the release.** Push a new patch tag (for example `v0.2.1`). The
    draft release body and the job summaries should read
-   *"signed with Developer ID + notarized"*. Before publishing, check a
-   downloaded dmg on a Mac:
+   *"signed with Developer ID + notarized"*. The smoke job runs `spctl` on
+   both apps; before approving the `release` environment you can also check
+   a downloaded dmg on a Mac:
 
    ```sh
    spctl -a -t open --context context:primary-signature -vv Helmcode.Desktop-macOS-AppleSilicon.dmg
@@ -137,10 +184,11 @@ is still blocked by Gatekeeper and would only look fixed.
    `.pfx` path below only works with a certificate you can export.
    For a new purchase, **Azure Trusted Signing** is the simplest CI-friendly
    option. Wire it by replacing the `signCommand` in the *Configure
-   Authenticode signing* step of `release.yml` with
+   Authenticode signing (Windows)* step of `release.yml` with
    `trusted-signing-cli -e <endpoint> -a <account> -c <profile> -d "Helmcode Desktop" %1`
    (Azure credentials as `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` /
-   `AZURE_TENANT_ID` secrets).
+   `AZURE_TENANT_ID` secrets, passed ONLY to the *Bundle and
+   Authenticode-sign (Windows)* step).
 2. With an exportable certificate, add the secrets:
 
    | Secret | Value |
@@ -148,9 +196,10 @@ is still blocked by Gatekeeper and would only look fixed.
    | `WINDOWS_CERTIFICATE` | base64 of the `.pfx` (`base64 -i cert.pfx`, or `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx"))`) |
    | `WINDOWS_CERTIFICATE_PASSWORD` | the `.pfx` password |
 
-3. Re-run the release. The build step signs through
-   `scripts/windows-sign.ps1` (SHA-256, RFC 3161 timestamp), and a verification
-   step fails the job if any exe or msi is not validly signed.
+3. Re-run the release. The *Bundle and Authenticode-sign (Windows)* step
+   signs through `scripts/windows-sign.ps1` (SHA-256, RFC 3161 timestamp),
+   and a verification step fails the job if any exe or msi is not validly
+   signed.
 
 ### Auto-update: updater signing key
 
@@ -183,12 +232,19 @@ independent of Apple/Windows code signing: both apply.
 
 How the release pipeline uses it:
 
-- Windows/Linux: a build overlay turns on `bundle.createUpdaterArtifacts`,
-  so the bundler writes `<installer>.sig` next to the msi, the setup exe and
-  the AppImage (and deb/rpm on newer bundlers). tauri-action uploads them.
+- Windows/Linux: the build no longer sets `bundle.createUpdaterArtifacts`
+  (that needs the private key for the whole build). After the installers
+  are built (and, on Windows, Authenticode-signed) and staged, the separate
+  *Sign updater bundles (Windows / Linux)* step runs
+  `pnpm tauri signer sign <installer> --app-version <X.Y.Z>` on the msi,
+  the setup exe, the AppImage, the deb and the rpm. It writes
+  `<installer>.sig` next to each, the same file the bundler used to write,
+  so the uploaded names (and the rename-assets table) are unchanged.
 - macOS: after the Apple signature/notarization, the re-packed
-  `.app.tar.gz` (the updater payload) is signed with `tauri signer sign`
-  and its `.sig` uploaded.
+  `.app.tar.gz` (the updater payload) is signed the same way in *Stage and
+  sign updater payload (macOS)*.
+- `--app-version` binds each signature to the release version (minisign
+  trusted comment), like the bundler's own signatures.
 - `rename-assets` renames the `.sig` files to the stable names, then builds
   `latest.json` with `scripts/updater-manifest.mjs` (each platform: tag URL
   + inlined signature) and uploads it. A missing required signature fails
@@ -197,7 +253,8 @@ How the release pipeline uses it:
 Without the two secrets the release still builds; it just has no
 `latest.json` and installed apps see no update.
 
-**Going live.** Apps check
+**Going live.** The feed goes live when the *publish* job (after the
+`release` environment approval) marks the release as latest. Apps check
 `https://github.com/helmcode/nan-desktop/releases/latest/download/latest.json`
 on startup and every 6 hours (debug builds skip the check unless
 `HELMCODE_DESKTOP_UPDATER_IN_DEV=1`). That URL resolves only for the latest
@@ -208,7 +265,7 @@ PUBLISHED release, so:
   pubkey (call it vN). When vN+1 is published with a signed `latest.json`,
   vN shows the banner.
 - That first signed release (and every later one) must contain:
-  `latest.json`, the five stable installers
+  `latest.json`, the five stable updater payloads
   `Helmcode.Desktop-macOS-AppleSilicon.app.tar.gz`,
   `Helmcode.Desktop-macOS-Intel.app.tar.gz`,
   `Helmcode.Desktop-Windows-x64-setup.exe`, `Helmcode.Desktop-Windows-x64.msi`,
@@ -216,7 +273,7 @@ PUBLISHED release, so:
 - Its version (tag `vX.Y.Z`, `tauri.conf.json`, `Cargo.toml`,
   `package.json`) must be higher than the installed one: the updater only
   offers newer semver versions.
-- End-to-end smoke test for vN+1: install vN, publish vN+1, start vN, see
+- End-to-end update test for vN+1: install vN, publish vN+1, start vN, see
   the banner, click Update, the app relaunches as vN+1. A tampered or
   wrongly-signed package is rejected by the updater (the install fails and
   the banner says so).
@@ -232,10 +289,13 @@ PUBLISHED release, so:
 - `scripts/updater-manifest.mjs`: builds the signed `latest.json`.
 - `test/updater-check.mjs`: auto-update wiring check (CI).
 - `src-tauri/src/updater.rs`: `update_check` / `update_install` commands.
-- `.github/workflows/release.yml`: `prepare` (draft release + honest body),
-  `build` (per-OS build and signing), `rename-assets` (stable download names
-  + `latest.json`).
+- `.github/workflows/release.yml`: `prepare` (tag guard, draft release +
+  honest body), `build` (per-OS build, scoped signing steps, upload),
+  `rename-assets` (stable download names + `latest.json`), `smoke`
+  (install/launch checks), `publish` (environment-gated `draft=false`,
+  `make_latest=true`).
+- `.github/workflows/release-dryrun.yml`: nightly secret-free rehearsal.
 
-Secrets are only exposed to the signing steps. The certificate lives in a
+Secrets are only exposed to the signing steps (table in "Secret scoping"). The certificate lives in a
 throwaway keychain or temp file that is deleted when the step ends, and the
 notary key file is removed right after each submission.

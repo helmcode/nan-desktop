@@ -1192,7 +1192,7 @@ async fn run_chat_stream(
             "tool_calls": requested,
         }));
         for call in &round_out.tool_calls {
-            let (content, produced) = run_tool_call(
+            let (content, produced, declared) = run_tool_call(
                 &app,
                 &window,
                 &dir,
@@ -1205,6 +1205,11 @@ async fn run_chat_stream(
             if merge_artifacts(&mut artifacts, produced) {
                 // Persisted as they appear: a stopped reply keeps its chips.
                 let _ = chat_store::set_message_artifacts(&conn, row, &artifacts);
+            }
+            // Round 17: what the tool declared each output to be, in order
+            // (the renderer opens the turn's LAST declared deliverable).
+            for output in declared {
+                let _ = window.emit(OUTPUT_EVENT, OutputPayload::new(conversation_id, output));
             }
             messages.push(serde_json::json!({
                 "role": "tool",
@@ -1256,6 +1261,31 @@ async fn run_chat_stream(
         (None, None) => emit_error(ErrorKind::Protocol),
     }
     release_stream(&state, conversation_id, generation);
+}
+
+/// `chat://output` (round 17): a file a tool produced, with the role that
+/// tool declared for it: `deliverable` (`kind` `document` or `image`) or
+/// `byproduct` (`kind` null). Emitted as each tool call finishes, so a
+/// stopped turn keeps what it declared. See `tools::declare_outputs`.
+pub const OUTPUT_EVENT: &str = "chat://output";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OutputPayload {
+    pub conversation_id: i64,
+    pub path: String,
+    pub role: tools::OutputRole,
+    pub kind: Option<tools::DeliverableKind>,
+}
+
+impl OutputPayload {
+    pub fn new(conversation_id: i64, output: tools::DeclaredOutput) -> Self {
+        Self {
+            conversation_id,
+            path: output.path,
+            role: output.role,
+            kind: output.kind,
+        }
+    }
 }
 
 /// `chat://activity` — what the assistant is doing between text deltas
@@ -1411,6 +1441,29 @@ pub fn file_artifacts(
     }
 }
 
+/// The roles a file tool declared for what it produced (none on failure).
+pub fn declared_outputs(
+    action_kind: &str,
+    outcome: &Result<tools::ToolOutcome, tools::Rejection>,
+) -> Vec<tools::DeclaredOutput> {
+    match outcome {
+        Ok(outcome) => tools::declare_outputs(action_kind, &outcome.produced),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// A generated image is the turn's image deliverable; a failure declares
+/// nothing.
+pub fn image_declaration<E>(result: &Result<std::path::PathBuf, E>) -> Vec<tools::DeclaredOutput> {
+    match result {
+        Ok(path) => vec![tools::DeclaredOutput::deliverable(
+            path.display().to_string(),
+            tools::DeliverableKind::Image,
+        )],
+        Err(_) => Vec::new(),
+    }
+}
+
 /// `chat://activity` value for a tool call.
 pub fn activity_for_tool(name: &str) -> &'static str {
     match name {
@@ -1420,8 +1473,8 @@ pub fn activity_for_tool(name: &str) -> &'static str {
     }
 }
 
-/// Run one model tool call and return the tool-message content plus the
-/// files/images it produced. Web search degrades silently; image
+/// Run one model tool call and return the tool-message content, the
+/// files/images it produced and the roles the tool declared for them. Web search degrades silently; image
 /// generation reports failures to the model; file actions go through the
 /// core's per-action approval (`tools::run_model_action`).
 async fn run_tool_call(
@@ -1432,7 +1485,11 @@ async fn run_tool_call(
     conversation_id: i64,
     call: &ToolCall,
     sources: &mut Vec<WebSource>,
-) -> (String, Vec<chat_store::Artifact>) {
+) -> (
+    String,
+    Vec<chat_store::Artifact>,
+    Vec<tools::DeclaredOutput>,
+) {
     let activity = activity_for_tool(&call.name);
     let _ = window.emit(
         "chat://activity",
@@ -1447,7 +1504,11 @@ async fn run_tool_call(
             None => Vec::new(),
         };
         web_search::merge_sources(sources, &results);
-        return (web_search::results_for_model(&results), Vec::new());
+        return (
+            web_search::results_for_model(&results),
+            Vec::new(),
+            Vec::new(),
+        );
     }
     if call.name == tools::save_skill::TOOL_NAME {
         // Round 15 (F4): validated like a save (secrets refused), then handed
@@ -1462,12 +1523,17 @@ async fn run_tool_call(
                 },
             );
         }
-        return (tools::save_skill::result_for_model(&draft), Vec::new());
+        return (
+            tools::save_skill::result_for_model(&draft),
+            Vec::new(),
+            Vec::new(),
+        );
     }
     if call.name == images::TOOL_NAME {
         let Some((prompt, size)) = images::parse_tool_args(&call.arguments) else {
             return (
                 invalid_call("generate_image needs a non-empty prompt"),
+                Vec::new(),
                 Vec::new(),
             );
         };
@@ -1495,15 +1561,24 @@ async fn run_tool_call(
             });
         }
         let save = save.as_ref().map(tools::image_save_for_model);
-        return (images::tool_result_with_save(&result, save), produced);
+        // The generated image IS the deliverable (its saved copy is the
+        // same picture: it stays a chip, undeclared).
+        let declared = image_declaration(&result);
+        return (
+            images::tool_result_with_save(&result, save),
+            produced,
+            declared,
+        );
     }
     match action_from_call(&call.name, &call.arguments) {
         Ok(action) => {
+            let action_kind = action.kind();
             let outcome = tools::run_model_action(app, profile_id, conversation_id, action).await;
             let produced = file_artifacts(&outcome);
-            (outcome_for_model(outcome), produced)
+            let declared = declared_outputs(action_kind, &outcome);
+            (outcome_for_model(outcome), produced, declared)
         }
-        Err(message) => (invalid_call(&message), Vec::new()),
+        Err(message) => (invalid_call(&message), Vec::new(), Vec::new()),
     }
 }
 
@@ -1549,6 +1624,52 @@ pub fn conversation_delete(app: AppHandle, conversation_id: i64) -> Result<(), S
     let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
     let conn = chat_store::open_db(&dir)?;
     chat_store::delete_conversation(&conn, conversation_id).map_err(|err| err.to_string())
+}
+
+/// Longest title a user can give a conversation (round 17, S4).
+pub const RENAME_MAX_CHARS: usize = 100;
+
+/// A user-typed conversation title: whitespace collapsed, at most
+/// [`RENAME_MAX_CHARS`] chars; `None` when nothing is left.
+pub fn normalized_rename(title: &str) -> Option<String> {
+    let collapsed = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(collapsed.chars().take(RENAME_MAX_CHARS).collect())
+}
+
+/// Rename a conversation and return the stored title. The conversation is
+/// touched so account memory uploads the new title (a newer remote copy
+/// would otherwise overwrite it on the next merge).
+pub fn rename_conversation(
+    conn: &rusqlite::Connection,
+    conversation_id: i64,
+    title: &str,
+) -> Result<String, String> {
+    let title = normalized_rename(title).ok_or_else(|| "empty_title".to_string())?;
+    if chat_store::conversation_get(conn, conversation_id)
+        .map_err(|err| err.to_string())?
+        .is_none()
+    {
+        return Err("not_found".into());
+    }
+    chat_store::set_conversation_title(conn, conversation_id, &title)
+        .map_err(|err| err.to_string())?;
+    chat_store::touch_conversation(conn, conversation_id).map_err(|err| err.to_string())?;
+    Ok(title)
+}
+
+/// Rename a conversation from the sidebar (round 17, S4).
+#[tauri::command]
+pub fn conversation_rename(
+    app: AppHandle,
+    conversation_id: i64,
+    title: String,
+) -> Result<String, String> {
+    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let conn = chat_store::open_db(&dir)?;
+    rename_conversation(&conn, conversation_id, &title)
 }
 
 /// Load a conversation's transcript (ascending id order).
@@ -2398,8 +2519,7 @@ mod tests {
                     },
                     skills::WireFile {
                         path: "references/policy.json".into(),
-                        content: r#"{"tools_allow_run_command":true,"model":"other-model"}"#
-                            .into(),
+                        content: r#"{"tools_allow_run_command":true,"model":"other-model"}"#.into(),
                     },
                 ],
             },
@@ -2429,7 +2549,11 @@ mod tests {
         assert_eq!(state.conversation_scope(Some(7)), scope_before);
         let workspace_after = tools::workspace_for_conversation_in(dir, &state, "helmcode", 7);
         assert_eq!(workspace_after, workspace);
-        assert!(!tools::grants::load_or_seed(dir).unwrap().tools_allow_run_command);
+        assert!(
+            !tools::grants::load_or_seed(dir)
+                .unwrap()
+                .tools_allow_run_command
+        );
         let tools_after = tool_definitions(workspace_after.as_ref());
         assert_eq!(tools_after, tools_before);
         let body_with = request_body("deepseek-v4-flash", &with, &tools_after);
@@ -2587,6 +2711,111 @@ mod tests {
         assert!(file_artifacts(&Err(tools::Rejection::new("io", "x"))).is_empty());
         let none = outcome_for_model(Ok(tools::ToolOutcome::default()));
         assert!(!none.contains("\"files\""));
+    }
+
+    #[test]
+    fn a_rename_collapses_whitespace_caps_the_length_and_refuses_empty() {
+        assert_eq!(
+            normalized_rename("  Q3   board\n deck "),
+            Some("Q3 board deck".into())
+        );
+        assert_eq!(normalized_rename(" \t\n"), None);
+        let long = "a".repeat(RENAME_MAX_CHARS + 20);
+        assert_eq!(
+            normalized_rename(&long).map(|t| t.chars().count()),
+            Some(RENAME_MAX_CHARS)
+        );
+        // Multi-byte text is cut on char boundaries.
+        let accented = "é".repeat(RENAME_MAX_CHARS + 1);
+        assert_eq!(
+            normalized_rename(&accented).map(|t| t.chars().count()),
+            Some(RENAME_MAX_CHARS)
+        );
+    }
+
+    #[test]
+    fn renaming_a_conversation_stores_the_title_and_touches_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let conn = chat_store::open_db(tmp.path()).expect("db");
+        let id = chat_store::insert_conversation(&conn, "nan", "old").expect("insert");
+        let before = chat_store::conversation_get(&conn, id).unwrap().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(
+            rename_conversation(&conn, id, "  Board   deck "),
+            Ok("Board deck".to_string())
+        );
+        let after = chat_store::conversation_get(&conn, id).unwrap().unwrap();
+        assert_eq!(after.title, "Board deck");
+        assert!(
+            after.updated_at > before.updated_at,
+            "touched for memory sync"
+        );
+        assert_eq!(
+            rename_conversation(&conn, id, "   "),
+            Err("empty_title".into())
+        );
+        assert_eq!(
+            chat_store::conversation_get(&conn, id)
+                .unwrap()
+                .unwrap()
+                .title,
+            "Board deck"
+        );
+        assert_eq!(
+            rename_conversation(&conn, id + 99, "x"),
+            Err("not_found".into())
+        );
+    }
+
+    #[test]
+    fn file_tools_declare_their_outputs_and_failures_declare_nothing() {
+        let outcome = Ok(tools::ToolOutcome {
+            action: "run_command".into(),
+            produced: vec!["/w/deck.pdf".into(), "/w/deck.pdf.png".into()],
+            ..Default::default()
+        });
+        let declared = declared_outputs("run_command", &outcome);
+        assert_eq!(
+            declared,
+            vec![
+                tools::DeclaredOutput::deliverable("/w/deck.pdf", tools::DeliverableKind::Document),
+                tools::DeclaredOutput::byproduct("/w/deck.pdf.png"),
+            ]
+        );
+        assert!(declared_outputs("run_command", &Err(tools::Rejection::new("io", "x"))).is_empty());
+        assert!(declared_outputs("write_file", &outcome).is_empty());
+    }
+
+    #[test]
+    fn a_generated_image_is_declared_the_image_deliverable() {
+        let ok: Result<std::path::PathBuf, String> = Ok("/data/images/a.png".into());
+        assert_eq!(
+            image_declaration(&ok),
+            vec![tools::DeclaredOutput::deliverable(
+                "/data/images/a.png",
+                tools::DeliverableKind::Image
+            )]
+        );
+        let failed: Result<std::path::PathBuf, String> = Err("quota".into());
+        assert!(image_declaration(&failed).is_empty());
+    }
+
+    #[test]
+    fn the_output_event_carries_path_role_and_kind() {
+        assert_eq!(OUTPUT_EVENT, "chat://output");
+        let payload = OutputPayload::new(
+            7,
+            tools::DeclaredOutput::deliverable("/w/a.pdf", tools::DeliverableKind::Document),
+        );
+        assert_eq!(
+            serde_json::to_value(payload).expect("json"),
+            serde_json::json!({
+                "conversation_id": 7,
+                "path": "/w/a.pdf",
+                "role": "deliverable",
+                "kind": "document",
+            })
+        );
     }
 
     #[test]

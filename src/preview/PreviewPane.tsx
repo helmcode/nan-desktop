@@ -13,6 +13,7 @@ import { IconExternal, IconGlobe, IconPencil, IconX } from "../icons";
 import { BrandMark } from "../brand";
 import { Markdown, openExternal } from "../Markdown";
 import { isEditableImagePath } from "../studio/studio";
+import { isTopLayer, useEscapeLayer } from "../escapeLayers";
 import { previewKind, targetKey, type PreviewTarget } from "./kind";
 
 const Renderers = {
@@ -143,13 +144,20 @@ export default function PreviewPane({
   const title = isWeb ? hostOf(target.ref) : folderName(target.ref);
   const key = targetKey(target);
 
+  // Round 17 review (U1): the pane is an escape layer like every other inner
+  // surface. A surface opened after it (a row menu, a dialog) sits above it
+  // and takes Escape first; a key another handler already consumed
+  // (defaultPrevented) or an IME composition never closes the pane.
+  const layer = useEscapeLayer(true);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape" || e.isComposing || e.defaultPrevented) return;
+      if (!isTopLayer(layer)) return;
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [layer, onClose]);
 
   return (
     <aside className="preview-pane" aria-label={t.preview.title}>

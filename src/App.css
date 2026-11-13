@@ -555,6 +555,13 @@ button:disabled {
   padding: 0.75rem 0.5rem;
 }
 
+/* Round 17 review (U3): a failed rename, above the list, sidebar-sized. */
+.conv-error {
+  font-size: 0.82rem;
+  padding: 0.5rem 0.65rem;
+  margin: 0 0.25rem 0.4rem;
+}
+
 .conv-item {
   position: relative;
   display: flex;
@@ -610,37 +617,83 @@ button:disabled {
   color: var(--text);
 }
 
-.conv-delete {
+/* Round 17 (S5): a reply arrived while another chat was on screen. */
+.conv-item.unread .conv-title {
+  font-weight: 650;
+  color: var(--text);
+}
+
+/* Round 17 (S4): the row menu (three dots) replaces the hover trash. */
+.conv-menu {
+  position: relative;
   flex: none;
+  margin-right: 4px;
+}
+
+.conv-menu-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 30px;
+  width: 30px;
   height: 30px;
-  margin-right: 4px;
-  padding: 0 0.4rem;
+  padding: 0;
   border: none;
   border-radius: 6px;
   background: none;
   color: var(--text-2);
-  font-size: 0.8rem;
   opacity: 0;
 }
 
-.conv-item:hover .conv-delete,
-.conv-item:focus-within .conv-delete,
-.conv-delete.armed {
+.conv-item:hover .conv-menu-btn,
+.conv-item:focus-within .conv-menu-btn,
+.conv-menu.open .conv-menu-btn {
   opacity: 1;
 }
 
-.conv-delete:hover {
+.conv-menu-btn:hover,
+.conv-menu.open .conv-menu-btn {
+  color: var(--text);
+  background-color: var(--surface-3);
+}
+
+.conv-menu-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 11rem;
+  padding: 0.3rem;
+  background-color: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+}
+
+.conv-menu-delete:hover,
+.conv-menu-delete.armed {
   color: var(--error);
 }
 
-.conv-delete.armed {
-  color: var(--error);
+.conv-menu-delete.armed {
   background-color: var(--error-soft);
   font-weight: 500;
+}
+
+.conv-menu-delete[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.conv-rename {
+  flex: 1;
+  min-width: 0;
+  margin: 0.25rem 0.25rem 0.25rem 0.5rem;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.9rem;
+  color: var(--text);
+  background-color: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
 }
 
 .sidebar-bottom {
@@ -1894,6 +1947,12 @@ button:disabled {
   margin-left: 0.2rem;
   font-variant-numeric: tabular-nums;
   color: var(--text-3);
+}
+
+/* Round 17 (S2): under the streaming caret the clock gets its own line. */
+.caret + .turn-activity {
+  display: flex;
+  width: fit-content;
 }
 
 .caret {

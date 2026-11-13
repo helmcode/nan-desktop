@@ -600,7 +600,13 @@ describe("while a Studio edit runs", () => {
     resetTauri(twoChats());
     renderApp();
     await openStudioFromChat();
-    const deleteFox = () => screen.getByRole("button", { name: 'Delete chat "Fox"' });
+    // Round 17 (S4): Delete lives in the row menu (three dots).
+    const deleteItem = (title: string) => {
+      const menu = screen.getByRole("button", { name: `Options for "${title}"` });
+      if (menu.getAttribute("aria-expanded") !== "true") fireEvent.click(menu);
+      return screen.getByRole("menuitem", { name: `Delete chat "${title}"` });
+    };
+    const deleteFox = () => deleteItem("Fox");
     expect(deleteFox().getAttribute("aria-disabled")).toBeNull();
     fireEvent.change(instructionBox(), { target: { value: "make it snowy" } });
     await apply();
@@ -611,10 +617,10 @@ describe("while a Studio edit runs", () => {
     // Clicking does nothing: it neither arms nor deletes.
     fireEvent.click(deleteFox());
     fireEvent.click(deleteFox());
-    expect(screen.getByRole("button", { name: 'Delete chat "Fox"' })).toBeTruthy();
+    expect(deleteFox()).toBeTruthy();
     expect(invokedWith("conversation_delete")).toHaveLength(0);
     // Another conversation stays deletable.
-    expect(screen.getByRole("button", { name: 'Delete chat "Other"' }).getAttribute("aria-disabled")).toBeNull();
+    expect(deleteItem("Other").getAttribute("aria-disabled")).toBeNull();
 
     rows = [...rows, row(3, "assistant", "make it snowy", { media_path: "/data/images/e.png", parent_message_id: 2 })];
     await act(async () => emit("images://done", { conversation_id: 7, media_path: "/data/images/e.png" }));

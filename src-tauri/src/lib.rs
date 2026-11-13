@@ -205,6 +205,7 @@ pub fn run() {
             chat::conversation_list,
             chat::conversation_create,
             chat::conversation_delete,
+            chat::conversation_rename,
             chat::messages_list,
             memory::memory_settings_get,
             memory::memory_set_mode,

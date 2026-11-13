@@ -96,6 +96,14 @@ export const en = {
     deleteArmedTitle: "Click again to delete",
     deleteTitle: "Delete",
     deleteArmed: "Delete?",
+    optionsLabel: (title: string) => `Options for "${title}"`,
+    options: "Options",
+    rename: "Rename",
+    renameLabel: (title: string) => `New name for "${title}"`,
+    renameHint: "Enter saves, Esc cancels",
+    /** Inline error under the list when a rename did not reach the core. */
+    renameFailed: "Could not rename the chat. Try again.",
+    unread: "New reply",
     noAccount: "No account",
     /** Screen-reader text on a chat whose reply is still streaming. */
     replying: "Replying",
@@ -121,6 +129,7 @@ export const en = {
     thinking: "Thinking…",
     searching: "Searching the web…",
     working: "Working…",
+    writing: "Writing…",
     turnElapsed: (seconds: number) =>
       seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`,
     generatingImage: "Creating the image. It usually takes about a minute.",
@@ -447,7 +456,8 @@ export const en = {
       reshare: "Share again",
       reshareLabel: (title: string) => `Share the new version of "${title}" with my team`,
       statusLocal: "Local",
-      statusPending: "In review",
+      statusPending: "Pending approval",
+      pendingHint: "An administrator must approve it before your team sees it.",
       statusApproved: "Shared",
       statusRejected: "Not approved",
       statusHidden: "Hidden by an administrator",

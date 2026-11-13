@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.6 - The preview knows what you asked for
+
+### Chat
+- The preview opens the file the tools declared as the deliverable (the PDF
+  you asked for, the generated image), not a page render or a scratch file.
+  Name-guessing only remains as the last resort.
+- A turn clock is always visible while the assistant works ("Escribiendo ...
+  12 s"), including while the answer streams, so long steps never look frozen.
+- Conversations in the sidebar get a 3-dot menu: rename the chat inline
+  (with a visible error if it fails) or delete it with the same two-step
+  confirm as before.
+- A chat that receives a reply while you are elsewhere shows its name in
+  bold until you open it.
+
+### Skills
+- Your own shared skills show "Pendiente de aprobacion" while an admin has
+  not approved them yet, with a tooltip explaining the wait.
+
+### Escapes
+- The preview pane joins the escape-layer stack: closing a popup with Esc no
+  longer also closes the preview.
+
 ## 0.2.5 - Sharing that works, and says why
 
 ### Skills

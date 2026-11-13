@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -43,7 +43,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2.9.3
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 
@@ -113,3 +113,48 @@ jobs:
       - name: macOS signing spec (ad-hoc seal + dmg repack)
         if: runner.os == 'macOS'
         run: bash test/macos-sign-test.sh
+
+  # The Intel macOS release leg is cross-compiled on an Apple Silicon runner
+  # and was never tested. Run the Rust suite for x86_64-apple-darwin once per
+  # push/PR; the test binaries execute under Rosetta 2.
+  rust-macos-x86_64:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tauri::generate_context! embeds ../dist, so the frontend must exist.
+      - name: Frontend build
+        run: pnpm build
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri
+          key: x86_64-apple-darwin
+
+      - name: Ensure Rosetta 2 and the x86_64 target
+        run: |
+          if ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          rustup target add x86_64-apple-darwin
+
+      - name: Rust tests (x86_64-apple-darwin under Rosetta)
+        working-directory: src-tauri
+        run: cargo test --target x86_64-apple-darwin

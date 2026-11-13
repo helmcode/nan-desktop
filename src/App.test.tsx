@@ -602,3 +602,408 @@ describe("folder selection and allow-mode suggestion", () => {
     expect(screen.queryByText(/You are approving many actions/)).toBeNull();
   });
 });
+
+describe("round 17 (S1): the turn's declared deliverable opens in the preview", () => {
+  const W = "/Users/ana/Proyecto";
+  async function sendText(text: string): Promise<void> {
+    const box = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: text } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+  }
+  const output = (path: string, role: "deliverable" | "byproduct", kind: "document" | "image" | null = null) =>
+    emit("chat://output", { conversation_id: 7, path, role, kind });
+
+  it("owner case: the rendered PDF opens, not the cover render produced after it", async () => {
+    const messages = [row(1, "user", "hola")];
+    resetTauri({ ...chatHandlers(messages), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hola");
+    await sendText("crea una presentacion");
+    await act(async () => {
+      output(`${W}/fonts/Inter.ttf`, "byproduct");
+      output(`${W}/Deck.pdf`, "deliverable", "document");
+      output(`${W}/s0.png`, "byproduct");
+      output(`${W}/Deck.pdf.png`, "byproduct");
+    });
+    messages.push(row(2, "user", "crea una presentacion"), {
+      ...row(3, "assistant", "Listo."),
+      artifacts: [
+        { path: `${W}/fonts/Inter.ttf`, kind: "file" },
+        { path: `${W}/index.html`, kind: "file" },
+        { path: `${W}/Deck.pdf`, kind: "file" },
+        { path: `${W}/s0.png`, kind: "file" },
+        { path: `${W}/check.js`, kind: "file" },
+        { path: `${W}/preview.html`, kind: "file" },
+        { path: `${W}/Deck.pdf.png`, kind: "file" },
+      ],
+    });
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const pane = await screen.findByRole("complementary", { name: "Preview" });
+    await waitFor(() => expect(within(pane).getByTitle(`${W}/Deck.pdf`)).toBeTruthy());
+    expect(within(pane).queryByTitle(`${W}/Deck.pdf.png`)).toBeNull();
+  });
+
+  it("declarations do not leak into the next turn: a byproduct-only turn opens nothing", async () => {
+    const messages = [row(1, "user", "hola")];
+    resetTauri({ ...chatHandlers(messages), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hola");
+    await sendText("render it");
+    await act(async () => output(`${W}/old.pdf`, "deliverable", "document"));
+    await act(async () => emit("chat://error", { conversation_id: 7, kind: "network" }));
+    await sendText("check the pages");
+    await act(async () => {
+      output(`${W}/s1.png`, "byproduct");
+      output(`${W}/s2.png`, "byproduct");
+    });
+    messages.push({
+      ...row(3, "assistant", "Checked."),
+      artifacts: [
+        { path: `${W}/s1.png`, kind: "file" },
+        { path: `${W}/s2.png`, kind: "file" },
+      ],
+    });
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    await screen.findByText("Checked.");
+    expect(screen.queryByRole("complementary", { name: "Preview" })).toBeNull();
+  });
+
+  it("a stopped turn keeps what it already declared: the declared PDF opens, not a later byproduct", async () => {
+    const messages = [row(1, "user", "hola")];
+    resetTauri({ ...chatHandlers(messages), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hola");
+    await sendText("crea una presentacion");
+    await act(async () => {
+      output(`${W}/Deck.pdf`, "deliverable", "document");
+      output(`${W}/Deck.pdf.png`, "byproduct");
+    });
+    // The user presses Stop after the PDF was declared; what arrived stays.
+    // Without the declaration the heuristics would pick a later file.
+    messages.push(row(2, "user", "crea una presentacion"), {
+      ...row(3, "assistant", "Rendering"),
+      partial: true,
+      artifacts: [
+        { path: `${W}/index.html`, kind: "file" },
+        { path: `${W}/Deck.pdf`, kind: "file" },
+        { path: `${W}/preview.html`, kind: "file" },
+        { path: `${W}/Deck.pdf.png`, kind: "file" },
+      ],
+    });
+    await act(async () => emit("chat://stopped", { conversation_id: 7 }));
+    const pane = await screen.findByRole("complementary", { name: "Preview" });
+    await waitFor(() => expect(within(pane).getByTitle(`${W}/Deck.pdf`)).toBeTruthy());
+    expect(within(pane).queryByTitle(`${W}/Deck.pdf.png`)).toBeNull();
+  });
+});
+
+describe("round 17 (S4): the conversation row menu", () => {
+  function setupRows() {
+    let title = "Report";
+    const messages = [row(1, "user", "hola")];
+    resetTauri({
+      ...chatHandlers(messages),
+      conversation_list: () => [{ id: 7, title, updated_at: "", last_message: null }],
+      conversation_rename: (args: Record<string, unknown> | undefined) => {
+        title = String(args?.title);
+        return title;
+      },
+      conversation_delete: () => undefined,
+    });
+  }
+  const kebab = (title = "Report") => screen.findByRole("button", { name: `Options for "${title}"` });
+
+  it("replaces the trash with a menu button that opens Rename and Delete, and Escape gives focus back", async () => {
+    setupRows();
+    renderApp("en");
+    const button = await kebab();
+    expect(screen.queryByRole("button", { name: 'Delete chat "Report"' })).toBeNull();
+    expect(button.getAttribute("aria-haspopup")).toBe("menu");
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(button);
+    const menu = screen.getByRole("menu", { name: 'Options for "Report"' });
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual(["Rename", "Delete"]);
+    // The first item takes focus; arrows move between items and wrap.
+    expect(document.activeElement).toBe(items[0]);
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(items[0]);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("Rename edits inline: Enter saves through the core and focus returns to the menu button", async () => {
+    setupRows();
+    renderApp("en");
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = screen.getByRole("textbox", { name: 'New name for "Report"' });
+    expect(document.activeElement).toBe(input);
+    expect((input as HTMLInputElement).value).toBe("Report");
+    fireEvent.change(input, { target: { value: "  Q3 board deck " } });
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+    expect(invokedWith("conversation_rename")).toEqual([{ conversationId: 7, title: "Q3 board deck" }]);
+    const renamed = await kebab("Q3 board deck");
+    expect(screen.queryByRole("textbox", { name: /New name/ })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(renamed));
+  });
+
+  it("Escape cancels a rename: nothing is sent and the title stays", async () => {
+    setupRows();
+    renderApp("en");
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = screen.getByRole("textbox", { name: 'New name for "Report"' });
+    fireEvent.change(input, { target: { value: "Nope" } });
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Escape" });
+    });
+    expect(invokedWith("conversation_rename")).toEqual([]);
+    expect(screen.queryByRole("textbox", { name: /New name/ })).toBeNull();
+    expect(screen.getByText("Report")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: 'Options for "Report"' })));
+  });
+
+  it("an empty or unchanged name sends nothing", async () => {
+    setupRows();
+    renderApp("en");
+    for (const value of ["   ", "Report"]) {
+      fireEvent.click(await kebab());
+      fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+      const input = screen.getByRole("textbox", { name: 'New name for "Report"' });
+      fireEvent.change(input, { target: { value } });
+      await act(async () => {
+        fireEvent.keyDown(input, { key: "Enter" });
+      });
+    }
+    expect(invokedWith("conversation_rename")).toEqual([]);
+  });
+
+  it("Delete keeps the destructive two-step confirmation", async () => {
+    setupRows();
+    renderApp("en");
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: 'Delete chat "Report"' }));
+    expect(invokedWith("conversation_delete")).toEqual([]);
+    const armed = screen.getByRole("menuitem", { name: 'Click again to delete "Report" forever' });
+    expect(armed.textContent).toBe("Delete?");
+    await act(async () => {
+      fireEvent.click(armed);
+    });
+    expect(invokedWith("conversation_delete")).toEqual([{ conversationId: 7 }]);
+    // Round 17 review (U4): focus lands on "New chat", not on <body>.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "New chat" })));
+  });
+
+  it("round 17 review (U3): a failed rename says so inline, and the next successful one clears it", async () => {
+    let title = "Report";
+    let fail = true;
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hola")]),
+      conversation_list: () => [{ id: 7, title, updated_at: "", last_message: null }],
+      conversation_rename: (args: Record<string, unknown> | undefined) => {
+        if (fail) throw new Error("db locked");
+        title = String(args?.title);
+        return title;
+      },
+    });
+    renderApp("en");
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    fireEvent.change(screen.getByRole("textbox", { name: 'New name for "Report"' }), { target: { value: "Deck" } });
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("textbox", { name: 'New name for "Report"' }), { key: "Enter" });
+    });
+    // The optimistic title flips back, and the user is told why.
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Could not rename the chat. Try again.");
+    expect(await kebab("Report")).toBeTruthy();
+
+    fail = false;
+    fireEvent.click(await kebab());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    fireEvent.change(screen.getByRole("textbox", { name: 'New name for "Report"' }), { target: { value: "Deck" } });
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("textbox", { name: 'New name for "Report"' }), { key: "Enter" });
+    });
+    expect(await kebab("Deck")).toBeTruthy();
+    expect(screen.queryByText("Could not rename the chat. Try again.")).toBeNull();
+  });
+
+  it("speaks Spanish", async () => {
+    setupRows();
+    renderApp("es");
+    fireEvent.click(await screen.findByRole("button", { name: "Opciones de «Report»" }));
+    // Round 17 review (U2): "Borrar", like the skills list and v0.2.5.
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Renombrar", "Borrar"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Borrar la conversación «Report»" }));
+    expect(screen.getByRole("menuitem", { name: "Pulsa otra vez para borrar «Report» para siempre" }).textContent).toBe(
+      "¿Borrar?",
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Renombrar" }));
+    const input = screen.getByRole("textbox", { name: "Nuevo nombre para «Report»" });
+    // Round 17 review (U5): the tooltip reads as a sentence.
+    expect(input.getAttribute("title")).toBe("Intro para guardar, Esc para cancelar");
+  });
+});
+
+describe("round 17 review (U1): Escape with the preview open", () => {
+  it("a row menu opened over the preview takes Escape: only the menu closes, the preview stays", async () => {
+    const W = "/Users/ana/Proyecto";
+    const messages = [row(1, "user", "hola")];
+    resetTauri({ ...chatHandlers(messages), chat_send: () => undefined });
+    renderApp("en");
+    await screen.findByText("hola");
+    const box = await screen.findByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "crea el informe" } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await act(async () => emit("chat://output", { conversation_id: 7, path: `${W}/Report.pdf`, role: "deliverable", kind: "document" }));
+    messages.push(row(2, "user", "crea el informe"), {
+      ...row(3, "assistant", "Listo."),
+      artifacts: [{ path: `${W}/Report.pdf`, kind: "file" }],
+    });
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    await screen.findByRole("complementary", { name: "Preview" });
+
+    const button = screen.getByRole("button", { name: 'Options for "Report"' });
+    fireEvent.click(button);
+    expect(screen.getByRole("menu")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(button);
+    expect(screen.getByRole("complementary", { name: "Preview" })).toBeTruthy();
+
+    // With nothing above it, the next Escape is the preview's.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("complementary", { name: "Preview" })).toBeNull());
+  });
+});
+
+describe("round 17 (S4): a rename saves once", () => {
+  it("a blur fired after Enter (webviews that blur on removal) does not save twice; leaving the field saves", async () => {
+    let title = "Report";
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hola")]),
+      conversation_list: () => [{ id: 7, title, updated_at: "", last_message: null }],
+      conversation_rename: (args: Record<string, unknown> | undefined) => {
+        title = String(args?.title);
+        return title;
+      },
+    });
+    renderApp("en");
+    fireEvent.click(await screen.findByRole("button", { name: 'Options for "Report"' }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = screen.getByRole("textbox", { name: 'New name for "Report"' });
+    fireEvent.change(input, { target: { value: "Deck" } });
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+      fireEvent.blur(input);
+    });
+    expect(invokedWith("conversation_rename")).toHaveLength(1);
+    fireEvent.click(await screen.findByRole("button", { name: 'Options for "Deck"' }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const again = screen.getByRole("textbox", { name: 'New name for "Deck"' });
+    fireEvent.change(again, { target: { value: "Deck v2" } });
+    await act(async () => {
+      fireEvent.blur(again);
+    });
+    expect(invokedWith("conversation_rename")).toEqual([
+      { conversationId: 7, title: "Deck" },
+      { conversationId: 7, title: "Deck v2" },
+    ]);
+  });
+});
+
+describe("round 17 (S5): unread replies are bold in the sidebar", () => {
+  function twoChats() {
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hola")]),
+      conversation_list: () => [
+        { id: 7, title: "Report", updated_at: "", last_message: null },
+        { id: 8, title: "Other", updated_at: "", last_message: null },
+      ],
+      chat_send: () => undefined,
+    });
+  }
+  const item = (name: string) => screen.getByRole("button", { name }).closest(".conv-item");
+
+  it("a reply that finishes in a chat not on screen bolds it until it is opened", async () => {
+    twoChats();
+    renderApp("en");
+    await screen.findByText("hola");
+    fireEvent.click(screen.getByRole("button", { name: "Other" }));
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    await waitFor(() => expect(item("Report")?.classList.contains("unread")).toBe(true));
+    const report = screen.getByRole("button", { name: "Report" });
+    expect(report.getAttribute("aria-describedby")).toBe("conv-unread-hint");
+    expect(document.getElementById("conv-unread-hint")?.textContent).toBe("New reply");
+    // The chat on screen is never marked.
+    expect(item("Other")?.classList.contains("unread")).toBe(false);
+    // Opening it clears the mark.
+    fireEvent.click(report);
+    await waitFor(() => expect(item("Report")?.classList.contains("unread")).toBe(false));
+    expect(screen.getByRole("button", { name: "Report" }).getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("a reply in the chat on screen is not unread; each chat keeps its own mark", async () => {
+    twoChats();
+    renderApp("es");
+    await screen.findByText("hola");
+    fireEvent.click(screen.getByRole("button", { name: "Report" }));
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    await act(async () => emit("chat://done", { conversation_id: 8 }));
+    await waitFor(() => expect(item("Other")?.classList.contains("unread")).toBe(true));
+    expect(item("Report")?.classList.contains("unread")).toBe(false);
+    expect(document.getElementById("conv-unread-hint")?.textContent).toBe("Respuesta nueva");
+    // A finished image in a background chat counts too.
+    fireEvent.click(screen.getByRole("button", { name: "Other" }));
+    await waitFor(() => expect(item("Other")?.classList.contains("unread")).toBe(false));
+    await act(async () => emit("images://done", { conversation_id: 7, media_path: "/d/images/a.png" }));
+    await waitFor(() => expect(item("Report")?.classList.contains("unread")).toBe(true));
+  });
+
+  it("deleting an unread chat drops its mark: a new chat that reuses the id is not bold", async () => {
+    let list = [
+      { id: 7, title: "Report", updated_at: "", last_message: null },
+      { id: 8, title: "Other", updated_at: "", last_message: null },
+    ];
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hola")]),
+      conversation_list: () => list,
+      conversation_delete: (args: Record<string, unknown> | undefined) => {
+        list = list.filter((c) => c.id !== args?.conversationId);
+      },
+      chat_send: () => undefined,
+    });
+    renderApp("en");
+    await screen.findByText("hola");
+    await act(async () => emit("chat://done", { conversation_id: 8 }));
+    await waitFor(() => expect(item("Other")?.classList.contains("unread")).toBe(true));
+    // The two-step delete: arm, then confirm.
+    fireEvent.click(screen.getByRole("button", { name: 'Options for "Other"' }));
+    fireEvent.click(screen.getByRole("menuitem", { name: 'Delete chat "Other"' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitem", { name: 'Click again to delete "Other" forever' }));
+    });
+    expect(invokedWith("conversation_delete")).toEqual([{ conversationId: 8 }]);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Other" })).toBeNull());
+    expect(document.querySelector(".conv-item.unread")).toBeNull();
+    // The store hands id 8 to a fresh chat with no reply yet; a refresh
+    // (a reply in the chat on screen) brings it into the list.
+    list = [...list, { id: 8, title: "Fresh", updated_at: "", last_message: null }];
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    const fresh = await screen.findByRole("button", { name: "Fresh" });
+    expect(fresh.closest(".conv-item")?.classList.contains("unread")).toBe(false);
+    expect(fresh.getAttribute("aria-describedby")).toBeNull();
+    expect(document.querySelector(".conv-item.unread")).toBeNull();
+  });
+});
