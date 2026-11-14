@@ -207,6 +207,107 @@ describe("PdfPreview (continuous scroll)", () => {
     expect(await screen.findByText("Could not load the preview.")).toBeTruthy();
   });
 
+  it("lets each page box adopt its own aspect ratio once painted (mixed portrait + landscape)", async () => {
+    // Page 1 is portrait (it sizes every placeholder), page 2 landscape,
+    // page 3 portrait again.
+    const sizes: Record<number, { width: number; height: number }> = {
+      1: { width: 600, height: 800 },
+      2: { width: 960, height: 540 },
+      3: { width: 500, height: 1000 },
+    };
+    pdf.numPages = 3;
+    pdf.getPage.mockImplementation(async (n: number) => ({
+      getViewport: ({ scale }: { scale: number }) => ({ width: sizes[n].width * scale, height: sizes[n].height * scale }),
+      render: (params: unknown) => {
+        pdf.render(params);
+        return { promise: Promise.resolve() };
+      },
+    }));
+    render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
+    await screen.findByRole("group", { name: "PDF document, 3 pages" });
+    await waitFor(() => expect(pdf.render).toHaveBeenCalledTimes(3));
+    const box = (n: number) => document.querySelector(`.preview-pdf-page[data-page="${n}"]`) as HTMLElement;
+    await waitFor(() => expect(box(2).style.aspectRatio).toBe(String(960 / 540)));
+    expect(box(1).style.aspectRatio).toBe(String(600 / 800));
+    expect(box(3).style.aspectRatio).toBe(String(500 / 1000));
+  });
+
+  it("keeps unpainted pages at page 1's ratio until they are painted", async () => {
+    const observers: { cb: IntersectionObserverCallback; targets: Element[] }[] = [];
+    class FakeObserver {
+      targets: Element[] = [];
+      constructor(public cb: IntersectionObserverCallback) {
+        observers.push(this);
+      }
+      observe(el: Element) {
+        this.targets.push(el);
+      }
+      disconnect() {}
+      unobserve() {}
+      takeRecords() {
+        return [];
+      }
+    }
+    vi.stubGlobal("IntersectionObserver", FakeObserver);
+    pdf.numPages = 2;
+    pdf.getPage.mockImplementation(async (n: number) => {
+      const size = n === 1 ? { width: 600, height: 800 } : { width: 960, height: 540 };
+      return {
+        getViewport: ({ scale }: { scale: number }) => ({ width: size.width * scale, height: size.height * scale }),
+        render: (params: unknown) => {
+          pdf.render(params);
+          return { promise: Promise.resolve() };
+        },
+      };
+    });
+    render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
+    await screen.findByRole("group", { name: "PDF document, 2 pages" });
+    const box2 = document.querySelector('.preview-pdf-page[data-page="2"]') as HTMLElement;
+    expect(box2.style.aspectRatio).toBe(String(600 / 800));
+    await act(async () => {
+      observers[1].cb([{ isIntersecting: true, target: observers[1].targets[0] } as IntersectionObserverEntry], observers[1] as never);
+    });
+    await waitFor(() => expect(box2.style.aspectRatio).toBe(String(960 / 540)));
+  });
+
+  it("replaces the whole document with the failure note when one page fails to render (chosen design)", async () => {
+    // A page pdf.js cannot draw means the file is damaged: rather than a
+    // document with a silently blank page, the pane shows the failure note
+    // (which keeps "open in the default app" available).
+    pdf.numPages = 6;
+    pdf.getPage.mockImplementation(async (n: number) => ({
+      getViewport: ({ scale }: { scale: number }) => ({ width: 960 * scale, height: 540 * scale }),
+      render: (params: unknown) => {
+        pdf.render(params);
+        return { promise: n === 4 ? Promise.reject(new Error("broken page")) : Promise.resolve() };
+      },
+    }));
+    render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
+    expect(await screen.findByText("Could not load the preview.")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "PDF document, 6 pages" })).toBeNull();
+    expect(document.querySelector(".preview-pdf-page")).toBeNull();
+  });
+
+  it("paints each page once at its first width: a later resize is CSS-only", async () => {
+    let paneWidth = 600;
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => paneWidth);
+    vi.stubGlobal("devicePixelRatio", 1);
+    pdf.numPages = 1;
+    render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
+    await waitFor(() => expect(pdf.render).toHaveBeenCalledTimes(1));
+    const canvas = screen.getByRole("img", { name: "Page 1 of 1" }) as HTMLCanvasElement;
+    expect(canvas.width).toBe(600);
+
+    paneWidth = 1000;
+    await act(async () => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    // No re-render, same backing store: CSS stretches the canvas to the
+    // box (PDF_MIN_RENDER_WIDTH keeps narrow first renders sharp enough).
+    expect(pdf.render).toHaveBeenCalledTimes(1);
+    expect(canvas.width).toBe(600);
+  });
+
   it("releases the document on unmount", async () => {
     const { unmount } = render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
     await screen.findByRole("group", { name: "PDF document, 13 pages" });

@@ -104,9 +104,14 @@ function scrollAreaOf(el: HTMLElement | null): HTMLElement | null {
   return (el?.closest(".preview-body") as HTMLElement | null) ?? el?.parentElement ?? null;
 }
 
-/// One page of the continuous PDF view. Its box keeps the page's aspect
-/// ratio before it is drawn (stable scroll height), and it is painted the
-/// first time it comes near the visible area.
+/// One page of the continuous PDF view. Its box keeps page 1's aspect
+/// ratio until it is drawn (stable scroll height), then adopts its own
+/// (mixed portrait/landscape documents). It is painted ONCE, the first time
+/// it comes near the visible area, at the pane width of that moment: a
+/// later pane resize is CSS-only (the canvas is stretched to the box, and
+/// PDF_MIN_RENDER_WIDTH keeps a narrow first paint sharp enough). A page
+/// that fails to render calls `onFailed`, which replaces the WHOLE document
+/// with the failure note (a damaged file is not shown with blank pages).
 function PdfPageView({
   doc,
   number,
