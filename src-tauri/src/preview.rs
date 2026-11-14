@@ -10,6 +10,11 @@
 //!   the grant root, is refused; the open itself uses `O_NOFOLLOW`).
 //!   This is a user-initiated view of a file the user already granted, so
 //!   it does not go through the propose/approve flow of the model's tools.
+//! - `preview_reveal_location(profile_id, path)` → `()`: shows the file
+//!   selected in the OS file manager (Finder / Explorer / FileManager1)
+//!   WITHOUT opening it. Same checks as `preview_read_file` (no size cap),
+//!   so it only ever acts on a file the preview could already show. The
+//!   renderer holds no opener permission: the reveal lives in the core.
 //! - `web_preview_fetch(profile_id, url)` → `{url, title, content_type,
 //!   text}`: `POST {platform_base}/v1/fetch {url}` with the profile's
 //!   session JWT (the same plumbing as `web_search`). The text is capped
@@ -20,7 +25,7 @@
 //! Nothing here logs: no URL, no page content, no key material.
 
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -54,20 +59,23 @@ pub struct FilePreview {
     pub size: u64,
 }
 
-/// Read a file for the preview pane. `app_data` and `home` are injected so
-/// tests can use tempdirs.
+/// Resolve `raw` to a previewable regular file: inside an active grant of
+/// `profile_id`, outside the app data folder and the sensitive deny-list,
+/// reached without any symlink. Returns the canonical path and its size.
+///
+/// Both the read and the reveal go through this, so the reveal can never
+/// point the file manager at anything the preview could not show.
 ///
 /// Rejections: everything [`grants::resolve_under_grant`] rejects
 /// (`traversal`, `protocol`, `io`, `no_grant`, `escape`), plus `scope`
-/// (app data dir), `sensitive` (deny-list), `symlink`, `not_file` and
-/// `too_large`.
-pub fn read_preview_file(
+/// (app data dir), `sensitive` (deny-list), `symlink` and `not_file`.
+fn resolve_preview_file(
     store: &GrantsStore,
     profile_id: &str,
     raw: &str,
     app_data: &Path,
     home: Option<&Path>,
-) -> Result<FilePreview, Rejection> {
+) -> Result<(PathBuf, u64), Rejection> {
     let (grant_id, canonical) = grants::resolve_under_grant(store, profile_id, raw)?;
     let grant = store
         .grant_by_id(&grant_id)
@@ -98,7 +106,23 @@ pub fn read_preview_file(
             "only regular files can be previewed",
         ));
     }
-    if meta.len() > MAX_PREVIEW_FILE_BYTES {
+    Ok((canonical, meta.len()))
+}
+
+/// Read a file for the preview pane. `app_data` and `home` are injected so
+/// tests can use tempdirs.
+///
+/// Rejections: everything [`resolve_preview_file`] rejects, plus
+/// `too_large`.
+pub fn read_preview_file(
+    store: &GrantsStore,
+    profile_id: &str,
+    raw: &str,
+    app_data: &Path,
+    home: Option<&Path>,
+) -> Result<FilePreview, Rejection> {
+    let (canonical, len) = resolve_preview_file(store, profile_id, raw, app_data, home)?;
+    if len > MAX_PREVIEW_FILE_BYTES {
         return Err(too_large());
     }
     let bytes = read_no_follow(&canonical)?;
@@ -106,6 +130,48 @@ pub fn read_preview_file(
         size: bytes.len() as u64,
         base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
     })
+}
+
+/// Reveal a previewed file in the OS file manager, selecting it. The file
+/// is never opened. `reveal` is the per-OS mechanism, injected so tests
+/// can observe what would be revealed without launching Finder.
+///
+/// The path passes the exact checks of [`read_preview_file`] (minus the
+/// size cap, which is irrelevant to a reveal), so this only ever acts on
+/// a file the user could already see in the preview.
+pub fn reveal_preview_file(
+    store: &GrantsStore,
+    profile_id: &str,
+    raw: &str,
+    app_data: &Path,
+    home: Option<&Path>,
+    reveal: impl FnOnce(&Path) -> Result<(), Rejection>,
+) -> Result<(), Rejection> {
+    let (canonical, _) = resolve_preview_file(store, profile_id, raw, app_data, home)?;
+    reveal(&canonical)
+}
+
+/// The per-OS reveal, all through `tauri-plugin-opener` called from the
+/// core (the renderer has no opener permission of its own):
+/// - macOS: `NSWorkspace activateFileViewerSelectingURLs` (Finder, file
+///   selected).
+/// - Windows: `SHOpenFolderAndSelectItems` (Explorer, file selected).
+/// - Linux/BSD: the `org.freedesktop.FileManager1.ShowItems` D-Bus call,
+///   then the OpenURI portal; when neither is available, the PARENT folder
+///   is opened with the default handler (xdg-open on the directory, never
+///   on the file).
+fn os_reveal(path: &Path) -> Result<(), Rejection> {
+    let failed = || Rejection::new("io", "could not open the containing folder");
+    match tauri_plugin_opener::reveal_item_in_dir(path) {
+        Ok(()) => Ok(()),
+        #[cfg(not(any(target_os = "macos", windows)))]
+        Err(_) => {
+            let parent = path.parent().ok_or_else(failed)?;
+            tauri_plugin_opener::open_path(parent, None::<&str>).map_err(|_| failed())
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        Err(_) => Err(failed()),
+    }
 }
 
 fn too_large() -> Rejection {
@@ -176,6 +242,29 @@ pub async fn preview_read_file(
     })
     .await
     .map_err(|_| Rejection::new("io", "preview read was interrupted"))?
+}
+
+/// Reveal a previewed file in Finder / Explorer / the Linux file manager.
+#[tauri::command]
+pub async fn preview_reveal_location(
+    app: AppHandle,
+    profile_id: String,
+    path: String,
+) -> Result<(), Rejection> {
+    if !crate::profile::is_known_profile_id(&profile_id) {
+        return Err(Rejection::new("protocol", "unknown profile"));
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = grants::load_or_seed(&dir).map_err(|err| Rejection::new("io", err))?;
+        let home = std::env::home_dir();
+        reveal_preview_file(&store, &profile_id, &path, &dir, home.as_deref(), os_reveal)
+    })
+    .await
+    .map_err(|_| Rejection::new("io", "reveal was interrupted"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +630,160 @@ mod tests {
                 .kind,
             "symlink"
         );
+    }
+
+    // ------------------------------------------------------------ reveal --
+
+    /// Run the reveal with a recording stand-in for the OS call.
+    fn reveal(
+        l: &Layout,
+        store: &GrantsStore,
+        path: &Path,
+    ) -> (Result<(), Rejection>, Option<PathBuf>) {
+        let mut seen = None;
+        let result = reveal_preview_file(
+            store,
+            "nan",
+            &path.display().to_string(),
+            &l.app_data,
+            Some(&l.home),
+            |p| {
+                seen = Some(p.to_path_buf());
+                Ok(())
+            },
+        );
+        (result, seen)
+    }
+
+    #[test]
+    fn reveal_selects_the_canonical_file_inside_the_grant() {
+        let l = layout();
+        let file = l.grant.join("Deck.pdf");
+        fs::write(&file, "%PDF").expect("write");
+        let (result, seen) = reveal(&l, &store_with(&[&l.grant]), &file);
+        result.expect("inside grant");
+        // The FILE is handed to the file manager (which selects it in its
+        // folder); it is never opened.
+        assert_eq!(seen, Some(file));
+    }
+
+    #[test]
+    fn reveal_is_not_bound_by_the_preview_size_cap() {
+        let l = layout();
+        let file = l.grant.join("big.bin");
+        fs::File::create(&file)
+            .expect("create")
+            .set_len(MAX_PREVIEW_FILE_BYTES + 1)
+            .expect("grow");
+        let (result, seen) = reveal(&l, &store_with(&[&l.grant]), &file);
+        result.expect("oversize files can still be revealed");
+        assert_eq!(seen, Some(file));
+    }
+
+    #[test]
+    fn reveal_refuses_everything_the_preview_refuses_without_touching_the_os() {
+        let l = layout();
+        fs::write(l.outside.join("secret.txt"), "x").expect("write");
+        fs::write(l.grant.join("server.pem"), "pem").expect("pem");
+        fs::write(l.app_data.join("tools-grants.json"), "{}").expect("write");
+        let grant_only = store_with(&[&l.grant]);
+        let home_wide = store_with(&[&l.home]);
+        let cases: [(&GrantsStore, PathBuf, &[&str]); 6] = [
+            (&grant_only, l.outside.join("secret.txt"), &["escape"]),
+            (
+                &grants::default_store(),
+                l.grant.join("server.pem"),
+                &["no_grant"],
+            ),
+            (&grant_only, l.grant.join("server.pem"), &["sensitive"]),
+            (&home_wide, l.app_data.join("tools-grants.json"), &["scope"]),
+            (&grant_only, l.grant.clone(), &["not_file"]),
+            (
+                &grant_only,
+                l.grant
+                    .join("..")
+                    .join("..")
+                    .join("outside")
+                    .join("secret.txt"),
+                &["traversal", "escape"],
+            ),
+        ];
+        for (store, path, kinds) in cases {
+            let (result, seen) = reveal(&l, store, &path);
+            let err = result.expect_err("refused");
+            assert!(
+                kinds.contains(&err.kind.as_str()),
+                "{}: {}",
+                path.display(),
+                err.kind
+            );
+            assert!(seen.is_none(), "the OS reveal ran for {}", path.display());
+        }
+        // Another profile's grant does not count either.
+        let mut seen = false;
+        let err = reveal_preview_file(
+            &store_with(&[&l.outside]),
+            "helmcode",
+            &l.outside.join("secret.txt").display().to_string(),
+            &l.app_data,
+            Some(&l.home),
+            |_| {
+                seen = true;
+                Ok(())
+            },
+        )
+        .expect_err("other profile");
+        assert_eq!(err.kind, "no_grant");
+        assert!(!seen);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reveal_never_follows_symlinks() {
+        let l = layout();
+        let store = store_with(&[&l.grant]);
+        fs::write(l.grant.join("real.txt"), "inside").expect("write");
+        let link = l.grant.join("link.txt");
+        std::os::unix::fs::symlink(l.grant.join("real.txt"), &link).expect("symlink");
+        let (result, seen) = reveal(&l, &store, &link);
+        assert_eq!(result.expect_err("leaf").kind, "symlink");
+        assert!(seen.is_none());
+    }
+
+    #[test]
+    fn reveal_os_failures_surface_as_a_typed_rejection() {
+        let l = layout();
+        let file = l.grant.join("a.txt");
+        fs::write(&file, "x").expect("write");
+        let err = reveal_preview_file(
+            &store_with(&[&l.grant]),
+            "nan",
+            &file.display().to_string(),
+            &l.app_data,
+            Some(&l.home),
+            |_| Err(Rejection::new("io", "could not open the containing folder")),
+        )
+        .expect_err("os failure");
+        assert_eq!(err.kind, "io");
+        assert!(!err.message.contains("a.txt"), "no path in the message");
+    }
+
+    #[test]
+    fn reveal_is_a_registered_core_command_and_the_renderer_gets_no_opener_grant() {
+        // The command is wired into the invoke handler...
+        assert!(include_str!("lib.rs").contains("preview::preview_reveal_location,"));
+        // ...and the renderer holds no opener permission of its own, so the
+        // grant-checked core command is the ONLY way to reveal a path.
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).expect("json");
+        let perms = caps["permissions"].as_array().expect("permissions");
+        for perm in perms {
+            let id = perm
+                .as_str()
+                .or_else(|| perm["identifier"].as_str())
+                .unwrap_or("");
+            assert!(!id.starts_with("opener:"), "renderer must not hold {id}");
+        }
     }
 
     // ------------------------------------------------------- web preview --
