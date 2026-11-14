@@ -382,6 +382,7 @@ export function ProfilePicker({
         ))}
       </div>
       <p className="hint">{t.login.hint}</p>
+      {overview.relogin_pending && <p className="hint">{t.login.reloginAfterUpdate}</p>}
       {error && (
         <p className="inline-error" role="alert">
           {error}

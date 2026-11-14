@@ -21,6 +21,9 @@ export interface ProfileOverview {
   profiles: ProfileView[];
   active_profile: string | null;
   active_user?: ActiveUser | null;
+  /** The app was updated from a pre-realm build and nobody has signed in
+   * since: the login screen says everyone signs in one more time. */
+  relogin_pending?: boolean;
 }
 
 export interface WebSource {

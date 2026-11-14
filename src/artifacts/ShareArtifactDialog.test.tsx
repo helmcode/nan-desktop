@@ -255,7 +255,7 @@ describe("ShareArtifactDialog: risk warning and consent", () => {
     fireEvent.click(screen.getByRole("radio", { name: /Everyone in your organization/ }));
     fireEvent.click(create());
     const secret = await screen.findByTestId("artifact-secret");
-    expect(secret.querySelector("strong")?.textContent).toContain("password, key or token");
+    expect(secret.querySelector("strong")?.textContent).toContain("password or access key");
     expect(create().hasAttribute("disabled")).toBe(true);
     fireEvent.click(within(secret).getByRole("checkbox"));
     fireEvent.click(create());
@@ -434,7 +434,8 @@ describe("ShareArtifactDialog: paywall and Escape", () => {
     const props = renderDialog({ profileId: "nan", availability: "paywall" });
     expect(screen.getByText("Sharing links is part of the membership")).toBeTruthy();
     expect(screen.queryByRole("radio")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Got it" }));
     expect(props.onClose).toHaveBeenCalled();
   });
 

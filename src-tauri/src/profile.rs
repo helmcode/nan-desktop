@@ -208,6 +208,12 @@ pub struct ProfileStore {
     /// an explicit, successful login of another user.
     #[serde(default)]
     pub bindings: BTreeMap<String, BoundUser>,
+    /// Set when this document was migrated from a pre-v3 (pre-realm) one:
+    /// the app was updated and nobody has signed in since, so the login
+    /// screen says that everyone signs in one more time. Cleared by the first
+    /// successful [`ProfileStore::bind`]. A fresh install never sets it.
+    #[serde(default)]
+    pub relogin_pending: bool,
 }
 
 /// The store seeded on first run: the locked profiles, nothing active, no
@@ -218,6 +224,7 @@ pub fn default_store() -> ProfileStore {
         profiles: canonical_profiles(),
         active_profile: None,
         bindings: BTreeMap::new(),
+        relogin_pending: false,
     }
 }
 
@@ -270,9 +277,24 @@ pub fn migrate_store(raw: &str) -> ProfileStore {
                 .collect()
         })
         .unwrap_or_default();
+    // A real pre-v3 document (v1 has no version, v2 has no bindings) means
+    // the app was just updated: the one-time re-login notice is due. A
+    // tampered v3 document keeps whatever it said; corrupt JSON (not an
+    // object) is not evidence of an update.
+    let pre_v3 = value.is_object()
+        && value
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .is_none_or(|v| v < u64::from(STORE_VERSION));
+    let relogin_pending = pre_v3
+        || value
+            .get("relogin_pending")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
     ProfileStore {
         active_profile: active,
         bindings,
+        relogin_pending,
         ..default_store()
     }
 }
@@ -391,6 +413,8 @@ impl ProfileStore {
             return Err("malformed user binding".to_string());
         }
         self.bindings.insert(profile_id.to_string(), user);
+        // The first sign-in after the update has happened.
+        self.relogin_pending = false;
         Ok(())
     }
 }
@@ -610,6 +634,46 @@ mod tests {
         assert_eq!(store.active_binding(), None, "unbound = signed out");
         let reread = parse_store(&read_store(&dir)).expect("v3 on disk");
         assert_eq!(reread, store);
+    }
+
+    #[test]
+    fn a_pre_v3_document_flags_the_one_time_relogin_until_the_first_bind() {
+        // v2 and v1 (no version) documents come from a pre-realm build.
+        for raw in [
+            v2_document("nan"),
+            format!(
+                r#"{{"profiles":{},"active_profile":"nan"}}"#,
+                serde_json::to_string(&canonical_profiles()).unwrap()
+            ),
+        ] {
+            let dir = TempDir::new().expect("temp dir");
+            std::fs::write(dir.path().join(STORE_FILE), raw).expect("write");
+            let mut store = load_or_seed(dir.path()).expect("migrate");
+            assert!(store.relogin_pending, "updated device: notice due");
+            // Persisted: a restart before signing in still shows it.
+            assert!(load_or_seed(dir.path()).expect("reload").relogin_pending);
+
+            store
+                .bind("nan", BoundUser::new("nan", "user-a", None))
+                .expect("bind");
+            assert!(!store.relogin_pending, "first bind clears it");
+            save(dir.path(), &store).expect("save");
+            store.clear_active_profile();
+            save(dir.path(), &store).expect("save");
+            assert!(
+                !load_or_seed(dir.path()).expect("reload").relogin_pending,
+                "a later sign-out does not bring it back"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fresh_install_or_corrupt_store_never_flags_the_relogin() {
+        let dir = TempDir::new().expect("temp dir");
+        assert!(!load_or_seed(dir.path()).expect("seed").relogin_pending);
+        let dir = TempDir::new().expect("temp dir");
+        std::fs::write(dir.path().join(STORE_FILE), "not json").expect("write");
+        assert!(!load_or_seed(dir.path()).expect("migrate").relogin_pending);
     }
 
     #[test]

@@ -594,7 +594,7 @@ function PaywallDialog({ onClose }: { onClose: () => void }) {
         </p>
         <div className="modal-actions">
           <button ref={closeRef} type="button" className="btn btn-primary" onClick={onClose}>
-            {a.done}
+            {a.paywallOk}
           </button>
         </div>
       </div>

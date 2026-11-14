@@ -90,6 +90,9 @@ struct ProfileOverview {
     profiles: Vec<ProfileView>,
     active_profile: Option<String>,
     active_user: Option<ActiveUser>,
+    /// The app was updated from a pre-realm build and nobody has signed in
+    /// since: the login screen tells everyone to sign in one more time.
+    relogin_pending: bool,
 }
 
 fn profiles_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -147,6 +150,7 @@ fn overview_with(
         profiles,
         active_profile: store.active_profile.clone(),
         active_user: if signed_in { active_user(store) } else { None },
+        relogin_pending: store.relogin_pending,
     }
 }
 
@@ -360,6 +364,19 @@ mod tests {
         // Active but no key (revoked / signed out elsewhere): not exposed.
         let overview = overview_with(&store, |_| (false, None));
         assert_eq!(overview.active_user, None);
+    }
+
+    #[test]
+    fn the_one_time_relogin_flag_reaches_the_renderer_until_the_first_bind() {
+        let mut store = profile::default_store();
+        let none = |_: &str| (false, None);
+        assert!(!overview_with(&store, none).relogin_pending);
+        store.relogin_pending = true;
+        assert!(overview_with(&store, none).relogin_pending);
+        store
+            .bind("nan", profile::BoundUser::new("nan", "u-a", None))
+            .unwrap();
+        assert!(!overview_with(&store, none).relogin_pending);
     }
 
     #[test]

@@ -38,8 +38,8 @@ function message(conversationId: number, content: string): ChatMessageRow {
 }
 
 /** A core with one data set per realm; `active` is the signed-in realm. */
-function realmCore(initial: Realm | null) {
-  const state: { active: Realm | null } = { active: initial };
+function realmCore(initial: Realm | null, reloginPending = false) {
+  const state: { active: Realm | null; reloginPending: boolean } = { active: initial, reloginPending };
   const conversations: Record<Realm, ConversationView[]> = {
     "realm-a": [{ id: 1, title: "Ana private plans", updated_at: "", last_message: "A-SECRET" }],
     "realm-b": [],
@@ -55,11 +55,13 @@ function realmCore(initial: Realm | null) {
             profiles: [{ id: "nan", name: "NaN", has_key: true, key_mask: "sk-…abcd" }],
             active_profile: "nan",
             active_user: { email: USERS[state.active], realm: state.active },
+            relogin_pending: state.reloginPending,
           }
         : {
             profiles: [{ id: "nan", name: "NaN", has_key: false, key_mask: null }],
             active_profile: null,
             active_user: null,
+            relogin_pending: state.reloginPending,
           },
     // Every realm-scoped command answers from the ACTIVE realm only.
     conversation_list: () => (state.active ? conversations[state.active] : []),
@@ -92,10 +94,16 @@ async function signOut(): Promise<void> {
 }
 
 /** Pick the NaN card, then the core approves the device login of `realm`. */
-async function signIn(state: { active: Realm | null }, realm: Realm, fresh: boolean): Promise<void> {
+async function signIn(
+  state: { active: Realm | null; reloginPending: boolean },
+  realm: Realm,
+  fresh: boolean,
+): Promise<void> {
   fireEvent.click(await screen.findByRole("button", { name: /NaN/ }));
   await waitFor(() => expect(invokedWith("device_login_start").length).toBeGreaterThan(0));
   state.active = realm;
+  // The core clears the one-time flag on the first successful bind.
+  state.reloginPending = false;
   await act(async () => {
     emit("device://approved", { key_alias: "desktop", profile_id: "nan", fresh_realm: fresh });
   });
@@ -122,7 +130,7 @@ describe("privacy fix: per-user realms in the UI", () => {
     expect(await screen.findByText("bea@example.com")).toBeTruthy();
     expect(
       await screen.findByText(
-        "Signed in as bea@example.com for the first time on this computer. You start with an empty space: nothing from other accounts is shown here.",
+        "This is your space as bea@example.com on this device and it is empty for now. What other accounts saved stays here: only someone who signs in as that account sees it.",
       ),
     ).toBeTruthy();
     expect(screen.queryByText("Ana private plans")).toBeNull();
@@ -134,7 +142,25 @@ describe("privacy fix: per-user realms in the UI", () => {
     await signIn(state, "realm-a", false);
     expect(await screen.findByText("Ana private plans")).toBeTruthy();
     expect(screen.getByText("ana@example.com")).toBeTruthy();
-    expect(screen.queryByText(/for the first time on this computer/)).toBeNull();
+    expect(screen.queryByText(/This is your space as/)).toBeNull();
+  });
+
+  it("the one-time re-login line shows after the update until the first sign-in", async () => {
+    const state = realmCore(null, true);
+    renderApp();
+    expect(await screen.findByText("After this update everyone signs in one more time.")).toBeTruthy();
+
+    await signIn(state, "realm-a", false);
+    expect(await screen.findByText("Ana private plans")).toBeTruthy();
+    await signOut();
+    expect(screen.queryByText("After this update everyone signs in one more time.")).toBeNull();
+  });
+
+  it("a fresh install never shows the re-login line", async () => {
+    realmCore(null);
+    renderApp();
+    await screen.findByText("Choose how to sign in:");
+    expect(screen.queryByText(/After this update/)).toBeNull();
   });
 
   it("the login identity failure is explained and nothing switches", async () => {
@@ -146,7 +172,7 @@ describe("privacy fix: per-user realms in the UI", () => {
       emit("device://error", { kind: "identity" });
     });
     expect(
-      await screen.findByText("We could not confirm which account signed in, so nothing changed. Try again."),
+      await screen.findByText("We could not confirm which account you signed in with, so nothing changed. Try again."),
     ).toBeTruthy();
     expect(state.active).toBeNull();
     expect(screen.queryByText("Ana private plans")).toBeNull();
