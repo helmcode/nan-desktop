@@ -34,7 +34,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::preview::{self, MAX_PREVIEW_FILE_BYTES};
 use crate::tools::Rejection;
-use crate::tools::grants::{self, GrantsStore};
+use crate::tools::grants::GrantsStore;
 
 /// The owner resource on both tenants.
 pub const API_ARTIFACTS: &str = "/api/artifacts";
@@ -745,16 +745,11 @@ pub async fn artifact_share(
     // Per-user realms: the grants are the signed-in user's (same scoping
     // as `preview_read_file`); `dir` stays the app-data root so the
     // app-data protection and the shared images folder still apply.
-    let realm =
-        crate::realm::dir_for_in(&dir, &profile_id).map_err(|_| ArtifactError::SourceRefused {
-            reason: "protocol".into(),
-        })?;
     let upload = {
         let profile_id = profile_id.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let store = grants::load_or_seed(&realm).map_err(|_| ArtifactError::SourceRefused {
-                reason: "io".into(),
-            })?;
+            let store = crate::preview::realm_grants_in(&dir, &profile_id)
+                .map_err(|rej| ArtifactError::SourceRefused { reason: rej.kind })?;
             let home = std::env::home_dir();
             prepare_upload(&store, &profile_id, &source, meta, &dir, home.as_deref())
         })
@@ -772,6 +767,7 @@ pub async fn artifact_share(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::grants;
     use std::fs;
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
@@ -1361,6 +1357,58 @@ mod tests {
         )
         .expect_err("other profile");
         assert_eq!(err.code(), "source_refused");
+    }
+
+    /// `artifact_share` minus the AppHandle: the realm's grants (the
+    /// `preview::realm_grants_in` seam), then `prepare_upload`.
+    fn realm_prepare(l: &Layout, path: &Path) -> Result<Upload, ArtifactError> {
+        let store = crate::preview::realm_grants_in(&l.app_data, "nan")
+            .map_err(|rej| ArtifactError::SourceRefused { reason: rej.kind })?;
+        prepare_upload(
+            &store,
+            "nan",
+            &file(path),
+            public_meta(),
+            &l.app_data,
+            Some(&l.home),
+        )
+    }
+
+    fn login(root: &Path, user: &str) -> PathBuf {
+        let identity = crate::realm::Identity {
+            id: user.into(),
+            email: Some(format!("{user}@example.com")),
+        };
+        let (store, _) = crate::realm::bind_login_in(root, "nan", &identity).expect("bind");
+        crate::profile::save(root, &store).expect("save");
+        crate::realm::dir_for_in(root, "nan").expect("realm")
+    }
+
+    #[test]
+    fn share_reads_only_the_active_realms_grants() {
+        let l = layout();
+        let path = l.grant.join("informe.pdf");
+        fs::write(&path, b"%PDF-1.7 body").expect("write");
+        let refused = |r: Result<Upload, ArtifactError>| match r {
+            Err(ArtifactError::SourceRefused { reason }) => reason,
+            other => panic!("expected source_refused, got {other:?}"),
+        };
+        // Signed out: no realm, no grants.
+        assert_eq!(refused(realm_prepare(&l, &path)), "protocol");
+        // Ana grants the folder in her realm: she can share from it.
+        let ana = login(&l.app_data, "ana");
+        grants::save(&ana, &store(&l)).expect("save");
+        assert_eq!(
+            realm_prepare(&l, &path).expect("ana").bytes,
+            b"%PDF-1.7 body"
+        );
+        // Bob on the same profile cannot; a root-level store is ignored.
+        login(&l.app_data, "bob");
+        grants::save(&l.app_data, &store(&l)).expect("stale root store");
+        assert_eq!(refused(realm_prepare(&l, &path)), "no_grant");
+        // Ana back: her realm grant resolves again.
+        login(&l.app_data, "ana");
+        assert!(realm_prepare(&l, &path).is_ok());
     }
 
     #[cfg(unix)]

@@ -59,6 +59,21 @@ pub struct FilePreview {
     pub size: u64,
 }
 
+/// The folder grants a command naming `profile_id` may use: those of the
+/// realm of the user bound to the ACTIVE profile under the app data `root`
+/// (`realm::dir_for_in`), never the pre-realm `<root>/tools.json`. The
+/// AppHandle-free seam shared by `preview_read_file`,
+/// `preview_reveal_location` and `artifact_share`, so their realm scoping
+/// is testable.
+///
+/// Rejections: `protocol` (signed out, or `profile_id` is not the active
+/// profile), `io` (the realm's `tools.json` is unreadable).
+pub fn realm_grants_in(root: &Path, profile_id: &str) -> Result<GrantsStore, Rejection> {
+    let realm = crate::realm::dir_for_in(root, profile_id)
+        .map_err(|err| Rejection::new("protocol", err.to_string()))?;
+    grants::load_or_seed(&realm).map_err(|err| Rejection::new("io", err))
+}
+
 /// Resolve `raw` to a previewable regular file: inside an active grant of
 /// `profile_id`, outside the app data folder and the sensitive deny-list,
 /// reached without any symlink. Returns the canonical path and its size.
@@ -255,10 +270,8 @@ pub async fn preview_read_file(
         .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
     // Privacy fix: the grants are the signed-in user's (realm); the
     // protection still covers the whole app data root (`dir`).
-    let realm = crate::realm::dir_for_in(&dir, &profile_id)
-        .map_err(|err| Rejection::new("protocol", err.to_string()))?;
     tauri::async_runtime::spawn_blocking(move || {
-        let store = grants::load_or_seed(&realm).map_err(|err| Rejection::new("io", err))?;
+        let store = realm_grants_in(&dir, &profile_id)?;
         let home = std::env::home_dir();
         read_preview_file(&store, &profile_id, &path, &dir, home.as_deref())
     })
@@ -282,10 +295,8 @@ pub async fn preview_reveal_location(
         .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
     // Same realm scoping as `preview_read_file`: the grants are the
     // signed-in user's; the app-data protection covers the whole root.
-    let realm = crate::realm::dir_for_in(&dir, &profile_id)
-        .map_err(|err| Rejection::new("protocol", err.to_string()))?;
     tauri::async_runtime::spawn_blocking(move || {
-        let store = grants::load_or_seed(&realm).map_err(|err| Rejection::new("io", err))?;
+        let store = realm_grants_in(&dir, &profile_id)?;
         let home = std::env::home_dir();
         reveal_preview_file(&store, &profile_id, &path, &dir, home.as_deref(), os_reveal)
     })
@@ -496,6 +507,225 @@ mod tests {
                 .expect("grant");
         }
         store
+    }
+
+    // ------------------------------------------------- realm scoping --
+
+    /// A verified login of `user` to `profile_id`, persisted like
+    /// `device_flow::store_credentials` does (claims legacy data when the
+    /// profile has no bound user yet).
+    fn login(root: &Path, profile_id: &str, user: &str) -> PathBuf {
+        let identity = crate::realm::Identity {
+            id: user.into(),
+            email: Some(format!("{user}@example.com")),
+        };
+        let (store, _) = crate::realm::bind_login_in(root, profile_id, &identity).expect("bind");
+        crate::profile::save(root, &store).expect("save profiles");
+        crate::realm::dir_for_in(root, profile_id).expect("realm")
+    }
+
+    /// A grant of `folder` for `profile_id` saved in `dir/tools.json`.
+    fn grant_in(dir: &Path, profile_id: &str, id: &str, folder: &Path) {
+        let mut store = grants::load_or_seed(dir).expect("load");
+        store
+            .add_grant(
+                id.into(),
+                profile_id,
+                folder.to_path_buf(),
+                "2026-11-14T00:00:00Z".into(),
+            )
+            .expect("grant");
+        grants::save(dir, &store).expect("save grants");
+    }
+
+    /// The command path minus the AppHandle: realm grants, then the bytes.
+    fn realm_read(
+        root: &Path,
+        home: &Path,
+        profile_id: &str,
+        path: &Path,
+    ) -> Result<Vec<u8>, Rejection> {
+        let store = realm_grants_in(root, profile_id)?;
+        read_granted_bytes(
+            &store,
+            profile_id,
+            &path.display().to_string(),
+            root,
+            Some(home),
+        )
+    }
+
+    fn realm_reveal(
+        root: &Path,
+        home: &Path,
+        profile_id: &str,
+        path: &Path,
+    ) -> Result<PathBuf, Rejection> {
+        let store = realm_grants_in(root, profile_id)?;
+        let mut seen = None;
+        reveal_preview_file(
+            &store,
+            profile_id,
+            &path.display().to_string(),
+            root,
+            Some(home),
+            |p| {
+                seen = Some(p.to_path_buf());
+                Ok(())
+            },
+        )?;
+        Ok(seen.expect("revealed"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn granted_paths_resolve_only_while_their_realm_is_active() {
+        let l = layout();
+        let root = &l.app_data;
+        let ana_dir = l.home.join("ana-proj");
+        let bob_dir = l.home.join("bob-proj");
+        fs::create_dir_all(&ana_dir).expect("mkdir");
+        fs::create_dir_all(&bob_dir).expect("mkdir");
+        let ana_file = ana_dir.join("a.md");
+        let bob_file = bob_dir.join("b.md");
+        fs::write(&ana_file, "ana").expect("write");
+        fs::write(&bob_file, "bob").expect("write");
+
+        // Signed out: no realm, nothing resolves (not even a stray root store).
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &ana_file)
+                .expect_err("signed out")
+                .kind,
+            "protocol"
+        );
+
+        let ana_realm = login(root, "nan", "ana");
+        grant_in(&ana_realm, "nan", "ga", &ana_dir);
+        let bob_realm = login(root, "nan", "bob");
+        grant_in(&bob_realm, "nan", "gb", &bob_dir);
+        assert_ne!(ana_realm, bob_realm);
+
+        // Bob is active: his grant works, Ana's realm grant does not.
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &bob_file).expect("bob reads"),
+            b"bob"
+        );
+        assert_eq!(
+            realm_reveal(root, &l.home, "nan", &bob_file).expect("bob reveals"),
+            bob_file
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &ana_file)
+                .expect_err("ana's grant")
+                .kind,
+            "escape"
+        );
+        assert_eq!(
+            realm_reveal(root, &l.home, "nan", &ana_file)
+                .expect_err("ana's grant")
+                .kind,
+            "escape"
+        );
+
+        // Ana signs back in: the path granted in HER realm resolves again.
+        assert_eq!(login(root, "nan", "ana"), ana_realm);
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &ana_file).expect("ana reads"),
+            b"ana"
+        );
+        assert_eq!(
+            realm_reveal(root, &l.home, "nan", &ana_file).expect("ana reveals"),
+            ana_file
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &bob_file)
+                .expect_err("bob's grant")
+                .kind,
+            "escape"
+        );
+
+        // A command naming a profile that is not the active one reads nothing.
+        assert_eq!(
+            realm_read(root, &l.home, "helmcode", &ana_file)
+                .expect_err("inactive")
+                .kind,
+            "protocol"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_root_grants_stop_authorizing_once_migrated() {
+        let l = layout();
+        let root = &l.app_data;
+        let legacy_dir = l.home.join("legacy-proj");
+        fs::create_dir_all(&legacy_dir).expect("mkdir");
+        let legacy_file = legacy_dir.join("old.md");
+        fs::write(&legacy_file, "old").expect("write");
+        // Pre-realm state: the grant lives in `<root>/tools.json`.
+        grant_in(root, "nan", "legacy", &legacy_dir);
+        assert!(
+            grants::load_or_seed(root)
+                .expect("load")
+                .grant_by_id("legacy")
+                .is_some()
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &legacy_file)
+                .expect_err("signed out")
+                .kind,
+            "protocol"
+        );
+
+        // First login claims it: it now lives in Ana's realm, not the root.
+        let ana_realm = login(root, "nan", "ana");
+        assert!(
+            grants::load_or_seed(&ana_realm)
+                .expect("load")
+                .grant_by_id("legacy")
+                .is_some()
+        );
+        assert!(
+            grants::load_or_seed(root)
+                .expect("load")
+                .grant_by_id("legacy")
+                .is_none()
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &legacy_file).expect("claimed"),
+            b"old"
+        );
+
+        // Another user of the same profile never inherits it.
+        login(root, "nan", "bob");
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &legacy_file)
+                .expect_err("not bob's")
+                .kind,
+            "no_grant"
+        );
+
+        // A root store that reappears after the migration (an older build,
+        // a restored backup) is never consulted.
+        grant_in(root, "nan", "stale", &legacy_dir);
+        assert!(
+            grants::load_or_seed(root)
+                .expect("load")
+                .grant_by_id("stale")
+                .is_some()
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &legacy_file)
+                .expect_err("stale root")
+                .kind,
+            "no_grant"
+        );
+        assert_eq!(
+            realm_reveal(root, &l.home, "nan", &legacy_file)
+                .expect_err("stale root")
+                .kind,
+            "no_grant"
+        );
     }
 
     fn read(l: &Layout, store: &GrantsStore, path: &Path) -> Result<FilePreview, Rejection> {
