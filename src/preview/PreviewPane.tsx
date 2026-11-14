@@ -9,13 +9,14 @@ import { fetchWebPreview, readFileForPreview, type WebPreview } from "../core";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { folderName, hostOf } from "../copy";
 import { useT } from "../i18n";
-import { IconExternal, IconFolder, IconGlobe, IconPencil, IconX } from "../icons";
+import { IconExternal, IconFolder, IconGlobe, IconPencil, IconShare, IconX } from "../icons";
 import { BrandMark } from "../brand";
 import { Markdown, openExternal } from "../Markdown";
 import { isEditableImagePath } from "../studio/studio";
 import { isTopLayer, useEscapeLayer } from "../escapeLayers";
 import { previewKind, targetKey, type PreviewTarget } from "./kind";
 import { revealInFolder } from "./reveal";
+import { shareSourceFor, type ShareSource } from "../artifacts/artifacts";
 
 const Renderers = {
   image: lazy(() => import("./renderers").then((m) => ({ default: m.ImagePreview }))),
@@ -123,6 +124,7 @@ export default function PreviewPane({
   onOpenLink,
   onEditImage,
   onRemove,
+  onShare,
 }: {
   target: PreviewTarget;
   profileId: string;
@@ -135,6 +137,9 @@ export default function PreviewPane({
   /// preview (the pane forgets it, so another image can be opened). It
   /// never deletes the file itself.
   onRemove?: () => void;
+  /// When set (shared artifacts available), a shareable file or generated
+  /// image shows a "Share" button that opens the share-as-link dialog.
+  onShare?: (source: ShareSource) => void;
 }) {
   const t = useT();
   const isWeb = target.kind === "web";
@@ -152,6 +157,7 @@ export default function PreviewPane({
     setRevealFailedFor(null);
     revealInFolder(profileId, target.ref).catch(() => setRevealFailedFor(key));
   };
+  const shareSource = onShare ? shareSourceFor(target) : null;
 
   // Round 17 review (U1): the pane is an escape layer like every other inner
   // surface. A surface opened after it (a row menu, a dialog) sits above it
@@ -192,6 +198,18 @@ export default function PreviewPane({
             {t.chat.editImage}
           </button>
         )}
+        {shareSource && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm preview-share"
+            aria-label={t.artifacts.shareLabel(title)}
+            onClick={() => onShare?.(shareSource)}
+          >
+            <IconShare size={14} />
+            {t.artifacts.share}
+          </button>
+        )}
+        {/* Show in folder stays right next to close (preview-scroll-reveal). */}
         {revealable && (
           <button
             type="button"

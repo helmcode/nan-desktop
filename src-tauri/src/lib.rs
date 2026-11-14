@@ -12,6 +12,8 @@
 // URLs (plus the debug-only mock overrides documented in `device_flow` and
 // `chat`).
 
+// Shared artifacts (F1): snapshot upload of a granted file + link list/revoke.
+mod artifacts;
 mod chat;
 mod chat_store;
 mod conn_test;
@@ -287,6 +289,8 @@ pub fn run() {
             skills_team::skills_team_cache_get,
             skills_team::skills_team_cache_clear,
             skills_team::skills_team_link,
+            artifacts::artifacts_request,
+            artifacts::artifact_share,
             tts::tts_speak,
             tts::tts_stop,
             stt::stt_transcribe,
