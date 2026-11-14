@@ -49,6 +49,7 @@ export const en = {
     server: "The sign-in service had a problem. Try again.",
     protocol: "Something failed on this computer. Try again.",
     identity: "We could not confirm which account signed in, so nothing changed. Try again.",
+    migration: "We could not move your chat history into your account, so nothing changed and your history is safe. The disk may be full: free up some space and sign in again.",
   } as Record<string, string>,
   chatErrors: {
     missing_key: "Your session is incomplete on this computer. Sign in again.",

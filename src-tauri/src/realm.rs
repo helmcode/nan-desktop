@@ -287,28 +287,48 @@ pub struct LoginBinding {
     pub fresh: bool,
 }
 
+/// Why [`bind_login_in`] refused a login. Either way nothing was bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindError {
+    /// Invalid identity, or a local step (profiles store, realm folder)
+    /// failed.
+    Local(String),
+    /// This user's pre-realm chat history (or folder grants) could not be
+    /// moved into their realm, e.g. the disk is full. The legacy data is
+    /// intact and the next login retries; binding anyway would show the
+    /// user a silently empty realm.
+    Claim(String),
+}
+
+impl From<String> for BindError {
+    fn from(err: String) -> Self {
+        BindError::Local(err)
+    }
+}
+
 /// Bind a VERIFIED login of `identity` to `profile_id`: claim legacy data
 /// when allowed, create the realm folder, and return the updated store (the
 /// caller persists it after the vault write succeeds) plus the decision.
 ///
 /// Legacy data is claimed only when the profile has no bound user yet, or
 /// the same user re-binds (an interrupted earlier claim): a DIFFERENT user
-/// never receives it.
+/// never receives it. A claim that fails refuses the login
+/// ([`BindError::Claim`]) instead of binding the user to an empty realm.
 pub fn bind_login_in(
     root: &Path,
     profile_id: &str,
     identity: &Identity,
-) -> Result<(ProfileStore, LoginBinding), String> {
+) -> Result<(ProfileStore, LoginBinding), BindError> {
     let mut store = profile::load_or_seed(root)?;
     let user = BoundUser::new(profile_id, &identity.id, identity.email.clone());
     if !profile::is_known_profile_id(profile_id) || !user.is_valid_for(profile_id) {
-        return Err("invalid identity".to_string());
+        return Err(BindError::Local("invalid identity".to_string()));
     }
     let previous = store.binding(profile_id).cloned();
     let dir = realm_dir(root, &user.realm);
     let existed = dir.exists();
     let may_claim = previous.as_ref().is_none_or(|prev| prev.id == user.id);
-    let claimed = may_claim && claim_legacy(root, profile_id, &dir);
+    let claimed = may_claim && claim_legacy(root, profile_id, &dir).map_err(BindError::Claim)?;
     create_private_dir(&dir)?;
     let realm_key = user.realm_key(profile_id);
     store.bind(profile_id, user)?;
@@ -335,17 +355,21 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Move whatever pre-realm data of `profile_id` still exists under `root`
-/// into the realm folder `dir`. Best-effort and idempotent: every step
-/// MOVES (nothing is duplicated), a step that fails leaves its legacy data
-/// where it was (unreachable by any command) for the same user's next
-/// login. Returns whether any user data was moved.
-pub fn claim_legacy(root: &Path, profile_id: &str, dir: &Path) -> bool {
-    if create_private_dir(dir).is_err() {
-        return false;
-    }
+/// into the realm folder `dir`. Idempotent: every step MOVES (nothing is
+/// duplicated), a step that fails leaves its legacy data where it was
+/// (unreachable by any command) for the same user's next login.
+///
+/// The chat history and the folder grants are the user's content: their
+/// failure is returned (the caller refuses the login) instead of being
+/// swallowed, so the user never lands in a silently empty realm. The
+/// skills/cache moves and the settings copy stay best-effort (a failed
+/// rename deletes nothing). Returns whether any user data was moved.
+pub fn claim_legacy(root: &Path, profile_id: &str, dir: &Path) -> Result<bool, String> {
+    create_private_dir(dir)?;
     let mut claimed = false;
-    // Conversations, messages and memory tombstones of this profile.
-    claimed |= chat_store::claim_profile(root, dir, profile_id).unwrap_or(false);
+    // Conversations, messages and memory tombstones of this profile. First,
+    // so a failure here moves nothing else.
+    claimed |= chat_store::claim_profile(root, dir, profile_id)?;
     // Local skills had no owner at all: they go to the first claim.
     claimed |= move_if_absent(
         &root.join(crate::skills::SKILLS_DIR),
@@ -357,14 +381,14 @@ pub fn claim_legacy(root: &Path, profile_id: &str, dir: &Path) -> bool {
         &dir.join(crate::skills_team::CACHE_DIR).join(profile_id),
     );
     // This profile's folder grants (+ the run_command switch).
-    claimed |= crate::tools::grants::claim_profile(root, dir, profile_id).unwrap_or(false);
+    claimed |= crate::tools::grants::claim_profile(root, dir, profile_id)?;
     // Memory settings are not user content (mode + a random device id):
     // copied, so the other profile's first user keeps the same settings.
     let memory = crate::memory::SETTINGS_FILE;
     if root.join(memory).is_file() && !dir.join(memory).exists() {
         let _ = std::fs::copy(root.join(memory), dir.join(memory));
     }
-    claimed
+    Ok(claimed)
 }
 
 /// Rename `from` to `to` when `from` exists and `to` does not.
@@ -574,6 +598,38 @@ mod tests {
         let again = login(root.path(), "nan", "user-a");
         assert!(!again.fresh, "the same user gets their realm back");
         assert_eq!(again.replaced, None, "same user is not a replacement");
+    }
+
+    #[test]
+    fn a_failed_chat_claim_refuses_the_bind_and_keeps_the_legacy_history() {
+        let root = TempDir::new().unwrap();
+        let conn = chat_store::open_db(root.path()).unwrap();
+        chat_store::insert_conversation(&conn, "nan", "old chat").unwrap();
+        drop(conn);
+        let dir = realm_dir(root.path(), &realm_hash(&realm_key("nan", "u-1")));
+        let blocker = dir.join(format!("{}.claim.tmp", chat_store::DB_FILE));
+        std::fs::create_dir_all(&blocker).unwrap();
+
+        let err = bind_login_in(root.path(), "nan", &identity("u-1", "u@x.io")).unwrap_err();
+        assert!(matches!(err, BindError::Claim(_)), "{err:?}");
+        assert!(claim_legacy(root.path(), "nan", &dir).is_err());
+        let legacy = chat_store::open_db(root.path()).unwrap();
+        assert_eq!(
+            chat_store::list_conversations(&legacy, "nan")
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(legacy);
+
+        std::fs::remove_dir(&blocker).unwrap();
+        let binding = login(root.path(), "nan", "u-1");
+        assert!(!binding.fresh, "the retry claims the history");
+        let mine = chat_store::open_db(&dir).unwrap();
+        assert_eq!(
+            chat_store::list_conversations(&mine, "nan").unwrap()[0].title,
+            "old chat"
+        );
     }
 
     #[test]

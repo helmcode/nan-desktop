@@ -50,6 +50,7 @@ export const es: Strings = {
     server: "El servicio de acceso ha tenido un problema. Vuelve a intentarlo.",
     protocol: "Algo ha fallado en este equipo. Vuelve a intentarlo.",
     identity: "No hemos podido confirmar qué cuenta ha entrado, así que no hemos cambiado nada. Vuelve a intentarlo.",
+    migration: "No hemos podido pasar tu historial de chats a tu cuenta, así que no hemos cambiado nada y tu historial sigue a salvo. Puede que el disco esté lleno: libera espacio y vuelve a entrar.",
   },
   chatErrors: {
     missing_key: "Tu sesión no está completa en este equipo. Vuelve a entrar.",

@@ -79,6 +79,10 @@ pub enum ErrorKind {
     /// The platform approved the login but could not say WHICH account it
     /// is (`/api/auth/me` failed): nothing was stored, no data was switched.
     Identity,
+    /// The login was verified but this user's earlier chat history could
+    /// not be moved into their account folder (e.g. the disk is full):
+    /// nothing was stored, nothing was switched, the history is intact.
+    Migration,
 }
 
 impl ErrorKind {
@@ -392,7 +396,10 @@ pub fn bind_and_store(
     session_token: &str,
 ) -> Result<bool, ErrorKind> {
     let (store, binding) =
-        crate::realm::bind_login_in(root, profile_id, identity).map_err(|_| ErrorKind::Protocol)?;
+        crate::realm::bind_login_in(root, profile_id, identity).map_err(|err| match err {
+            crate::realm::BindError::Claim(_) => ErrorKind::Migration,
+            crate::realm::BindError::Local(_) => ErrorKind::Protocol,
+        })?;
     let key = profile::key_account(&binding.realm_key);
     let session = profile::session_account(&binding.realm_key);
     vault
@@ -1068,6 +1075,47 @@ mod tests {
             vault
                 .set_many(&[("nan", "sk-legacy"), ("nan.session", "jwt-legacy")])
                 .unwrap();
+        }
+
+        #[test]
+        fn a_failed_history_move_refuses_the_login_and_the_retry_recovers_it() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let vault = vault(root);
+            v026_fixture(root, &vault);
+            // The disk "fills up": the realm copy cannot be written.
+            let a_dir =
+                realm::realm_dir(root, &realm::realm_hash(&realm::realm_key("nan", "user-a")));
+            let blocker = a_dir.join(format!("{}.claim.tmp", chat_store::DB_FILE));
+            std::fs::create_dir_all(&blocker).unwrap();
+
+            assert_eq!(
+                bind_and_store(root, &vault, "nan", &who("user-a"), "sk-a", "jwt-a"),
+                Err(ErrorKind::Migration)
+            );
+            // Fail-closed: nothing stored, nothing bound, no fresh realm.
+            assert_eq!(vault.get("nan:user-a").unwrap(), None);
+            assert_eq!(realm::accounts_in(root, "nan"), None);
+            let store = profile::load_or_seed(root).unwrap();
+            assert_eq!(store.binding("nan"), None);
+            // The history is intact where it was.
+            assert_eq!(titles(root), vec!["A private chat".to_string()]);
+
+            std::fs::remove_dir(&blocker).unwrap();
+            assert!(!login(root, &vault, "user-a"), "history claimed: not fresh");
+            assert_eq!(
+                visible(&active(root)),
+                (vec!["A private chat".to_string()], 1, 1, 1, 1)
+            );
+        }
+
+        #[test]
+        fn migration_failure_serializes_for_the_renderer() {
+            let payload = serde_json::to_string(&ErrorPayload {
+                kind: ErrorKind::Migration,
+            })
+            .expect("serialize");
+            assert_eq!(payload, r#"{"kind":"migration"}"#);
         }
 
         #[test]
