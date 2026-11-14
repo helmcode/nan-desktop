@@ -84,6 +84,7 @@ import {
   IconTrash,
   IconWarning,
   IconX,
+  IconShare,
 } from "./icons";
 import { Markdown } from "./Markdown";
 import { targetKey, type PreviewTarget } from "./preview/kind";
@@ -98,10 +99,12 @@ import type {
 import type { StudioSeed } from "./studio/studio";
 import { SkillPicker } from "./skills/SkillPicker";
 import { SkillsView, type SkillFormDraft } from "./skills/SkillsView";
+import { fetchAccess, shareSourceFor, type ArtifactsAccess, type ShareSource } from "./artifacts/artifacts";
+import { ShareArtifactDialog } from "./artifacts/ShareArtifactDialog";
+import { SharedLinksView } from "./artifacts/SharedLinksView";
 import {
   EMPTY_VIEW,
   TEAM_PROFILE,
-  fetchIdentity,
   fetchSkillsSharing,
   isTeamSkillId,
   loadCache,
@@ -150,6 +153,8 @@ interface DeviceStarted {
 interface DeviceApproved {
   key_alias: string;
   profile_id: string;
+  /** The account has no data on this device yet (privacy fix). */
+  fresh_realm?: boolean;
 }
 interface DeviceError {
   kind: string;
@@ -200,7 +205,8 @@ const RENAME_MAX_CHARS = 100;
 // normally holds the chats, and shows one section at a time. Order is the
 // reading order of the owner's reference; Account comes first because it is
 // where "about" and sign out live.
-const SETTINGS_SECTIONS: readonly SettingsPane[] = ["account", "folders", "memory", "language", "skills"];
+// "links" (Shared links) only shows while shared artifacts are available.
+const SETTINGS_SECTIONS: readonly SettingsPane[] = ["account", "folders", "memory", "language", "skills", "links"];
 
 /// The sidebar text of a Settings section (existing keys, no new copy).
 function settingsSectionLabel(t: Strings, section: SettingsPane): string {
@@ -215,6 +221,8 @@ function settingsSectionLabel(t: Strings, section: SettingsPane): string {
       return t.settings.language.title;
     case "skills":
       return t.skills.title;
+    case "links":
+      return t.artifacts.links.title;
   }
 }
 
@@ -231,6 +239,8 @@ function SettingsSectionIcon({ section }: { section: SettingsPane }) {
       return <IconGlobe size={16} />;
     case "skills":
       return <IconBolt size={16} />;
+    case "links":
+      return <IconShare size={16} />;
   }
 }
 
@@ -273,7 +283,16 @@ function SourceChips({ sources, onOpen }: { sources: WebSource[]; onOpen: (url: 
 }
 
 /// Chips for local files the assistant mentions (inside working folders).
-function FileChips({ paths, onOpen }: { paths: string[]; onOpen: (path: string) => void }) {
+function FileChips({
+  paths,
+  onOpen,
+  onShare,
+}: {
+  paths: string[];
+  onOpen: (path: string) => void;
+  /** Shared artifacts available: a share button on each shareable chip. */
+  onShare?: (source: ShareSource) => void;
+}) {
   const t = useT();
   if (paths.length === 0) return null;
   return (
@@ -292,6 +311,17 @@ function FileChips({ paths, onOpen }: { paths: string[]; onOpen: (path: string) 
               <IconFile size={13} />
               <span className="source-title">{folderName(path)}</span>
             </button>
+            {onShare && shareSourceFor({ kind: "file", ref: path }) && (
+              <button
+                type="button"
+                className="icon-btn file-chip-share"
+                aria-label={t.artifacts.shareLabel(folderName(path))}
+                title={t.artifacts.share}
+                onClick={() => onShare({ kind: "file", path })}
+              >
+                <IconShare size={13} />
+              </button>
+            )}
           </li>
         ))}
       </ul>
@@ -352,6 +382,7 @@ export function ProfilePicker({
         ))}
       </div>
       <p className="hint">{t.login.hint}</p>
+      {overview.relogin_pending && <p className="hint">{t.login.reloginAfterUpdate}</p>}
       {error && (
         <p className="inline-error" role="alert">
           {error}
@@ -661,8 +692,22 @@ function ApprovalCards({
 // Chat shell
 // ---------------------------------------------------------------------------
 
-function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; busy: boolean; onSignOut: () => void }) {
+function ChatShell({
+  overview,
+  busy,
+  onSignOut,
+  freshRealm = false,
+}: {
+  overview: ProfileOverview;
+  busy: boolean;
+  onSignOut: () => void;
+  /** This account signed in for the first time on this device (privacy
+   * fix): its realm starts empty and the empty state says so. */
+  freshRealm?: boolean;
+}) {
   const t = useT();
+  // Privacy fix: per-conversation renderer storage is scoped to the realm.
+  const realm = overview.active_user?.realm ?? "";
   const activeProfile: ProfileView | undefined = overview.profiles.find((p) => p.id === overview.active_profile);
   const workspace = useWorkspace(overview.active_profile);
 
@@ -708,8 +753,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [previews, setPreviews] = useState<Map<number, PreviewState>>(() => new Map());
 
   // Per-conversation folder selection (composer picker): none by default.
-  const [selections, setSelections] = useState<Selections>(loadSelections);
-  useEffect(() => saveSelections(selections), [selections]);
+  const [selections, setSelections] = useState<Selections>(() => loadSelections(realm));
+  useEffect(() => saveSelections(selections, realm), [selections, realm]);
   const selectionsRef = useRef(selections);
   useEffect(() => {
     selectionsRef.current = selections;
@@ -720,8 +765,10 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   });
 
   // Allow-mode suggestion: one per conversation, remembered across runs.
-  const [nudges, dispatchNudge] = useReducer(nudgeReducer, undefined, () => initialNudgeState(loadShownNudges()));
-  useEffect(() => saveShownNudges(nudges.shown), [nudges.shown]);
+  const [nudges, dispatchNudge] = useReducer(nudgeReducer, undefined, () =>
+    initialNudgeState(loadShownNudges(realm)),
+  );
+  useEffect(() => saveShownNudges(nudges.shown, realm), [nudges.shown, realm]);
   const countedApprovals = useRef<Set<string>>(new Set());
 
   // Image mode: the composer sends the prompt to `image_generate`. It is a
@@ -755,6 +802,33 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const pickerSkills = useMemo(() => [...skills, ...usableTeamSkills(teamState.view)], [skills, teamState.view]);
   const knownSkills = useMemo(() => [...skills, ...teamSkills], [skills, teamSkills]);
   const activeSkill = activeSkillFor(activeSkills, activeConvId ?? NEW_CHAT_KEY, knownSkills);
+
+  // Shared artifacts (design 5.1): whether the share action shows for the
+  // active profile (Helmcode org flag, community capability) and whether
+  // the user is an org admin (the Organization tab of Shared links). Read
+  // from /api/auth/me on every profile change; hidden until it answers.
+  const [artifactsAccess, setArtifactsAccess] = useState<ArtifactsAccess>({ availability: "off", admin: false });
+  const [sharingSource, setSharingSource] = useState<ShareSource | null>(null);
+  useEffect(() => {
+    const profileId = overview.active_profile;
+    setArtifactsAccess({ availability: "off", admin: false });
+    setSharingSource(null);
+    if (!profileId) return;
+    let alive = true;
+    void fetchAccess(profileId).then((access) => {
+      if (alive) setArtifactsAccess(access);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [overview.active_profile]);
+  const artifactsOn = artifactsAccess.availability !== "off";
+  const openShare = useCallback((source: ShareSource): void => setSharingSource(source), []);
+  const closeShare = useCallback((): void => setSharingSource(null), []);
+  const artifactsNotice = useCallback(
+    (kind: "success" | "error", text: string): void => setNotice({ id: Date.now(), kind, text }),
+    [],
+  );
 
   // Image edits happen in the Image Studio, its own view. `studio` is the
   // current session (null until first opened); the Studio stays mounted
@@ -812,22 +886,6 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [sttHint, setSttHint] = useState("");
   const recorderRef = useRef<MediaRecorder | null>(null);
 
-  // Round 13: the signed-in user's email for the bottom-left chip. Fetched on
-  // profile change; a miss keeps the platform label (both tenants answer
-  // /api/auth/me, but a session that cannot read it must not break the chip).
-  const [userEmail, setUserEmail] = useState<{ [profileId: string]: string }>({});
-  useEffect(() => {
-    const profileId = overview.active_profile;
-    if (!profileId) return;
-    let alive = true;
-    fetchIdentity(profileId).then(({ email }) => {
-      if (!alive || !email) return;
-      setUserEmail((prev) => (prev[profileId] === email ? prev : { ...prev, [profileId]: email }));
-    });
-    return () => {
-      alive = false;
-    };
-  }, [overview.active_profile]);
   const activeProfileRef = useRef<string | null>(overview.active_profile);
   useEffect(() => {
     activeProfileRef.current = overview.active_profile;
@@ -2062,7 +2120,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   };
 
   const profileLabel = activeProfile ? profileTitle(t, activeProfile.id, activeProfile.name) : t.sidebar.noAccount;
-  const accountName = (activeProfile && userEmail[activeProfile.id]) || profileLabel;
+  // Round 13 + privacy fix: the chip names the account whose realm is open
+  // (the identity the core verified at login), never a cached guess.
+  const accountName = overview.active_user?.email || profileLabel;
   const placed = placeCards(approvals, activeConvId, messages.length);
   // The open conversation's allow-mode suggestion, anchored like the cards.
   const activeNudge = nudges.active.find((nudge) => nudge.conversationId === activeConvId);
@@ -2154,7 +2214,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           </p>
         )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
-        <FileChips paths={files.chips} onOpen={openFilePreview} />
+        <FileChips paths={files.chips} onOpen={openFilePreview} onShare={artifactsOn ? openShare : undefined} />
         {VOICE_UI && visible.trim().length > 0 && (
           <div className="msg-actions">
             <button
@@ -2208,7 +2268,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         </div>
         {view === "settings" ? (
           <nav className="settings-nav" aria-label={t.settings.sections} ref={settingsNavRef}>
-            {SETTINGS_SECTIONS.map((section) => (
+            {SETTINGS_SECTIONS.filter((section) => section !== "links" || artifactsOn).map((section) => (
               <button
                 key={section}
                 type="button"
@@ -2313,6 +2373,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             onOpenSettings={openSettings}
             onSignOut={onSignOut}
             signingOut={busy}
+            sharedLinks={artifactsOn}
           />
         </div>
       </aside>
@@ -2350,7 +2411,16 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         // sidebar picks it. `data-section` is what App.css keys the visible
         // section off (see .settings-surface there).
         <div className="settings-surface" data-section={settingsSection}>
-          {settingsSection === "skills" ? (
+          {settingsSection === "links" && artifactsOn && overview.active_profile ? (
+            <SharedLinksView
+              profileId={overview.active_profile}
+              admin={artifactsAccess.admin}
+              onBack={leaveSettings}
+              backLabel={settingsReturn === "studio" ? t.settings.backToStudio : t.settings.back}
+              onNotice={artifactsNotice}
+              onSignIn={onSignOut}
+            />
+          ) : settingsSection === "skills" ? (
             <SkillsView
               skills={skills}
               loadError={skillsLoadError}
@@ -2463,6 +2533,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                     <BrandMark size="xl" />
                     <p className="empty-title">{t.chat.emptyTitle}</p>
                     <p className="empty-hint">{t.chat.emptyHint}</p>
+                    {freshRealm && conversations.length === 0 && (
+                      <p className="empty-fresh" role="status">
+                        {t.chat.freshRealm(overview.active_user?.email ?? null)}
+                      </p>
+                    )}
                   </div>
                 )}
                 <ApprovalCards cards={placed.after.get(0)} onRespond={(id, g) => void respondApproval(id, g)} />
@@ -2733,6 +2808,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   onOpenLink={openWebPreview}
                   onEditImage={editFromPreview}
                   onRemove={removeFromPreview}
+                  onShare={artifactsOn ? openShare : undefined}
                 />
               </Suspense>
             )}
@@ -2743,6 +2819,24 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
 
       {askComputerWide && (
         <ComputerWideDialog onCancel={() => setAskComputerWide(false)} onContinue={() => void confirmComputerWide()} />
+      )}
+      {/* Stays open if the server turns the feature off mid-share (404), so
+          the dialog can say so; the share buttons are gone by then. */}
+      {sharingSource && overview.active_profile && (
+        <ShareArtifactDialog
+          key={`${sharingSource.kind}:${sharingSource.path}`}
+          profileId={overview.active_profile}
+          source={sharingSource}
+          availability={artifactsAccess.availability === "paywall" ? "paywall" : "on"}
+          onClose={closeShare}
+          onManage={() => {
+            setSharingSource(null);
+            openSettings("links");
+          }}
+          onNotice={artifactsNotice}
+          onSignIn={onSignOut}
+          onDisabled={() => setArtifactsAccess({ availability: "off", admin: false })}
+        />
       )}
       <Toast notice={notice} onDismiss={dismissNotice} />
     </main>
@@ -2759,6 +2853,8 @@ function App() {
   const [overview, setOverview] = useState<ProfileOverview | null>(null);
   const [pickerError, setPickerError] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Privacy fix: the account that just signed in starts with a fresh realm.
+  const [freshRealm, setFreshRealm] = useState(false);
 
   // Device-flow login state.
   const [authProfileId, setAuthProfileId] = useState<string | null>(null);
@@ -2800,6 +2896,7 @@ function App() {
         refreshOverview()
           .then((next) => {
             setOverview(next);
+            setFreshRealm(event.payload.fresh_realm === true);
             setAuthProfileId(null);
             setScreen("chat");
           })
@@ -2856,6 +2953,7 @@ function App() {
       await invoke("device_logout", { profileId });
       const next = await refreshOverview();
       setOverview(next);
+      setFreshRealm(false);
       setScreen("picker");
     } catch {
       setScreen("error");
@@ -2926,7 +3024,17 @@ function App() {
     return null; // unreachable with a consistent state machine
   }
 
-  return <ChatShell overview={overview} busy={busy} onSignOut={() => void signOut()} />;
+  // Keyed by the realm: another account never inherits this shell's state
+  // (conversation ids restart at 1 in every realm).
+  return (
+    <ChatShell
+      key={overview.active_user?.realm ?? overview.active_profile ?? ""}
+      overview={overview}
+      busy={busy}
+      onSignOut={() => void signOut()}
+      freshRealm={freshRealm}
+    />
+  );
 }
 
 export default App;

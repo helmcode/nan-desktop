@@ -1,6 +1,9 @@
 //! Chat persistence (T4, S3): conversations and messages in SQLite.
 //!
-//! The chat store lives in its own file (`chat.db` in the app data dir).
+//! The chat store lives in its own file: `chat.db` inside the signed-in
+//! user's realm folder (`<app data>/realms/<hash>/chat.db`, see `realm.rs`).
+//! A pre-realm `<app data>/chat.db` is split per profile into the first
+//! bound realm by [`claim_profile`].
 //!
 //! All functions are connection-injected pure logic, unit-tested against a
 //! temp file — never the real app dir.
@@ -223,6 +226,310 @@ pub fn open_db(dir: &std::path::Path) -> Result<Connection, String> {
     let conn = Connection::open(dir.join(DB_FILE)).map_err(|err| err.to_string())?;
     ensure_schema(&conn).map_err(|err| err.to_string())?;
     Ok(conn)
+}
+
+/// Table written INSIDE a realm chat database when the legacy rows of a
+/// profile were fully copied into it (the claim marker). Its presence is
+/// what allows [`claim_profile`] to prune the legacy rows.
+const CLAIM_TABLE: &str = "realm_claim";
+
+/// Privacy fix (realms): move every row of `profile_id` from the pre-realm
+/// `<root>/chat.db` into `<realm_dir>/chat.db`, without duplicating them and
+/// without ever losing one.
+///
+/// The legacy rows are deleted ONLY when the realm database carries the
+/// claim marker for this profile (a `realm_claim` row recording how many
+/// conversations, messages and tombstones were copied). The marker is
+/// written in the same unit as the copy, so its presence proves the copy is
+/// complete:
+///
+/// - no realm database yet: the copy is built as a temp file (`VACUUM
+///   INTO`, then the OTHER profiles' rows are deleted and the file vacuumed
+///   so no freed page keeps their text), the marker is written into it, and
+///   only then is it renamed into place;
+/// - a realm database WITHOUT the marker (an earlier claim failed, e.g. the
+///   disk filled up during `VACUUM INTO`, and the user chatted afterwards so
+///   the realm file was created empty): the claim is resumed by merging the
+///   legacy rows into it (new ids, see [`merge_legacy_rows`]) and writing
+///   the marker, in ONE transaction;
+/// - a realm database WITH the marker (the copy landed, the prune did not):
+///   only the prune runs.
+///
+/// Every interruption therefore leaves the legacy rows in place for the
+/// next login. The moved rows are then deleted from the legacy file
+/// (vacuumed too); a legacy file left with no rows at all is removed.
+/// Returns whether any row was moved. Never touches a realm database of
+/// another user.
+pub fn claim_profile(
+    root: &std::path::Path,
+    realm_dir: &std::path::Path,
+    profile_id: &str,
+) -> Result<bool, String> {
+    let legacy_path = root.join(DB_FILE);
+    if !legacy_path.is_file() {
+        return Ok(false);
+    }
+    let legacy = open_db(root)?;
+    let owned: i64 = legacy
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM conversations WHERE profile_id = ?1)
+                  + (SELECT COUNT(*) FROM memory_tombstones WHERE profile_id = ?1)",
+            [profile_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| err.to_string())?;
+    if owned == 0 {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(realm_dir).map_err(|err| err.to_string())?;
+    let dest = realm_dir.join(DB_FILE);
+    if dest.exists() {
+        let mut realm = open_db(realm_dir)?;
+        if !has_claim_marker(&realm, profile_id).map_err(|err| err.to_string())? {
+            merge_legacy_rows(&mut realm, &legacy_path, profile_id)
+                .map_err(|err| err.to_string())?;
+        }
+    } else {
+        let tmp = realm_dir.join(format!("{DB_FILE}.claim.tmp"));
+        let _ = std::fs::remove_file(&tmp);
+        let built = (|| -> Result<(), rusqlite::Error> {
+            legacy.execute("VACUUM INTO ?1", [tmp.to_string_lossy().as_ref()])?;
+            let copy = Connection::open(&tmp)?;
+            copy.execute_batch("PRAGMA foreign_keys = ON;")?;
+            delete_profile_rows(&copy, profile_id, false)?;
+            copy.execute_batch("VACUUM;")?;
+            write_claim_marker(&copy, profile_id)?;
+            Ok(())
+        })();
+        if let Err(err) = built {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.to_string());
+        }
+        std::fs::rename(&tmp, &dest).map_err(|err| err.to_string())?;
+    }
+    delete_profile_rows(&legacy, profile_id, true).map_err(|err| err.to_string())?;
+    legacy
+        .execute_batch("VACUUM;")
+        .map_err(|err| err.to_string())?;
+    let left: i64 = legacy
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM conversations) + (SELECT COUNT(*) FROM memory_tombstones)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|err| err.to_string())?;
+    drop(legacy);
+    if left == 0 {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(root.join(format!("{DB_FILE}{suffix}")));
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `conn` carries the claim marker of `profile_id`.
+fn has_claim_marker(conn: &Connection, profile_id: &str) -> Result<bool, rusqlite::Error> {
+    let table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [CLAIM_TABLE],
+        |row| row.get(0),
+    )?;
+    if table == 0 {
+        return Ok(false);
+    }
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM {CLAIM_TABLE} WHERE profile_id = ?1"),
+        [profile_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+}
+
+/// Record that every legacy row of `profile_id` is now in `conn`, with the
+/// counts it holds for that profile (audit trail of the completed claim).
+fn write_claim_marker(conn: &Connection, profile_id: &str) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {CLAIM_TABLE} (
+             profile_id TEXT PRIMARY KEY,
+             conversations INTEGER NOT NULL,
+             messages INTEGER NOT NULL,
+             tombstones INTEGER NOT NULL,
+             completed_at TEXT NOT NULL
+         );"
+    ))?;
+    conn.execute(
+        &format!(
+            "INSERT OR REPLACE INTO {CLAIM_TABLE}
+                 (profile_id, conversations, messages, tombstones, completed_at)
+             VALUES (?1,
+                 (SELECT COUNT(*) FROM conversations WHERE profile_id = ?1),
+                 (SELECT COUNT(*) FROM messages WHERE conversation_id IN
+                     (SELECT id FROM conversations WHERE profile_id = ?1)),
+                 (SELECT COUNT(*) FROM memory_tombstones WHERE profile_id = ?1),
+                 strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+        ),
+        [profile_id],
+    )?;
+    Ok(())
+}
+
+/// The column names of `table` in the main database, minus `skip`.
+fn columns_except(
+    conn: &Connection,
+    table: &str,
+    skip: &[&str],
+) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(names
+        .into_iter()
+        .filter(|name| !skip.contains(&name.as_str()))
+        .collect())
+}
+
+/// Resume an interrupted claim: copy every legacy row of `profile_id` into
+/// the (unmarked) realm database `realm` and write the claim marker, all in
+/// one transaction (a failure rolls back to the realm file as it was, the
+/// legacy rows stay). Rows get new ids; message `parent_message_id`s are
+/// remapped (to NULL when their parent was not copied). A conversation whose
+/// `remote_id` already exists in the realm with at least as many messages is
+/// the same synced conversation and is skipped, so a retry never
+/// duplicates; with FEWER messages both are kept (the legacy one under a
+/// new remote id), never one dropped.
+fn merge_legacy_rows(
+    realm: &mut Connection,
+    legacy_path: &std::path::Path,
+    profile_id: &str,
+) -> Result<(), rusqlite::Error> {
+    use std::collections::HashMap;
+    realm.execute(
+        "ATTACH DATABASE ?1 AS legacy",
+        [legacy_path.to_string_lossy().as_ref()],
+    )?;
+    let merged = (|| -> Result<(), rusqlite::Error> {
+        let tx = realm.transaction()?;
+        let conv_cols = columns_except(&tx, "conversations", &["id"])?.join(", ");
+        let unsynced_cols =
+            columns_except(&tx, "conversations", &["id", "remote_id", "synced_at"])?.join(", ");
+        let msg_cols = columns_except(
+            &tx,
+            "messages",
+            &["id", "conversation_id", "parent_message_id"],
+        )?
+        .join(", ");
+        let conversations: Vec<(i64, Option<String>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, remote_id FROM legacy.conversations WHERE profile_id = ?1 ORDER BY id",
+            )?;
+            stmt.query_map([profile_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()?
+        };
+        let mut message_ids: HashMap<i64, i64> = HashMap::new();
+        let mut parents: Vec<(i64, i64)> = Vec::new();
+        for (old_conv, remote_id) in conversations {
+            let mut clash = false;
+            if let Some(remote_id) = &remote_id {
+                // Messages the realm copy of this synced conversation is
+                // missing (None: the realm does not have it).
+                let missing: Option<i64> = tx
+                    .query_row(
+                        "SELECT (SELECT COUNT(*) FROM legacy.messages WHERE conversation_id = ?2)
+                              - (SELECT COUNT(*) FROM main.messages WHERE conversation_id = c.id)
+                         FROM main.conversations c WHERE c.remote_id = ?1",
+                        rusqlite::params![remote_id, old_conv],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                match missing {
+                    Some(missing) if missing <= 0 => continue,
+                    Some(_) => clash = true,
+                    None => {}
+                }
+            }
+            // On a clash the realm's copy has fewer messages: keep both
+            // rather than drop any. The legacy one is copied without its
+            // sync identity and gets a fresh remote id later (backfill), so
+            // the two never collide on sync.
+            let cols = if clash { &unsynced_cols } else { &conv_cols };
+            tx.execute(
+                &format!(
+                    "INSERT INTO main.conversations ({cols})
+                     SELECT {cols} FROM legacy.conversations WHERE id = ?1"
+                ),
+                [old_conv],
+            )?;
+            let new_conv = tx.last_insert_rowid();
+            let messages: Vec<(i64, Option<i64>)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id, parent_message_id FROM legacy.messages
+                     WHERE conversation_id = ?1 ORDER BY id",
+                )?;
+                stmt.query_map([old_conv], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<_, _>>()?
+            };
+            for (old_msg, parent) in messages {
+                tx.execute(
+                    &format!(
+                        "INSERT INTO main.messages (conversation_id, {msg_cols})
+                         SELECT ?1, {msg_cols} FROM legacy.messages WHERE id = ?2"
+                    ),
+                    [new_conv, old_msg],
+                )?;
+                let new_msg = tx.last_insert_rowid();
+                message_ids.insert(old_msg, new_msg);
+                if let Some(parent) = parent {
+                    parents.push((new_msg, parent));
+                }
+            }
+        }
+        for (new_msg, old_parent) in parents {
+            if let Some(new_parent) = message_ids.get(&old_parent) {
+                tx.execute(
+                    "UPDATE main.messages SET parent_message_id = ?1 WHERE id = ?2",
+                    [*new_parent, new_msg],
+                )?;
+            }
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO main.memory_tombstones (remote_id, profile_id)
+             SELECT remote_id, profile_id FROM legacy.memory_tombstones WHERE profile_id = ?1",
+            [profile_id],
+        )?;
+        write_claim_marker(&tx, profile_id)?;
+        tx.commit()
+    })();
+    let detached = realm.execute("DETACH DATABASE legacy", []);
+    merged?;
+    detached.map(|_| ())
+}
+
+/// Delete the rows of `profile_id` (`matching = true`) or of every OTHER
+/// profile (`matching = false`): messages first, then conversations, then
+/// memory tombstones.
+fn delete_profile_rows(
+    conn: &Connection,
+    profile_id: &str,
+    matching: bool,
+) -> Result<(), rusqlite::Error> {
+    let op = if matching { "=" } else { "!=" };
+    conn.execute(
+        &format!(
+            "DELETE FROM messages WHERE conversation_id IN
+                 (SELECT id FROM conversations WHERE profile_id {op} ?1)"
+        ),
+        [profile_id],
+    )?;
+    conn.execute(
+        &format!("DELETE FROM conversations WHERE profile_id {op} ?1"),
+        [profile_id],
+    )?;
+    conn.execute(
+        &format!("DELETE FROM memory_tombstones WHERE profile_id {op} ?1"),
+        [profile_id],
+    )?;
+    Ok(())
 }
 
 /// Insert a conversation and return its id. `title` may be empty — the empty
@@ -899,6 +1206,362 @@ fn truncate_chars(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ---- privacy fix: per-user realms (legacy chat.db split) -------------
+
+    /// A pre-realm chat.db holding both tenants' conversations.
+    fn legacy_db(root: &std::path::Path) {
+        let conn = open_db(root).expect("legacy db");
+        let nan = insert_conversation(&conn, "nan", "nan secret plans").unwrap();
+        insert_message(&conn, nan, "user", "NAN-PRIVATE-TEXT", None).unwrap();
+        let helm = insert_conversation(&conn, "helmcode", "helm roadmap").unwrap();
+        insert_message(&conn, helm, "user", "HELM-PRIVATE-TEXT", None).unwrap();
+        conn.execute(
+            "INSERT INTO memory_tombstones (remote_id, profile_id) VALUES ('r-nan', 'nan'), ('r-helm', 'helmcode')",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn file_contains(path: &std::path::Path, needle: &str) -> bool {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    #[test]
+    fn claim_moves_one_profile_into_its_realm_and_scrubs_the_other() {
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let realm = root.path().join("realms").join("a".repeat(32));
+
+        assert!(claim_profile(root.path(), &realm, "nan").expect("claim"));
+
+        let mine = open_db(&realm).unwrap();
+        let listed = list_conversations(&mine, "nan").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "nan secret plans");
+        let rows = list_messages(&mine, listed[0].id).unwrap();
+        assert_eq!(rows[0].content, "NAN-PRIVATE-TEXT");
+        assert!(list_conversations(&mine, "helmcode").unwrap().is_empty());
+        assert_eq!(
+            list_tombstones(&mine, "nan").unwrap(),
+            vec!["r-nan".to_string()]
+        );
+        assert!(list_tombstones(&mine, "helmcode").unwrap().is_empty());
+        drop(mine);
+        // Not a byte of the other tenant's text survives in the realm file.
+        assert!(!file_contains(&realm.join(DB_FILE), "HELM-PRIVATE-TEXT"));
+
+        // Moved, not duplicated: the legacy file keeps only helmcode.
+        let legacy = open_db(root.path()).unwrap();
+        assert!(list_conversations(&legacy, "nan").unwrap().is_empty());
+        assert_eq!(list_conversations(&legacy, "helmcode").unwrap().len(), 1);
+        assert!(list_tombstones(&legacy, "nan").unwrap().is_empty());
+        drop(legacy);
+        assert!(!file_contains(
+            &root.path().join(DB_FILE),
+            "NAN-PRIVATE-TEXT"
+        ));
+        // A second claim of the same profile moves nothing more.
+        assert!(!claim_profile(root.path(), &realm, "nan").unwrap());
+    }
+
+    #[test]
+    fn claiming_the_last_profile_removes_the_legacy_file() {
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let a = root.path().join("realms").join("a".repeat(32));
+        let h = root.path().join("realms").join("b".repeat(32));
+        assert!(claim_profile(root.path(), &a, "nan").unwrap());
+        assert!(claim_profile(root.path(), &h, "helmcode").unwrap());
+        assert!(!root.path().join(DB_FILE).exists(), "nothing left: removed");
+        let helm = open_db(&h).unwrap();
+        assert_eq!(list_conversations(&helm, "helmcode").unwrap().len(), 1);
+        assert!(list_conversations(&helm, "nan").unwrap().is_empty());
+    }
+
+    #[test]
+    fn claim_without_a_legacy_file_or_rows_is_a_no_op() {
+        let root = TempDir::new().unwrap();
+        let realm = root.path().join("realms").join("c".repeat(32));
+        assert!(!claim_profile(root.path(), &realm, "nan").unwrap());
+        assert!(!realm.join(DB_FILE).exists());
+        // A legacy file with only the other tenant's rows: nothing moves.
+        let conn = open_db(root.path()).unwrap();
+        insert_conversation(&conn, "helmcode", "h").unwrap();
+        drop(conn);
+        assert!(!claim_profile(root.path(), &realm, "nan").unwrap());
+        assert!(!realm.join(DB_FILE).exists());
+    }
+
+    fn titles(conn: &Connection, profile_id: &str) -> Vec<String> {
+        let mut titles: Vec<String> = list_conversations(conn, profile_id)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.title)
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    fn all_contents(conn: &Connection, profile_id: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for conv in list_conversations(conn, profile_id).unwrap() {
+            for row in list_messages(conn, conv.id).unwrap() {
+                out.push(row.content);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_completed_claim_carries_the_marker() {
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let realm = root.path().join("realms").join("m".repeat(32));
+        assert!(claim_profile(root.path(), &realm, "nan").unwrap());
+        let mine = open_db(&realm).unwrap();
+        assert!(has_claim_marker(&mine, "nan").unwrap());
+        assert!(!has_claim_marker(&mine, "helmcode").unwrap());
+        let counts: (i64, i64, i64) = mine
+            .query_row(
+                "SELECT conversations, messages, tombstones FROM realm_claim WHERE profile_id = 'nan'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1, 1));
+    }
+
+    #[test]
+    fn a_marked_realm_copy_only_prunes() {
+        // The rename landed (marker inside) but the prune did not: the
+        // retry must not rebuild, merge into or overwrite the realm copy.
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let realm = root.path().join("realms").join("d".repeat(32));
+        let existing = open_db(&realm).unwrap();
+        insert_conversation(&existing, "nan", "already moved").unwrap();
+        write_claim_marker(&existing, "nan").unwrap();
+        drop(existing);
+
+        assert!(claim_profile(root.path(), &realm, "nan").unwrap());
+        let mine = open_db(&realm).unwrap();
+        assert_eq!(titles(&mine, "nan"), vec!["already moved".to_string()]);
+        let legacy = open_db(root.path()).unwrap();
+        assert!(list_conversations(&legacy, "nan").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unmarked_realm_db_is_merged_never_pruned_blindly() {
+        // An earlier claim failed before the rename; the user then chatted,
+        // which created an EMPTY realm db. The next claim must keep both
+        // the new chat and the whole legacy history.
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let realm = root.path().join("realms").join("e".repeat(32));
+        let partial = open_db(&realm).unwrap();
+        let after = insert_conversation(&partial, "nan", "chat after the failure").unwrap();
+        insert_message(&partial, after, "user", "NEW-TEXT", None).unwrap();
+        drop(partial);
+
+        assert!(claim_profile(root.path(), &realm, "nan").unwrap());
+        let mine = open_db(&realm).unwrap();
+        assert_eq!(
+            titles(&mine, "nan"),
+            vec![
+                "chat after the failure".to_string(),
+                "nan secret plans".to_string()
+            ]
+        );
+        assert_eq!(
+            all_contents(&mine, "nan"),
+            vec!["NAN-PRIVATE-TEXT".to_string(), "NEW-TEXT".to_string()]
+        );
+        assert_eq!(
+            list_tombstones(&mine, "nan").unwrap(),
+            vec!["r-nan".to_string()]
+        );
+        assert!(list_conversations(&mine, "helmcode").unwrap().is_empty());
+        assert!(has_claim_marker(&mine, "nan").unwrap());
+        drop(mine);
+        assert!(!file_contains(&realm.join(DB_FILE), "HELM-PRIVATE-TEXT"));
+        // Only now is the legacy copy pruned; a retry moves nothing more.
+        let legacy = open_db(root.path()).unwrap();
+        assert!(list_conversations(&legacy, "nan").unwrap().is_empty());
+        assert_eq!(list_conversations(&legacy, "helmcode").unwrap().len(), 1);
+        drop(legacy);
+        assert!(!claim_profile(root.path(), &realm, "nan").unwrap());
+        assert_eq!(titles(&open_db(&realm).unwrap(), "nan").len(), 2);
+    }
+
+    #[test]
+    fn an_aborted_copy_keeps_the_legacy_history_and_the_next_login_recovers_it() {
+        // ENOSPC-style abort: the temp copy cannot be written (here its
+        // path is a directory), so `VACUUM INTO` fails mid-claim.
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let realm = root.path().join("realms").join("f".repeat(32));
+        let blocker = realm.join(format!("{DB_FILE}.claim.tmp"));
+        std::fs::create_dir_all(&blocker).unwrap();
+
+        assert!(claim_profile(root.path(), &realm, "nan").is_err());
+        assert!(!realm.join(DB_FILE).exists(), "no half copy in place");
+        let legacy = open_db(root.path()).unwrap();
+        assert_eq!(
+            all_contents(&legacy, "nan"),
+            vec!["NAN-PRIVATE-TEXT".to_string()]
+        );
+        assert_eq!(
+            list_tombstones(&legacy, "nan").unwrap(),
+            vec!["r-nan".to_string()]
+        );
+        drop(legacy);
+
+        // Worst interleaving: the user still reached the chat and wrote
+        // into a new, unmarked realm db before the disk was freed.
+        let partial = open_db(&realm).unwrap();
+        insert_conversation(&partial, "nan", "written meanwhile").unwrap();
+        drop(partial);
+        std::fs::remove_dir(&blocker).unwrap();
+
+        assert!(claim_profile(root.path(), &realm, "nan").unwrap());
+        let mine = open_db(&realm).unwrap();
+        assert_eq!(
+            titles(&mine, "nan"),
+            vec![
+                "nan secret plans".to_string(),
+                "written meanwhile".to_string()
+            ]
+        );
+        assert_eq!(
+            all_contents(&mine, "nan"),
+            vec!["NAN-PRIVATE-TEXT".to_string()]
+        );
+        assert_eq!(
+            list_tombstones(&mine, "nan").unwrap(),
+            vec!["r-nan".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_merge_that_fails_midway_rolls_back_and_prunes_nothing() {
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let legacy = open_db(root.path()).unwrap();
+        let conv = list_conversations(&legacy, "nan").unwrap()[0].id;
+        insert_message(&legacy, conv, "assistant", "SECOND-MESSAGE", None).unwrap();
+        drop(legacy);
+        let realm = root.path().join("realms").join("g".repeat(32));
+        let partial = open_db(&realm).unwrap();
+        insert_conversation(&partial, "nan", "written meanwhile").unwrap();
+        // The disk "fills up" on the second copied message.
+        partial
+            .execute_batch(
+                "CREATE TRIGGER full_disk BEFORE INSERT ON messages
+                 WHEN NEW.content = 'SECOND-MESSAGE'
+                 BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+            )
+            .unwrap();
+        drop(partial);
+
+        assert!(claim_profile(root.path(), &realm, "nan").is_err());
+        let mine = open_db(&realm).unwrap();
+        assert_eq!(titles(&mine, "nan"), vec!["written meanwhile".to_string()]);
+        assert!(!has_claim_marker(&mine, "nan").unwrap());
+        mine.execute_batch("DROP TRIGGER full_disk;").unwrap();
+        drop(mine);
+        let legacy = open_db(root.path()).unwrap();
+        assert_eq!(
+            all_contents(&legacy, "nan"),
+            vec!["NAN-PRIVATE-TEXT".to_string(), "SECOND-MESSAGE".to_string()]
+        );
+        drop(legacy);
+
+        assert!(claim_profile(root.path(), &realm, "nan").unwrap());
+        let mine = open_db(&realm).unwrap();
+        assert_eq!(
+            all_contents(&mine, "nan"),
+            vec!["NAN-PRIVATE-TEXT".to_string(), "SECOND-MESSAGE".to_string()]
+        );
+        assert_eq!(titles(&mine, "nan").len(), 2);
+    }
+
+    #[test]
+    fn a_merge_remaps_ids_and_dedupes_synced_conversations() {
+        let root = TempDir::new().unwrap();
+        let legacy = open_db(root.path()).unwrap();
+        let synced = insert_conversation(&legacy, "nan", "synced").unwrap();
+        insert_message(&legacy, synced, "user", "S1", None).unwrap();
+        let longer = insert_conversation(&legacy, "nan", "longer here").unwrap();
+        insert_message(&legacy, longer, "user", "L1", None).unwrap();
+        insert_message(&legacy, longer, "assistant", "L2", None).unwrap();
+        let edits = insert_conversation(&legacy, "nan", "edits").unwrap();
+        let source = insert_message(&legacy, edits, "assistant", "SOURCE", None).unwrap();
+        let edit = insert_message(&legacy, edits, "assistant", "EDIT", None).unwrap();
+        legacy
+            .execute(
+                "UPDATE messages SET parent_message_id = ?1 WHERE id = ?2",
+                [source, edit],
+            )
+            .unwrap();
+        legacy
+            .execute_batch(
+                "UPDATE conversations SET remote_id = 'r-synced' WHERE title = 'synced';
+                 UPDATE conversations SET remote_id = 'r-longer' WHERE title = 'longer here';",
+            )
+            .unwrap();
+        drop(legacy);
+        // The realm db already pulled both synced conversations (ids shifted
+        // by a conversation of its own), the second one with fewer messages.
+        let realm = root.path().join("realms").join("h".repeat(32));
+        let partial = open_db(&realm).unwrap();
+        insert_conversation(&partial, "nan", "own").unwrap();
+        let pulled = insert_conversation(&partial, "nan", "synced").unwrap();
+        insert_message(&partial, pulled, "user", "S1", None).unwrap();
+        let short = insert_conversation(&partial, "nan", "longer here").unwrap();
+        partial
+            .execute_batch(&format!(
+                "UPDATE conversations SET remote_id = 'r-synced' WHERE id = {pulled};
+                 UPDATE conversations SET remote_id = 'r-longer' WHERE id = {short};"
+            ))
+            .unwrap();
+        drop(partial);
+
+        assert!(claim_profile(root.path(), &realm, "nan").unwrap());
+        let mine = open_db(&realm).unwrap();
+        // "synced" is not duplicated; the shorter "longer here" copy is kept
+        // AND the legacy one is added (no message lost).
+        assert_eq!(
+            titles(&mine, "nan"),
+            vec![
+                "edits".to_string(),
+                "longer here".to_string(),
+                "longer here".to_string(),
+                "own".to_string(),
+                "synced".to_string()
+            ]
+        );
+        let remote_ids: i64 = mine
+            .query_row(
+                "SELECT COUNT(*) FROM conversations WHERE remote_id = 'r-longer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remote_ids, 1, "the added copy never reuses the remote id");
+        // The edit lineage points at the copied source, not the old id.
+        let (edit_parent, source_id): (i64, i64) = mine
+            .query_row(
+                "SELECT e.parent_message_id, s.id FROM messages e, messages s
+                 WHERE e.content = 'EDIT' AND s.content = 'SOURCE'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(edit_parent, source_id);
+    }
 
     fn open_temp_db(dir: &TempDir) -> Connection {
         let conn = Connection::open(dir.path().join("chat-test.db")).expect("open temp db");

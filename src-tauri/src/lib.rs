@@ -12,6 +12,8 @@
 // URLs (plus the debug-only mock overrides documented in `device_flow` and
 // `chat`).
 
+// Shared artifacts (F1): snapshot upload of a granted file + link list/revoke.
+mod artifacts;
 mod chat;
 mod chat_store;
 mod conn_test;
@@ -29,6 +31,9 @@ mod memory;
 // Preview pane backends (S21): granted-file reads + platform page fetch.
 mod preview;
 mod profile;
+// Per-user data realms (privacy fix): user binding, realm folders, the
+// one-time claim of pre-realm data.
+mod realm;
 // Local skills (T14/S1): store, bundle validation and the context block.
 mod skills;
 // Shared skills (S4): org library API passthrough + offline team cache.
@@ -69,10 +74,25 @@ struct ProfileView {
     key_mask: Option<String>,
 }
 
+/// The account signed in to the active profile (privacy fix): the identity
+/// chip shows it, and the renderer scopes its own per-conversation storage
+/// with `realm` (the realm hash, never the raw user id). Only the ACTIVE
+/// profile's user is ever exposed: the picker never names who used the
+/// other profile, or this one before.
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+struct ActiveUser {
+    email: Option<String>,
+    realm: String,
+}
+
 #[derive(Clone, Serialize)]
 struct ProfileOverview {
     profiles: Vec<ProfileView>,
     active_profile: Option<String>,
+    active_user: Option<ActiveUser>,
+    /// The app was updated from a pre-realm build and nobody has signed in
+    /// since: the login screen tells everyone to sign in one more time.
+    relogin_pending: bool,
 }
 
 fn profiles_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -83,13 +103,34 @@ fn profiles_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 /// storage failure degrades to "no key" (logged out) so the profile list
 /// always renders and the user can simply sign in again.
 fn key_status(profile_id: &str) -> (bool, Option<String>) {
-    match credentials::store().and_then(|store| store.get(&profile::key_account(profile_id))) {
+    // Privacy fix: only the bound user's realm-keyed slot counts.
+    let Some((account, _)) = realm::accounts(profile_id) else {
+        return (false, None);
+    };
+    match credentials::store().and_then(|store| store.get(&account)) {
         Ok(Some(value)) if !value.is_empty() => (true, Some(profile::mask_key(&value))),
         _ => (false, None),
     }
 }
 
+/// The active profile's signed-in user, when it has one.
+fn active_user(store: &ProfileStore) -> Option<ActiveUser> {
+    let (_, user) = store.active_binding()?;
+    Some(ActiveUser {
+        email: user.email.clone(),
+        realm: user.realm.clone(),
+    })
+}
+
 fn store_overview(store: &ProfileStore) -> Result<ProfileOverview, String> {
+    Ok(overview_with(store, key_status))
+}
+
+/// [`store_overview`] with the credential probe injected (testable).
+fn overview_with(
+    store: &ProfileStore,
+    key_status: impl Fn(&str) -> (bool, Option<String>),
+) -> ProfileOverview {
     let mut profiles = Vec::with_capacity(store.profiles.len());
     for p in &store.profiles {
         let (has_key, key_mask) = key_status(&p.id);
@@ -100,10 +141,17 @@ fn store_overview(store: &ProfileStore) -> Result<ProfileOverview, String> {
             key_mask,
         });
     }
-    Ok(ProfileOverview {
+    // A user who signed out (or whose key is gone) is not "signed in": no
+    // identity is exposed for them.
+    let signed_in = profiles
+        .iter()
+        .any(|p| Some(&p.id) == store.active_profile.as_ref() && p.has_key);
+    ProfileOverview {
         profiles,
         active_profile: store.active_profile.clone(),
-    })
+        active_user: if signed_in { active_user(store) } else { None },
+        relogin_pending: store.relogin_pending,
+    }
 }
 
 /// List the two locked profiles with their credential state (no key material,
@@ -112,7 +160,27 @@ fn store_overview(store: &ProfileStore) -> Result<ProfileOverview, String> {
 fn profiles_load(app: AppHandle) -> Result<ProfileOverview, String> {
     let dir = profiles_dir(&app)?;
     let store = profile::load_or_seed(&dir)?;
+    purge_legacy_credentials();
     store_overview(&store)
+}
+
+/// Privacy fix: the pre-realm, profile-keyed vault entries (`nan`,
+/// `nan.session`, ...) do not say WHICH user they belong to, so they are
+/// never read as credentials again. Dropping them on load means an upgraded
+/// install shows the sign-in once; that login binds the user (realm.rs).
+/// Best-effort: a failure only leaves unreadable entries behind.
+fn purge_legacy_credentials() {
+    let accounts: Vec<String> = profile::canonical_profiles()
+        .iter()
+        .flat_map(|p| {
+            [
+                profile::legacy_key_account(&p.id),
+                profile::legacy_session_account(&p.id),
+            ]
+        })
+        .collect();
+    let refs: Vec<&str> = accounts.iter().map(String::as_str).collect();
+    let _ = credentials::store().and_then(|store| store.delete_many(&refs));
 }
 
 /// Static app facts for the Settings "About" section and build flags.
@@ -178,6 +246,9 @@ pub fn run() {
             // panic).
             if let Ok(dir) = app.path().app_data_dir() {
                 credentials::init(&dir);
+                // Per-user realms: credential lookups resolve the bound
+                // user from profiles.json under this root.
+                realm::init(&dir);
                 // Round 6: best-effort cleanup of generated images no
                 // conversation references any more (background, never fails
                 // startup).
@@ -222,6 +293,8 @@ pub fn run() {
             skills_team::skills_team_cache_get,
             skills_team::skills_team_cache_clear,
             skills_team::skills_team_link,
+            artifacts::artifacts_request,
+            artifacts::artifact_share,
             tts::tts_speak,
             tts::tts_stop,
             stt::stt_transcribe,
@@ -242,6 +315,7 @@ pub fn run() {
             tools::tools_settings_get,
             tools::tools_set_run_command_enabled,
             preview::preview_read_file,
+            preview::preview_reveal_location,
             preview::web_preview_fetch,
             links::open_external,
             updater::update_check,
@@ -252,6 +326,59 @@ pub fn run() {
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_active_signed_in_user_is_exposed_to_the_renderer() {
+        let mut store = profile::default_store();
+        store
+            .bind(
+                "nan",
+                profile::BoundUser::new("nan", "u-a", Some("a@example.com".into())),
+            )
+            .unwrap();
+        store
+            .bind(
+                "helmcode",
+                profile::BoundUser::new("helmcode", "u-h", Some("h@corp.com".into())),
+            )
+            .unwrap();
+        let has_key = |_: &str| (true, Some("••••1234".to_string()));
+        // Nothing active (signed out): nobody is named, not even the
+        // profile's previous user (the picker must not reveal them).
+        let overview = overview_with(&store, has_key);
+        assert_eq!(overview.active_user, None);
+        // Active + key: exactly that profile's user, by email + realm hash.
+        store.set_active_profile("nan").unwrap();
+        let overview = overview_with(&store, has_key);
+        assert_eq!(
+            overview.active_user,
+            Some(ActiveUser {
+                email: Some("a@example.com".into()),
+                realm: realm::realm_hash("nan:u-a"),
+            })
+        );
+        let json = serde_json::to_string(&overview.active_user).unwrap();
+        assert!(!json.contains("u-a"), "the raw user id never crosses IPC");
+        assert!(!json.contains("h@corp.com"));
+        // Active but no key (revoked / signed out elsewhere): not exposed.
+        let overview = overview_with(&store, |_| (false, None));
+        assert_eq!(overview.active_user, None);
+    }
+
+    #[test]
+    fn the_one_time_relogin_flag_reaches_the_renderer_until_the_first_bind() {
+        let mut store = profile::default_store();
+        let none = |_: &str| (false, None);
+        assert!(!overview_with(&store, none).relogin_pending);
+        store.relogin_pending = true;
+        assert!(overview_with(&store, none).relogin_pending);
+        store
+            .bind("nan", profile::BoundUser::new("nan", "u-a", None))
+            .unwrap();
+        assert!(!overview_with(&store, none).relogin_pending);
+    }
+
     #[test]
     fn voice_ui_is_parked_by_default() {
         // S24: default builds hide the voice UI; `--features voice-ui`

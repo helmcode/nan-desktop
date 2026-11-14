@@ -8,6 +8,7 @@ import {
   grantErrorLabel,
   imageErrorLabel,
   profileTitle,
+  signInErrorLabel,
 } from "./copy";
 import { en } from "./i18n/en";
 import { es } from "./i18n/es";
@@ -23,6 +24,14 @@ describe("copy helpers", () => {
     expect(chatErrorLabel(en, "network")).toBe(en.chatErrors.network);
     expect(chatErrorLabel(en, "weird")).toBe(en.app.genericError);
     expect(commandErrorLabel(es, "Error: stack trace at foo")).toBe(es.app.genericError);
+  });
+
+  it("tells the user a failed history move kept their history and how to retry", () => {
+    expect(signInErrorLabel(en, "migration")).toBe(en.signInErrors.migration);
+    expect(signInErrorLabel(es, "migration")).toBe(es.signInErrors.migration);
+    expect(es.signInErrors.migration).toContain("historial sigue a salvo");
+    expect(en.signInErrors.migration).toContain("history is safe");
+    expect(signInErrorLabel(es, "migration")).not.toBe(es.app.genericError);
   });
 
   it("gives image errors a specific, actionable line (S23)", () => {

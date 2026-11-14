@@ -10,6 +10,11 @@
 //!   the grant root, is refused; the open itself uses `O_NOFOLLOW`).
 //!   This is a user-initiated view of a file the user already granted, so
 //!   it does not go through the propose/approve flow of the model's tools.
+//! - `preview_reveal_location(profile_id, path)` → `()`: shows the file
+//!   selected in the OS file manager (Finder / Explorer / FileManager1)
+//!   WITHOUT opening it. Same checks as `preview_read_file` (no size cap),
+//!   so it only ever acts on a file the preview could already show. The
+//!   renderer holds no opener permission: the reveal lives in the core.
 //! - `web_preview_fetch(profile_id, url)` → `{url, title, content_type,
 //!   text}`: `POST {platform_base}/v1/fetch {url}` with the profile's
 //!   session JWT (the same plumbing as `web_search`). The text is capped
@@ -20,7 +25,7 @@
 //! Nothing here logs: no URL, no page content, no key material.
 
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -54,20 +59,38 @@ pub struct FilePreview {
     pub size: u64,
 }
 
-/// Read a file for the preview pane. `app_data` and `home` are injected so
-/// tests can use tempdirs.
+/// The folder grants a command naming `profile_id` may use: those of the
+/// realm of the user bound to the ACTIVE profile under the app data `root`
+/// (`realm::dir_for_in`), never the pre-realm `<root>/tools.json`. The
+/// AppHandle-free seam shared by `preview_read_file`,
+/// `preview_reveal_location` and `artifact_share`, so their realm scoping
+/// is testable.
+///
+/// Rejections: `protocol` (signed out, or `profile_id` is not the active
+/// profile), `io` (the realm's `tools.json` is unreadable).
+pub fn realm_grants_in(root: &Path, profile_id: &str) -> Result<GrantsStore, Rejection> {
+    let realm = crate::realm::dir_for_in(root, profile_id)
+        .map_err(|err| Rejection::new("protocol", err.to_string()))?;
+    grants::load_or_seed(&realm).map_err(|err| Rejection::new("io", err))
+}
+
+/// Resolve `raw` to a previewable regular file: inside an active grant of
+/// `profile_id`, outside the app data folder and the sensitive deny-list,
+/// reached without any symlink. Returns the canonical path and its size.
+///
+/// Both the read and the reveal go through this, so the reveal can never
+/// point the file manager at anything the preview could not show.
 ///
 /// Rejections: everything [`grants::resolve_under_grant`] rejects
 /// (`traversal`, `protocol`, `io`, `no_grant`, `escape`), plus `scope`
-/// (app data dir), `sensitive` (deny-list), `symlink`, `not_file` and
-/// `too_large`.
-pub fn read_preview_file(
+/// (app data dir), `sensitive` (deny-list), `symlink` and `not_file`.
+fn resolve_preview_file(
     store: &GrantsStore,
     profile_id: &str,
     raw: &str,
     app_data: &Path,
     home: Option<&Path>,
-) -> Result<FilePreview, Rejection> {
+) -> Result<(PathBuf, u64), Rejection> {
     let (grant_id, canonical) = grants::resolve_under_grant(store, profile_id, raw)?;
     let grant = store
         .grant_by_id(&grant_id)
@@ -98,14 +121,90 @@ pub fn read_preview_file(
             "only regular files can be previewed",
         ));
     }
-    if meta.len() > MAX_PREVIEW_FILE_BYTES {
-        return Err(too_large());
-    }
-    let bytes = read_no_follow(&canonical)?;
+    Ok((canonical, meta.len()))
+}
+
+/// Read a file for the preview pane. `app_data` and `home` are injected so
+/// tests can use tempdirs.
+///
+/// Rejections: everything [`read_granted_bytes`] rejects.
+pub fn read_preview_file(
+    store: &GrantsStore,
+    profile_id: &str,
+    raw: &str,
+    app_data: &Path,
+    home: Option<&Path>,
+) -> Result<FilePreview, Rejection> {
+    let bytes = read_granted_bytes(store, profile_id, raw, app_data, home)?;
     Ok(FilePreview {
         size: bytes.len() as u64,
         base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
     })
+}
+
+/// The exact bytes of a granted file, with every check of
+/// [`read_preview_file`] (the same rejections): grant resolution, the
+/// app-data and sensitive deny-list, no symlink anywhere, a regular file,
+/// the [`MAX_PREVIEW_FILE_BYTES`] cap and an `O_NOFOLLOW` open. The
+/// artifacts share reads its snapshot through here, so it can never reach
+/// a file the preview could not show.
+///
+/// Rejections: everything [`resolve_preview_file`] rejects, plus
+/// `too_large`.
+pub fn read_granted_bytes(
+    store: &GrantsStore,
+    profile_id: &str,
+    raw: &str,
+    app_data: &Path,
+    home: Option<&Path>,
+) -> Result<Vec<u8>, Rejection> {
+    let (canonical, len) = resolve_preview_file(store, profile_id, raw, app_data, home)?;
+    if len > MAX_PREVIEW_FILE_BYTES {
+        return Err(too_large());
+    }
+    read_no_follow(&canonical)
+}
+
+/// Reveal a previewed file in the OS file manager, selecting it. The file
+/// is never opened. `reveal` is the per-OS mechanism, injected so tests
+/// can observe what would be revealed without launching Finder.
+///
+/// The path passes the exact checks of [`read_preview_file`] (minus the
+/// size cap, which is irrelevant to a reveal), so this only ever acts on
+/// a file the user could already see in the preview.
+pub fn reveal_preview_file(
+    store: &GrantsStore,
+    profile_id: &str,
+    raw: &str,
+    app_data: &Path,
+    home: Option<&Path>,
+    reveal: impl FnOnce(&Path) -> Result<(), Rejection>,
+) -> Result<(), Rejection> {
+    let (canonical, _) = resolve_preview_file(store, profile_id, raw, app_data, home)?;
+    reveal(&canonical)
+}
+
+/// The per-OS reveal, all through `tauri-plugin-opener` called from the
+/// core (the renderer has no opener permission of its own):
+/// - macOS: `NSWorkspace activateFileViewerSelectingURLs` (Finder, file
+///   selected).
+/// - Windows: `SHOpenFolderAndSelectItems` (Explorer, file selected).
+/// - Linux/BSD: the `org.freedesktop.FileManager1.ShowItems` D-Bus call,
+///   then the OpenURI portal; when neither is available, the PARENT folder
+///   is opened with the default handler (xdg-open on the directory, never
+///   on the file).
+fn os_reveal(path: &Path) -> Result<(), Rejection> {
+    let failed = || Rejection::new("io", "could not open the containing folder");
+    match tauri_plugin_opener::reveal_item_in_dir(path) {
+        Ok(()) => Ok(()),
+        #[cfg(not(any(target_os = "macos", windows)))]
+        Err(_) => {
+            let parent = path.parent().ok_or_else(failed)?;
+            tauri_plugin_opener::open_path(parent, None::<&str>).map_err(|_| failed())
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        Err(_) => Err(failed()),
+    }
 }
 
 fn too_large() -> Rejection {
@@ -135,7 +234,7 @@ fn reject_symlink_traversal(root: &Path, raw: &Path, canonical: &Path) -> Result
 
 /// Read at most cap + 1 bytes without following a symlink leaf (a swap
 /// after the checks above fails closed).
-fn read_no_follow(path: &Path) -> Result<Vec<u8>, Rejection> {
+pub(crate) fn read_no_follow(path: &Path) -> Result<Vec<u8>, Rejection> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -169,13 +268,40 @@ pub async fn preview_read_file(
         .path()
         .app_data_dir()
         .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
+    // Privacy fix: the grants are the signed-in user's (realm); the
+    // protection still covers the whole app data root (`dir`).
     tauri::async_runtime::spawn_blocking(move || {
-        let store = grants::load_or_seed(&dir).map_err(|err| Rejection::new("io", err))?;
+        let store = realm_grants_in(&dir, &profile_id)?;
         let home = std::env::home_dir();
         read_preview_file(&store, &profile_id, &path, &dir, home.as_deref())
     })
     .await
     .map_err(|_| Rejection::new("io", "preview read was interrupted"))?
+}
+
+/// Reveal a previewed file in Finder / Explorer / the Linux file manager.
+#[tauri::command]
+pub async fn preview_reveal_location(
+    app: AppHandle,
+    profile_id: String,
+    path: String,
+) -> Result<(), Rejection> {
+    if !crate::profile::is_known_profile_id(&profile_id) {
+        return Err(Rejection::new("protocol", "unknown profile"));
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
+    // Same realm scoping as `preview_read_file`: the grants are the
+    // signed-in user's; the app-data protection covers the whole root.
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = realm_grants_in(&dir, &profile_id)?;
+        let home = std::env::home_dir();
+        reveal_preview_file(&store, &profile_id, &path, &dir, home.as_deref(), os_reveal)
+    })
+    .await
+    .map_err(|_| Rejection::new("io", "reveal was interrupted"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +509,225 @@ mod tests {
         store
     }
 
+    // ------------------------------------------------- realm scoping --
+
+    /// A verified login of `user` to `profile_id`, persisted like
+    /// `device_flow::store_credentials` does (claims legacy data when the
+    /// profile has no bound user yet).
+    fn login(root: &Path, profile_id: &str, user: &str) -> PathBuf {
+        let identity = crate::realm::Identity {
+            id: user.into(),
+            email: Some(format!("{user}@example.com")),
+        };
+        let (store, _) = crate::realm::bind_login_in(root, profile_id, &identity).expect("bind");
+        crate::profile::save(root, &store).expect("save profiles");
+        crate::realm::dir_for_in(root, profile_id).expect("realm")
+    }
+
+    /// A grant of `folder` for `profile_id` saved in `dir/tools.json`.
+    fn grant_in(dir: &Path, profile_id: &str, id: &str, folder: &Path) {
+        let mut store = grants::load_or_seed(dir).expect("load");
+        store
+            .add_grant(
+                id.into(),
+                profile_id,
+                folder.to_path_buf(),
+                "2026-11-14T00:00:00Z".into(),
+            )
+            .expect("grant");
+        grants::save(dir, &store).expect("save grants");
+    }
+
+    /// The command path minus the AppHandle: realm grants, then the bytes.
+    fn realm_read(
+        root: &Path,
+        home: &Path,
+        profile_id: &str,
+        path: &Path,
+    ) -> Result<Vec<u8>, Rejection> {
+        let store = realm_grants_in(root, profile_id)?;
+        read_granted_bytes(
+            &store,
+            profile_id,
+            &path.display().to_string(),
+            root,
+            Some(home),
+        )
+    }
+
+    fn realm_reveal(
+        root: &Path,
+        home: &Path,
+        profile_id: &str,
+        path: &Path,
+    ) -> Result<PathBuf, Rejection> {
+        let store = realm_grants_in(root, profile_id)?;
+        let mut seen = None;
+        reveal_preview_file(
+            &store,
+            profile_id,
+            &path.display().to_string(),
+            root,
+            Some(home),
+            |p| {
+                seen = Some(p.to_path_buf());
+                Ok(())
+            },
+        )?;
+        Ok(seen.expect("revealed"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn granted_paths_resolve_only_while_their_realm_is_active() {
+        let l = layout();
+        let root = &l.app_data;
+        let ana_dir = l.home.join("ana-proj");
+        let bob_dir = l.home.join("bob-proj");
+        fs::create_dir_all(&ana_dir).expect("mkdir");
+        fs::create_dir_all(&bob_dir).expect("mkdir");
+        let ana_file = ana_dir.join("a.md");
+        let bob_file = bob_dir.join("b.md");
+        fs::write(&ana_file, "ana").expect("write");
+        fs::write(&bob_file, "bob").expect("write");
+
+        // Signed out: no realm, nothing resolves (not even a stray root store).
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &ana_file)
+                .expect_err("signed out")
+                .kind,
+            "protocol"
+        );
+
+        let ana_realm = login(root, "nan", "ana");
+        grant_in(&ana_realm, "nan", "ga", &ana_dir);
+        let bob_realm = login(root, "nan", "bob");
+        grant_in(&bob_realm, "nan", "gb", &bob_dir);
+        assert_ne!(ana_realm, bob_realm);
+
+        // Bob is active: his grant works, Ana's realm grant does not.
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &bob_file).expect("bob reads"),
+            b"bob"
+        );
+        assert_eq!(
+            realm_reveal(root, &l.home, "nan", &bob_file).expect("bob reveals"),
+            bob_file
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &ana_file)
+                .expect_err("ana's grant")
+                .kind,
+            "escape"
+        );
+        assert_eq!(
+            realm_reveal(root, &l.home, "nan", &ana_file)
+                .expect_err("ana's grant")
+                .kind,
+            "escape"
+        );
+
+        // Ana signs back in: the path granted in HER realm resolves again.
+        assert_eq!(login(root, "nan", "ana"), ana_realm);
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &ana_file).expect("ana reads"),
+            b"ana"
+        );
+        assert_eq!(
+            realm_reveal(root, &l.home, "nan", &ana_file).expect("ana reveals"),
+            ana_file
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &bob_file)
+                .expect_err("bob's grant")
+                .kind,
+            "escape"
+        );
+
+        // A command naming a profile that is not the active one reads nothing.
+        assert_eq!(
+            realm_read(root, &l.home, "helmcode", &ana_file)
+                .expect_err("inactive")
+                .kind,
+            "protocol"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_root_grants_stop_authorizing_once_migrated() {
+        let l = layout();
+        let root = &l.app_data;
+        let legacy_dir = l.home.join("legacy-proj");
+        fs::create_dir_all(&legacy_dir).expect("mkdir");
+        let legacy_file = legacy_dir.join("old.md");
+        fs::write(&legacy_file, "old").expect("write");
+        // Pre-realm state: the grant lives in `<root>/tools.json`.
+        grant_in(root, "nan", "legacy", &legacy_dir);
+        assert!(
+            grants::load_or_seed(root)
+                .expect("load")
+                .grant_by_id("legacy")
+                .is_some()
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &legacy_file)
+                .expect_err("signed out")
+                .kind,
+            "protocol"
+        );
+
+        // First login claims it: it now lives in Ana's realm, not the root.
+        let ana_realm = login(root, "nan", "ana");
+        assert!(
+            grants::load_or_seed(&ana_realm)
+                .expect("load")
+                .grant_by_id("legacy")
+                .is_some()
+        );
+        assert!(
+            grants::load_or_seed(root)
+                .expect("load")
+                .grant_by_id("legacy")
+                .is_none()
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &legacy_file).expect("claimed"),
+            b"old"
+        );
+
+        // Another user of the same profile never inherits it.
+        login(root, "nan", "bob");
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &legacy_file)
+                .expect_err("not bob's")
+                .kind,
+            "no_grant"
+        );
+
+        // A root store that reappears after the migration (an older build,
+        // a restored backup) is never consulted.
+        grant_in(root, "nan", "stale", &legacy_dir);
+        assert!(
+            grants::load_or_seed(root)
+                .expect("load")
+                .grant_by_id("stale")
+                .is_some()
+        );
+        assert_eq!(
+            realm_read(root, &l.home, "nan", &legacy_file)
+                .expect_err("stale root")
+                .kind,
+            "no_grant"
+        );
+        assert_eq!(
+            realm_reveal(root, &l.home, "nan", &legacy_file)
+                .expect_err("stale root")
+                .kind,
+            "no_grant"
+        );
+    }
+
     fn read(l: &Layout, store: &GrantsStore, path: &Path) -> Result<FilePreview, Rejection> {
         read_preview_file(
             store,
@@ -541,6 +886,160 @@ mod tests {
                 .kind,
             "symlink"
         );
+    }
+
+    // ------------------------------------------------------------ reveal --
+
+    /// Run the reveal with a recording stand-in for the OS call.
+    fn reveal(
+        l: &Layout,
+        store: &GrantsStore,
+        path: &Path,
+    ) -> (Result<(), Rejection>, Option<PathBuf>) {
+        let mut seen = None;
+        let result = reveal_preview_file(
+            store,
+            "nan",
+            &path.display().to_string(),
+            &l.app_data,
+            Some(&l.home),
+            |p| {
+                seen = Some(p.to_path_buf());
+                Ok(())
+            },
+        );
+        (result, seen)
+    }
+
+    #[test]
+    fn reveal_selects_the_canonical_file_inside_the_grant() {
+        let l = layout();
+        let file = l.grant.join("Deck.pdf");
+        fs::write(&file, "%PDF").expect("write");
+        let (result, seen) = reveal(&l, &store_with(&[&l.grant]), &file);
+        result.expect("inside grant");
+        // The FILE is handed to the file manager (which selects it in its
+        // folder); it is never opened.
+        assert_eq!(seen, Some(file));
+    }
+
+    #[test]
+    fn reveal_is_not_bound_by_the_preview_size_cap() {
+        let l = layout();
+        let file = l.grant.join("big.bin");
+        fs::File::create(&file)
+            .expect("create")
+            .set_len(MAX_PREVIEW_FILE_BYTES + 1)
+            .expect("grow");
+        let (result, seen) = reveal(&l, &store_with(&[&l.grant]), &file);
+        result.expect("oversize files can still be revealed");
+        assert_eq!(seen, Some(file));
+    }
+
+    #[test]
+    fn reveal_refuses_everything_the_preview_refuses_without_touching_the_os() {
+        let l = layout();
+        fs::write(l.outside.join("secret.txt"), "x").expect("write");
+        fs::write(l.grant.join("server.pem"), "pem").expect("pem");
+        fs::write(l.app_data.join("tools-grants.json"), "{}").expect("write");
+        let grant_only = store_with(&[&l.grant]);
+        let home_wide = store_with(&[&l.home]);
+        let cases: [(&GrantsStore, PathBuf, &[&str]); 6] = [
+            (&grant_only, l.outside.join("secret.txt"), &["escape"]),
+            (
+                &grants::default_store(),
+                l.grant.join("server.pem"),
+                &["no_grant"],
+            ),
+            (&grant_only, l.grant.join("server.pem"), &["sensitive"]),
+            (&home_wide, l.app_data.join("tools-grants.json"), &["scope"]),
+            (&grant_only, l.grant.clone(), &["not_file"]),
+            (
+                &grant_only,
+                l.grant
+                    .join("..")
+                    .join("..")
+                    .join("outside")
+                    .join("secret.txt"),
+                &["traversal", "escape"],
+            ),
+        ];
+        for (store, path, kinds) in cases {
+            let (result, seen) = reveal(&l, store, &path);
+            let err = result.expect_err("refused");
+            assert!(
+                kinds.contains(&err.kind.as_str()),
+                "{}: {}",
+                path.display(),
+                err.kind
+            );
+            assert!(seen.is_none(), "the OS reveal ran for {}", path.display());
+        }
+        // Another profile's grant does not count either.
+        let mut seen = false;
+        let err = reveal_preview_file(
+            &store_with(&[&l.outside]),
+            "helmcode",
+            &l.outside.join("secret.txt").display().to_string(),
+            &l.app_data,
+            Some(&l.home),
+            |_| {
+                seen = true;
+                Ok(())
+            },
+        )
+        .expect_err("other profile");
+        assert_eq!(err.kind, "no_grant");
+        assert!(!seen);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reveal_never_follows_symlinks() {
+        let l = layout();
+        let store = store_with(&[&l.grant]);
+        fs::write(l.grant.join("real.txt"), "inside").expect("write");
+        let link = l.grant.join("link.txt");
+        std::os::unix::fs::symlink(l.grant.join("real.txt"), &link).expect("symlink");
+        let (result, seen) = reveal(&l, &store, &link);
+        assert_eq!(result.expect_err("leaf").kind, "symlink");
+        assert!(seen.is_none());
+    }
+
+    #[test]
+    fn reveal_os_failures_surface_as_a_typed_rejection() {
+        let l = layout();
+        let file = l.grant.join("a.txt");
+        fs::write(&file, "x").expect("write");
+        let err = reveal_preview_file(
+            &store_with(&[&l.grant]),
+            "nan",
+            &file.display().to_string(),
+            &l.app_data,
+            Some(&l.home),
+            |_| Err(Rejection::new("io", "could not open the containing folder")),
+        )
+        .expect_err("os failure");
+        assert_eq!(err.kind, "io");
+        assert!(!err.message.contains("a.txt"), "no path in the message");
+    }
+
+    #[test]
+    fn reveal_is_a_registered_core_command_and_the_renderer_gets_no_opener_grant() {
+        // The command is wired into the invoke handler...
+        assert!(include_str!("lib.rs").contains("preview::preview_reveal_location,"));
+        // ...and the renderer holds no opener permission of its own, so the
+        // grant-checked core command is the ONLY way to reveal a path.
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).expect("json");
+        let perms = caps["permissions"].as_array().expect("permissions");
+        for perm in perms {
+            let id = perm
+                .as_str()
+                .or_else(|| perm["identifier"].as_str())
+                .unwrap_or("");
+            assert!(!id.starts_with("opener:"), "renderer must not hold {id}");
+        }
     }
 
     // ------------------------------------------------------- web preview --
