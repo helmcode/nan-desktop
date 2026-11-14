@@ -84,6 +84,7 @@ import {
   IconTrash,
   IconWarning,
   IconX,
+  IconShare,
 } from "./icons";
 import { Markdown } from "./Markdown";
 import { targetKey, type PreviewTarget } from "./preview/kind";
@@ -98,6 +99,9 @@ import type {
 import type { StudioSeed } from "./studio/studio";
 import { SkillPicker } from "./skills/SkillPicker";
 import { SkillsView, type SkillFormDraft } from "./skills/SkillsView";
+import { fetchAccess, shareSourceFor, type ArtifactsAccess, type ShareSource } from "./artifacts/artifacts";
+import { ShareArtifactDialog } from "./artifacts/ShareArtifactDialog";
+import { SharedLinksView } from "./artifacts/SharedLinksView";
 import {
   EMPTY_VIEW,
   TEAM_PROFILE,
@@ -200,7 +204,8 @@ const RENAME_MAX_CHARS = 100;
 // normally holds the chats, and shows one section at a time. Order is the
 // reading order of the owner's reference; Account comes first because it is
 // where "about" and sign out live.
-const SETTINGS_SECTIONS: readonly SettingsPane[] = ["account", "folders", "memory", "language", "skills"];
+// "links" (Shared links) only shows while shared artifacts are available.
+const SETTINGS_SECTIONS: readonly SettingsPane[] = ["account", "folders", "memory", "language", "skills", "links"];
 
 /// The sidebar text of a Settings section (existing keys, no new copy).
 function settingsSectionLabel(t: Strings, section: SettingsPane): string {
@@ -215,6 +220,8 @@ function settingsSectionLabel(t: Strings, section: SettingsPane): string {
       return t.settings.language.title;
     case "skills":
       return t.skills.title;
+    case "links":
+      return t.artifacts.links.title;
   }
 }
 
@@ -231,6 +238,8 @@ function SettingsSectionIcon({ section }: { section: SettingsPane }) {
       return <IconGlobe size={16} />;
     case "skills":
       return <IconBolt size={16} />;
+    case "links":
+      return <IconShare size={16} />;
   }
 }
 
@@ -273,7 +282,16 @@ function SourceChips({ sources, onOpen }: { sources: WebSource[]; onOpen: (url: 
 }
 
 /// Chips for local files the assistant mentions (inside working folders).
-function FileChips({ paths, onOpen }: { paths: string[]; onOpen: (path: string) => void }) {
+function FileChips({
+  paths,
+  onOpen,
+  onShare,
+}: {
+  paths: string[];
+  onOpen: (path: string) => void;
+  /** Shared artifacts available: a share button on each shareable chip. */
+  onShare?: (source: ShareSource) => void;
+}) {
   const t = useT();
   if (paths.length === 0) return null;
   return (
@@ -292,6 +310,17 @@ function FileChips({ paths, onOpen }: { paths: string[]; onOpen: (path: string) 
               <IconFile size={13} />
               <span className="source-title">{folderName(path)}</span>
             </button>
+            {onShare && shareSourceFor({ kind: "file", ref: path }) && (
+              <button
+                type="button"
+                className="icon-btn file-chip-share"
+                aria-label={t.artifacts.shareLabel(folderName(path))}
+                title={t.artifacts.share}
+                onClick={() => onShare({ kind: "file", path })}
+              >
+                <IconShare size={13} />
+              </button>
+            )}
           </li>
         ))}
       </ul>
@@ -755,6 +784,33 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const pickerSkills = useMemo(() => [...skills, ...usableTeamSkills(teamState.view)], [skills, teamState.view]);
   const knownSkills = useMemo(() => [...skills, ...teamSkills], [skills, teamSkills]);
   const activeSkill = activeSkillFor(activeSkills, activeConvId ?? NEW_CHAT_KEY, knownSkills);
+
+  // Shared artifacts (design 5.1): whether the share action shows for the
+  // active profile (Helmcode org flag, community capability) and whether
+  // the user is an org admin (the Organization tab of Shared links). Read
+  // from /api/auth/me on every profile change; hidden until it answers.
+  const [artifactsAccess, setArtifactsAccess] = useState<ArtifactsAccess>({ availability: "off", admin: false });
+  const [sharingSource, setSharingSource] = useState<ShareSource | null>(null);
+  useEffect(() => {
+    const profileId = overview.active_profile;
+    setArtifactsAccess({ availability: "off", admin: false });
+    setSharingSource(null);
+    if (!profileId) return;
+    let alive = true;
+    void fetchAccess(profileId).then((access) => {
+      if (alive) setArtifactsAccess(access);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [overview.active_profile]);
+  const artifactsOn = artifactsAccess.availability !== "off";
+  const openShare = useCallback((source: ShareSource): void => setSharingSource(source), []);
+  const closeShare = useCallback((): void => setSharingSource(null), []);
+  const artifactsNotice = useCallback(
+    (kind: "success" | "error", text: string): void => setNotice({ id: Date.now(), kind, text }),
+    [],
+  );
 
   // Image edits happen in the Image Studio, its own view. `studio` is the
   // current session (null until first opened); the Studio stays mounted
@@ -2154,7 +2210,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
           </p>
         )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
-        <FileChips paths={files.chips} onOpen={openFilePreview} />
+        <FileChips paths={files.chips} onOpen={openFilePreview} onShare={artifactsOn ? openShare : undefined} />
         {VOICE_UI && visible.trim().length > 0 && (
           <div className="msg-actions">
             <button
@@ -2208,7 +2264,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         </div>
         {view === "settings" ? (
           <nav className="settings-nav" aria-label={t.settings.sections} ref={settingsNavRef}>
-            {SETTINGS_SECTIONS.map((section) => (
+            {SETTINGS_SECTIONS.filter((section) => section !== "links" || artifactsOn).map((section) => (
               <button
                 key={section}
                 type="button"
@@ -2313,6 +2369,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
             onOpenSettings={openSettings}
             onSignOut={onSignOut}
             signingOut={busy}
+            sharedLinks={artifactsOn}
           />
         </div>
       </aside>
@@ -2350,7 +2407,16 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
         // sidebar picks it. `data-section` is what App.css keys the visible
         // section off (see .settings-surface there).
         <div className="settings-surface" data-section={settingsSection}>
-          {settingsSection === "skills" ? (
+          {settingsSection === "links" && artifactsOn && overview.active_profile ? (
+            <SharedLinksView
+              profileId={overview.active_profile}
+              admin={artifactsAccess.admin}
+              onBack={leaveSettings}
+              backLabel={settingsReturn === "studio" ? t.settings.backToStudio : t.settings.back}
+              onNotice={artifactsNotice}
+              onSignIn={onSignOut}
+            />
+          ) : settingsSection === "skills" ? (
             <SkillsView
               skills={skills}
               loadError={skillsLoadError}
@@ -2733,6 +2799,7 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                   onOpenLink={openWebPreview}
                   onEditImage={editFromPreview}
                   onRemove={removeFromPreview}
+                  onShare={artifactsOn ? openShare : undefined}
                 />
               </Suspense>
             )}
@@ -2743,6 +2810,24 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
 
       {askComputerWide && (
         <ComputerWideDialog onCancel={() => setAskComputerWide(false)} onContinue={() => void confirmComputerWide()} />
+      )}
+      {/* Stays open if the server turns the feature off mid-share (404), so
+          the dialog can say so; the share buttons are gone by then. */}
+      {sharingSource && overview.active_profile && (
+        <ShareArtifactDialog
+          key={`${sharingSource.kind}:${sharingSource.path}`}
+          profileId={overview.active_profile}
+          source={sharingSource}
+          availability={artifactsAccess.availability === "paywall" ? "paywall" : "on"}
+          onClose={closeShare}
+          onManage={() => {
+            setSharingSource(null);
+            openSettings("links");
+          }}
+          onNotice={artifactsNotice}
+          onSignIn={onSignOut}
+          onDisabled={() => setArtifactsAccess({ availability: "off", admin: false })}
+        />
       )}
       <Toast notice={notice} onDismiss={dismissNotice} />
     </main>

@@ -17,11 +17,12 @@ import {
   IconGlobe,
   IconLogout,
   IconMemory,
+  IconShare,
 } from "../icons";
 import { UpdateAction } from "./UpdateAction";
 
 /** One of the sections the Settings surface shows (its sidebar lists them). */
-export type SettingsPane = "account" | "folders" | "memory" | "language" | "skills";
+export type SettingsPane = "account" | "folders" | "memory" | "language" | "skills" | "links";
 
 /** A section to open: a pane, or null for the first one (Account). */
 export type SettingsSection = SettingsPane | null;
@@ -47,10 +48,13 @@ export function UserMenu({
   onOpenSettings,
   onSignOut,
   signingOut,
+  sharedLinks = false,
 }: {
   accountName: string;
   accountDetail: string;
   update?: UserMenuUpdate | null;
+  /** Shared artifacts are available: offer the "Shared links" entry. */
+  sharedLinks?: boolean;
   onOpenSettings: (section: SettingsTarget) => void;
   onSignOut: () => void;
   signingOut: boolean;
@@ -127,6 +131,12 @@ export function UserMenu({
             <IconMemory size={15} />
             <span className="ws-menu-text">{t.userMenu.memory}</span>
           </button>
+          {sharedLinks && (
+            <button type="button" role="menuitem" className="ws-menu-item" onClick={() => go("links")}>
+              <IconShare size={15} />
+              <span className="ws-menu-text">{t.userMenu.sharedLinks}</span>
+            </button>
+          )}
           <p className="ws-menu-heading">
             <IconGlobe size={13} /> {t.userMenu.language}
           </p>
