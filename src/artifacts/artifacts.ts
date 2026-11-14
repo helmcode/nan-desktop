@@ -69,6 +69,8 @@ export type SharedArtifact = {
   viewCount: number;
   url: string | null;
   owner: string | null;
+  /** The server's own `status` (`active`/`expired`/`revoked`), when sent. */
+  status: string | null;
 };
 
 export type LinkState = "active" | "expired" | "revoked";
@@ -327,6 +329,7 @@ export function parseArtifact(raw: unknown, url?: unknown): SharedArtifact | nul
     viewCount: num(pick(row, "view_count", "viewCount")),
     url: safeLink(url ?? row.url),
     owner,
+    status: str(row.status),
   };
 }
 
@@ -340,7 +343,8 @@ export function parseShareReply(body: unknown): { artifact: SharedArtifact | nul
 }
 
 /** `GET /api/artifacts` (or the admin list): `{artifacts: []}`, `{items: []}`
- *  or a bare array; unreadable rows are skipped. */
+ *  or a bare array; unreadable rows are skipped. A row's `url` may be null
+ *  (community: an inactive link has none) or absent (enterprise omits it). */
 export function parseArtifactList(body: unknown): SharedArtifact[] {
   const rows = Array.isArray(body)
     ? body
@@ -349,6 +353,20 @@ export function parseArtifactList(body: unknown): SharedArtifact[] {
       : null;
   if (!Array.isArray(rows)) return [];
   return rows.map((row) => parseArtifact(row)).filter((row): row is SharedArtifact => row !== null);
+}
+
+/** One page of the list: the rows plus how many exist in total. The total
+ *  is the body's `total` (enterprise), else the `X-Total-Count` header the
+ *  core forwards as `headerTotal`, else the row count (community has no
+ *  paging). A total below the row count is never trusted. */
+export function parseArtifactPage(body: unknown, headerTotal?: unknown): { items: SharedArtifact[]; total: number } {
+  const items = parseArtifactList(body);
+  const bodyTotal =
+    body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>).total : undefined;
+  const candidate = [bodyTotal, headerTotal].find(
+    (value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0,
+  );
+  return { items, total: candidate !== undefined && candidate >= items.length ? candidate : items.length };
 }
 
 /** `GET /api/members`: enterprise answers `{items: [{userId, email}]}`. */
@@ -371,7 +389,8 @@ export function parseMembers(body: unknown): Member[] | null {
 }
 
 export function linkState(artifact: SharedArtifact, now = Date.now()): LinkState {
-  if (artifact.revokedAt) return "revoked";
+  if (artifact.revokedAt || artifact.status === "revoked") return "revoked";
+  if (artifact.status === "expired") return "expired";
   if (artifact.expiresAt) {
     const at = Date.parse(artifact.expiresAt);
     if (!Number.isNaN(at) && at <= now) return "expired";
@@ -381,51 +400,82 @@ export function linkState(artifact: SharedArtifact, now = Date.now()): LinkState
 
 // ------------------------------------------------------ availability --
 
-function hasFlag(me: Record<string, unknown>): boolean {
-  for (const flag of ARTIFACTS_FLAGS) {
-    if (me[flag] === true) return true;
-  }
-  if (me.artifactsSharing === true) return true;
-  if (Array.isArray(me.featureFlags) && ARTIFACTS_FLAGS.some((flag) => (me.featureFlags as unknown[]).includes(flag))) {
-    return true;
-  }
-  for (const key of ["org", "organization", "features", "flags", "feature_flags"]) {
-    const nested = me[key];
-    if (Array.isArray(nested) && ARTIFACTS_FLAGS.some((flag) => nested.includes(flag))) return true;
-    if (nested && typeof nested === "object" && ARTIFACTS_FLAGS.some((flag) => (nested as Record<string, unknown>)[flag] === true)) {
-      return true;
-    }
-  }
-  return false;
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
-function capabilitiesOf(me: Record<string, unknown>): unknown {
-  if (me.capabilities !== undefined) return me.capabilities;
-  const user = me.user;
-  return user && typeof user === "object" ? (user as Record<string, unknown>).capabilities : undefined;
+/** A flag holder: a list of enabled names, or an object of booleans.
+ *  true = on, false = explicitly off, null = says nothing. */
+function flagIn(holder: unknown): boolean | null {
+  if (Array.isArray(holder)) return ARTIFACTS_FLAGS.some((flag) => holder.includes(flag)) ? true : null;
+  const obj = record(holder);
+  if (!obj) return null;
+  let seen: boolean | null = null;
+  for (const key of [...ARTIFACTS_FLAGS, "artifactsSharing"]) {
+    if (obj[key] === true) return true;
+    if (obj[key] === false) seen = false;
+  }
+  return seen;
+}
+
+/**
+ * The artifacts flag from `/api/auth/me`, whatever shape the tenant sends:
+ * - top-level `artifacts` boolean (enterprise `/me`, beside `featureFlags`)
+ * - `entitlements.artifacts` (community `/me`; `capabilities` tolerated)
+ * - `featureFlags` holding `artifacts` (enterprise's generic list)
+ * plus the nested `org`/`features`/`flags` holders. Any "on" wins; an
+ * explicit `false` anywhere is "off"; null when nothing mentions it.
+ */
+export function artifactsFlag(me: Record<string, unknown>): boolean | null {
+  const user = record(me.user);
+  const holders: unknown[] = [
+    me,
+    me.entitlements,
+    me.capabilities,
+    user?.entitlements,
+    user?.capabilities,
+    me.featureFlags,
+    me.feature_flags,
+    me.org,
+    me.organization,
+    me.features,
+    me.flags,
+  ];
+  let result: boolean | null = null;
+  for (const holder of holders) {
+    const flag = flagIn(holder);
+    if (flag === true) return true;
+    if (flag === false) result = false;
+  }
+  return result;
+}
+
+/** Community `/me` could not resolve the live entitlements (lookup failed):
+ *  unknown, so neither the share action nor the paywall is shown. */
+function entitlementsUnknown(me: Record<string, unknown>): boolean {
+  return me.entitlementsError === true || me.entitlements === null;
 }
 
 /**
  * The share action's availability from `/api/auth/me` (design 2 / 5.1).
- * Enterprise: the org flag on, else hidden. Community: `capabilities`
- * holding `artifacts` turns it on; a capabilities object without it shows
- * the paywall copy; no capabilities at all means the tenant does not offer
- * artifacts yet, so it stays hidden.
+ * Every tenant accepts every flag shape ([`artifactsFlag`]).
+ * - Enterprise: the org flag on, else hidden (the routes 404 when off).
+ * - Community: the flag on opens the dialog; off, or no flag at all, keeps
+ *   the paywall copy; entitlements that failed to resolve stay hidden (a
+ *   paying member is never shown an upgrade prompt on a lookup error).
  */
 export function parseAccess(profileId: string, body: unknown): ArtifactsAccess {
-  if (!body || typeof body !== "object") return { availability: "off", admin: false };
-  const me = body as Record<string, unknown>;
+  const me = record(body);
+  if (!me) return { availability: "off", admin: false };
+  const flag = artifactsFlag(me);
   if (profileId === ENTERPRISE_PROFILE) {
-    const org = me.org && typeof me.org === "object" ? (me.org as Record<string, unknown>) : {};
+    const org = record(me.org) ?? {};
     const admin = me.role === "admin" || org.role === "admin";
-    return { availability: hasFlag(me) ? "on" : "off", admin };
+    return { availability: flag === true ? "on" : "off", admin };
   }
-  const caps = capabilitiesOf(me);
-  if (Array.isArray(caps)) return { availability: caps.includes("artifacts") ? "on" : "paywall", admin: false };
-  if (caps && typeof caps === "object") {
-    return { availability: (caps as Record<string, unknown>).artifacts === true ? "on" : "paywall", admin: false };
-  }
-  return { availability: "off", admin: false };
+  if (flag === true) return { availability: "on", admin: false };
+  if (flag === null && entitlementsUnknown(me)) return { availability: "off", admin: false };
+  return { availability: "paywall", admin: false };
 }
 
 // ------------------------------------------------------------ errors --
@@ -505,7 +555,8 @@ export function problemForError(err: unknown): ArtifactProblem {
 
 // ---------------------------------------------------------------- IPC --
 
-type CoreReply = { status: number; body: unknown };
+/** `total` is the `X-Total-Count` header, when the server sent one. */
+type CoreReply = { status: number; body: unknown; total?: number | null };
 
 function request(profileId: string, method: "GET" | "DELETE", path: string): Promise<CoreReply> {
   return invoke<CoreReply>("artifacts_request", { profileId, method, path });
@@ -544,11 +595,11 @@ export async function shareArtifact(
 export async function listArtifacts(
   profileId: string,
   admin = false,
-): Promise<Outcome<{ items: SharedArtifact[] }>> {
+): Promise<Outcome<{ items: SharedArtifact[]; total: number }>> {
   try {
     const reply = await request(profileId, "GET", admin ? ADMIN_ARTIFACTS_PATH : ARTIFACTS_PATH);
     const problem = problemForReply(reply.status, reply.body);
-    return problem ? { ok: false, problem } : { ok: true, items: parseArtifactList(reply.body) };
+    return problem ? { ok: false, problem } : { ok: true, ...parseArtifactPage(reply.body, reply.total) };
   } catch (err) {
     return { ok: false, problem: problemForError(err) };
   }

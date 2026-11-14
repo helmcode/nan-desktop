@@ -602,6 +602,7 @@ export const en = {
       filterLabel: "Show",
       empty: "No shared links yet. Use Share on a file in the preview to create one.",
       emptyInactive: "No expired or revoked links.",
+      partial: (shown: number, total: number) => `Showing the ${shown} most recent of ${total} links.`,
       loading: "Loading links…",
       retry: "Try again",
       refresh: "Refresh",

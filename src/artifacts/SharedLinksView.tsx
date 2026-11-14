@@ -19,7 +19,7 @@ import { ArtifactProblemLine, copyLink } from "./ShareArtifactDialog";
 
 type Tab = "mine" | "org";
 type Filter = "active" | "inactive";
-type Load = { status: "loading" } | { status: "ready"; items: SharedArtifact[] } | { status: "error"; problem: ArtifactProblem };
+type Load = { status: "loading" } | { status: "ready"; items: SharedArtifact[]; total: number } | { status: "error"; problem: ArtifactProblem };
 
 /** "in 3 days" / "2 days ago" in the UI locale; "" for an unreadable date. */
 export function relativeTime(value: string | null, locale: string, now = Date.now()): string {
@@ -77,7 +77,7 @@ export function SharedLinksView({
   const refresh = useCallback(async (): Promise<void> => {
     setLoad({ status: "loading" });
     const res = await listArtifacts(profileId, activeTab === "org");
-    setLoad(res.ok ? { status: "ready", items: res.items } : { status: "error", problem: res.problem });
+    setLoad(res.ok ? { status: "ready", items: res.items, total: res.total } : { status: "error", problem: res.problem });
   }, [profileId, activeTab]);
 
   useEffect(() => {
@@ -153,6 +153,9 @@ export function SharedLinksView({
         )}
         {load.status === "ready" && items.length === 0 && (
           <p className="skills-notice">{filter === "active" ? l.empty : l.emptyInactive}</p>
+        )}
+        {load.status === "ready" && load.total > load.items.length && (
+          <p className="skills-notice links-partial">{l.partial(load.items.length, load.total)}</p>
         )}
         {items.length > 0 && (
           <ul className="links-list" aria-label={l.title}>

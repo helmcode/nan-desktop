@@ -23,6 +23,8 @@ import {
   linkState,
   listArtifacts,
   parseAccess,
+  artifactsFlag,
+  parseArtifactPage,
   parseArtifact,
   parseArtifactList,
   parseMembers,
@@ -220,6 +222,7 @@ describe("reply parsing", () => {
       viewCount: 3,
       url: "https://share.helmcode.com/a/tok",
       owner: null,
+      status: null,
     });
   });
 
@@ -242,6 +245,30 @@ describe("reply parsing", () => {
     expect(parseShareReply({ artifact: row })?.url).toBe("https://share.helmcode.com/a/tok");
     expect(parseShareReply(null)).toBeNull();
     expect(safeLink("not a url")).toBeNull();
+  });
+
+  it("community list: {artifacts} rows with a null url (inactive link) parse with no link", () => {
+    const items = parseArtifactList({
+      artifacts: [
+        { ...row, url: "https://share.nan.builders/a/live", status: "active" },
+        { ...row, id: "b", url: null, status: "revoked", revoked_at: null },
+        { ...row, id: "c", url: null, status: "expired" },
+      ],
+    });
+    expect(items.map((item) => item.url)).toEqual(["https://share.nan.builders/a/live", null, null]);
+    expect(items.map((item) => linkState(item))).toEqual(["active", "revoked", "expired"]);
+  });
+
+  it("pages: total from the body, else the X-Total-Count header, else the row count", () => {
+    expect(parseArtifactPage({ artifacts: [row], total: 57 }).total).toBe(57);
+    expect(parseArtifactPage({ artifacts: [row] }, 12).total).toBe(12);
+    expect(parseArtifactPage({ artifacts: [row], total: 57 }, 12).total).toBe(57);
+    expect(parseArtifactPage({ artifacts: [row, row] }).total).toBe(2);
+    // Junk or a total below what arrived is never trusted.
+    expect(parseArtifactPage({ artifacts: [row, row], total: 1 }).total).toBe(2);
+    expect(parseArtifactPage({ artifacts: [row] }, "9").total).toBe(1);
+    expect(parseArtifactPage({ artifacts: [row], total: -3 }).total).toBe(1);
+    expect(parseArtifactPage(null)).toEqual({ items: [], total: 0 });
   });
 
   it("lists accept {artifacts}, {items} or an array and skip junk rows", () => {
@@ -271,13 +298,40 @@ describe("reply parsing", () => {
 });
 
 describe("availability", () => {
-  it("enterprise: the org flag in /api/auth/me, either spelling", () => {
+  // The three shapes the tenants actually send (contract alignment):
+  // enterprise /api/auth/me: top-level `artifacts` bool beside `featureFlags`;
+  // community /api/auth/me: `entitlements.artifacts`.
+  const ENTERPRISE_ME = { email: "a@acme.com", role: "member", featureFlags: ["chat", "artifacts"], skillsSharing: false, artifacts: true };
+  const COMMUNITY_ME = { email: "a@x.io", tier: "inference", entitlements: { inference: true, artifacts: true }, entitlementsError: false };
+
+  it("artifactsFlag reads each shape on its own", () => {
+    expect(artifactsFlag({ artifacts: true })).toBe(true);
+    expect(artifactsFlag({ entitlements: { artifacts: true } })).toBe(true);
+    expect(artifactsFlag({ featureFlags: ["artifacts"] })).toBe(true);
+    expect(artifactsFlag({ artifacts: false })).toBe(false);
+    expect(artifactsFlag({ entitlements: { artifacts: false } })).toBe(false);
+    expect(artifactsFlag({ featureFlags: ["chat"] })).toBeNull();
+    expect(artifactsFlag({ email: "a@x.io" })).toBeNull();
+    // On wins over an explicit off elsewhere; a non-boolean is never on.
+    expect(artifactsFlag({ artifacts: false, featureFlags: ["artifacts"] })).toBe(true);
+    expect(artifactsFlag({ artifacts: "yes" })).toBeNull();
+  });
+
+  it("enterprise: top-level artifacts, entitlements.artifacts or featureFlags turn it on", () => {
+    expect(parseAccess("helmcode", ENTERPRISE_ME).availability).toBe("on");
+    expect(parseAccess("helmcode", { artifacts: true }).availability).toBe("on");
+    expect(parseAccess("helmcode", { entitlements: { artifacts: true } }).availability).toBe("on");
     expect(parseAccess("helmcode", { featureFlags: ["artifacts"] }).availability).toBe("on");
     expect(parseAccess("helmcode", { featureFlags: ["artifacts_sharing"] }).availability).toBe("on");
     expect(parseAccess("helmcode", { artifactsSharing: true }).availability).toBe("on");
     expect(parseAccess("helmcode", { org: { artifacts: true } }).availability).toBe("on");
+  });
+
+  it("enterprise: off, unknown or junk stays hidden (never a paywall)", () => {
+    expect(parseAccess("helmcode", { ...ENTERPRISE_ME, featureFlags: ["chat"], artifacts: false }).availability).toBe("off");
     expect(parseAccess("helmcode", { featureFlags: ["skills_sharing"], skillsSharing: true }).availability).toBe("off");
     expect(parseAccess("helmcode", { artifacts: "yes" }).availability).toBe("off");
+    expect(parseAccess("helmcode", { email: "a@acme.com" }).availability).toBe("off");
     expect(parseAccess("helmcode", null).availability).toBe("off");
   });
 
@@ -286,14 +340,34 @@ describe("availability", () => {
     expect(parseAccess("helmcode", { featureFlags: ["artifacts"], role: "member" }).admin).toBe(false);
   });
 
-  it("community: capabilities.artifacts, paywall without it, hidden with no capabilities", () => {
+  it("community: entitlements.artifacts, top-level artifacts or featureFlags turn it on", () => {
+    expect(parseAccess("nan", COMMUNITY_ME).availability).toBe("on");
+    expect(parseAccess("nan", { entitlements: { artifacts: true } }).availability).toBe("on");
+    expect(parseAccess("nan", { artifacts: true }).availability).toBe("on");
+    expect(parseAccess("nan", { featureFlags: ["artifacts"] }).availability).toBe("on");
+    // The earlier capabilities spelling still works.
     expect(parseAccess("nan", { capabilities: { artifacts: true } }).availability).toBe("on");
     expect(parseAccess("nan", { capabilities: ["inference", "artifacts"] }).availability).toBe("on");
     expect(parseAccess("nan", { user: { capabilities: { artifacts: true } } }).availability).toBe("on");
+    expect(parseAccess("nan", { user: { entitlements: { artifacts: true } } }).availability).toBe("on");
+  });
+
+  it("community: flag off or no flag at all keeps the paywall", () => {
+    expect(parseAccess("nan", { ...COMMUNITY_ME, entitlements: { inference: true, artifacts: false } }).availability).toBe(
+      "paywall",
+    );
+    // An account endpoint that predates artifacts (no such key anywhere).
+    expect(parseAccess("nan", { entitlements: { inference: true } }).availability).toBe("paywall");
     expect(parseAccess("nan", { capabilities: { inference: true } }).availability).toBe("paywall");
-    expect(parseAccess("nan", { email: "a@x.io" }).availability).toBe("off");
-    // The enterprise flag never turns on the community feature.
-    expect(parseAccess("nan", { featureFlags: ["artifacts"] }).availability).toBe("off");
+    expect(parseAccess("nan", { email: "a@x.io" }).availability).toBe("paywall");
+  });
+
+  it("community: entitlements that failed to resolve stay hidden, not paywalled", () => {
+    expect(parseAccess("nan", { email: "a@x.io", entitlements: null, entitlementsError: true }).availability).toBe("off");
+    expect(parseAccess("nan", { email: "a@x.io", entitlements: null }).availability).toBe("off");
+    // A flag that does arrive still wins.
+    expect(parseAccess("nan", { artifacts: true, entitlements: null, entitlementsError: true }).availability).toBe("on");
+    expect(parseAccess("nan", null).availability).toBe("off");
   });
 });
 
@@ -374,7 +448,7 @@ describe("IPC", () => {
       artifacts_request: (args) =>
         args?.method === "GET" ? { status: 200, body: { artifacts: [{ id: ID }] } } : { status: 204, body: null },
     });
-    expect(await listArtifacts("helmcode")).toEqual({ ok: true, items: [expect.objectContaining({ id: ID })] });
+    expect(await listArtifacts("helmcode")).toEqual({ ok: true, items: [expect.objectContaining({ id: ID })], total: 1 });
     expect(await listArtifacts("helmcode", true)).toMatchObject({ ok: true });
     expect(await revokeArtifact("helmcode", ID)).toEqual({ ok: true });
     expect(await revokeArtifact("helmcode", ID, true)).toEqual({ ok: true });
@@ -384,6 +458,11 @@ describe("IPC", () => {
       { profileId: "helmcode", method: "DELETE", path: `/api/artifacts/${ID}` },
       { profileId: "helmcode", method: "DELETE", path: `/api/admin/artifacts/${ID}` },
     ]);
+  });
+
+  it("the list total comes through from the core's X-Total-Count", async () => {
+    resetTauri({ artifacts_request: () => ({ status: 200, body: { artifacts: [{ id: ID }] }, total: 40 }) });
+    expect(await listArtifacts("helmcode")).toMatchObject({ ok: true, total: 40 });
   });
 
   it("revoking an already gone link counts as done; other failures do not", async () => {

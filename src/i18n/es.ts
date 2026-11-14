@@ -600,6 +600,7 @@ export const es: Strings = {
       filterLabel: "Mostrar",
       empty: "Aún no has compartido enlaces. Usa Compartir sobre un archivo en la vista previa para crear uno.",
       emptyInactive: "No hay enlaces caducados ni revocados.",
+      partial: (shown: number, total: number) => `Mostrando los ${shown} enlaces más recientes de ${total}.`,
       loading: "Cargando enlaces…",
       retry: "Reintentar",
       refresh: "Actualizar",

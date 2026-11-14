@@ -97,6 +97,41 @@ describe("SharedLinksView", () => {
     expect(invokedWith("artifacts_request")[0]).toEqual({ profileId: "helmcode", method: "GET", path: "/api/artifacts" });
   });
 
+  it("a paged list (enterprise total / X-Total-Count) says how many it shows", async () => {
+    renderView({
+      core: table({ artifacts_request: () => ({ status: 200, body: { artifacts: ROWS, total: 57 } }) }),
+    });
+    await screen.findAllByTestId("link-row");
+    expect(screen.getByText("Showing the 3 most recent of 57 links.")).toBeTruthy();
+  });
+
+  it("a header-only total works too; a complete list shows no hint", async () => {
+    renderView({ core: table({ artifacts_request: () => ({ status: 200, body: { artifacts: ROWS }, total: 9 }) }) });
+    expect(await screen.findByText("Showing the 3 most recent of 9 links.")).toBeTruthy();
+    cleanup();
+    renderView();
+    await screen.findAllByTestId("link-row");
+    expect(screen.queryByText(/most recent of/)).toBeNull();
+  });
+
+  it("community rows with a null url still list; the inactive one has no Copy", async () => {
+    renderView({
+      profileId: "nan",
+      core: table({
+        artifacts_request: () => ({
+          status: 200,
+          body: { artifacts: [{ ...ROWS[0], url: "https://share.nan.builders/a/x", status: "active" }, { ...ROWS[2], url: null, status: "revoked" }] },
+        }),
+      }),
+    });
+    const rows = await screen.findAllByTestId("link-row");
+    expect(rows).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Expired or revoked" }));
+    const inactive = screen.getAllByTestId("link-row");
+    expect(inactive[0].textContent).toContain("Revoked");
+    expect(within(inactive[0]).queryByRole("button")).toBeNull();
+  });
+
   it("the filter shows expired and revoked links, without actions", async () => {
     renderView();
     await screen.findAllByTestId("link-row");

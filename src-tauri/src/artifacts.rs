@@ -189,6 +189,20 @@ pub fn route_allowed(profile_id: &str, method: &str, path: &str) -> bool {
 pub struct ArtifactResponse {
     pub status: u16,
     pub body: serde_json::Value,
+    /// The `X-Total-Count` header (enterprise list paging), when present
+    /// and a plain non-negative integer. Omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
+/// `X-Total-Count` as a number: ASCII digits only (no sign, no spaces),
+/// anything else is ignored rather than guessed.
+fn total_count(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers.get("x-total-count")?.to_str().ok()?;
+    if raw.is_empty() || raw.len() > 19 || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse().ok()
 }
 
 fn client(timeout: Duration) -> Result<reqwest::Client, ArtifactError> {
@@ -203,6 +217,7 @@ fn client(timeout: Duration) -> Result<reqwest::Client, ArtifactError> {
 async fn read_reply(response: reqwest::Response) -> Result<ArtifactResponse, ArtifactError> {
     use futures_util::StreamExt as _;
     let status = response.status().as_u16();
+    let total = total_count(response.headers());
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -213,7 +228,11 @@ async fn read_reply(response: reqwest::Response) -> Result<ArtifactResponse, Art
         }
     }
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-    Ok(ArtifactResponse { status, body })
+    Ok(ArtifactResponse {
+        status,
+        body,
+        total,
+    })
 }
 
 /// One owner/admin call: `{base}{path}` with the session Bearer, no body.
@@ -745,6 +764,42 @@ mod tests {
     use std::path::PathBuf;
 
     const UUID: &str = "0b9c6f1e-2d3a-4b5c-8d7e-9f0a1b2c3d4e";
+
+    // -------------------------------------------------- total count --
+
+    #[test]
+    fn total_count_reads_only_plain_integers() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let with = |v: &'static str| {
+            let mut h = HeaderMap::new();
+            h.insert("X-Total-Count", HeaderValue::from_static(v));
+            total_count(&h)
+        };
+        assert_eq!(with("42"), Some(42));
+        assert_eq!(with("0"), Some(0));
+        for bad in ["", "-1", " 3", "3 ", "1e3", "abc", "99999999999999999999"] {
+            assert_eq!(with(bad), None, "{bad:?}");
+        }
+        assert_eq!(total_count(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn response_omits_total_when_absent_and_forwards_it_when_present() {
+        let without = serde_json::to_value(ArtifactResponse {
+            status: 200,
+            body: serde_json::Value::Null,
+            total: None,
+        })
+        .expect("json");
+        assert!(without.get("total").is_none());
+        let with = serde_json::to_value(ArtifactResponse {
+            status: 200,
+            body: serde_json::json!({"artifacts": []}),
+            total: Some(7),
+        })
+        .expect("json");
+        assert_eq!(with["total"], 7);
+    }
 
     // ------------------------------------------------------- routes --
 
@@ -1343,6 +1398,15 @@ mod tests {
 
     /// Serve one (status, body) reply; return the raw request.
     fn mock_server(status: u16, body: String) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+        mock_server_with(status, "", body)
+    }
+
+    /// [`mock_server`] with extra raw header lines (each ending in CRLF).
+    fn mock_server_with(
+        status: u16,
+        extra_headers: &'static str,
+        body: String,
+    ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         let handle = std::thread::spawn(move || {
@@ -1371,7 +1435,7 @@ mod tests {
                 }
             }
             let reply = format!(
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(reply.as_bytes()).expect("write");
@@ -1446,6 +1510,33 @@ mod tests {
                 .contains("authorization: bearer jwt-canary-zz9")
         );
         assert!(raw.ends_with("\r\n\r\n"), "no body: {raw}");
+    }
+
+    #[test]
+    fn list_reply_forwards_the_total_count_header() {
+        // Enterprise pages the list: `{artifacts, total}` + X-Total-Count.
+        let (base, server) = mock_server_with(
+            200,
+            "X-Total-Count: 57\r\n",
+            r#"{"artifacts":[],"total":57}"#.into(),
+        );
+        let response = tauri::async_runtime::block_on(send(
+            &base,
+            TOKEN,
+            "helmcode",
+            "GET",
+            "/api/artifacts",
+        ))
+        .expect("sent");
+        assert_eq!(response.total, Some(57));
+        let _ = server.join();
+        // Community sends no header: nothing is forwarded.
+        let (base, server) = mock_server(200, r#"{"artifacts":[]}"#.into());
+        let response =
+            tauri::async_runtime::block_on(send(&base, TOKEN, "nan", "GET", "/api/artifacts"))
+                .expect("sent");
+        assert_eq!(response.total, None);
+        let _ = server.join();
     }
 
     #[test]

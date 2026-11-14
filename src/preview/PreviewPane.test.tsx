@@ -81,3 +81,40 @@ describe("PreviewPane: show in folder", () => {
     expect(screen.getByText("No hay vista previa para este tipo de archivo.")).toBeTruthy();
   });
 });
+
+// Release integration (r18): the artifacts Share action and Show in folder
+// both live in the header; Show in folder stays right next to close.
+describe("PreviewPane: share and show in folder together", () => {
+  it("orders Share, Show in folder, Close for a shareable local file", () => {
+    resetTauri({ preview_read_file: () => ({ base64: btoa("hello"), size: 5 }) });
+    const onShare = vi.fn();
+    render(
+      <I18nProvider initial="en">
+        <PreviewPane
+          target={{ kind: "file", ref: "/Users/ana/Proyecto/notes.md" }}
+          profileId="nan"
+          onClose={() => {}}
+          onOpenLink={() => {}}
+          onShare={onShare}
+        />
+      </I18nProvider>,
+    );
+    const share = screen.getByRole("button", { name: "Share notes.md as a link" });
+    const reveal = screen.getByRole("button", { name: "Show in folder" });
+    expect(share.nextElementSibling).toBe(reveal);
+    expect(reveal.nextElementSibling).toBe(screen.getByRole("button", { name: "Close preview" }));
+    fireEvent.click(share);
+    expect(onShare).toHaveBeenCalledWith({ kind: "file", path: "/Users/ana/Proyecto/notes.md" });
+  });
+
+  it("a generated image shares but has no folder to show", () => {
+    resetTauri({});
+    render(
+      <I18nProvider initial="en">
+        <PreviewPane target={{ kind: "media", ref: "/data/images/r.png" }} profileId="nan" onClose={() => {}} onOpenLink={() => {}} onShare={() => {}} />
+      </I18nProvider>,
+    );
+    expect(screen.getByRole("button", { name: /as a link$/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Show in folder" })).toBeNull();
+  });
+});
