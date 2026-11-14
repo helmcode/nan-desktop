@@ -365,8 +365,13 @@ async fn fetch_image(
 }
 
 /// The directory generated images are saved under: `<app data>/images`.
+/// Shared by every realm on purpose (the asset protocol scope is
+/// `$APPDATA/images/**`): file names are random v4 uuids that no command
+/// lists, so an image is only reachable through the `chat.db` row of the
+/// realm that generated it. Accepts a realm folder too (mapped back to the
+/// root with `realm::root_of`).
 pub fn images_dir(app_data: &Path) -> PathBuf {
-    app_data.join("images")
+    crate::realm::root_of(app_data).join("images")
 }
 
 /// The extensions this app saves images under (see [`save_image`]).
@@ -488,14 +493,13 @@ pub fn sweep_orphan_images(
     min_age: std::time::Duration,
     now: std::time::SystemTime,
 ) -> usize {
-    // No chat store at all: references are unknowable, keep everything.
-    if !app_data.join(chat_store::DB_FILE).is_file() {
-        return 0;
-    }
-    let Ok(entries) = std::fs::read_dir(images_dir(app_data)) else {
+    // Privacy fix (realms): images are shared by every realm, so an image
+    // is an orphan only when NO chat store references it: the pre-realm
+    // `chat.db` (if any) and every `realms/<hash>/chat.db`.
+    let Some(stores) = chat_stores_for_sweep(app_data) else {
         return 0;
     };
-    let Ok(conn) = chat_store::open_db(app_data) else {
+    let Ok(entries) = std::fs::read_dir(images_dir(app_data)) else {
         return 0;
     };
     let mut deleted = 0;
@@ -527,18 +531,54 @@ pub fn sweep_orphan_images(
         if !old_enough {
             continue;
         }
-        match chat_store::references_file_name(&conn, name) {
-            Ok(true) => {}
-            Ok(false) => {
-                if std::fs::remove_file(entry.path()).is_ok() {
-                    deleted += 1;
+        let mut referenced = false;
+        for conn in &stores {
+            match chat_store::references_file_name(conn, name) {
+                Ok(true) => {
+                    referenced = true;
+                    break;
                 }
+                Ok(false) => {}
+                // A store cannot answer: stop, never guess.
+                Err(_) => return deleted,
             }
-            // The store cannot answer: stop, never guess.
-            Err(_) => break,
+        }
+        if !referenced && std::fs::remove_file(entry.path()).is_ok() {
+            deleted += 1;
         }
     }
     deleted
+}
+
+/// Every chat store the orphan sweep must consult: the pre-realm
+/// `<root>/chat.db` when present and each `<root>/realms/<hash>/chat.db`.
+/// `None` (sweep nothing) when there is no store at all, or when any of them
+/// cannot be opened or the realms folder cannot be listed: references are
+/// then unknowable.
+fn chat_stores_for_sweep(app_data: &Path) -> Option<Vec<rusqlite::Connection>> {
+    let mut dirs = Vec::new();
+    if app_data.join(chat_store::DB_FILE).is_file() {
+        dirs.push(app_data.to_path_buf());
+    }
+    let realms = app_data.join(crate::realm::REALMS_DIR);
+    match std::fs::read_dir(&realms) {
+        Ok(entries) => {
+            for entry in entries {
+                let dir = entry.ok()?.path();
+                if dir.join(chat_store::DB_FILE).is_file() {
+                    dirs.push(dir);
+                }
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    if dirs.is_empty() {
+        return None;
+    }
+    dirs.iter()
+        .map(|dir| chat_store::open_db(dir).ok())
+        .collect()
 }
 
 /// Run [`sweep_orphan_images`] once at startup on a background thread (it
@@ -628,6 +668,22 @@ struct ActiveImage {
 /// Active generations keyed by conversation id.
 #[derive(Default)]
 pub struct ImagesState(Mutex<HashMap<String, ActiveImage>>);
+
+/// Abort EVERY running generation/edit (privacy fix: a realm switch, see
+/// `chat::abort_all_streams`). Returns how many were aborted.
+pub(crate) fn abort_all_images(state: &ImagesState) -> usize {
+    let Ok(mut guard) = state.0.lock() else {
+        return 0;
+    };
+    let mut aborted = 0;
+    for (_, entry) in guard.drain() {
+        if let Some(handle) = entry.handle {
+            handle.abort();
+        }
+        aborted += 1;
+    }
+    aborted
+}
 
 /// Atomically abort the previous generation for `conversation_id` (if any)
 /// and reserve the next generation. No handle yet — `attach_image` adds it.
@@ -750,7 +806,7 @@ pub fn image_generate(
     };
     validate_size(&size).map_err(|kind| format!("invalid size {size:?} ({kind:?})"))?;
 
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
     let conversation = chat_store::conversation_get(&conn, conversation_id)
         .map_err(|err| err.to_string())?
@@ -764,6 +820,7 @@ pub fn image_generate(
     let handle = tauri::async_runtime::spawn(run_image_generation(
         app.clone(),
         window,
+        dir,
         conversation_id,
         conversation.profile_id,
         prompt,
@@ -779,9 +836,13 @@ pub fn image_generate(
 /// (deleting the file if the insert fails) and emit the lifecycle events.
 /// `generation` identifies this task in the registry — a superseded task
 /// never emits.
+#[allow(clippy::too_many_arguments)]
 async fn run_image_generation(
     app: AppHandle,
     window: Window,
+    // The realm folder resolved by `image_generate` (a realm switch
+    // mid-generation never redirects the row).
+    app_dir: PathBuf,
     conversation_id: i64,
     profile_id: String,
     prompt: String,
@@ -808,10 +869,6 @@ async fn run_image_generation(
     };
 
     // ---- save + persist (no orphan files) -----------------------------------
-    let app_dir = match app.path().app_data_dir() {
-        Ok(dir) => dir,
-        Err(_) => return emit_error(ImageErrorKind::Protocol),
-    };
     let path = match save_image(&images_dir(&app_dir), &bytes) {
         Ok(path) => path,
         Err(kind) => return emit_error(kind.into()),
@@ -2260,6 +2317,35 @@ mod tests {
             0
         );
         assert_eq!(ORPHAN_MIN_AGE, std::time::Duration::from_secs(86_400));
+    }
+
+    #[test]
+    fn sweep_keeps_images_referenced_by_any_realm_and_deletes_true_orphans() {
+        // Privacy fix: images are shared, chat stores are per realm. An
+        // image referenced only from a realm's chat.db (e.g. one moved out
+        // of the legacy file) must survive while a legacy chat.db exists.
+        let app_data = TempDir::new().expect("tmp");
+        let dir = images_dir(app_data.path());
+        let in_realm = save_image(&dir, b"a").expect("png");
+        let orphan = save_image(&dir, b"b").expect("png");
+        // Legacy store present, referencing nothing.
+        let legacy = chat_store::open_db(app_data.path()).expect("legacy");
+        chat_store::insert_conversation(&legacy, "helmcode", "h").unwrap();
+        drop(legacy);
+        let realm = crate::realm::realm_dir(app_data.path(), &crate::realm::realm_hash("nan:a"));
+        let conn = chat_store::open_db(&realm).expect("realm db");
+        let conv = chat_store::insert_conversation(&conn, "nan", "t").unwrap();
+        chat_store::insert_image_message(&conn, conv, "p", "m", &in_realm.to_string_lossy())
+            .unwrap();
+        drop(conn);
+        let later = std::time::SystemTime::now() + ORPHAN_MIN_AGE * 2;
+
+        assert_eq!(
+            sweep_orphan_images(app_data.path(), ORPHAN_MIN_AGE, later),
+            1
+        );
+        assert!(in_realm.is_file(), "referenced by a realm: kept");
+        assert!(!orphan.exists(), "referenced by nobody: swept");
     }
 
     #[test]

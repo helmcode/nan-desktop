@@ -7,8 +7,9 @@
 //!   every device. `GET/PUT {platform_base}/api/memory/conversations`,
 //!   `DELETE {platform_base}/api/memory/conversations/{id}`, authenticated
 //!   with the login session JWT from the credential vault
-//!   (`<profile-id>.session`). The JWT never leaves the Rust core.
-//! - [`LocalMemory`]: the SQLite chat store on this device (`chat.db`).
+//!   (`<realm-key>.session`). The JWT never leaves the Rust core.
+//! - [`LocalMemory`]: the SQLite chat store on this device (`chat.db` in
+//!   the signed-in user's realm folder, see `realm.rs`).
 //!
 //! The local store is always the working copy the chat surface reads and
 //! writes; in remote mode [`memory_sync`] reconciles it with the account
@@ -30,7 +31,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::chat_store::{self, MessageRecord};
 use crate::profile;
@@ -589,7 +590,8 @@ async fn run_sync(app: &AppHandle, state: &MemoryState, profile_id: &str) -> boo
     if !profile::is_known_profile_id(profile_id) {
         return false;
     }
-    let Ok(dir) = app.path().app_data_dir() else {
+    // Privacy fix: the active user's realm (its chat.db + memory.json).
+    let Ok(dir) = crate::realm::dir_for(app, profile_id) else {
         return false;
     };
     let Ok(settings) = load_settings(&dir) else {
@@ -642,7 +644,7 @@ async fn run_sync(app: &AppHandle, state: &MemoryState, profile_id: &str) -> boo
 
 #[tauri::command]
 pub fn memory_settings_get(app: AppHandle) -> Result<MemorySettingsView, String> {
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let dir = crate::realm::active_dir(&app)?;
     let settings = load_settings(&dir)?;
     Ok(MemorySettingsView {
         mode: settings.mode,
@@ -657,7 +659,7 @@ pub async fn memory_set_mode(
     profile_id: String,
     mode: MemoryMode,
 ) -> Result<MemorySettingsView, String> {
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let dir = crate::realm::dir_for(&app, &profile_id)?;
     let mut settings = load_settings(&dir)?;
     if settings.mode != mode {
         settings.mode = mode;

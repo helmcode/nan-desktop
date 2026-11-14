@@ -761,6 +761,24 @@ type ActiveStream = (u64, Option<JoinHandle<()>>);
 #[derive(Default)]
 pub struct ChatState(Mutex<HashMap<String, ActiveStream>>);
 
+/// Abort EVERY running stream (privacy fix: a realm switch). Conversation
+/// ids are per realm database, so a stream of the previous user left running
+/// would emit its text under an id the next user's sidebar may also use.
+/// Returns how many streams were aborted.
+pub(crate) fn abort_all_streams(state: &ChatState) -> usize {
+    let Ok(mut guard) = state.0.lock() else {
+        return 0;
+    };
+    let mut aborted = 0;
+    for (_, (_, handle)) in guard.drain() {
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+        aborted += 1;
+    }
+    aborted
+}
+
 /// Atomically abort the previous stream for `conversation_id` (if any) and
 /// reserve the next generation. No handle yet — `attach_stream` adds it.
 fn reserve_stream(state: &ChatState, conversation_id: i64) -> Result<u64, String> {
@@ -848,8 +866,13 @@ fn abort_stream(state: &ChatState, conversation_id: i64) -> Result<bool, String>
 /// vault reads as "no key" (logged out); only a real storage failure (e.g.
 /// the master key could not be loaded) is a local `Protocol` error.
 pub(crate) fn read_profile_key(profile_id: &str) -> Result<String, ErrorKind> {
-    match crate::credentials::store().and_then(|store| store.get(&profile::key_account(profile_id)))
-    {
+    // Privacy fix: the key slot is the BOUND USER's realm account; an
+    // unbound profile has no readable key (the pre-realm profile-keyed slot
+    // is never read: it does not say whose key it is).
+    let Some((account, _)) = crate::realm::accounts(profile_id) else {
+        return Err(ErrorKind::MissingKey);
+    };
+    match crate::credentials::store().and_then(|store| store.get(&account)) {
         Ok(Some(key)) if !key.is_empty() => Ok(key),
         Ok(_) => Err(ErrorKind::MissingKey),
         Err(_) => Err(ErrorKind::Protocol),
@@ -857,12 +880,23 @@ pub(crate) fn read_profile_key(profile_id: &str) -> Result<String, ErrorKind> {
 }
 
 /// Read a profile's login session JWT from the credential vault (account
-/// `<profile-id>.session`). Used for platform calls (web search, memory
-/// sync). Missing, empty or unreadable → None: callers degrade silently.
-/// Never rendered, logged or echoed (S4).
+/// `<realm-key>.session` of the user bound to the profile). Used for
+/// platform calls (web search, memory sync). Missing, empty, unbound or
+/// unreadable → None: callers degrade silently. Never rendered, logged or
+/// echoed (S4).
 pub(crate) fn read_session_token(profile_id: &str) -> Option<String> {
-    crate::credentials::store()
-        .and_then(|store| store.get(&profile::session_account(profile_id)))
+    let store = crate::credentials::store().ok()?;
+    let (_, account) = crate::realm::accounts(profile_id)?;
+    session_token_from(store, &account)
+}
+
+/// The non-empty session JWT stored under `account`.
+pub(crate) fn session_token_from(
+    store: &dyn crate::credentials::CredentialStore,
+    account: &str,
+) -> Option<String> {
+    store
+        .get(account)
         .ok()
         .flatten()
         .filter(|token| !token.is_empty())
@@ -901,7 +935,8 @@ pub fn chat_send(
     if content.trim().is_empty() {
         return Err("message is empty".to_string());
     }
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    // Privacy fix: the active user's realm only.
+    let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
 
     let conversation = chat_store::conversation_get(&conn, conversation_id)
@@ -914,8 +949,7 @@ pub fn chat_send(
         Some(id) => Some(
             match skills_team::resolve_active(&dir, &conversation.profile_id, id) {
                 Some(team) => team.map_err(|err| format!("skill:{err}"))?,
-                None => skills::skills_dir(&app)
-                    .and_then(|dir| skills::get(&dir, id))
+                None => skills::get(&skills::skills_dir_in(&dir), id)
                     .map(skills::ActiveSkill::local)
                     .map_err(|err| format!("skill:{err}"))?,
             },
@@ -951,6 +985,7 @@ pub fn chat_send(
     let handle = tauri::async_runtime::spawn(run_chat_stream(
         app.clone(),
         window,
+        dir,
         conversation_id,
         conversation.profile_id,
         model,
@@ -972,7 +1007,7 @@ pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result
     if !abort_stream(&state, conversation_id)? {
         return Ok(());
     }
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
     chat_store::finalize_in_progress(&conn, conversation_id).map_err(|err| err.to_string())?;
     chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
@@ -983,9 +1018,13 @@ pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result
 /// The managed stream task: build the request from stored history, stream the
 /// SSE reply, accumulate deltas, persist the assistant message on success.
 /// `generation` identifies this task in the active-stream registry.
+#[allow(clippy::too_many_arguments)]
 async fn run_chat_stream(
     app: AppHandle,
     window: Window,
+    // The realm folder resolved by `chat_send` (never re-resolved here: a
+    // realm switch mid-stream must not redirect this reply).
+    dir: std::path::PathBuf,
     conversation_id: i64,
     profile_id: String,
     model: String,
@@ -1020,14 +1059,6 @@ async fn run_chat_stream(
     };
 
     // ---- history + request body ------------------------------------------
-    let dir = match app.path().app_data_dir() {
-        Ok(dir) => dir,
-        Err(_) => {
-            emit_error(ErrorKind::Protocol);
-            release_stream(&state, conversation_id, generation);
-            return;
-        }
-    };
     let conn = match chat_store::open_db(&dir) {
         Ok(conn) => conn,
         Err(_) => {
@@ -1594,7 +1625,7 @@ pub fn conversation_list(
     app: AppHandle,
     profile_id: String,
 ) -> Result<Vec<ConversationView>, String> {
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let dir = crate::realm::dir_for(&app, &profile_id)?;
     let conn = chat_store::open_db(&dir)?;
     chat_store::list_conversations(&conn, &profile_id).map_err(|err| err.to_string())
 }
@@ -1612,7 +1643,7 @@ pub fn conversation_create(
     if profile::profile_by_id(&profile_id).is_none() {
         return Err(format!("unknown profile id: {profile_id:?}"));
     }
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let dir = crate::realm::dir_for(&app, &profile_id)?;
     let conn = chat_store::open_db(&dir)?;
     chat_store::insert_conversation(&conn, &profile_id, title.as_deref().unwrap_or(""))
         .map_err(|err| err.to_string())
@@ -1621,7 +1652,7 @@ pub fn conversation_create(
 /// Delete a conversation and its messages.
 #[tauri::command]
 pub fn conversation_delete(app: AppHandle, conversation_id: i64) -> Result<(), String> {
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
     chat_store::delete_conversation(&conn, conversation_id).map_err(|err| err.to_string())
 }
@@ -1667,7 +1698,7 @@ pub fn conversation_rename(
     conversation_id: i64,
     title: String,
 ) -> Result<String, String> {
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
     rename_conversation(&conn, conversation_id, &title)
 }
@@ -1675,7 +1706,7 @@ pub fn conversation_rename(
 /// Load a conversation's transcript (ascending id order).
 #[tauri::command]
 pub fn messages_list(app: AppHandle, conversation_id: i64) -> Result<Vec<ChatMessageRow>, String> {
-    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
     let mut rows =
         chat_store::list_messages(&conn, conversation_id).map_err(|err| err.to_string())?;
@@ -1793,6 +1824,18 @@ mod tests {
         // conversation exists at any time).
         assert!(!abort_stream(&state, 7).expect("second abort"));
         assert_eq!(reserve_stream(&state, 7).expect("reserve again"), 1);
+    }
+
+    #[test]
+    fn a_realm_switch_aborts_every_running_stream() {
+        let state = ChatState::default();
+        for id in [1, 2] {
+            let generation = reserve_stream(&state, id).expect("reserve");
+            attach_stream(&state, id, generation, spawn_pending_task()).expect("attach");
+        }
+        assert_eq!(abort_all_streams(&state), 2);
+        assert!(!abort_stream(&state, 1).expect("abort"), "registry emptied");
+        assert_eq!(abort_all_streams(&state), 0);
     }
 
     #[test]

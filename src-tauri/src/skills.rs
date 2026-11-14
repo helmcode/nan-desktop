@@ -38,9 +38,9 @@ use std::path::{Path, PathBuf};
 
 use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
-/// Folder under the app data dir holding one `<id>.json` per skill.
+/// Folder under the user's realm folder holding one `<id>.json` per skill.
 pub const SKILLS_DIR: &str = "skills";
 /// The generated instructions file at the bundle root.
 pub const SKILL_MD: &str = "SKILL.md";
@@ -1114,11 +1114,17 @@ pub fn delete(dir: &Path, id: &str) -> Result<(), SkillError> {
     })
 }
 
-/// The app's skills folder.
+/// The skills folder inside a realm folder.
+pub fn skills_dir_in(realm_dir: &Path) -> PathBuf {
+    realm_dir.join(SKILLS_DIR)
+}
+
+/// The signed-in user's skills folder (privacy fix: local skills are per
+/// user realm, never shared across accounts on the device). Signed out →
+/// an I/O refusal (no realm is readable).
 pub fn skills_dir(app: &AppHandle) -> Result<PathBuf, SkillError> {
-    app.path()
-        .app_data_dir()
-        .map(|dir| dir.join(SKILLS_DIR))
+    crate::realm::active_dir(app)
+        .map(|dir| skills_dir_in(&dir))
         .map_err(|_| SkillError::Io)
 }
 

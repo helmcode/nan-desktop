@@ -1,6 +1,9 @@
 //! Chat persistence (T4, S3): conversations and messages in SQLite.
 //!
-//! The chat store lives in its own file (`chat.db` in the app data dir).
+//! The chat store lives in its own file: `chat.db` inside the signed-in
+//! user's realm folder (`<app data>/realms/<hash>/chat.db`, see `realm.rs`).
+//! A pre-realm `<app data>/chat.db` is split per profile into the first
+//! bound realm by [`claim_profile`].
 //!
 //! All functions are connection-injected pure logic, unit-tested against a
 //! temp file — never the real app dir.
@@ -223,6 +226,104 @@ pub fn open_db(dir: &std::path::Path) -> Result<Connection, String> {
     let conn = Connection::open(dir.join(DB_FILE)).map_err(|err| err.to_string())?;
     ensure_schema(&conn).map_err(|err| err.to_string())?;
     Ok(conn)
+}
+
+/// Privacy fix (realms): move every row of `profile_id` from the pre-realm
+/// `<root>/chat.db` into `<realm_dir>/chat.db`, without duplicating them.
+///
+/// The realm copy is built as a temp file (`VACUUM INTO`, then the OTHER
+/// profile's conversations, messages and tombstones are deleted and the file
+/// vacuumed so no freed page keeps their text) and renamed into place only
+/// when complete. The moved rows are then deleted from the legacy file
+/// (vacuumed too); a legacy file left with no rows at all is removed. When
+/// the realm database already exists (an earlier move renamed it but was
+/// interrupted before pruning), only the prune runs. Returns whether any row
+/// was moved. Never touches a realm database of another user.
+pub fn claim_profile(
+    root: &std::path::Path,
+    realm_dir: &std::path::Path,
+    profile_id: &str,
+) -> Result<bool, String> {
+    let legacy_path = root.join(DB_FILE);
+    if !legacy_path.is_file() {
+        return Ok(false);
+    }
+    let legacy = open_db(root)?;
+    let owned: i64 = legacy
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM conversations WHERE profile_id = ?1)
+                  + (SELECT COUNT(*) FROM memory_tombstones WHERE profile_id = ?1)",
+            [profile_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| err.to_string())?;
+    if owned == 0 {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(realm_dir).map_err(|err| err.to_string())?;
+    let dest = realm_dir.join(DB_FILE);
+    if !dest.exists() {
+        let tmp = realm_dir.join(format!("{DB_FILE}.claim.tmp"));
+        let _ = std::fs::remove_file(&tmp);
+        let built = (|| -> Result<(), rusqlite::Error> {
+            legacy.execute("VACUUM INTO ?1", [tmp.to_string_lossy().as_ref()])?;
+            let copy = Connection::open(&tmp)?;
+            copy.execute_batch("PRAGMA foreign_keys = ON;")?;
+            delete_profile_rows(&copy, profile_id, false)?;
+            copy.execute_batch("VACUUM;")?;
+            Ok(())
+        })();
+        if let Err(err) = built {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.to_string());
+        }
+        std::fs::rename(&tmp, &dest).map_err(|err| err.to_string())?;
+    }
+    delete_profile_rows(&legacy, profile_id, true).map_err(|err| err.to_string())?;
+    legacy
+        .execute_batch("VACUUM;")
+        .map_err(|err| err.to_string())?;
+    let left: i64 = legacy
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM conversations) + (SELECT COUNT(*) FROM memory_tombstones)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|err| err.to_string())?;
+    drop(legacy);
+    if left == 0 {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(root.join(format!("{DB_FILE}{suffix}")));
+        }
+    }
+    Ok(true)
+}
+
+/// Delete the rows of `profile_id` (`matching = true`) or of every OTHER
+/// profile (`matching = false`): messages first, then conversations, then
+/// memory tombstones.
+fn delete_profile_rows(
+    conn: &Connection,
+    profile_id: &str,
+    matching: bool,
+) -> Result<(), rusqlite::Error> {
+    let op = if matching { "=" } else { "!=" };
+    conn.execute(
+        &format!(
+            "DELETE FROM messages WHERE conversation_id IN
+                 (SELECT id FROM conversations WHERE profile_id {op} ?1)"
+        ),
+        [profile_id],
+    )?;
+    conn.execute(
+        &format!("DELETE FROM conversations WHERE profile_id {op} ?1"),
+        [profile_id],
+    )?;
+    conn.execute(
+        &format!("DELETE FROM memory_tombstones WHERE profile_id {op} ?1"),
+        [profile_id],
+    )?;
+    Ok(())
 }
 
 /// Insert a conversation and return its id. `title` may be empty — the empty
@@ -899,6 +1000,117 @@ fn truncate_chars(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ---- privacy fix: per-user realms (legacy chat.db split) -------------
+
+    /// A pre-realm chat.db holding both tenants' conversations.
+    fn legacy_db(root: &std::path::Path) {
+        let conn = open_db(root).expect("legacy db");
+        let nan = insert_conversation(&conn, "nan", "nan secret plans").unwrap();
+        insert_message(&conn, nan, "user", "NAN-PRIVATE-TEXT", None).unwrap();
+        let helm = insert_conversation(&conn, "helmcode", "helm roadmap").unwrap();
+        insert_message(&conn, helm, "user", "HELM-PRIVATE-TEXT", None).unwrap();
+        conn.execute(
+            "INSERT INTO memory_tombstones (remote_id, profile_id) VALUES ('r-nan', 'nan'), ('r-helm', 'helmcode')",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn file_contains(path: &std::path::Path, needle: &str) -> bool {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    #[test]
+    fn claim_moves_one_profile_into_its_realm_and_scrubs_the_other() {
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let realm = root.path().join("realms").join("a".repeat(32));
+
+        assert!(claim_profile(root.path(), &realm, "nan").expect("claim"));
+
+        let mine = open_db(&realm).unwrap();
+        let listed = list_conversations(&mine, "nan").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "nan secret plans");
+        let rows = list_messages(&mine, listed[0].id).unwrap();
+        assert_eq!(rows[0].content, "NAN-PRIVATE-TEXT");
+        assert!(list_conversations(&mine, "helmcode").unwrap().is_empty());
+        assert_eq!(
+            list_tombstones(&mine, "nan").unwrap(),
+            vec!["r-nan".to_string()]
+        );
+        assert!(list_tombstones(&mine, "helmcode").unwrap().is_empty());
+        drop(mine);
+        // Not a byte of the other tenant's text survives in the realm file.
+        assert!(!file_contains(&realm.join(DB_FILE), "HELM-PRIVATE-TEXT"));
+
+        // Moved, not duplicated: the legacy file keeps only helmcode.
+        let legacy = open_db(root.path()).unwrap();
+        assert!(list_conversations(&legacy, "nan").unwrap().is_empty());
+        assert_eq!(list_conversations(&legacy, "helmcode").unwrap().len(), 1);
+        assert!(list_tombstones(&legacy, "nan").unwrap().is_empty());
+        drop(legacy);
+        assert!(!file_contains(
+            &root.path().join(DB_FILE),
+            "NAN-PRIVATE-TEXT"
+        ));
+        // A second claim of the same profile moves nothing more.
+        assert!(!claim_profile(root.path(), &realm, "nan").unwrap());
+    }
+
+    #[test]
+    fn claiming_the_last_profile_removes_the_legacy_file() {
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let a = root.path().join("realms").join("a".repeat(32));
+        let h = root.path().join("realms").join("b".repeat(32));
+        assert!(claim_profile(root.path(), &a, "nan").unwrap());
+        assert!(claim_profile(root.path(), &h, "helmcode").unwrap());
+        assert!(!root.path().join(DB_FILE).exists(), "nothing left: removed");
+        let helm = open_db(&h).unwrap();
+        assert_eq!(list_conversations(&helm, "helmcode").unwrap().len(), 1);
+        assert!(list_conversations(&helm, "nan").unwrap().is_empty());
+    }
+
+    #[test]
+    fn claim_without_a_legacy_file_or_rows_is_a_no_op() {
+        let root = TempDir::new().unwrap();
+        let realm = root.path().join("realms").join("c".repeat(32));
+        assert!(!claim_profile(root.path(), &realm, "nan").unwrap());
+        assert!(!realm.join(DB_FILE).exists());
+        // A legacy file with only the other tenant's rows: nothing moves.
+        let conn = open_db(root.path()).unwrap();
+        insert_conversation(&conn, "helmcode", "h").unwrap();
+        drop(conn);
+        assert!(!claim_profile(root.path(), &realm, "nan").unwrap());
+        assert!(!realm.join(DB_FILE).exists());
+    }
+
+    #[test]
+    fn an_interrupted_claim_only_prunes_and_keeps_the_realm_copy() {
+        // The rename landed but the prune did not: the realm file is the
+        // complete copy, so the retry must not rebuild or overwrite it.
+        let root = TempDir::new().unwrap();
+        legacy_db(root.path());
+        let realm = root.path().join("realms").join("d".repeat(32));
+        std::fs::create_dir_all(&realm).unwrap();
+        let existing = open_db(&realm).unwrap();
+        insert_conversation(&existing, "nan", "already moved").unwrap();
+        drop(existing);
+
+        assert!(claim_profile(root.path(), &realm, "nan").unwrap());
+        let mine = open_db(&realm).unwrap();
+        let titles: Vec<String> = list_conversations(&mine, "nan")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.title)
+            .collect();
+        assert_eq!(titles, vec!["already moved".to_string()]);
+        let legacy = open_db(root.path()).unwrap();
+        assert!(list_conversations(&legacy, "nan").unwrap().is_empty());
+    }
 
     fn open_temp_db(dir: &TempDir) -> Connection {
         let conn = Connection::open(dir.path().join("chat-test.db")).expect("open temp db");

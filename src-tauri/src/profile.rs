@@ -1,24 +1,32 @@
 //! Profile store (T3b, S2/S12): the app talks to exactly two owned tenants.
 //!
-//! `profiles.json` (schema v2) in the app data dir persists the canonical
-//! profile list next to the active profile id. The profile definitions are
+//! `profiles.json` (schema v3) in the app data dir persists the canonical
+//! profile list next to the active profile id and, per profile, the user
+//! currently bound to it (the privacy fix: see `realm.rs`). The profile definitions are
 //! compiled-in constants: there is deliberately no API to add, edit or
 //! remove profiles and no user-configurable endpoint anywhere, so the binary
 //! cannot be pointed at anything but the two owned tenants (S2/S12).
 //!
-//! Any pre-existing v1 document (custom profiles, `base_url` fields) is
-//! migrated on load: rewritten to v2 with custom profiles dropped and the
-//! active id kept only when it is one of the two known ids.
+//! Any pre-existing v1/v2 document (custom profiles, `base_url` fields, no
+//! bindings) is migrated on load: rewritten to v3 with custom profiles
+//! dropped and the active id kept only when it is one of the two known ids.
+//! A v2 document carries no binding, so every profile starts unbound: the
+//! first login after the update binds that user (see `realm.rs`).
 //!
 //! Secrets never live in this file (S4): the inference API key is stored in
-//! the encrypted credential vault (`credentials.rs`) with account = profile
-//! id, and the login session JWT under account = `<profile-id>.session`.
+//! the encrypted credential vault (`credentials.rs`) with account = the
+//! user's realm key (`<profile-id>:<user-id>`), and the login session JWT
+//! under account = `<realm-key>.session`. The binding (user id, email and
+//! realm hash) is NOT a secret and must live outside the vault: a vault
+//! reset (round 13 signature stamp) signs the user out but must never make
+//! the app forget whose local data is whose.
 //!
 //! Everything here is pure logic (seed / parse / migrate / validate / mutate)
 //! or path-injected file I/O, free of Tauri types, so it can be unit-tested
 //! against a temp dir. Tauri glue (resolving the app data dir, credential
 //! access) lives in `lib.rs` / `device_flow.rs` / `credentials.rs`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -33,8 +41,8 @@ pub const KEYRING_SERVICE: &str = "com.helmcode.nan.desktop";
 pub const STORE_FILE: &str = "profiles.json";
 
 /// Current on-disk schema version. A file without this exact version is
-/// migrated (rewritten) on load.
-pub const STORE_VERSION: u32 = 2;
+/// migrated (rewritten) on load. v3 adds the per-profile user bindings.
+pub const STORE_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // The two locked profiles (S2). Constants on purpose: no code path can widen
@@ -145,28 +153,85 @@ pub fn is_known_profile_id(id: &str) -> bool {
 // Store document
 // ---------------------------------------------------------------------------
 
-/// The on-disk store (`profiles.json` document, schema v2). The profile list
-/// is always the canonical one; only `active_profile` is real user state.
+/// The account currently bound to a platform profile on this device: the
+/// user whose local data realm is in use (see `realm.rs`). Not a secret (the
+/// renderer shows the email in the identity chip) and never a credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundUser {
+    /// The account id the platform reported at login (`/api/auth/me`).
+    pub id: String,
+    /// The account email, when the platform reported one (display only).
+    #[serde(default)]
+    pub email: Option<String>,
+    /// `realm::realm_hash(realm::realm_key(profile, id))`: the folder name of
+    /// this user's data realm. Stored for display/debug and re-verified on
+    /// every load (a mismatch drops the binding, never redirects data).
+    pub realm: String,
+}
+
+impl BoundUser {
+    /// Bind `id` (and `email`) for `profile_id`, deriving the realm hash.
+    pub fn new(profile_id: &str, id: &str, email: Option<String>) -> Self {
+        BoundUser {
+            id: id.to_string(),
+            email,
+            realm: crate::realm::realm_hash(&crate::realm::realm_key(profile_id, id)),
+        }
+    }
+
+    /// The realm key (`<profile-id>:<user-id>`) of this binding.
+    pub fn realm_key(&self, profile_id: &str) -> String {
+        crate::realm::realm_key(profile_id, &self.id)
+    }
+
+    /// Whether this binding is well formed for `profile_id`: a valid user id
+    /// and a realm hash that matches it. A tampered `realm` never points the
+    /// app at another user's folder: the binding is simply dropped.
+    pub fn is_valid_for(&self, profile_id: &str) -> bool {
+        crate::realm::valid_user_id(&self.id)
+            && self.email.as_deref().is_none_or(crate::realm::valid_email)
+            && self.realm == crate::realm::realm_hash(&self.realm_key(profile_id))
+    }
+}
+
+/// The on-disk store (`profiles.json` document, schema v3). The profile list
+/// is always the canonical one; `active_profile` and `bindings` are the real
+/// user state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileStore {
     pub version: u32,
     pub profiles: Vec<Profile>,
     #[serde(default)]
     pub active_profile: Option<String>,
+    /// Profile id -> the user currently bound to it on this device. Kept on
+    /// sign-out (the realm data stays, nothing is deleted); replaced only by
+    /// an explicit, successful login of another user.
+    #[serde(default)]
+    pub bindings: BTreeMap<String, BoundUser>,
 }
 
-/// The store seeded on first run: the locked profiles, nothing active (S2).
+/// The store seeded on first run: the locked profiles, nothing active, no
+/// bound user (S2).
 pub fn default_store() -> ProfileStore {
     ProfileStore {
         version: STORE_VERSION,
         profiles: canonical_profiles(),
         active_profile: None,
+        bindings: BTreeMap::new(),
     }
 }
 
+/// Whether every binding is keyed by a known profile and well formed.
+fn bindings_valid(bindings: &BTreeMap<String, BoundUser>) -> bool {
+    bindings
+        .iter()
+        .all(|(profile_id, user)| is_known_profile_id(profile_id) && user.is_valid_for(profile_id))
+}
+
 /// Parse a stored document. `None` means "treat as stale/corrupt": not valid
-/// JSON, not schema v2, a profile list that is not exactly the canonical one,
-/// or an active id that is not one of the two known ids.
+/// JSON, not schema v3, a profile list that is not exactly the canonical one,
+/// an active id that is not one of the two known ids, or a malformed
+/// binding.
 pub fn parse_store(raw: &str) -> Option<ProfileStore> {
     let store: ProfileStore = serde_json::from_str(raw).ok()?;
     let locked = store.version == STORE_VERSION
@@ -174,14 +239,17 @@ pub fn parse_store(raw: &str) -> Option<ProfileStore> {
         && store
             .active_profile
             .as_ref()
-            .is_none_or(|id| is_known_profile_id(id));
+            .is_none_or(|id| is_known_profile_id(id))
+        && bindings_valid(&store.bindings);
     locked.then_some(store)
 }
 
-/// Migrate any previously stored document (v1 with custom profiles, a
-/// hand-tampered v2, or corrupt JSON) to the locked v2 store. The active id
-/// survives only when it is one of the two known ids; everything else —
-/// custom profiles, user-configured URLs — is dropped (S2/S12).
+/// Migrate any previously stored document (v1 with custom profiles, a v2
+/// without bindings, a hand-tampered v3, or corrupt JSON) to the locked v3
+/// store. The active id survives only when it is one of the two known ids;
+/// a binding survives only when it is well formed for a known profile
+/// (a v2 document has none, so every profile starts unbound); everything
+/// else (custom profiles, user-configured URLs) is dropped (S2/S12).
 pub fn migrate_store(raw: &str) -> ProfileStore {
     let value: serde_json::Value = serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
     let active = value
@@ -189,15 +257,29 @@ pub fn migrate_store(raw: &str) -> ProfileStore {
         .and_then(|v| v.as_str())
         .filter(|id| is_known_profile_id(id))
         .map(str::to_string);
+    let bindings = value
+        .get("bindings")
+        .and_then(|v| v.as_object())
+        .map(|map| {
+            map.iter()
+                .filter_map(|(profile_id, raw)| {
+                    let user: BoundUser = serde_json::from_value(raw.clone()).ok()?;
+                    (is_known_profile_id(profile_id) && user.is_valid_for(profile_id))
+                        .then(|| (profile_id.clone(), user))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     ProfileStore {
         active_profile: active,
+        bindings,
         ..default_store()
     }
 }
 
 /// Load the store from `dir`, creating or migrating `profiles.json` as
 /// needed: a missing file is seeded with [`default_store`]; a file that is
-/// not a valid locked v2 document is migrated (rewritten) on load. Only real
+/// not a valid locked v3 document is migrated (rewritten) on load. Only real
 /// I/O failures are returned as `Err`.
 pub fn load_or_seed(dir: &Path) -> Result<ProfileStore, String> {
     let path = dir.join(STORE_FILE);
@@ -206,9 +288,10 @@ pub fn load_or_seed(dir: &Path) -> Result<ProfileStore, String> {
             if let Some(store) = parse_store(&raw) {
                 return Ok(store);
             }
-            // Missing version (v1), tampered fields, custom profiles, an
-            // unknown active id or corrupt JSON: rewrite the locked v2
-            // document, keeping a valid active id when present.
+            // Missing version (v1), a v2 document, tampered fields, custom
+            // profiles, an unknown active id or corrupt JSON: rewrite the
+            // locked v3 document, keeping a valid active id and valid
+            // bindings when present.
             let store = migrate_store(&raw);
             save(dir, &store)?;
             Ok(store)
@@ -229,13 +312,28 @@ pub fn save(dir: &Path, store: &ProfileStore) -> Result<(), String> {
     std::fs::write(dir.join(STORE_FILE), json).map_err(|err| err.to_string())
 }
 
-/// Vault (and legacy keychain) account for a profile's inference API key.
-pub fn key_account(profile_id: &str) -> String {
+/// Vault account for a realm's inference API key: the realm key itself
+/// (`<profile-id>:<user-id>`), so two users of one tenant never share a key
+/// slot.
+pub fn key_account(realm_key: &str) -> String {
+    realm_key.to_string()
+}
+
+/// Vault account for a realm's login session JWT (`<realm-key>.session`).
+pub fn session_account(realm_key: &str) -> String {
+    format!("{realm_key}.session")
+}
+
+/// Pre-realm (v0.2.6 and older) vault and keychain account of a profile's
+/// inference key: the bare profile id. Never read as a credential any more
+/// (it does not say WHICH user it belongs to); only deleted, and probed by
+/// the pre-round-5 keychain migration.
+pub fn legacy_key_account(profile_id: &str) -> String {
     profile_id.to_string()
 }
 
-/// Vault (and legacy keychain) account for a profile's login session JWT.
-pub fn session_account(profile_id: &str) -> String {
+/// Pre-realm account of a profile's session JWT (`<profile-id>.session`).
+pub fn legacy_session_account(profile_id: &str) -> String {
     format!("{profile_id}.session")
 }
 
@@ -263,9 +361,37 @@ impl ProfileStore {
         Ok(())
     }
 
-    /// Clear the active profile (sign-out).
+    /// Clear the active profile (sign-out). The binding is kept on purpose:
+    /// the realm data stays on disk and the same user gets it back on their
+    /// next login.
     pub fn clear_active_profile(&mut self) {
         self.active_profile = None;
+    }
+
+    /// The user bound to `profile_id`, if any.
+    pub fn binding(&self, profile_id: &str) -> Option<&BoundUser> {
+        self.bindings.get(profile_id)
+    }
+
+    /// The active profile id together with its bound user. `None` when no
+    /// profile is active or the active profile has no bound user (both mean
+    /// "signed out": no realm is readable).
+    pub fn active_binding(&self) -> Option<(&str, &BoundUser)> {
+        let id = self.active_profile.as_deref()?;
+        Some((id, self.bindings.get(id)?))
+    }
+
+    /// Bind `user` to `profile_id` (replacing any previous binding). Fails
+    /// for unknown profile ids or a malformed user without mutating.
+    pub fn bind(&mut self, profile_id: &str, user: BoundUser) -> Result<(), String> {
+        if !is_known_profile_id(profile_id) {
+            return Err(format!("unknown profile id: {profile_id:?}"));
+        }
+        if !user.is_valid_for(profile_id) {
+            return Err("malformed user binding".to_string());
+        }
+        self.bindings.insert(profile_id.to_string(), user);
+        Ok(())
     }
 }
 
@@ -446,14 +572,104 @@ mod tests {
     }
 
     #[test]
-    fn keychain_accounts_split_key_and_session() {
-        // The inference key lives under the bare profile id; the login
-        // session JWT lives under "<profile-id>.session" (T13). One service.
+    fn vault_accounts_are_per_realm_and_split_key_and_session() {
+        // The inference key lives under the realm key ("<profile>:<user>"),
+        // the session JWT under "<realm>.session". Two users of the same
+        // tenant never share a slot.
         assert_eq!(KEYRING_SERVICE, "com.helmcode.nan.desktop");
-        assert_eq!(key_account("nan"), "nan");
-        assert_eq!(session_account("nan"), "nan.session");
-        assert_eq!(key_account("helmcode"), "helmcode");
-        assert_eq!(session_account("helmcode"), "helmcode.session");
+        assert_eq!(key_account("nan:u-1"), "nan:u-1");
+        assert_eq!(session_account("nan:u-1"), "nan:u-1.session");
+        assert_ne!(key_account("nan:u-1"), key_account("nan:u-2"));
+        assert_ne!(session_account("nan:u-1"), session_account("nan:u-2"));
+        // The pre-realm accounts are the bare profile ids (only deleted and
+        // probed by the pre-round-5 keychain migration, never read as a
+        // credential).
+        assert_eq!(legacy_key_account("nan"), "nan");
+        assert_eq!(legacy_session_account("helmcode"), "helmcode.session");
+    }
+
+    fn v2_document(active: &str) -> String {
+        format!(
+            r#"{{"version":2,"profiles":{},"active_profile":"{active}"}}"#,
+            serde_json::to_string(&canonical_profiles()).unwrap()
+        )
+    }
+
+    #[test]
+    fn v2_store_migrates_to_v3_with_no_bound_user() {
+        // The privacy fix: a v0.2.6 document has no binding, so the first
+        // login after the update binds whoever signs in (realm.rs).
+        let dir = TempDir::new().expect("temp dir");
+        std::fs::write(dir.path().join(STORE_FILE), v2_document("nan")).expect("write");
+
+        let store = load_or_seed(dir.path()).expect("migrate");
+
+        assert_eq!(store.version, 3);
+        assert_eq!(store.active_profile.as_deref(), Some("nan"));
+        assert!(store.bindings.is_empty());
+        assert_eq!(store.active_binding(), None, "unbound = signed out");
+        let reread = parse_store(&read_store(&dir)).expect("v3 on disk");
+        assert_eq!(reread, store);
+    }
+
+    #[test]
+    fn bindings_roundtrip_and_survive_sign_out() {
+        let dir = TempDir::new().expect("temp dir");
+        let mut store = load_or_seed(dir.path()).expect("seed");
+        let user = BoundUser::new("nan", "user-a", Some("a@example.com".into()));
+        store.bind("nan", user.clone()).expect("bind");
+        store.set_active_profile("nan").expect("active");
+        save(dir.path(), &store).expect("save");
+
+        let mut reloaded = load_or_seed(dir.path()).expect("reload");
+        assert_eq!(reloaded.binding("nan"), Some(&user));
+        assert_eq!(reloaded.active_binding(), Some(("nan", &user)));
+
+        reloaded.clear_active_profile();
+        save(dir.path(), &reloaded).expect("save");
+        let after = load_or_seed(dir.path()).expect("reload");
+        assert_eq!(
+            after.binding("nan"),
+            Some(&user),
+            "sign-out keeps the binding"
+        );
+        assert_eq!(after.active_binding(), None);
+    }
+
+    #[test]
+    fn a_tampered_binding_is_dropped_never_redirected() {
+        // Pointing nan's binding at another realm folder must not make the
+        // app read that folder: the hash is re-derived and verified.
+        let dir = TempDir::new().expect("temp dir");
+        let mut store = default_store();
+        let good = BoundUser::new("helmcode", "user-h", None);
+        store.bindings.insert("helmcode".into(), good.clone());
+        let mut forged = BoundUser::new("nan", "user-a", None);
+        forged.realm = BoundUser::new("nan", "user-b", None).realm;
+        store.bindings.insert("nan".into(), forged);
+        std::fs::write(
+            dir.path().join(STORE_FILE),
+            serde_json::to_string(&store).unwrap(),
+        )
+        .expect("write");
+
+        let loaded = load_or_seed(dir.path()).expect("migrate");
+        assert_eq!(loaded.binding("nan"), None, "forged binding dropped");
+        assert_eq!(loaded.binding("helmcode"), Some(&good), "valid one kept");
+    }
+
+    #[test]
+    fn bind_rejects_unknown_profiles_and_malformed_users() {
+        let mut store = default_store();
+        assert!(
+            store
+                .bind("root", BoundUser::new("root", "u", None))
+                .is_err()
+        );
+        let mut bad = BoundUser::new("nan", "u", None);
+        bad.id = "has space".into();
+        assert!(store.bind("nan", bad).is_err());
+        assert!(store.bindings.is_empty());
     }
 
     #[test]

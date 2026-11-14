@@ -138,9 +138,11 @@ pub async fn connection_test(profile_id: String) -> Result<ConnectionTestResult,
 
     // Resolve the stored vault value. The key is used for this request only
     // and never leaves this function (S4).
-    let key = match crate::credentials::store()
-        .and_then(|store| store.get(&profile::key_account(&profile_id)))
-    {
+    // Privacy fix: the bound user's realm-keyed slot only.
+    let Some((account, _)) = crate::realm::accounts(&profile_id) else {
+        return Ok(missing_key_result());
+    };
+    let key = match crate::credentials::store().and_then(|store| store.get(&account)) {
         Ok(Some(stored)) if !stored.is_empty() => stored,
         Ok(_) => return Ok(missing_key_result()),
         Err(err) => return Err(err.to_string()),
