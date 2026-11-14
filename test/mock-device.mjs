@@ -14,6 +14,11 @@
 //   GET  /api/auth/device         → static approval-page stub (auto-approve)
 //   POST /api/auth/device/approve → 200 ok (approval is automatic by count)
 //   POST /api/auth/device/deny    → marks the request denied
+//   GET  /api/auth/me             → {id, email} of the signed-in mock user
+//                                    (privacy fix: the core binds the login
+//                                    to this id). MOCK_USER_ID / MOCK_EMAIL
+//                                    switch the account, so a second user of
+//                                    the same tenant can be exercised.
 //   GET  /reset                   → clears all in-memory state
 //
 // Usage: node test/mock-device.mjs
@@ -24,12 +29,14 @@ const HOST = "127.0.0.1";
 const PORT = 14322;
 const BASE = `http://${HOST}:${PORT}`;
 
-// Fixture credentials (not real). The api_key/session_token shapes are what
-// the Rust core maps into the OS keychain (api_key → account "<profile-id>",
-// session_token → account "<profile-id>.session").
+// Fixture credentials (not real). The Rust core stores them in its vault
+// under the signed-in user's realm (api_key → account "<profile>:<user-id>",
+// session_token → account "<profile>:<user-id>.session").
 const SESSION_TOKEN = "fake-jwt";
 const API_KEY = "sk-test-1234567890abcdef";
 const KEY_ALIAS = "mock-member.dt-0a1b2c3d";
+const USER_ID = process.env.MOCK_USER_ID || "mock-user-1";
+const USER_EMAIL = process.env.MOCK_EMAIL || "mock-member@example.com";
 
 const PENDING_POLLS_BEFORE_APPROVAL = 2;
 const MOCK_POLL_INTERVAL_MS = 200;
@@ -186,6 +193,15 @@ const server = createServer(async (req, res) => {
       return;
     }
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/auth/me") {
+    if (req.headers.authorization !== `Bearer ${SESSION_TOKEN}`) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    sendJson(res, 200, { id: USER_ID, email: USER_EMAIL });
     return;
   }
 

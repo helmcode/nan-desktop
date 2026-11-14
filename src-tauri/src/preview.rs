@@ -169,8 +169,12 @@ pub async fn preview_read_file(
         .path()
         .app_data_dir()
         .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
+    // Privacy fix: the grants are the signed-in user's (realm); the
+    // protection still covers the whole app data root (`dir`).
+    let realm = crate::realm::dir_for_in(&dir, &profile_id)
+        .map_err(|err| Rejection::new("protocol", err.to_string()))?;
     tauri::async_runtime::spawn_blocking(move || {
-        let store = grants::load_or_seed(&dir).map_err(|err| Rejection::new("io", err))?;
+        let store = grants::load_or_seed(&realm).map_err(|err| Rejection::new("io", err))?;
         let home = std::env::home_dir();
         read_preview_file(&store, &profile_id, &path, &dir, home.as_deref())
     })

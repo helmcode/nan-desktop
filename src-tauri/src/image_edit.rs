@@ -785,7 +785,9 @@ pub fn edit_images(
     // as the SECOND image right after the base. See [`ANNOTATIONS_DIR`].
     annotation_path: Option<String>,
 ) -> Result<(), String> {
-    let app_data = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    // Privacy fix: the active user's realm (its chat.db); the shared images
+    // folder is derived from it by `images::images_dir`.
+    let app_data = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&app_data)?;
     let conversation = chat_store::conversation_get(&conn, conversation_id)
         .map_err(|err| err.to_string())?
@@ -815,6 +817,7 @@ pub fn edit_images(
         app.clone(),
         window,
         EditJob {
+            realm: app_data,
             conversation_id,
             profile_id: conversation.profile_id,
             model,
@@ -830,6 +833,9 @@ pub fn edit_images(
 }
 
 struct EditJob {
+    /// The realm folder resolved by `edit_images` (never re-resolved: a
+    /// realm switch mid-edit must not redirect the row).
+    realm: PathBuf,
     conversation_id: i64,
     profile_id: String,
     model: &'static str,
@@ -860,9 +866,7 @@ async fn run_image_edit(app: AppHandle, window: Window, job: EditJob) {
             },
         );
     };
-    let Ok(app_data) = app.path().app_data_dir() else {
-        return emit_error(EditErrorKind::Protocol);
-    };
+    let app_data = job.realm.clone();
 
     // Re-verify and read every source right before the upload.
     let mut sources = Vec::with_capacity(job.sources.len());
@@ -960,8 +964,11 @@ pub async fn image_edit_pick(
     let path = picked
         .into_path()
         .map_err(|_| EditErrorKind::SourceNotAllowed.as_str().to_string())?;
-    let store = grants::load_or_seed(&app_data)
+    // The grants are the signed-in user's; the protection covers the root.
+    let realm = crate::realm::dir_for_in(&app_data, &profile_id)
         .map_err(|_| EditErrorKind::Protocol.as_str().to_string())?;
+    let store =
+        grants::load_or_seed(&realm).map_err(|_| EditErrorKind::Protocol.as_str().to_string())?;
     let home = std::env::home_dir();
     stage_picked_source(&app_data, &store, &profile_id, home.as_deref(), &path)
         .map(Some)
@@ -1002,8 +1009,11 @@ pub async fn image_edit_stage(
         return Err(EditErrorKind::Protocol.as_str().to_string());
     }
     let app_data = app.path().app_data_dir().map_err(|err| err.to_string())?;
-    let store = grants::load_or_seed(&app_data)
+    // The grants are the signed-in user's; the protection covers the root.
+    let realm = crate::realm::dir_for_in(&app_data, &profile_id)
         .map_err(|_| EditErrorKind::Protocol.as_str().to_string())?;
+    let store =
+        grants::load_or_seed(&realm).map_err(|_| EditErrorKind::Protocol.as_str().to_string())?;
     let home = std::env::home_dir();
     stage_requested_source(&app_data, &store, &profile_id, home.as_deref(), &path)
         .map_err(|kind| kind.as_str().to_string())

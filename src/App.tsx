@@ -101,7 +101,6 @@ import { SkillsView, type SkillFormDraft } from "./skills/SkillsView";
 import {
   EMPTY_VIEW,
   TEAM_PROFILE,
-  fetchIdentity,
   fetchSkillsSharing,
   isTeamSkillId,
   loadCache,
@@ -150,6 +149,8 @@ interface DeviceStarted {
 interface DeviceApproved {
   key_alias: string;
   profile_id: string;
+  /** The account has no data on this device yet (privacy fix). */
+  fresh_realm?: boolean;
 }
 interface DeviceError {
   kind: string;
@@ -661,8 +662,22 @@ function ApprovalCards({
 // Chat shell
 // ---------------------------------------------------------------------------
 
-function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; busy: boolean; onSignOut: () => void }) {
+function ChatShell({
+  overview,
+  busy,
+  onSignOut,
+  freshRealm = false,
+}: {
+  overview: ProfileOverview;
+  busy: boolean;
+  onSignOut: () => void;
+  /** This account signed in for the first time on this device (privacy
+   * fix): its realm starts empty and the empty state says so. */
+  freshRealm?: boolean;
+}) {
   const t = useT();
+  // Privacy fix: per-conversation renderer storage is scoped to the realm.
+  const realm = overview.active_user?.realm ?? "";
   const activeProfile: ProfileView | undefined = overview.profiles.find((p) => p.id === overview.active_profile);
   const workspace = useWorkspace(overview.active_profile);
 
@@ -708,8 +723,8 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [previews, setPreviews] = useState<Map<number, PreviewState>>(() => new Map());
 
   // Per-conversation folder selection (composer picker): none by default.
-  const [selections, setSelections] = useState<Selections>(loadSelections);
-  useEffect(() => saveSelections(selections), [selections]);
+  const [selections, setSelections] = useState<Selections>(() => loadSelections(realm));
+  useEffect(() => saveSelections(selections, realm), [selections, realm]);
   const selectionsRef = useRef(selections);
   useEffect(() => {
     selectionsRef.current = selections;
@@ -720,8 +735,10 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   });
 
   // Allow-mode suggestion: one per conversation, remembered across runs.
-  const [nudges, dispatchNudge] = useReducer(nudgeReducer, undefined, () => initialNudgeState(loadShownNudges()));
-  useEffect(() => saveShownNudges(nudges.shown), [nudges.shown]);
+  const [nudges, dispatchNudge] = useReducer(nudgeReducer, undefined, () =>
+    initialNudgeState(loadShownNudges(realm)),
+  );
+  useEffect(() => saveShownNudges(nudges.shown, realm), [nudges.shown, realm]);
   const countedApprovals = useRef<Set<string>>(new Set());
 
   // Image mode: the composer sends the prompt to `image_generate`. It is a
@@ -812,22 +829,6 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   const [sttHint, setSttHint] = useState("");
   const recorderRef = useRef<MediaRecorder | null>(null);
 
-  // Round 13: the signed-in user's email for the bottom-left chip. Fetched on
-  // profile change; a miss keeps the platform label (both tenants answer
-  // /api/auth/me, but a session that cannot read it must not break the chip).
-  const [userEmail, setUserEmail] = useState<{ [profileId: string]: string }>({});
-  useEffect(() => {
-    const profileId = overview.active_profile;
-    if (!profileId) return;
-    let alive = true;
-    fetchIdentity(profileId).then(({ email }) => {
-      if (!alive || !email) return;
-      setUserEmail((prev) => (prev[profileId] === email ? prev : { ...prev, [profileId]: email }));
-    });
-    return () => {
-      alive = false;
-    };
-  }, [overview.active_profile]);
   const activeProfileRef = useRef<string | null>(overview.active_profile);
   useEffect(() => {
     activeProfileRef.current = overview.active_profile;
@@ -2062,7 +2063,9 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
   };
 
   const profileLabel = activeProfile ? profileTitle(t, activeProfile.id, activeProfile.name) : t.sidebar.noAccount;
-  const accountName = (activeProfile && userEmail[activeProfile.id]) || profileLabel;
+  // Round 13 + privacy fix: the chip names the account whose realm is open
+  // (the identity the core verified at login), never a cached guess.
+  const accountName = overview.active_user?.email || profileLabel;
   const placed = placeCards(approvals, activeConvId, messages.length);
   // The open conversation's allow-mode suggestion, anchored like the cards.
   const activeNudge = nudges.active.find((nudge) => nudge.conversationId === activeConvId);
@@ -2463,6 +2466,11 @@ function ChatShell({ overview, busy, onSignOut }: { overview: ProfileOverview; b
                     <BrandMark size="xl" />
                     <p className="empty-title">{t.chat.emptyTitle}</p>
                     <p className="empty-hint">{t.chat.emptyHint}</p>
+                    {freshRealm && conversations.length === 0 && (
+                      <p className="empty-fresh" role="status">
+                        {t.chat.freshRealm(overview.active_user?.email ?? null)}
+                      </p>
+                    )}
                   </div>
                 )}
                 <ApprovalCards cards={placed.after.get(0)} onRespond={(id, g) => void respondApproval(id, g)} />
@@ -2759,6 +2767,8 @@ function App() {
   const [overview, setOverview] = useState<ProfileOverview | null>(null);
   const [pickerError, setPickerError] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Privacy fix: the account that just signed in starts with a fresh realm.
+  const [freshRealm, setFreshRealm] = useState(false);
 
   // Device-flow login state.
   const [authProfileId, setAuthProfileId] = useState<string | null>(null);
@@ -2800,6 +2810,7 @@ function App() {
         refreshOverview()
           .then((next) => {
             setOverview(next);
+            setFreshRealm(event.payload.fresh_realm === true);
             setAuthProfileId(null);
             setScreen("chat");
           })
@@ -2856,6 +2867,7 @@ function App() {
       await invoke("device_logout", { profileId });
       const next = await refreshOverview();
       setOverview(next);
+      setFreshRealm(false);
       setScreen("picker");
     } catch {
       setScreen("error");
@@ -2926,7 +2938,17 @@ function App() {
     return null; // unreachable with a consistent state machine
   }
 
-  return <ChatShell overview={overview} busy={busy} onSignOut={() => void signOut()} />;
+  // Keyed by the realm: another account never inherits this shell's state
+  // (conversation ids restart at 1 in every realm).
+  return (
+    <ChatShell
+      key={overview.active_user?.realm ?? overview.active_profile ?? ""}
+      overview={overview}
+      busy={busy}
+      onSignOut={() => void signOut()}
+      freshRealm={freshRealm}
+    />
+  );
 }
 
 export default App;

@@ -245,8 +245,11 @@ pub struct ToolsState {
     /// Per-conversation folder selection (grant ids), set with every chat
     /// send. A conversation without an entry sees every grant (legacy).
     scopes: Mutex<HashMap<i64, Vec<String>>>,
-    /// Random per-run id naming this run's session temp folders.
-    session_id: String,
+    /// Random id naming the session temp folders. Per run, and rotated on
+    /// every realm switch (privacy fix: conversation ids are per realm, so
+    /// the next user's conversation 1 must never reuse the previous user's
+    /// `conversation-1` temp folder).
+    session_id: Mutex<String>,
     /// Parent of the session temp folders (the OS temp dir in production;
     /// tests point it at a tempdir).
     pub scratch_base: PathBuf,
@@ -259,7 +262,7 @@ impl Default for ToolsState {
             ttl: PROPOSAL_TTL,
             approvals: ApprovalBroker::default(),
             scopes: Mutex::new(HashMap::new()),
-            session_id: uuid::Uuid::new_v4().to_string(),
+            session_id: Mutex::new(uuid::Uuid::new_v4().to_string()),
             scratch_base: std::env::temp_dir(),
         }
     }
@@ -295,10 +298,31 @@ impl ToolsState {
 
     /// This run's temp folder for one conversation (not created here).
     pub fn scratch_dir(&self, conversation_id: i64) -> PathBuf {
+        let session = self
+            .session_id
+            .lock()
+            .map(|id| id.clone())
+            .unwrap_or_else(|p| p.into_inner().clone());
         self.scratch_base
             .join("helmcode-desktop")
-            .join(&self.session_id)
+            .join(session)
             .join(format!("conversation-{conversation_id}"))
+    }
+
+    /// A realm switch (login or sign-out, privacy fix): forget every
+    /// per-conversation scope and pending proposal of the previous user and
+    /// start a new session temp namespace, so nothing keyed by a
+    /// conversation id carries over to the next user's realm.
+    pub fn reset_for_realm_switch(&self) {
+        if let Ok(mut scopes) = self.scopes.lock() {
+            scopes.clear();
+        }
+        if let Ok(mut pending) = self.inner.lock() {
+            pending.clear();
+        }
+        if let Ok(mut id) = self.session_id.lock() {
+            *id = uuid::Uuid::new_v4().to_string();
+        }
     }
 }
 
@@ -524,8 +548,13 @@ pub fn declare_outputs(action_kind: &str, produced: &[String]) -> Vec<DeclaredOu
 
 // --------------------------------------------------------------- utils --
 
+/// The tools store folder: the signed-in user's realm (privacy fix: folder
+/// grants, approval modes, the run_command switch and the audit log are per
+/// user). Every guard that must see the WHOLE app data folder (the sandbox
+/// protection, the generated images) derives the root from it with
+/// `realm::root_of`, so a realm never narrows what is protected.
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path().app_data_dir().map_err(|err| err.to_string())
+    crate::realm::active_dir(app)
 }
 
 fn load_store(dir: &Path) -> Result<GrantsStore, Rejection> {
@@ -1045,6 +1074,9 @@ fn check_protected_paths(
     canonical: Option<&Path>,
     dest: Option<&Path>,
 ) -> Result<(), Rejection> {
+    // `dir` may be a realm folder: the protection always covers the WHOLE
+    // app data root (vault, profiles, every realm).
+    let dir = crate::realm::root_of(dir);
     if let ToolAction::SaveImage { source, .. } = action {
         crate::images::verify_generated_image(dir, Path::new(source))
             .map_err(|message| Rejection::new("scope", message))?;
@@ -2101,7 +2133,11 @@ pub async fn tools_grant_add(
     // log, profiles, chat DB), the filesystem root, $HOME itself, and any
     // folder that CONTAINS the app data dir are all rejected. The whole
     // computer is only reachable through the explicit computer-wide mode.
-    grants::validate_grant_scope(&canonical, &dir, std::env::home_dir().as_deref())?;
+    grants::validate_grant_scope(
+        &canonical,
+        crate::realm::root_of(&dir),
+        std::env::home_dir().as_deref(),
+    )?;
     let mut store = load_store(&dir)?;
     let grant_id = uuid::Uuid::new_v4().to_string();
     let grant = store
@@ -2277,7 +2313,7 @@ pub async fn tools_grant_computer_wide(
         .ok_or_else(|| Rejection::new("protocol", "cannot locate your user folder"))?;
     let canonical_home = std::fs::canonicalize(&home)
         .map_err(|err| Rejection::new("io", format!("cannot resolve user folder: {err}")))?;
-    grants::validate_computer_wide_root(&canonical_home, &dir)?;
+    grants::validate_computer_wide_root(&canonical_home, crate::realm::root_of(&dir))?;
 
     let dialog_app = app.clone();
     let confirmed = off_main_thread(move || {
@@ -4363,6 +4399,66 @@ mod tests {
         store.add_computer_wide_grant("cw".into(), "nan", home.clone(), "t".into());
         grants::save(&app_data, &store).expect("save");
         (home, app_data, tmp)
+    }
+
+    #[test]
+    fn a_realm_switch_resets_scopes_proposals_and_the_temp_namespace() {
+        let st = state();
+        st.set_conversation_scope(1, Some(vec!["g-of-a".into()]));
+        let before = st.scratch_dir(1);
+        st.reset_for_realm_switch();
+        assert_eq!(st.conversation_scope(Some(1)), None);
+        let after = st.scratch_dir(1);
+        assert_ne!(
+            before, after,
+            "conversation 1 of the next user is another folder"
+        );
+        assert!(after.ends_with("conversation-1"));
+    }
+
+    #[test]
+    fn a_realm_tools_store_still_protects_the_whole_app_data_root() {
+        // Privacy fix: the tools store moved into the user's realm folder;
+        // the sandbox must keep refusing the vault, profiles.json and EVERY
+        // realm (another user's chat.db above all), not just its own.
+        let (home, app_data, _guard) = computer_wide_layout();
+        let realm = crate::realm::realm_dir(&app_data, &crate::realm::realm_hash("nan:a"));
+        let other = crate::realm::realm_dir(&app_data, &crate::realm::realm_hash("nan:b"));
+        fs::create_dir_all(&other).expect("other realm");
+        grants::save(&realm, &grants::load_or_seed(&app_data).expect("load")).expect("save");
+        fs::write(app_data.join("vault.bin"), "x").expect("vault");
+        fs::write(app_data.join("profiles.json"), "{}").expect("profiles");
+        fs::write(other.join("chat.db"), "B").expect("other db");
+        fs::write(home.join("notes.txt"), "hola").expect("home file");
+        let st = state();
+        for target in [
+            app_data.join("vault.bin"),
+            app_data.join("profiles.json"),
+            other.join("chat.db"),
+            realm.join(grants::STORE_FILE),
+        ] {
+            let err = propose(
+                &realm,
+                &st,
+                "nan",
+                None,
+                &ToolAction::ReadFile {
+                    path: target.display().to_string(),
+                },
+            )
+            .expect_err("app data root is protected");
+            assert_eq!(err.kind, "scope", "{}", target.display());
+        }
+        propose(
+            &realm,
+            &st,
+            "nan",
+            None,
+            &ToolAction::ReadFile {
+                path: home.join("notes.txt").display().to_string(),
+            },
+        )
+        .expect("the realm's own computer-wide grant still works");
     }
 
     #[test]

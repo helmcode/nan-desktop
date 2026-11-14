@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::skills::{self, ActiveSkill, SkillError, WireFile};
 
@@ -596,9 +596,13 @@ pub fn cache_dir_in(app_data: &Path, profile_id: &str) -> Result<PathBuf, TeamEr
     Ok(app_data.join(CACHE_DIR).join(profile_id))
 }
 
+/// The cache of `profile_id` inside the signed-in user's realm (privacy
+/// fix: `<realm>/skills-cache/<profile>`; another account of the same
+/// tenant never sees this one's org library cache). Only the active, bound
+/// profile resolves.
 fn cache_dir(app: &AppHandle, profile_id: &str) -> Result<PathBuf, TeamError> {
-    let data = app.path().app_data_dir().map_err(|_| TeamError::Io)?;
-    cache_dir_in(&data, profile_id)
+    let realm = crate::realm::dir_for(app, profile_id).map_err(|_| TeamError::NoSession)?;
+    cache_dir_in(&realm, profile_id)
 }
 
 /// `chat_send`'s resolver for a `team:<id>` skill id; `None` when `id` is

@@ -48,6 +48,7 @@ export const en = {
     rate_limited: "Too many attempts. Wait a moment and try again.",
     server: "The sign-in service had a problem. Try again.",
     protocol: "Something failed on this computer. Try again.",
+    identity: "We could not confirm which account signed in, so nothing changed. Try again.",
   } as Record<string, string>,
   chatErrors: {
     missing_key: "Your session is incomplete on this computer. Sign in again.",
@@ -125,6 +126,8 @@ export const en = {
     settings: "Settings",
     emptyTitle: "How can I help?",
     emptyHint: "Enter sends. Shift + Enter adds a line.",
+    freshRealm: (email: string | null) =>
+      `${email ? `Signed in as ${email}` : "Signed in"} for the first time on this computer. You start with an empty space: nothing from other accounts is shown here.`,
     interrupted: "The reply was interrupted.",
     thinking: "Thinking…",
     searching: "Searching the web…",

@@ -174,6 +174,39 @@ pub fn save(dir: &Path, store: &GrantsStore) -> Result<(), String> {
     std::fs::write(&path, raw).map_err(|err| format!("cannot write {}: {err}", path.display()))
 }
 
+/// Privacy fix (realms): move `profile_id`'s folder grants from the
+/// pre-realm `<root>/tools.json` into `<realm_dir>/tools.json` (the
+/// run_command switch is copied along). Grants are moved, never duplicated:
+/// they are removed from the legacy file, which is deleted once it holds no
+/// grant at all. A realm that already has a tools store keeps it (the
+/// legacy grants then stay where they are). Returns whether any grant moved.
+pub fn claim_profile(root: &Path, realm_dir: &Path, profile_id: &str) -> Result<bool, String> {
+    if !root.join(STORE_FILE).is_file() || realm_dir.join(STORE_FILE).exists() {
+        return Ok(false);
+    }
+    let mut legacy = load_or_seed(root)?;
+    let (mine, others): (Vec<Grant>, Vec<Grant>) = legacy
+        .grants
+        .drain(..)
+        .partition(|grant| grant.profile_id == profile_id);
+    if mine.is_empty() {
+        legacy.grants = others;
+        return Ok(false);
+    }
+    let realm = GrantsStore {
+        grants: mine,
+        ..legacy.clone()
+    };
+    save(realm_dir, &realm)?;
+    legacy.grants = others;
+    if legacy.grants.is_empty() {
+        std::fs::remove_file(root.join(STORE_FILE)).map_err(|err| err.to_string())?;
+    } else {
+        save(root, &legacy)?;
+    }
+    Ok(true)
+}
+
 impl GrantsStore {
     pub fn grants_for(&self, profile_id: &str) -> Vec<&Grant> {
         self.grants
@@ -705,6 +738,63 @@ fn longest_covering<'a>(grants: &[&'a Grant], canonical: &Path) -> Option<&'a Gr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- privacy fix: per-user realms --------------------------------------
+
+    fn grant(id: &str, profile: &str, path: &str) -> Grant {
+        Grant {
+            id: id.into(),
+            canonical_path: PathBuf::from(path),
+            granted_at: "t".into(),
+            profile_id: profile.into(),
+            scope: GrantScope::Folder,
+            mode: ApprovalMode::Allow,
+        }
+    }
+
+    #[test]
+    fn claim_moves_one_profiles_grants_into_the_realm() {
+        let root = tempfile::TempDir::new().unwrap();
+        let realm = root.path().join("realms").join("a".repeat(32));
+        let mut store = default_store();
+        store.tools_allow_run_command = false;
+        store.grants = vec![
+            grant("g-nan", "nan", "/Users/a/private"),
+            grant("g-helm", "helmcode", "/Users/a/work"),
+        ];
+        save(root.path(), &store).unwrap();
+
+        assert!(claim_profile(root.path(), &realm, "nan").unwrap());
+        let mine = load_or_seed(&realm).unwrap();
+        assert_eq!(mine.grants, vec![grant("g-nan", "nan", "/Users/a/private")]);
+        assert!(!mine.tools_allow_run_command, "the switch travels along");
+        let legacy = load_or_seed(root.path()).unwrap();
+        assert_eq!(
+            legacy.grants,
+            vec![grant("g-helm", "helmcode", "/Users/a/work")]
+        );
+
+        // The last profile empties the legacy file: it is removed.
+        let other = root.path().join("realms").join("b".repeat(32));
+        assert!(claim_profile(root.path(), &other, "helmcode").unwrap());
+        assert!(!root.path().join(STORE_FILE).exists());
+    }
+
+    #[test]
+    fn claim_never_overwrites_an_existing_realm_store() {
+        let root = tempfile::TempDir::new().unwrap();
+        let realm = root.path().join("realms").join("c".repeat(32));
+        let mut legacy = default_store();
+        legacy.grants = vec![grant("g", "nan", "/x")];
+        save(root.path(), &legacy).unwrap();
+        save(&realm, &default_store()).unwrap();
+        assert!(!claim_profile(root.path(), &realm, "nan").unwrap());
+        assert!(load_or_seed(&realm).unwrap().grants.is_empty());
+        assert_eq!(load_or_seed(root.path()).unwrap().grants.len(), 1);
+        // No legacy file at all: nothing to do.
+        let empty = tempfile::TempDir::new().unwrap();
+        assert!(!claim_profile(empty.path(), &realm, "nan").unwrap());
+    }
     use std::fs;
 
     fn tempdir() -> (PathBuf, tempfile::TempDir) {

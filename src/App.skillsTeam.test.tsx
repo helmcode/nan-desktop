@@ -48,8 +48,10 @@ function weekly(patch: Partial<Skill> = {}): Skill {
 type Setup = {
   profile?: "nan" | "helmcode";
   sharing?: boolean;
-  /** Override for `GET /api/auth/me` (round 13: the identity chip). */
+  /** Override for `GET /api/auth/me` (the org flags). */
   me?: { status: number; body?: Record<string, unknown> };
+  /** The realm identity the core reports (privacy fix: the chip's source). */
+  activeUser?: { email: string | null; realm: string } | null;
   skills?: Skill[];
   rows?: TeamMeta[];
   links?: Record<string, ShareLink>;
@@ -125,6 +127,7 @@ function setup(opts: Setup = {}) {
     profiles_load: () => ({
       profiles: [{ id: profile, name: profile, has_key: true, key_mask: "sk-…abcd" }],
       active_profile: profile,
+      active_user: opts.activeUser === undefined ? { email: "ana@example.com", realm: "realm-ana" } : opts.activeUser,
     }),
     conversation_list: () => [{ id: 7, title: "Notes", updated_at: "", last_message: null }],
     messages_list: () => [row(1, "user", "Summarize my notes weekly")],
@@ -218,8 +221,17 @@ describe("Share with my team: gating", () => {
     expect(screen.queryByText("Helmcode for teams")).toBeNull();
   });
 
-  it("round 13: without /api/auth/me the chip keeps the platform label", async () => {
-    setup({ profile: "helmcode", me: { status: 404, body: {} } });
+  it("privacy fix: the chip names the verified realm identity, never a live /me guess", async () => {
+    // Even when /api/auth/me would answer another email, the chip shows the
+    // account whose realm is open (the identity the core bound at login).
+    setup({ profile: "helmcode", me: { status: 200, body: { email: "mallory@example.com" } } });
+    renderApp();
+    await screen.findByText("ana@example.com");
+    expect(screen.queryByText("mallory@example.com")).toBeNull();
+  });
+
+  it("round 13: without an email in the identity the chip keeps the platform label", async () => {
+    setup({ profile: "helmcode", activeUser: { email: null, realm: "realm-x" } });
     renderApp();
     await screen.findByText("Helmcode for teams");
     expect(screen.queryByText("ana@example.com")).toBeNull();
@@ -232,9 +244,9 @@ describe("Share with my team: gating", () => {
     expect(await screen.findByText("Weekly report")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /with my team/ })).toBeNull();
     expect(screen.queryByRole("tablist")).toBeNull();
-    // Round 13: the only allowed community call is the identity read of the
-    // bottom-left chip; no skills/library surfaces may fire.
-    expect(core.requests).toEqual([{ method: "GET", path: "/api/auth/me", body: null, ifNoneMatch: null }]);
+    // No library surface may fire on the community profile (and since the
+    // privacy fix the chip reads the realm identity, not /api/auth/me).
+    expect(core.requests).toEqual([]);
   });
 
   it("round 15 (F3): on Helmcode with the org flag off it is visible but disabled and says why", async () => {

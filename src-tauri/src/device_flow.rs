@@ -8,11 +8,16 @@
 //! returned `verification_url`, then polls `/api/auth/device/poll` at the
 //! advertised interval until the request is approved, denied, expired or
 //! fails. On approval the response carries `{session_token, api_key,
-//! key_alias}` exactly once: the API key is stored in the credential vault
-//! (`credentials.rs`) under the profile id, the session JWT under
-//! `<profile-id>.session` (one atomic write), the profile
-//! becomes active, and the renderer only learns the alias + profile id.
-//! Raw credentials never cross the IPC boundary (S4).
+//! key_alias}` exactly once. Privacy fix (realms): before anything is
+//! stored, the NEW session asks the platform who signed in (`GET
+//! /api/auth/me`); without a verified user id the login fails closed and
+//! nothing changes. The user is then bound to the profile (`realm.rs`), the
+//! API key is stored in the credential vault (`credentials.rs`) under the
+//! realm key (`<profile-id>:<user-id>`) and the session JWT under
+//! `<realm-key>.session` (one atomic write), the profile becomes active, and
+//! the renderer only learns the alias, the profile id and whether this user
+//! starts with a fresh, empty realm on this device. Raw credentials never
+//! cross the IPC boundary (S4).
 //!
 //! The poll status contract mirrors the backends:
 //!
@@ -71,6 +76,9 @@ pub enum ErrorKind {
     /// A response did not match the contract, or a local step (credential
     /// vault, browser) failed.
     Protocol,
+    /// The platform approved the login but could not say WHICH account it
+    /// is (`/api/auth/me` failed): nothing was stored, no data was switched.
+    Identity,
 }
 
 impl ErrorKind {
@@ -105,6 +113,9 @@ pub struct StatusPayload {
 pub struct ApprovedPayload {
     pub key_alias: String,
     pub profile_id: String,
+    /// The signed-in account has no data on this device yet: the UI says so
+    /// explicitly (privacy fix: a new user starts from an empty realm).
+    pub fresh_realm: bool,
 }
 
 /// Payload of `device://error`.
@@ -305,50 +316,116 @@ pub fn device_login_cancel(state: State<'_, DeviceLoginState>) -> Result<(), Str
     Ok(())
 }
 
-/// Sign out of `profile_id`: delete both vault entries (inference key and
-/// session JWT, in one atomic write; missing entries are a no-op) and clear
-/// the active profile.
+/// Sign out of `profile_id`: delete the bound user's vault entries
+/// (inference key and session JWT, plus any pre-realm profile-keyed pair, in
+/// one atomic write; missing entries are a no-op), stop every running
+/// stream and clear the active profile. The user binding and the realm data
+/// are KEPT: the same user gets everything back on their next login, any
+/// other user can only reach their own realm.
 #[tauri::command]
 pub fn device_logout(app: AppHandle, profile_id: String) -> Result<(), String> {
     if profile::profile_by_id(&profile_id).is_none() {
         return Err(format!("unknown profile id: {profile_id:?}"));
     }
-    let key = profile::key_account(&profile_id);
-    let session = profile::session_account(&profile_id);
-    crate::credentials::store()
-        .and_then(|store| store.delete_many(&[key.as_str(), session.as_str()]))
-        .map_err(|err| err.to_string())?;
     let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let accounts = logout_accounts(&dir, &profile_id);
+    let refs: Vec<&str> = accounts.iter().map(String::as_str).collect();
+    crate::credentials::store()
+        .and_then(|store| store.delete_many(&refs))
+        .map_err(|err| err.to_string())?;
+    stop_realm_tasks(&app);
     let mut store = profile::load_or_seed(&dir)?;
     store.clear_active_profile();
     profile::save(&dir, &store)
 }
 
-/// Store the approved credentials: both secrets in the credential vault in
-/// ONE atomic write (S4), then the profile as active. The vault write comes
-/// first so a failure never leaves a profile marked active without its
-/// credentials, and never leaves a half-stored key/session pair behind.
+/// Every vault account a sign-out of `profile_id` deletes: the bound user's
+/// key + session and the pre-realm profile-keyed pair.
+pub fn logout_accounts(root: &std::path::Path, profile_id: &str) -> Vec<String> {
+    let mut accounts = vec![
+        profile::legacy_key_account(profile_id),
+        profile::legacy_session_account(profile_id),
+    ];
+    if let Some((key, session)) = crate::realm::accounts_in(root, profile_id) {
+        accounts.extend([key, session]);
+    }
+    accounts
+}
+
+/// Abort every task that may still emit the previous realm's content (chat
+/// streams, image generations and edits) and drop every in-memory state
+/// keyed by a conversation id (tool scopes, pending proposals, the session
+/// temp namespace): a realm switch must not leak a reply, an approval card
+/// or a temp file into the next user's window.
+fn stop_realm_tasks(app: &AppHandle) {
+    crate::chat::abort_all_streams(&app.state::<crate::chat::ChatState>());
+    crate::images::abort_all_images(&app.state::<crate::images::ImagesState>());
+    app.state::<crate::tools::ToolsState>()
+        .reset_for_realm_switch();
+    // A previous user's rejected session must not park the next user's
+    // account memory for the rest of the run.
+    let memory = app.state::<crate::memory::MemoryState>();
+    for profile in profile::canonical_profiles() {
+        memory.clear(&profile.id);
+    }
+}
+
+/// Bind the verified `identity` and store the approved credentials (the
+/// privacy fix's login boundary, pure + path injected so it is tested
+/// against a temp dir and an in-memory vault):
+///
+/// 1. [`crate::realm::bind_login_in`] picks the user's realm (claiming the
+///    pre-realm data only for the first user of the profile);
+/// 2. the vault gets the realm-keyed key + session in ONE atomic write;
+/// 3. the pre-realm profile-keyed pair and, when another user was bound,
+///    that user's pair are deleted (their realm data stays);
+/// 4. `profiles.json` records the binding and the active profile LAST, so a
+///    failure never leaves a profile active without its credentials.
+///
+/// Returns whether the user starts with a fresh, empty realm.
+pub fn bind_and_store(
+    root: &std::path::Path,
+    vault: &dyn crate::credentials::CredentialStore,
+    profile_id: &str,
+    identity: &crate::realm::Identity,
+    api_key: &str,
+    session_token: &str,
+) -> Result<bool, ErrorKind> {
+    let (store, binding) =
+        crate::realm::bind_login_in(root, profile_id, identity).map_err(|_| ErrorKind::Protocol)?;
+    let key = profile::key_account(&binding.realm_key);
+    let session = profile::session_account(&binding.realm_key);
+    vault
+        .set_many(&[(key.as_str(), api_key), (session.as_str(), session_token)])
+        .map_err(credential_error)?;
+    let mut stale = vec![
+        profile::legacy_key_account(profile_id),
+        profile::legacy_session_account(profile_id),
+    ];
+    if let Some(previous) = &binding.replaced {
+        let previous_key = previous.realm_key(profile_id);
+        stale.push(profile::key_account(&previous_key));
+        stale.push(profile::session_account(&previous_key));
+    }
+    let stale: Vec<&str> = stale.iter().map(String::as_str).collect();
+    vault.delete_many(&stale).map_err(credential_error)?;
+    profile::save(root, &store).map_err(|_| ErrorKind::Protocol)?;
+    Ok(binding.fresh)
+}
+
+/// [`bind_and_store`] against the running app: stops the previous realm's
+/// tasks first, then binds and stores.
 fn store_credentials(
     app: &AppHandle,
     profile_id: &str,
+    identity: &crate::realm::Identity,
     api_key: &str,
     session_token: &str,
-) -> Result<(), ErrorKind> {
-    let key = profile::key_account(profile_id);
-    let session = profile::session_account(profile_id);
-    crate::credentials::store()
-        .and_then(|store| {
-            store.set_many(&[(key.as_str(), api_key), (session.as_str(), session_token)])
-        })
-        .map_err(credential_error)?;
-
-    let dir = app.path().app_data_dir().map_err(|_| ErrorKind::Protocol)?;
-    let mut store = profile::load_or_seed(&dir).map_err(|_| ErrorKind::Protocol)?;
-    store
-        .set_active_profile(profile_id)
-        .map_err(|_| ErrorKind::Protocol)?;
-    profile::save(&dir, &store).map_err(|_| ErrorKind::Protocol)?;
-    Ok(())
+) -> Result<bool, ErrorKind> {
+    stop_realm_tasks(app);
+    let root = app.path().app_data_dir().map_err(|_| ErrorKind::Protocol)?;
+    let vault = crate::credentials::store().map_err(credential_error)?;
+    bind_and_store(&root, vault, profile_id, identity, api_key, session_token)
 }
 
 /// Credential-storage failures are local device failures, not server errors.
@@ -478,15 +555,29 @@ async fn run_device_login(app: AppHandle, window: Window, profile_id: String) {
                 api_key,
                 key_alias,
             } => {
-                if let Err(kind) = store_credentials(&app, &profile_id, &api_key, &session_token) {
-                    emit_error(kind);
+                // Privacy fix: WHO signed in decides which realm opens. Asked
+                // with the NEW session; no answer = no login (never a
+                // fallback to the previously bound user).
+                let Ok(identity) = crate::realm::fetch_identity(&platform, &session_token).await
+                else {
+                    emit_error(ErrorKind::Identity);
                     return;
-                }
+                };
+                let fresh_realm =
+                    match store_credentials(&app, &profile_id, &identity, &api_key, &session_token)
+                    {
+                        Ok(fresh) => fresh,
+                        Err(kind) => {
+                            emit_error(kind);
+                            return;
+                        }
+                    };
                 let _ = window.emit(
                     "device://approved",
                     ApprovedPayload {
                         key_alias,
                         profile_id,
+                        fresh_realm,
                     },
                 );
                 return;
@@ -800,5 +891,332 @@ mod tests {
         })
         .expect("serialize");
         assert_eq!(payload, r#"{"kind":"network"}"#);
+    }
+
+    #[test]
+    fn identity_failure_and_fresh_realm_serialize_for_the_renderer() {
+        let payload = serde_json::to_string(&ErrorPayload {
+            kind: ErrorKind::Identity,
+        })
+        .expect("serialize");
+        assert_eq!(payload, r#"{"kind":"identity"}"#);
+        let approved = serde_json::to_string(&ApprovedPayload {
+            key_alias: "desktop".into(),
+            profile_id: "nan".into(),
+            fresh_realm: true,
+        })
+        .expect("serialize");
+        assert_eq!(
+            approved,
+            r#"{"key_alias":"desktop","profile_id":"nan","fresh_realm":true}"#
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Privacy fix (realms): integration at the credentials / chat boundary.
+    //
+    // Two accounts of the SAME tenant on one device. Every user-visible
+    // surface the renderer can reach is checked after each login:
+    //   * sidebar conversations + transcripts      (chat.db, conversation_list/messages_list)
+    //   * memory tombstones                        (chat.db, memory_sync)
+    //   * local skills                             (skills/, skills_list)
+    //   * org skills offline cache                 (skills-cache/<profile>, skills_team_cache_load)
+    //   * folder grants + run_command switch       (tools.json, tools_grant_list/settings)
+    //   * memory settings                          (memory.json, memory_settings_get)
+    //   * inference key + session JWT              (vault accounts, every platform/inference call)
+    // ------------------------------------------------------------------
+    mod realms {
+        use super::super::*;
+        use crate::chat_store;
+        use crate::credentials::{CredentialStore, FileMasterKey, StampSource, Vault};
+        use crate::realm::{self, Identity};
+        use crate::skills;
+        use crate::skills_team;
+        use crate::tools::grants;
+        use std::path::{Path, PathBuf};
+        use tempfile::TempDir;
+
+        struct Stamp;
+        impl StampSource for Stamp {
+            fn current(&self) -> String {
+                "test-stamp".into()
+            }
+        }
+
+        fn vault(root: &Path) -> Vault {
+            Vault::new(
+                root.join(crate::credentials::VAULT_FILE),
+                Box::new(FileMasterKey::new(
+                    root.join(crate::credentials::DEV_MASTER_KEY_FILE),
+                )),
+            )
+            .with_stamp(Box::new(Stamp))
+        }
+
+        fn who(id: &str) -> Identity {
+            Identity {
+                id: id.into(),
+                email: Some(format!("{id}@example.com")),
+            }
+        }
+
+        fn login(root: &Path, vault: &Vault, id: &str) -> bool {
+            bind_and_store(
+                root,
+                vault,
+                "nan",
+                &who(id),
+                &format!("sk-key-of-{id}"),
+                &format!("jwt-of-{id}"),
+            )
+            .expect("login")
+        }
+
+        fn logout(root: &Path, vault: &Vault) {
+            let accounts = logout_accounts(root, "nan");
+            let refs: Vec<&str> = accounts.iter().map(String::as_str).collect();
+            vault.delete_many(&refs).expect("delete");
+            let mut store = profile::load_or_seed(root).unwrap();
+            store.clear_active_profile();
+            profile::save(root, &store).unwrap();
+        }
+
+        /// The active realm, as every realm-scoped command resolves it.
+        fn active(root: &Path) -> PathBuf {
+            realm::dir_for_in(root, "nan").expect("signed in")
+        }
+
+        /// The session token the platform calls would use right now.
+        fn active_session(root: &Path, vault: &Vault) -> Option<String> {
+            let (_, session) = realm::accounts_in(root, "nan")?;
+            crate::chat::session_token_from(vault, &session)
+        }
+
+        fn titles(dir: &Path) -> Vec<String> {
+            let conn = chat_store::open_db(dir).unwrap();
+            chat_store::list_conversations(&conn, "nan")
+                .unwrap()
+                .into_iter()
+                .map(|c| c.title)
+                .collect()
+        }
+
+        /// Everything the renderer could show for the active realm, empty
+        /// or not.
+        fn visible(dir: &Path) -> (Vec<String>, usize, usize, usize, usize) {
+            let conn = chat_store::open_db(dir).unwrap();
+            let tombstones = chat_store::list_tombstones(&conn, "nan").unwrap().len();
+            let skills = skills::list(&skills::skills_dir_in(dir)).unwrap().len();
+            let team = skills_team::view(&skills_team::cache_dir_in(dir, "nan").unwrap())
+                .skills
+                .len();
+            let grants = grants::load_or_seed(dir).unwrap().grants.len();
+            (titles(dir), tombstones, skills, team, grants)
+        }
+
+        /// A v0.2.6 app data folder: profiles.json v2 (nan active), a shared
+        /// chat.db, local skills, the nan team cache, a folder grant and the
+        /// profile-keyed vault entries of whoever was signed in.
+        fn v026_fixture(root: &Path, vault: &Vault) {
+            std::fs::write(
+                root.join(profile::STORE_FILE),
+                format!(
+                    r#"{{"version":2,"profiles":{},"active_profile":"nan"}}"#,
+                    serde_json::to_string(&profile::canonical_profiles()).unwrap()
+                ),
+            )
+            .unwrap();
+            let conn = chat_store::open_db(root).unwrap();
+            let id = chat_store::insert_conversation(&conn, "nan", "A private chat").unwrap();
+            chat_store::insert_message(&conn, id, "user", "A-SECRET", None).unwrap();
+            conn.execute(
+                "INSERT INTO memory_tombstones (remote_id, profile_id) VALUES ('gone', 'nan')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+            skills::create_at(
+                &root.join(skills::SKILLS_DIR),
+                &skills::SkillInput {
+                    title: "A skill".into(),
+                    description: "d".into(),
+                    instructions: "i".into(),
+                    references: vec![],
+                },
+                0,
+            )
+            .unwrap();
+            let meta: skills_team::TeamMeta =
+                serde_json::from_value(serde_json::json!({"id": "sk_01A", "status": "approved"}))
+                    .unwrap();
+            skills_team::store_list(
+                &root.join(skills_team::CACHE_DIR).join("nan"),
+                Some("\"e1\"".into()),
+                vec![meta],
+            )
+            .unwrap();
+            let mut tools = grants::default_store();
+            tools.grants.push(grants::Grant {
+                id: "g-a".into(),
+                canonical_path: PathBuf::from("/Users/a/private"),
+                granted_at: "t".into(),
+                profile_id: "nan".into(),
+                scope: grants::GrantScope::Folder,
+                mode: grants::ApprovalMode::Ask,
+            });
+            grants::save(root, &tools).unwrap();
+            vault
+                .set_many(&[("nan", "sk-legacy"), ("nan.session", "jwt-legacy")])
+                .unwrap();
+        }
+
+        #[test]
+        fn upgrade_then_a_second_user_of_the_same_tenant_sees_nothing_of_the_first() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let vault = vault(root);
+            v026_fixture(root, &vault);
+
+            // ---- first login after the update: A is bound, keeps the data --
+            assert!(
+                !login(root, &vault, "user-a"),
+                "legacy data claimed: not fresh"
+            );
+            let a_dir = active(root);
+            assert_eq!(
+                visible(&a_dir),
+                (vec!["A private chat".to_string()], 1, 1, 1, 1)
+            );
+            // The pre-realm stores are gone (moved, not duplicated).
+            assert!(!root.join(chat_store::DB_FILE).exists());
+            assert!(!root.join(skills::SKILLS_DIR).exists());
+            assert!(!root.join(grants::STORE_FILE).exists());
+            // Vault: realm-keyed slots only; the profile-keyed pair is gone.
+            assert_eq!(vault.get("nan").unwrap(), None);
+            assert_eq!(vault.get("nan.session").unwrap(), None);
+            assert_eq!(
+                vault.get("nan:user-a").unwrap().as_deref(),
+                Some("sk-key-of-user-a")
+            );
+            assert_eq!(
+                active_session(root, &vault).as_deref(),
+                Some("jwt-of-user-a")
+            );
+
+            // A keeps working in their realm.
+            let conn = chat_store::open_db(&a_dir).unwrap();
+            chat_store::insert_conversation(&conn, "nan", "A second chat").unwrap();
+            drop(conn);
+
+            // ---- A signs out, B (same tenant) signs in --------------------
+            logout(root, &vault);
+            assert!(
+                realm::dir_for_in(root, "nan").is_err(),
+                "signed out: no realm"
+            );
+            assert_eq!(active_session(root, &vault), None, "A's session is revoked");
+            assert!(login(root, &vault, "user-b"), "a new user starts fresh");
+            let b_dir = active(root);
+            assert_ne!(b_dir, a_dir);
+            assert_ne!(
+                b_dir.join(chat_store::DB_FILE),
+                a_dir.join(chat_store::DB_FILE),
+                "a different database file on disk"
+            );
+            // ZERO of A on every surface.
+            assert_eq!(visible(&b_dir), (vec![], 0, 0, 0, 0));
+            assert!(crate::memory::load_settings(&b_dir).is_ok());
+            assert_eq!(
+                active_session(root, &vault).as_deref(),
+                Some("jwt-of-user-b")
+            );
+            // A's realm is intact on disk, just unreachable.
+            assert_eq!(titles(&a_dir), vec!["A second chat", "A private chat"]);
+
+            // ---- B works, then A signs back in ----------------------------
+            let conn = chat_store::open_db(&b_dir).unwrap();
+            chat_store::insert_conversation(&conn, "nan", "B only").unwrap();
+            drop(conn);
+            logout(root, &vault);
+            assert!(!login(root, &vault, "user-a"), "A's realm comes back");
+            assert_eq!(active(root), a_dir);
+            assert_eq!(
+                titles(&active(root)),
+                vec!["A second chat", "A private chat"]
+            );
+            assert_eq!(
+                active_session(root, &vault).as_deref(),
+                Some("jwt-of-user-a")
+            );
+            // ...and nothing of B leaks back.
+            assert!(!titles(&active(root)).contains(&"B only".to_string()));
+        }
+
+        #[test]
+        fn a_different_user_while_another_realm_is_active_switches_and_drops_its_credentials() {
+            // A's session was revoked by the server (A never signed out) and
+            // B signs in: the active realm becomes B's, A's stale secrets are
+            // dropped, A's data stays on disk and out of reach.
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let vault = vault(root);
+            login(root, &vault, "user-a");
+            let a_dir = active(root);
+            let conn = chat_store::open_db(&a_dir).unwrap();
+            chat_store::insert_conversation(&conn, "nan", "A chat").unwrap();
+            drop(conn);
+
+            assert!(login(root, &vault, "user-b"));
+            let b_dir = active(root);
+            assert_ne!(b_dir, a_dir);
+            assert!(titles(&b_dir).is_empty());
+            assert_eq!(vault.get("nan:user-a").unwrap(), None);
+            assert_eq!(vault.get("nan:user-a.session").unwrap(), None);
+            assert_eq!(
+                active_session(root, &vault).as_deref(),
+                Some("jwt-of-user-b")
+            );
+            assert_eq!(titles(&a_dir), vec!["A chat"]);
+            let store = profile::load_or_seed(root).unwrap();
+            assert_eq!(store.binding("nan").map(|u| u.id.as_str()), Some("user-b"));
+        }
+
+        #[test]
+        fn the_session_is_read_for_the_active_realm_only() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let vault = vault(root);
+            // A leftover session of another user in the vault is never used.
+            vault.set("nan:user-a.session", "jwt-of-user-a").unwrap();
+            login(root, &vault, "user-b");
+            assert_eq!(
+                active_session(root, &vault).as_deref(),
+                Some("jwt-of-user-b")
+            );
+            // The other tenant has no bound user: nothing is readable.
+            assert_eq!(realm::accounts_in(root, "helmcode"), None);
+        }
+
+        #[test]
+        fn an_unverified_identity_stores_nothing_and_switches_nothing() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let vault = vault(root);
+            login(root, &vault, "user-a");
+            let bad = Identity {
+                id: "".into(),
+                email: None,
+            };
+            assert_eq!(
+                bind_and_store(root, &vault, "nan", &bad, "sk-x", "jwt-x"),
+                Err(ErrorKind::Protocol)
+            );
+            assert_eq!(
+                active_session(root, &vault).as_deref(),
+                Some("jwt-of-user-a")
+            );
+            let store = profile::load_or_seed(root).unwrap();
+            assert_eq!(store.binding("nan").map(|u| u.id.as_str()), Some("user-a"));
+        }
     }
 }

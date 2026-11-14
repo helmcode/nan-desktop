@@ -901,7 +901,12 @@ static GLOBAL: OnceLock<Vault> = OnceLock::new();
 fn legacy_accounts() -> Vec<String> {
     profile::canonical_profiles()
         .iter()
-        .flat_map(|p| [profile::key_account(&p.id), profile::session_account(&p.id)])
+        .flat_map(|p| {
+            [
+                profile::legacy_key_account(&p.id),
+                profile::legacy_session_account(&p.id),
+            ]
+        })
         .collect()
 }
 

@@ -9,9 +9,18 @@ export interface ProfileView {
   key_mask: string | null;
 }
 
+/** The account signed in to the active profile (privacy fix: per-user
+ * realms). `realm` is the opaque realm hash, used to scope renderer storage;
+ * the raw user id never crosses IPC. Absent when nobody is signed in. */
+export interface ActiveUser {
+  email: string | null;
+  realm: string;
+}
+
 export interface ProfileOverview {
   profiles: ProfileView[];
   active_profile: string | null;
+  active_user?: ActiveUser | null;
 }
 
 export interface WebSource {
