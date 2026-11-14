@@ -52,4 +52,12 @@ describe("folder selection", () => {
     window.localStorage.setItem(FOLDER_SELECTION_STORAGE_KEY, JSON.stringify({ "4": ["g1", 3] }));
     expect(loadSelections()).toEqual({ "4": ["g1"] });
   });
+
+  it("privacy fix: selections are stored per realm and never read across realms", () => {
+    saveSelections({ "1": ["g-of-a"] }, "realm-a");
+    expect(loadSelections("realm-a")).toEqual({ "1": ["g-of-a"] });
+    expect(loadSelections("realm-b")).toEqual({});
+    expect(loadSelections()).toEqual({}, "the unscoped key is not the realm's");
+    expect(window.localStorage.getItem(`${FOLDER_SELECTION_STORAGE_KEY}:realm-a`)).toBe('{"1":["g-of-a"]}');
+  });
 });

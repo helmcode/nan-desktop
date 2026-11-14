@@ -16,6 +16,7 @@
 
 import type { GrantView } from "../types";
 import { isInsideRoots } from "./filePaths";
+import { realmScopedKey } from "./realmStorage";
 
 export const NUDGE_THRESHOLD = 3;
 export const NUDGE_SHOWN_STORAGE_KEY = "helmcode.allowNudgeShown.v1";
@@ -142,9 +143,10 @@ export function targetForPath(
   return null;
 }
 
-export function loadShownNudges(): number[] {
+/// `realm` scopes the stored ids to the signed-in user (see realmStorage).
+export function loadShownNudges(realm = ""): number[] {
   try {
-    const raw = window.localStorage.getItem(NUDGE_SHOWN_STORAGE_KEY);
+    const raw = window.localStorage.getItem(realmScopedKey(NUDGE_SHOWN_STORAGE_KEY, realm));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((id): id is number => typeof id === "number") : [];
   } catch {
@@ -152,9 +154,9 @@ export function loadShownNudges(): number[] {
   }
 }
 
-export function saveShownNudges(shown: number[]): void {
+export function saveShownNudges(shown: number[], realm = ""): void {
   try {
-    window.localStorage.setItem(NUDGE_SHOWN_STORAGE_KEY, JSON.stringify(shown));
+    window.localStorage.setItem(realmScopedKey(NUDGE_SHOWN_STORAGE_KEY, realm), JSON.stringify(shown));
   } catch {
     // Unavailable storage: the suggestion may show again next run.
   }

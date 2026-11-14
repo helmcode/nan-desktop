@@ -49,6 +49,7 @@ export const es: Strings = {
     rate_limited: "Demasiados intentos. Espera un momento y vuelve a intentarlo.",
     server: "El servicio de acceso ha tenido un problema. Vuelve a intentarlo.",
     protocol: "Algo ha fallado en este equipo. Vuelve a intentarlo.",
+    identity: "No hemos podido confirmar qué cuenta ha entrado, así que no hemos cambiado nada. Vuelve a intentarlo.",
   },
   chatErrors: {
     missing_key: "Tu sesión no está completa en este equipo. Vuelve a entrar.",
@@ -123,6 +124,8 @@ export const es: Strings = {
     settings: "Ajustes",
     emptyTitle: "¿En qué puedo ayudarte?",
     emptyHint: "Intro envía. Mayús + Intro añade una línea.",
+    freshRealm: (email: string | null) =>
+      `${email ? `Has entrado como ${email}` : "Has entrado"} por primera vez en este equipo. Empiezas con un espacio vacío: aquí no se muestra nada de otras cuentas.`,
     interrupted: "La respuesta se interrumpió.",
     thinking: "Pensando…",
     searching: "Buscando en internet…",

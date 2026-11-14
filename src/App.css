@@ -1198,6 +1198,16 @@ button:disabled {
   font-size: 0.93rem;
 }
 
+/* Privacy fix: first sign-in of this account on the device (empty realm). */
+.empty-fresh {
+  max-width: 34rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-2);
+  font-size: 0.88rem;
+}
+
 .msg {
   max-width: 100%;
   overflow-wrap: anywhere;

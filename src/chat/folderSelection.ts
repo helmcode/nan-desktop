@@ -11,6 +11,7 @@
 // grants that no longer exist are dropped before sending.
 
 import type { GrantView } from "../types";
+import { realmScopedKey } from "./realmStorage";
 
 export const FOLDER_SELECTION_STORAGE_KEY = "helmcode.folderSelection.v1";
 
@@ -25,8 +26,9 @@ function storage(): Storage | null {
   }
 }
 
-export function loadSelections(): Selections {
-  const raw = storage()?.getItem(FOLDER_SELECTION_STORAGE_KEY);
+/// `realm` scopes the stored map to the signed-in user (see realmStorage).
+export function loadSelections(realm = ""): Selections {
+  const raw = storage()?.getItem(realmScopedKey(FOLDER_SELECTION_STORAGE_KEY, realm));
   if (!raw) return {};
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -42,10 +44,10 @@ export function loadSelections(): Selections {
 }
 
 /// Persist real conversations only (the unsaved new chat is in memory).
-export function saveSelections(selections: Selections): void {
+export function saveSelections(selections: Selections, realm = ""): void {
   const persisted = Object.fromEntries(Object.entries(selections).filter(([key]) => Number(key) >= 0));
   try {
-    storage()?.setItem(FOLDER_SELECTION_STORAGE_KEY, JSON.stringify(persisted));
+    storage()?.setItem(realmScopedKey(FOLDER_SELECTION_STORAGE_KEY, realm), JSON.stringify(persisted));
   } catch {
     // Storage full or unavailable: the selection still applies this run.
   }
