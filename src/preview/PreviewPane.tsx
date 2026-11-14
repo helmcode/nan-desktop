@@ -9,12 +9,13 @@ import { fetchWebPreview, readFileForPreview, type WebPreview } from "../core";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { folderName, hostOf } from "../copy";
 import { useT } from "../i18n";
-import { IconExternal, IconGlobe, IconPencil, IconX } from "../icons";
+import { IconExternal, IconGlobe, IconPencil, IconShare, IconX } from "../icons";
 import { BrandMark } from "../brand";
 import { Markdown, openExternal } from "../Markdown";
 import { isEditableImagePath } from "../studio/studio";
 import { isTopLayer, useEscapeLayer } from "../escapeLayers";
 import { previewKind, targetKey, type PreviewTarget } from "./kind";
+import { shareSourceFor, type ShareSource } from "../artifacts/artifacts";
 
 const Renderers = {
   image: lazy(() => import("./renderers").then((m) => ({ default: m.ImagePreview }))),
@@ -122,6 +123,7 @@ export default function PreviewPane({
   onOpenLink,
   onEditImage,
   onRemove,
+  onShare,
 }: {
   target: PreviewTarget;
   profileId: string;
@@ -134,6 +136,9 @@ export default function PreviewPane({
   /// preview (the pane forgets it, so another image can be opened). It
   /// never deletes the file itself.
   onRemove?: () => void;
+  /// When set (shared artifacts available), a shareable file or generated
+  /// image shows a "Share" button that opens the share-as-link dialog.
+  onShare?: (source: ShareSource) => void;
 }) {
   const t = useT();
   const isWeb = target.kind === "web";
@@ -143,6 +148,7 @@ export default function PreviewPane({
     (target.kind === "media" || (target.kind === "file" && previewKind(target) === "image" && isEditableImagePath(target.ref)));
   const title = isWeb ? hostOf(target.ref) : folderName(target.ref);
   const key = targetKey(target);
+  const shareSource = onShare ? shareSourceFor(target) : null;
 
   // Round 17 review (U1): the pane is an escape layer like every other inner
   // surface. A surface opened after it (a row menu, a dialog) sits above it
@@ -181,6 +187,17 @@ export default function PreviewPane({
           <button type="button" className="btn btn-secondary btn-sm preview-edit" onClick={() => onEditImage?.(target)}>
             <IconPencil size={14} />
             {t.chat.editImage}
+          </button>
+        )}
+        {shareSource && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm preview-share"
+            aria-label={t.artifacts.shareLabel(title)}
+            onClick={() => onShare?.(shareSource)}
+          >
+            <IconShare size={14} />
+            {t.artifacts.share}
           </button>
         )}
         <button type="button" className="icon-btn" aria-label={t.preview.close} title={t.preview.close} onClick={onClose}>

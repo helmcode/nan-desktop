@@ -1351,7 +1351,8 @@ button:disabled {
   color: var(--text);
 }
 
-.preview-edit {
+.preview-edit,
+.preview-share {
   flex: none;
 }
 
@@ -3425,4 +3426,259 @@ button:disabled {
 
 .about-update {
   margin-top: 0.75rem;
+}
+
+/* ---- shared artifacts (share as a link) ------------------------------- */
+
+.artifact-dialog {
+  max-height: calc(100vh - 3rem);
+  overflow-y: auto;
+  gap: 0.85rem;
+}
+
+.artifact-file {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 0.88rem;
+}
+
+.artifact-file-name {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-file-kind {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-size: 0.8rem;
+}
+
+.artifact-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.artifact-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.artifact-select {
+  width: auto;
+}
+
+.artifact-label {
+  color: var(--text-2);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.artifact-scopes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.artifact-scopes legend {
+  margin-bottom: 0.35rem;
+}
+
+.artifact-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+.artifact-radio input {
+  margin-top: 0.2rem;
+  accent-color: var(--accent);
+}
+
+.artifact-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.3rem 0.2rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background-color: var(--surface);
+  font-size: 0.84rem;
+}
+
+.artifact-chip .skill-badge {
+  margin-left: 0;
+}
+
+.artifact-external {
+  border-color: rgba(255, 189, 46, 0.45);
+  color: var(--warn);
+}
+
+.artifact-chip-remove {
+  display: inline-flex;
+  padding: 0.15rem;
+  border-radius: 999px;
+  color: var(--text-2);
+}
+
+.artifact-chip-remove:hover,
+.artifact-chip-remove:focus-visible {
+  color: var(--text);
+  background-color: var(--surface-3);
+}
+
+.artifact-members {
+  max-height: 11rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  list-style: none;
+}
+
+.artifact-risk {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid rgba(255, 189, 46, 0.45);
+  border-radius: var(--radius-sm);
+  background-color: var(--warn-soft);
+}
+
+.artifact-risk p {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0;
+  color: var(--warn);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.artifact-risk p svg {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+}
+
+.artifact-accept strong {
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.artifact-link {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+/* The Shared links view (Settings section). */
+.links-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.links-filter {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.links-filter button[aria-pressed="true"] {
+  color: var(--text);
+  background-color: var(--surface-3);
+}
+
+.links-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.links-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background-color: var(--surface);
+}
+
+.links-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.links-row-title {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.links-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-2);
+  font-size: 0.8rem;
+}
+
+.links-row-meta .skill-badge {
+  margin-left: 0;
+}
+
+.links-row-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+/* The share button next to a file chip. */
+.sources li:has(.file-chip-share) {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.file-chip-share {
+  width: 26px;
+  height: 26px;
 }
