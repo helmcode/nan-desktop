@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased - Your data is yours alone on a shared computer
+
+### Privacy (critical fix)
+- Local data is now kept per signed-in account, not per platform. Before,
+  a second account of the same platform signing in on the same computer saw
+  the first account's conversations, skills, team skills cache and folder
+  grants. Each account now has its own private space on the device; another
+  account sees none of it.
+- At sign-in the app asks the platform which account signed in (with the new
+  session) and opens that account's space. If the platform cannot confirm
+  it, the sign-in stops and nothing changes.
+- Signing out keeps your data on the device; signing back in with the same
+  account brings it back. An account signing in for the first time on the
+  computer starts with an empty space and the chat says so.
+- The account chip names the account whose space is open.
+
+### Upgrading (one-time)
+- You are asked to sign in once after the update.
+- Everything stored before this version has no owner on record. It is given
+  to the FIRST account that signs in to each platform after the update (the
+  data so far belonged to whoever used the app). Local skills, which were
+  shared by both platforms, go to the first sign-in on the computer. Any
+  other account starts empty.
+
 ## 0.2.6 - The preview knows what you asked for
 
 ### Chat

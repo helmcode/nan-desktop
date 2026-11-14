@@ -34,13 +34,18 @@ themselves, the web portals, LiteLLM.
   HTML is never rendered.
 - **Tool executor (when enabled) asks per action**: model proposes, user
   approves; file access is granted per folder.
+- **Local data is isolated per signed-in user** (see
+  [Per-user data realms](#per-user-data-realms) below): another account on the
+  same device, even of the same tenant, sees nothing of yours.
 
 ## Credential storage
 
 Implementation: `src-tauri/src/credentials.rs`.
 
-All secrets (per-profile inference API keys and login session tokens) live in
-ONE file, `vault.bin` in the app data directory:
+All secrets (per-user inference API keys and login session tokens) live in
+ONE file, `vault.bin` in the app data directory. Since the per-user realms,
+each secret is stored under the signed-in user's realm key
+(`<profile>:<user-id>` and `<profile>:<user-id>.session`):
 
 - **Encryption:** AES-256-GCM, a fresh random 96-bit nonce on every write, a
   versioned envelope (`HCDVAULT | version | nonce | ciphertext+tag`) whose
@@ -91,6 +96,53 @@ ONE file, `vault.bin` in the app data directory:
 The storage backend sits behind a `CredentialStore` trait; a per-item
 keychain backend (`KeyringStore`) remains available behind the same seam if a
 platform needs it.
+
+## Per-user data realms
+
+Implementation: `src-tauri/src/realm.rs` (plus `profile.rs` bindings and the
+login boundary in `device_flow.rs`).
+
+Up to v0.2.6 local data was keyed by the tenant (`nan` / `helmcode`), so two
+accounts of the same tenant on one device shared conversations, skills and
+folder grants. Every user-identifying store now lives in a per-user realm:
+
+- **Realm key:** `<profile>:<user-id>`, where the user id is what the platform
+  answers to `GET /api/auth/me` called with the NEW session right after the
+  device-flow approval. No verified user id means no login: nothing is
+  stored and the previously open realm does not change.
+- **Realm folder:** `<app data>/realms/<hex(sha256(realm key))[0..16 bytes]>`
+  (mode `0700`) holds `chat.db`, local skills, the org skills cache,
+  `tools.json` (folder grants, approval modes, run_command switch), the tools
+  audit log and `memory.json`.
+- **Binding:** `profiles.json` (schema v3) records the user bound to each
+  profile (id, email, realm hash). It lives outside the vault on purpose: a
+  vault reset signs you out but never forgets whose data is whose. A binding
+  whose realm hash does not match its user id is dropped, never followed.
+- **Resolution:** commands reach a realm only for the ACTIVE, BOUND profile.
+  Signed out, nothing is readable. Sign-out deletes the session and keeps the
+  binding and the realm data, so the same user gets everything back.
+- **Switching users:** a login of another user id opens a fresh, empty realm
+  and deletes the previous user's credentials (their data stays on disk,
+  unreachable). Every login and sign-out aborts running replies and image
+  jobs and resets per-conversation tool state.
+- **Shared on purpose:** generated images under `images/` (the asset
+  protocol scope). Their names are random v4 uuids that no command lists;
+  an image is only reachable through the `chat.db` row of the realm that
+  made it.
+- **Tool sandbox:** the protected area is still the WHOLE app data folder
+  (vault, profiles, every realm), not only the open realm.
+
+**One-time migration:** data written before realms has no owner. It is
+assigned to whoever signs in to that profile FIRST after the update (moved,
+not copied; `chat.db` is split per profile and vacuumed so no other
+profile's text remains). Local skills, which had no profile at all, go to
+the first sign-in on the device. Any later user gets a fresh realm.
+
+**Not covered:** other people using the SAME OS account can still open the
+app data folder directly (the realms are not encrypted at rest; use separate
+OS accounts for real separation), and conversations that a previous version
+already synced to another account's memory cannot be recalled from the
+device.
 
 ## Supported versions
 
