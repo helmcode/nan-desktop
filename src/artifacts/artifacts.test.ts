@@ -16,6 +16,7 @@ import {
   defaultExpiry,
   expiryFor,
   expiryOptions,
+  NO_EXPIRY,
   externalEmails,
   fetchAccess,
   fetchMembers,
@@ -59,8 +60,9 @@ describe("scopes and expiry", () => {
   it("expiry options, defaults and caps follow the design table", () => {
     expect(expiryOptions("public")).toEqual([1, 7, 30]);
     expect(expiryOptions("emails")).toEqual([1, 7, 30, 90]);
-    expect(expiryOptions("members")).toEqual([7, 30, 90, null]);
-    expect(expiryOptions("org")).toEqual([7, 30, 90, null]);
+    expect(expiryOptions("members")).toEqual([7, 30, 90, 0]);
+    expect(expiryOptions("org")).toEqual([7, 30, 90, 0]);
+    expect(NO_EXPIRY).toBe(0);
     expect(defaultExpiry("public")).toBe(7);
     expect(defaultExpiry("emails")).toBe(30);
     expect(defaultExpiry("org")).toBe(90);
@@ -68,7 +70,9 @@ describe("scopes and expiry", () => {
     expect(expiryFor("public", 30)).toBe(30);
     expect(expiryFor("public", 90)).toBe(7);
     expect(expiryFor("emails", null)).toBe(30);
-    expect(expiryFor("org", null)).toBeNull();
+    expect(expiryFor("org", null)).toBe(90);
+    expect(expiryFor("org", NO_EXPIRY)).toBe(0);
+    expect(expiryFor("public", NO_EXPIRY)).toBe(7);
   });
 });
 
@@ -165,13 +169,13 @@ describe("share meta", () => {
       notify: false,
       risk_ack: { kind: "public", version: RISK_VERSION },
     });
-    const members = buildMeta(draft({ scope: "members", memberIds: ["u1"], expiresDays: null }), null, true);
+    const members = buildMeta(draft({ scope: "members", memberIds: ["u1"], expiresDays: NO_EXPIRY }), null, true);
     expect(members).toEqual({
       title: "Report",
       scope: "members",
       emails: [],
       member_ids: ["u1"],
-      expires_days: null,
+      expires_days: 0,
       notify: true,
       secret_ack: true,
     });
@@ -493,5 +497,29 @@ describe("IPC", () => {
     // Community never asks for members.
     expect(await fetchMembers("nan")).toBeNull();
     expect(invokedWith("artifacts_request").some((args) => args?.profileId === "nan")).toBe(false);
+  });
+
+  it("sends 'Sin caducidad' as the integer 0 on the wire, never null or absent", () => {
+    // Both servers read null/absent as the scope DEFAULT (90 days), so the
+    // "never" option must serialize to 0 or the link silently expires.
+    for (const scope of ["members", "org"] as const) {
+      const meta = buildMeta(draft({ scope, memberIds: ["u1"], expiresDays: NO_EXPIRY }), null, false);
+      const wire = JSON.parse(JSON.stringify(meta));
+      expect(Object.prototype.hasOwnProperty.call(wire, "expires_days")).toBe(true);
+      expect(wire.expires_days).toBe(0);
+      expect(Number.isInteger(wire.expires_days)).toBe(true);
+    }
+    for (const scope of ["public", "emails", "members", "org"] as const) {
+      for (const days of expiryOptions(scope).filter((d) => d !== NO_EXPIRY)) {
+        const wire = JSON.parse(JSON.stringify(buildMeta(draft({ scope, emails: ["a@x.io"], memberIds: ["u1"], expiresDays: days }), null, false)));
+        expect(wire.expires_days).toBe(days);
+        expect(Number.isInteger(wire.expires_days) && wire.expires_days > 0).toBe(true);
+      }
+      // a scope without "never" never emits 0: it falls back to its default
+      if (!expiryOptions(scope).includes(NO_EXPIRY)) {
+        const wire = JSON.parse(JSON.stringify(buildMeta(draft({ scope, emails: ["a@x.io"], expiresDays: NO_EXPIRY }), null, false)));
+        expect(wire.expires_days).toBe(defaultExpiry(scope));
+      }
+    }
   });
 });

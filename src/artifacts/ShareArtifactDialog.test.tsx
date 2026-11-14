@@ -119,6 +119,18 @@ describe("ShareArtifactDialog: scopes", () => {
     expect(meta).toEqual({ title: "informe-q3.pdf", scope: "org", emails: [], member_ids: [], expires_days: 90, notify: false });
   });
 
+  it("'No expiry' reaches the core as expires_days 0, not null (null = server default)", async () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole("radio", { name: /Everyone in your organization/ }));
+    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    const never = Array.from(select.querySelectorAll("option")).find((o) => o.textContent === "No expiry");
+    fireEvent.change(select, { target: { value: never?.value } });
+    fireEvent.click(create());
+    await screen.findByText("Your link is ready");
+    const meta = invokedWith("artifact_share")[0]?.meta as Record<string, unknown>;
+    expect(meta.expires_days).toBe(0);
+  });
+
   it("members scope picks from the org list and sends user ids", async () => {
     renderDialog();
     fireEvent.click(screen.getByRole("radio", { name: /Team members/ }));

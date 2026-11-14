@@ -106,25 +106,30 @@ export function scopeOptions(profileId: string): ShareScope[] {
   return profileId === ENTERPRISE_PROFILE ? ["emails", "members", "org", "public"] : ["emails", "public"];
 }
 
-/** Expiry options per scope in days; `null` is "no expiry" (design 3.5). */
-export function expiryOptions(scope: ShareScope): Array<number | null> {
+/** The wire value for "no expiry" (members/org only). Both servers read an
+ *  absent or `null` `expires_days` as the scope DEFAULT, never as "never",
+ *  so "Sin caducidad" must travel as the integer 0 (ARTIFACTS.md 3.5). */
+export const NO_EXPIRY = 0;
+
+/** Expiry options per scope in days; [`NO_EXPIRY`] is "no expiry" (design 3.5). */
+export function expiryOptions(scope: ShareScope): number[] {
   switch (scope) {
     case "public":
       return [1, 7, 30];
     case "emails":
       return [1, 7, 30, 90];
     default:
-      return [7, 30, 90, null];
+      return [7, 30, 90, NO_EXPIRY];
   }
 }
 
-export function defaultExpiry(scope: ShareScope): number | null {
+export function defaultExpiry(scope: ShareScope): number {
   return scope === "public" ? 7 : scope === "emails" ? 30 : 90;
 }
 
 /** Keep the chosen expiry when the new scope offers it, else its default. */
-export function expiryFor(scope: ShareScope, current: number | null): number | null {
-  return expiryOptions(scope).includes(current) ? current : defaultExpiry(scope);
+export function expiryFor(scope: ShareScope, current: number | null): number {
+  return current !== null && expiryOptions(scope).includes(current) ? current : defaultExpiry(scope);
 }
 
 // -------------------------------------------------------------- emails --
@@ -232,7 +237,8 @@ export type ShareDraft = {
   scope: ShareScope;
   emails: string[];
   memberIds: string[];
-  expiresDays: number | null;
+  /** Days, or [`NO_EXPIRY`]. */
+  expiresDays: number;
   notify: boolean;
 };
 
@@ -242,7 +248,8 @@ export type WireMeta = {
   scope: ShareScope;
   emails: string[];
   member_ids: string[];
-  expires_days: number | null;
+  /** Always an integer; 0 = never. Never null or absent (= server default). */
+  expires_days: number;
   notify: boolean;
   risk_ack?: { kind: RiskKind; version: string };
   secret_ack?: boolean;

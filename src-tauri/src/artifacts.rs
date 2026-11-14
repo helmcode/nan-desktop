@@ -278,7 +278,11 @@ pub struct RiskAck {
 }
 
 /// The share metadata as the renderer sends it (wire contract 8.1, `meta`).
-/// `expires_days: null` means "no expiry" (members/org scopes only).
+/// `expires_days` is a required integer: [`NO_EXPIRY`] (0) is "no expiry"
+/// (members/org scopes only). A null/absent value is refused here: both
+/// servers read it as the scope DEFAULT, so letting it through would turn
+/// "Sin caducidad" into a silent 90-day expiry. It is parsed wide (`i64`) so
+/// negatives and nulls fail in [`checked_meta`] as `RequestInvalid`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShareMeta {
@@ -289,7 +293,7 @@ pub struct ShareMeta {
     #[serde(default)]
     pub member_ids: Vec<String>,
     #[serde(default)]
-    pub expires_days: Option<u32>,
+    pub expires_days: Option<i64>,
     #[serde(default)]
     pub notify: bool,
     #[serde(default)]
@@ -305,7 +309,8 @@ pub struct WireMeta {
     pub scope: String,
     pub emails: Vec<String>,
     pub member_ids: Vec<String>,
-    pub expires_days: Option<u32>,
+    /// Always serialized as an integer; 0 = never (ARTIFACTS.md 3.5).
+    pub expires_days: u32,
     pub notify: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk_ack: Option<RiskAck>,
@@ -322,13 +327,18 @@ pub fn scope_allowed(profile_id: &str, scope: &str) -> bool {
     }
 }
 
-/// The expiry options per scope (design 3.5). `None` is "no expiry".
-pub fn expiry_allowed(scope: &str, days: Option<u32>) -> bool {
-    match (scope, days) {
-        ("public", Some(d)) => [1, 7, 30].contains(&d),
-        ("emails", Some(d)) => [1, 7, 30, 90].contains(&d),
-        ("members" | "org", None) => true,
-        ("members" | "org", Some(d)) => [7, 30, 90].contains(&d),
+/// The wire value for "no expiry" (server policy: members/org only).
+pub const NO_EXPIRY: u32 = 0;
+
+/// The expiry options per scope (design 3.5), mirroring the server policy:
+/// [`NO_EXPIRY`] only for members/org; emails/public need a positive option.
+/// Null/absent and negatives are never allowed.
+pub fn expiry_allowed(scope: &str, days: Option<i64>) -> bool {
+    let Some(d) = days else { return false };
+    match scope {
+        "public" => [1, 7, 30].contains(&d),
+        "emails" => [1, 7, 30, 90].contains(&d),
+        "members" | "org" => [7, 30, 90, i64::from(NO_EXPIRY)].contains(&d),
         _ => false,
     }
 }
@@ -450,12 +460,17 @@ pub fn checked_meta(
     }
 
     let notify = meta.notify && matches!(meta.scope.as_str(), "emails" | "members");
+    // `expiry_allowed` already pinned it to a small non-negative option.
+    let expires_days = meta
+        .expires_days
+        .and_then(|d| u32::try_from(d).ok())
+        .ok_or(ArtifactError::RequestInvalid)?;
     Ok(WireMeta {
         title,
         scope: meta.scope,
         emails,
         member_ids,
-        expires_days: meta.expires_days,
+        expires_days,
         notify,
         risk_ack: meta.risk_ack,
         secret_ack: meta.secret_ack.filter(|ack| *ack),
@@ -730,11 +745,10 @@ pub async fn artifact_share(
     // Per-user realms: the grants are the signed-in user's (same scoping
     // as `preview_read_file`); `dir` stays the app-data root so the
     // app-data protection and the shared images folder still apply.
-    let realm = crate::realm::dir_for_in(&dir, &profile_id).map_err(|_| {
-        ArtifactError::SourceRefused {
+    let realm =
+        crate::realm::dir_for_in(&dir, &profile_id).map_err(|_| ArtifactError::SourceRefused {
             reason: "protocol".into(),
-        }
-    })?;
+        })?;
     let upload = {
         let profile_id = profile_id.clone();
         tauri::async_runtime::spawn_blocking(move || {
@@ -914,6 +928,72 @@ mod tests {
         assert!(checked_meta("helmcode", m, "a.pdf").is_ok());
     }
 
+    /// Server contract (ARTIFACTS.md 3.5): null/absent = scope DEFAULT, 0 =
+    /// never (members/org only). "Sin caducidad" must go out as integer 0.
+    #[test]
+    fn expiry_follows_the_server_contract() {
+        let with = |scope: &str, days: Option<i64>| {
+            let mut m = meta(scope);
+            m.expires_days = days;
+            match scope {
+                "emails" => m.emails = vec!["ana@acme.com".into()],
+                "members" => m.member_ids = vec!["u1".into()],
+                "public" => m.risk_ack = ack("public"),
+                _ => {}
+            }
+            checked_meta("helmcode", m, "a.pdf")
+        };
+        // 0 = never: members/org only, and it reaches the wire as integer 0.
+        for scope in ["members", "org"] {
+            let wire = with(scope, Some(0)).expect("never is offered");
+            assert_eq!(wire.expires_days, NO_EXPIRY);
+            let json = serde_json::to_value(&wire).unwrap();
+            assert_eq!(json["expires_days"], serde_json::json!(0));
+            assert!(json["expires_days"].is_u64());
+        }
+        // Positive options pass through as numbers.
+        for (scope, days) in [("public", 7), ("emails", 90), ("members", 30), ("org", 7)] {
+            let json = serde_json::to_value(with(scope, Some(days)).unwrap()).unwrap();
+            assert_eq!(json["expires_days"], serde_json::json!(days));
+        }
+        // emails/public need a positive number: 0 is refused.
+        for scope in ["emails", "public"] {
+            assert_eq!(with(scope, Some(0)), Err(ArtifactError::RequestInvalid));
+        }
+        // null/absent (= silent server default) and negatives are refused everywhere.
+        for scope in ["emails", "public", "members", "org"] {
+            assert_eq!(with(scope, None), Err(ArtifactError::RequestInvalid));
+            assert_eq!(with(scope, Some(-1)), Err(ArtifactError::RequestInvalid));
+            assert_eq!(with(scope, Some(-90)), Err(ArtifactError::RequestInvalid));
+        }
+        // Options outside the policy stay refused.
+        assert_eq!(with("public", Some(90)), Err(ArtifactError::RequestInvalid));
+        assert_eq!(with("org", Some(1)), Err(ArtifactError::RequestInvalid));
+        assert_eq!(
+            with("org", Some(i64::from(u32::MAX) + 1)),
+            Err(ArtifactError::RequestInvalid)
+        );
+        // From the renderer's JSON: explicit null and absence both refused.
+        for raw in [
+            serde_json::json!({"title": "x", "scope": "org", "expires_days": null}),
+            serde_json::json!({"title": "x", "scope": "org"}),
+        ] {
+            let m: ShareMeta = serde_json::from_value(raw).expect("parses");
+            assert_eq!(
+                checked_meta("helmcode", m, "a.pdf"),
+                Err(ArtifactError::RequestInvalid)
+            );
+        }
+        let m: ShareMeta = serde_json::from_value(
+            serde_json::json!({"title": "x", "scope": "org", "expires_days": 0}),
+        )
+        .unwrap();
+        assert_eq!(
+            checked_meta("helmcode", m, "a.pdf").unwrap().expires_days,
+            0
+        );
+    }
+
     #[test]
     fn expiry_options_and_caps_per_scope() {
         assert!(expiry_allowed("public", Some(30)));
@@ -922,7 +1002,9 @@ mod tests {
         assert!(expiry_allowed("emails", Some(90)));
         assert!(!expiry_allowed("emails", Some(365)));
         assert!(!expiry_allowed("emails", None));
-        assert!(expiry_allowed("members", None));
+        assert!(!expiry_allowed("members", None));
+        assert!(expiry_allowed("members", Some(0)));
+        assert!(!expiry_allowed("members", Some(-7)));
         assert!(expiry_allowed("org", Some(90)));
         assert!(!expiry_allowed("org", Some(1)));
         assert!(!expiry_allowed("emails", Some(0)));
@@ -982,7 +1064,7 @@ mod tests {
             Err(ArtifactError::RiskAckRequired)
         );
         let mut m = meta("org");
-        m.expires_days = None;
+        m.expires_days = Some(0);
         m.risk_ack = ack("external");
         assert_eq!(
             checked_meta("helmcode", m, "a.pdf"),
@@ -1520,14 +1602,9 @@ mod tests {
             "X-Total-Count: 57\r\n",
             r#"{"artifacts":[],"total":57}"#.into(),
         );
-        let response = tauri::async_runtime::block_on(send(
-            &base,
-            TOKEN,
-            "helmcode",
-            "GET",
-            "/api/artifacts",
-        ))
-        .expect("sent");
+        let response =
+            tauri::async_runtime::block_on(send(&base, TOKEN, "helmcode", "GET", "/api/artifacts"))
+                .expect("sent");
         assert_eq!(response.total, Some(57));
         let _ = server.join();
         // Community sends no header: nothing is forwarded.

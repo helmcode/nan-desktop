@@ -26,6 +26,7 @@ import {
   canSubmit,
   defaultExpiry,
   expiryOptions,
+  NO_EXPIRY,
   externalEmails,
   fetchMembers,
   riskFor,
@@ -143,7 +144,7 @@ export function ShareArtifactDialog({
   const [memberQuery, setMemberQuery] = useState("");
   // undefined: loading; null: unavailable.
   const [members, setMembers] = useState<Member[] | null | undefined>(enterprise ? undefined : null);
-  const [expiresDays, setExpiresDays] = useState<number | null>(defaultExpiry("emails"));
+  const [expiresDays, setExpiresDays] = useState<number>(defaultExpiry("emails"));
   const [notify, setNotify] = useState(true);
   const [ackedRisk, setAckedRisk] = useState<Risk | null>(null);
   // The server said some recipients are external (422 risk_ack_required).
@@ -432,12 +433,12 @@ export function ShareArtifactDialog({
           <span className="artifact-label">{a.expiresLabel}</span>
           <select
             className="text-input artifact-select"
-            value={expiresDays === null ? "never" : String(expiresDays)}
-            onChange={(e) => setExpiresDays(e.target.value === "never" ? null : Number(e.target.value))}
+            value={String(expiresDays)}
+            onChange={(e) => setExpiresDays(Number(e.target.value))}
           >
             {expiryOptions(scope).map((days) => (
-              <option key={days ?? "never"} value={days === null ? "never" : String(days)}>
-                {days === null ? a.expiresNever : a.expiresDays(days)}
+              <option key={days} value={String(days)}>
+                {days === NO_EXPIRY ? a.expiresNever : a.expiresDays(days)}
               </option>
             ))}
           </select>
