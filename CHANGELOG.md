@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - Your data is yours alone on a shared computer
+## 0.2.7 - 2026-11-14 - Your data is yours alone on a shared computer
 
 ### Privacy (critical fix)
 - Local data is now kept per signed-in account, not per platform. Before,
@@ -23,6 +23,28 @@
   data so far belonged to whoever used the app). Local skills, which were
   shared by both platforms, go to the first sign-in on the computer. Any
   other account starts empty.
+
+### Reading previews
+- PDF previews now render every page stacked in a continuous vertical
+  scroll at the pane width (up to 1100px), replacing the previous/next
+  pager. A small page indicator follows the scroll, each page is
+  announced to screen readers, and pages render lazily while you scroll.
+- A "Mostrar en la carpeta" button sits next to close for local files:
+  it reveals the file in Finder/Explorer without opening it, reusing
+  the same folder-grant checks as the preview reader.
+
+### Sharing artifacts
+- Share a produced file as a link (Artifacts): from the chat file chips,
+  the preview header, the user menu and Settings. Pick recipients by
+  email (with consent for external people), org members, the whole org
+  or a public link; the risk warning must be accepted with an explicit
+  checkbox for anything leaving the org, and a detected secret needs its
+  own confirmation.
+- The success screen shows the link returned by the server with copy and
+  open actions; "Mis enlaces" lists your shared links and lets you revoke
+  them (admins also see the whole organization).
+- "Sin caducidad" now really means no expiry (it previously fell back to
+  the platform default in a server contract mismatch).
 
 ## 0.2.6 - The preview knows what you asked for
 
