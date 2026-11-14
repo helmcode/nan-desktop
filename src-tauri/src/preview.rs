@@ -68,6 +68,24 @@ pub fn read_preview_file(
     app_data: &Path,
     home: Option<&Path>,
 ) -> Result<FilePreview, Rejection> {
+    let bytes = read_granted_bytes(store, profile_id, raw, app_data, home)?;
+    Ok(FilePreview {
+        size: bytes.len() as u64,
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
+}
+
+/// The exact bytes of a granted file, with every check of
+/// [`read_preview_file`] (the same rejections). The artifacts share reads
+/// its snapshot through here, so it can never reach a file the preview
+/// could not show.
+pub fn read_granted_bytes(
+    store: &GrantsStore,
+    profile_id: &str,
+    raw: &str,
+    app_data: &Path,
+    home: Option<&Path>,
+) -> Result<Vec<u8>, Rejection> {
     let (grant_id, canonical) = grants::resolve_under_grant(store, profile_id, raw)?;
     let grant = store
         .grant_by_id(&grant_id)
@@ -101,11 +119,7 @@ pub fn read_preview_file(
     if meta.len() > MAX_PREVIEW_FILE_BYTES {
         return Err(too_large());
     }
-    let bytes = read_no_follow(&canonical)?;
-    Ok(FilePreview {
-        size: bytes.len() as u64,
-        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-    })
+    read_no_follow(&canonical)
 }
 
 fn too_large() -> Rejection {
@@ -135,7 +149,7 @@ fn reject_symlink_traversal(root: &Path, raw: &Path, canonical: &Path) -> Result
 
 /// Read at most cap + 1 bytes without following a symlink leaf (a swap
 /// after the checks above fails closed).
-fn read_no_follow(path: &Path) -> Result<Vec<u8>, Rejection> {
+pub(crate) fn read_no_follow(path: &Path) -> Result<Vec<u8>, Rejection> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
