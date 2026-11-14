@@ -314,6 +314,46 @@ describe("ShareArtifactDialog: success", () => {
     expect(screen.getByRole("status").textContent).toBe("Link copied");
   });
 
+  it("shows, copies and opens exactly the server's url, never one built client-side", async () => {
+    // Nothing about this url is derivable from the id, the tenant or the
+    // API base: any reconstruction would differ from it.
+    const opaque = "https://links.example.test/s/Zz9-opaque_token?sig=abc%2F1#frag";
+    const props = renderDialog({
+      table: core({
+        artifact_share: () => ({
+          status: 201,
+          body: { artifact: { id: "11111111-2222-4333-8444-555555555555", url: "https://share.helmcode.com/a/other" }, url: opaque },
+        }),
+      }),
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /Everyone in your organization/ }));
+    fireEvent.click(create());
+    await screen.findByText("Your link is ready");
+    expect((screen.getByLabelText("Link") as HTMLInputElement).value).toBe(opaque);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    });
+    expect(writeText).toHaveBeenCalledWith(opaque);
+    fireEvent.click(screen.getByRole("button", { name: /Open in browser/ }));
+    expect(invokedWith("open_external")[0]).toEqual({ url: opaque });
+    expect(props.onNotice).toHaveBeenCalledWith("success", "Link copied");
+  });
+
+  it("a reply without an https url is an error, not a reconstructed link", async () => {
+    for (const body of [
+      { artifact: { id: "11111111-2222-4333-8444-555555555555" } },
+      { artifact: { id: "11111111-2222-4333-8444-555555555555" }, url: "http://share.helmcode.com/a/tok" },
+    ]) {
+      renderDialog({ table: core({ artifact_share: () => ({ status: 201, body }) }) });
+      fireEvent.click(screen.getByRole("radio", { name: /Everyone in your organization/ }));
+      fireEvent.click(create());
+      await screen.findByTestId("artifact-problem");
+      expect(screen.queryByText("Your link is ready")).toBeNull();
+      expect(screen.queryByLabelText("Link")).toBeNull();
+      cleanup();
+    }
+  });
+
   it("a clipboard failure says how to copy by hand", async () => {
     await shareOrg();
     writeText.mockRejectedValueOnce(new Error("denied"));
