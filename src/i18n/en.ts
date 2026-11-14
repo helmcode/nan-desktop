@@ -373,6 +373,8 @@ export const en = {
     sheet: "Sheet",
     page: (n: number, total: number) => `Page ${n} of ${total}`,
     pdfPages: (total: number) => `PDF document, ${total} ${total === 1 ? "page" : "pages"}`,
+    revealInFolder: "Show in folder",
+    revealFailed: "Could not open the folder.",
     crashed: "This preview stopped working. Close it and open the file again.",
     messageCrashed: "This message could not be shown.",
     shellCrashed: "This conversation could not be shown. Pick another one or start a new chat.",

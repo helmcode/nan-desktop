@@ -371,6 +371,8 @@ export const es: Strings = {
     sheet: "Hoja",
     page: (n: number, total: number) => `Página ${n} de ${total}`,
     pdfPages: (total: number) => `Documento PDF, ${total} ${total === 1 ? "página" : "páginas"}`,
+    revealInFolder: "Mostrar en la carpeta",
+    revealFailed: "No se ha podido abrir la carpeta.",
     crashed: "Esta vista previa ha dejado de funcionar. Ciérrala y vuelve a abrir el archivo.",
     messageCrashed: "No se ha podido mostrar este mensaje.",
     shellCrashed: "No se ha podido mostrar esta conversación. Elige otra o empieza un chat nuevo.",

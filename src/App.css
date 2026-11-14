@@ -1002,6 +1002,12 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+.preview-reveal-error {
+  margin: 0;
+  padding: 0.45rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
 /* An image in the preview with its "Remove from preview" X on the corner. */
 .preview-image-frame {
   position: relative;
