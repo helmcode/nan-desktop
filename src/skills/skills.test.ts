@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { en } from "../i18n/en";
 import { es } from "../i18n/es";
 import {
+  parseSkillDraftEvent,
   MAX_REFERENCE_BYTES,
   REFERENCE_ACCEPT,
   activeSkillFor,
@@ -311,5 +312,47 @@ describe("save-as-skill drafts (round 15/F4)", () => {
     expect(es.skills.distillPrompt).toBe("Guarda esta conversación como una skill reutilizable.");
     expect(en.skills.reviewHintDistilled).toContain("AI summarized");
     expect(es.skills.reviewHintDistilled).toContain("La IA ha resumido");
+  });
+});
+
+describe("R19-A: the chat://skill_draft payload is parsed defensively", () => {
+  const good = { conversation_id: 7, draft: { title: "T", description: "D", instructions: "1. Step." } };
+
+  it("a well-formed payload passes through", () => {
+    expect(parseSkillDraftEvent(good)).toEqual({
+      conversationId: 7,
+      draft: { title: "T", description: "D", instructions: "1. Step." },
+    });
+  });
+
+  it("extra fields are dropped, never forwarded to the form", () => {
+    const parsed = parseSkillDraftEvent({ ...good, draft: { ...good.draft, html: "<img onerror>" } });
+    expect(parsed?.draft).toEqual(good.draft);
+  });
+
+  it.each([
+    ["null", null],
+    ["a string", "draft"],
+    ["an array", []],
+    ["no draft", { conversation_id: 7 }],
+    ["a null draft", { conversation_id: 7, draft: null }],
+    ["a string id", { ...good, conversation_id: "7" }],
+    ["a fractional id", { ...good, conversation_id: 7.5 }],
+    ["a NaN id", { ...good, conversation_id: Number.NaN }],
+    ["a missing title", { ...good, draft: { description: "D", instructions: "I" } }],
+    ["a numeric description", { ...good, draft: { ...good.draft, description: 42 } }],
+    ["object instructions", { ...good, draft: { ...good.draft, instructions: { text: "I" } } }],
+    ["the tool's own arg names", { conversation_id: 7, draft: { name: "T", description: "D", instructions: "I" } }],
+  ])("%s is ignored without throwing", (_label, payload) => {
+    expect(() => parseSkillDraftEvent(payload)).not.toThrow();
+    expect(parseSkillDraftEvent(payload)).toBeNull();
+  });
+
+  it("a parsed draft always renders: every form field is a string", () => {
+    const parsed = parseSkillDraftEvent(good);
+    const form = settleSkillDraft(parsed?.draft, true, []);
+    expect(typeof form?.title.trim()).toBe("string");
+    expect(typeof form?.description.trim()).toBe("string");
+    expect(Array.isArray(form?.references)).toBe(true);
   });
 });

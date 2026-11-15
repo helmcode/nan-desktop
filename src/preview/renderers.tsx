@@ -208,7 +208,7 @@ export function PdfPreview({ bytes }: { bytes: Uint8Array }) {
       // Page 1 sizes every placeholder until each page reports its own.
       const first = (await loaded.getPage(1)).getViewport({ scale: 1 });
       if (cancelled) {
-        void loaded.destroy();
+        void loaded.destroy().catch(() => {});
         return;
       }
       setDoc({ pdf: loaded, ratio: first.width > 0 && first.height > 0 ? first.width / first.height : 1 / Math.SQRT2 });
@@ -218,7 +218,7 @@ export function PdfPreview({ bytes }: { bytes: Uint8Array }) {
     });
     return () => {
       cancelled = true;
-      if (loaded) void loaded.destroy();
+      if (loaded) void loaded.destroy().catch(() => {});
     };
   }, [bytes]);
 

@@ -4,6 +4,15 @@
 import type { Strings } from "./en";
 
 export const es: Strings = {
+  crash: {
+    // "Algo no ha ido bien": calmer than "se ha cortado" (no hint of lost
+    // work) and the same wording as app.errorTitle.
+    title: "Algo no ha ido bien",
+    body: "La app se ha detenido un momento. Tus conversaciones siguen guardadas en este equipo.",
+    retry: "Probar de nuevo",
+    restart: "Cerrar y volver a abrir",
+    restartHint: "Si probar de nuevo no funciona, esto cierra la app y la vuelve a abrir. Tus conversaciones siguen guardadas.",
+  },
   app: {
     name: "Helmcode",
     windowTitle: "Helmcode Desktop",
@@ -127,8 +136,6 @@ export const es: Strings = {
     settings: "Ajustes",
     emptyTitle: "¿En qué puedo ayudarte?",
     emptyHint: "Intro envía. Mayús + Intro añade una línea.",
-    freshRealm: (email: string | null) =>
-      `${email ? `Este es tu espacio como ${email} en este dispositivo` : "Este es tu espacio en este dispositivo"} y de momento está vacío. Lo que guardaron otras cuentas sigue aquí: solo lo ve quien entra con esa cuenta.`,
     interrupted: "La respuesta se interrumpió.",
     thinking: "Pensando…",
     searching: "Buscando en internet…",
@@ -249,6 +256,7 @@ export const es: Strings = {
     permanent: "Aquí no hay papelera: este borrado no se puede deshacer.",
   },
   settings: {
+    surfaceCrashed: "Esta sección ha dejado de funcionar. Lo que tenías sigue guardado; vuelve a intentarlo.",
     title: "Ajustes",
     sections: "Secciones de ajustes",
     back: "Volver al chat",

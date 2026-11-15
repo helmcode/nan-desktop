@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.8 - 2026-11-15 - The app recovers instead of going dark
+
+### Reliability
+- If anything unexpected breaks inside the app, it now shows a calm recovery
+  screen ("Algo no ha ido bien") with two actions: try again (remount) or
+  close and reopen the app; conversations are never lost. A renderer fault
+  can no longer leave a black, empty window.
+- Errors reaching the recovery screen are logged with tokens redacted
+  (sk-, hke_, nan_, Bearer, JWT), including errors caught by error
+  boundaries (React 19 onCaughtError), so no credential ever reaches logs.
+
+### Interface
+- Removed the "este es tu espacio" notice shown when an account with no
+  data signs in (owner call: isolation is self-evident).
 ## 0.2.7 - 2026-11-14 - Your data is yours alone on a shared computer
 
 ### Privacy (critical fix)

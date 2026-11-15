@@ -481,6 +481,23 @@ describe("Save as skill", () => {
     expect(invokedWith("skills_create")[0]).toEqual({ input: { ...distilled, references: [] } });
   });
 
+  it("R19-A: a malformed distilled draft cannot crash the window; the template opens instead", async () => {
+    resetTauri(handlers([], chatRows()));
+    renderApp();
+    await clickSave();
+    await act(async () =>
+      emit("chat://skill_draft", { conversation_id: 7, draft: { title: null, description: 3, instructions: {} } }),
+    );
+    await act(async () => emit("chat://skill_draft", { conversation_id: 7 }));
+    await act(async () => emit("chat://skill_draft", null));
+    await act(async () => emit("chat://done", { conversation_id: 7 }));
+    expect(await screen.findByRole("heading", { name: "New skill" })).toBeTruthy();
+    expect(
+      screen.getByText("We could not summarize this chat, so we copied its start. Review it before saving."),
+    ).toBeTruthy();
+    expect(screen.queryByText("Something went wrong")).toBeNull();
+  });
+
   it("round 15 (F4): without a tool call the deterministic template is the fallback", async () => {
     resetTauri(handlers([], chatRows()));
     renderApp();

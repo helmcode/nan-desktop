@@ -3,6 +3,13 @@
 // language, and never an em dash.
 
 export const en = {
+  crash: {
+    title: "Something went wrong",
+    body: "The app stopped for a moment. Your conversations are saved on this computer.",
+    retry: "Try again",
+    restart: "Restart the app",
+    restartHint: "If trying again does not help, this closes the app and opens it again. Your conversations stay saved.",
+  },
   app: {
     name: "Helmcode",
     windowTitle: "Helmcode Desktop",
@@ -129,8 +136,6 @@ export const en = {
     settings: "Settings",
     emptyTitle: "How can I help?",
     emptyHint: "Enter sends. Shift + Enter adds a line.",
-    freshRealm: (email: string | null) =>
-      `${email ? `This is your space as ${email} on this device` : "This is your space on this device"} and it is empty for now. What other accounts saved stays here: only someone who signs in as that account sees it.`,
     interrupted: "The reply was interrupted.",
     thinking: "Thinking…",
     searching: "Searching the web…",
@@ -251,6 +256,7 @@ export const en = {
     permanent: "There is no trash here: this deletion cannot be undone.",
   },
   settings: {
+    surfaceCrashed: "This section stopped working. Your work is saved; try again.",
     title: "Settings",
     sections: "Settings sections",
     back: "Back to chat",

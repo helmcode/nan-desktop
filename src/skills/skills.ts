@@ -130,6 +130,24 @@ export function draftFromConversation(messages: ReadonlyArray<{ role: string; co
 /** What the core sends on `chat://skill_draft` (tools/save_skill.rs). */
 export type DistilledDraft = { title: string; description: string; instructions: string };
 
+/**
+ * R19-A: the `chat://skill_draft` payload, checked field by field. The core
+ * validates the draft, but this is the renderer's trust boundary: a payload
+ * of another shape (an older or newer core, a corrupted event) is dropped
+ * here, so nothing downstream (the save form renders `title.trim()`,
+ * `cleanTitle(title)`...) can throw during render and take the window down.
+ * Null means "ignore the event"; the template fallback still opens.
+ */
+export function parseSkillDraftEvent(payload: unknown): { conversationId: number; draft: DistilledDraft } | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { conversation_id: conversationId, draft } = payload as Record<string, unknown>;
+  if (typeof conversationId !== "number" || !Number.isSafeInteger(conversationId)) return null;
+  if (typeof draft !== "object" || draft === null) return null;
+  const { title, description, instructions } = draft as Record<string, unknown>;
+  if (typeof title !== "string" || typeof description !== "string" || typeof instructions !== "string") return null;
+  return { conversationId, draft: { title, description, instructions } };
+}
+
 /** A draft the model distilled with `save_chat_as_skill`, for the save form. */
 export function draftFromDistilled(draft: DistilledDraft): SkillDraft {
   return {
