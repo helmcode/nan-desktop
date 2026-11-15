@@ -492,6 +492,52 @@ fn utf8_text(bytes: &[u8]) -> bool {
     !body.contains(&0) && std::str::from_utf8(body).is_ok()
 }
 
+/// The leading bytes announce a binary type the allowlist knows.
+fn binary_magic(bytes: &[u8]) -> bool {
+    [
+        &b"%PDF-"[..],
+        b"\x89PNG\r\n\x1a\n",
+        &[0xFF, 0xD8, 0xFF],
+        b"GIF87a",
+        b"GIF89a",
+        b"PK\x03\x04",
+    ]
+    .iter()
+    .any(|magic| bytes.starts_with(magic))
+        || (bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
+}
+
+/// Shareable text: UTF-8, no NUL, no binary magic.
+fn plain(bytes: &[u8]) -> bool {
+    utf8_text(bytes) && !binary_magic(bytes)
+}
+
+/// R20-C: the text files the preview shows as text (renderer
+/// `TEXT_EXTENSIONS`, minus `txt` and the `env` credential stores). The
+/// servers store md/txt/csv/html only, so these share as text/plain under
+/// a `.txt` upload name ([`upload_name`]); the title keeps the real name.
+/// A renderer test keeps this list in sync with the preview's.
+pub const PLAIN_TEXT_EXTENSIONS: &[&str] = &[
+    "log", "json", "jsonl", "yaml", "yml", "toml", "ini", "xml", "svg", "tsv", "js", "jsx", "ts",
+    "tsx", "mjs", "cjs", "py", "rb", "go", "rs", "java", "kt", "swift", "c", "h", "cpp", "hpp",
+    "cs", "php", "sh", "bash", "zsh", "sql", "css", "scss",
+];
+
+/// The multipart file name: the servers type an upload by its extension,
+/// so a plain-text-family file travels as `<name>.txt`.
+pub fn upload_name(filename: &str) -> String {
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if PLAIN_TEXT_EXTENSIONS.contains(&ext.as_str()) {
+        format!("{filename}.txt")
+    } else {
+        filename.to_string()
+    }
+}
+
 /// Sniff `bytes` named `filename` against the allowlist (design 1.1):
 /// the extension picks the candidate type and the bytes must agree.
 pub fn sniff(filename: &str, bytes: &[u8]) -> Result<Sniffed, ArtifactError> {
@@ -519,10 +565,13 @@ pub fn sniff(filename: &str, bytes: &[u8]) -> Result<Sniffed, ArtifactError> {
         "gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => {
             binary("image/gif")
         }
-        "md" | "markdown" if utf8_text(bytes) => text("text/markdown"),
-        "txt" if utf8_text(bytes) => text("text/plain"),
-        "csv" if utf8_text(bytes) => text("text/csv"),
-        "html" | "htm" if utf8_text(bytes) => text("text/html"),
+        // Text: valid UTF-8 and no binary magic (a polyglot is refused,
+        // as the servers do).
+        "md" | "markdown" if plain(bytes) => text("text/markdown"),
+        "txt" if plain(bytes) => text("text/plain"),
+        "csv" if plain(bytes) => text("text/csv"),
+        "html" | "htm" if plain(bytes) => text("text/html"),
+        ext if PLAIN_TEXT_EXTENSIONS.contains(&ext) && plain(bytes) => text("text/plain"),
         "docx" if zip => {
             binary("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         }
@@ -673,7 +722,7 @@ pub fn prepare_upload(
         return Err(ArtifactError::PossibleSecret);
     }
     Ok(Upload {
-        filename,
+        filename: upload_name(&filename),
         content_type: sniffed.content_type,
         bytes,
         meta,
@@ -1214,13 +1263,77 @@ mod tests {
             sniff("a.docx", b"%PDF-"),
             Err(ArtifactError::UnsupportedType)
         );
-        for name in ["a.exe", "a.svg", "a.js", "a", "a.zip", "a.png.exe"] {
+        for name in [
+            "a.exe",
+            "a",
+            "a.zip",
+            "a.png.exe",
+            "a.bmp",
+            "a.xls",
+            "prod.env",
+        ] {
             assert_eq!(
                 sniff(name, b"PK\x03\x04"),
                 Err(ArtifactError::UnsupportedType),
                 "{name}"
             );
         }
+    }
+
+    /// R20-C: every text kind the preview shows is shareable as plain text
+    /// (the servers store md/txt/csv/html only, so the rest travel as
+    /// text/plain under a `.txt` upload name); bytes must still be text.
+    #[test]
+    fn plain_text_family_shares_as_text_plain() {
+        for name in [
+            "a.json", "a.YAML", "a.log", "a.py", "a.sh", "a.svg", "a.tsv", "a.rs",
+        ] {
+            let sniffed = sniff(name, b"{\"a\": 1}\n").expect(name);
+            assert_eq!(sniffed.content_type, "text/plain", "{name}");
+            assert!(sniffed.text, "{name}");
+        }
+        assert_eq!(
+            sniff("a.json", b"bin\0ary"),
+            Err(ArtifactError::UnsupportedType)
+        );
+        // A text name over binary magic (a polyglot) is refused, as the
+        // servers do.
+        assert_eq!(
+            sniff("a.json", b"%PDF-1.7 x"),
+            Err(ArtifactError::UnsupportedType)
+        );
+        assert_eq!(
+            sniff("a.txt", b"GIF89a"),
+            Err(ArtifactError::UnsupportedType)
+        );
+        // Credential stores by definition: never.
+        assert_eq!(
+            sniff("prod.env", b"A=1"),
+            Err(ArtifactError::UnsupportedType)
+        );
+    }
+
+    #[test]
+    fn upload_name_carries_an_extension_the_servers_accept() {
+        assert_eq!(upload_name("config.json"), "config.json.txt");
+        assert_eq!(upload_name("notes.md"), "notes.md");
+        assert_eq!(upload_name("a.TXT"), "a.TXT");
+        assert_eq!(upload_name("informe.pdf"), "informe.pdf");
+        assert_eq!(upload_name("main.PY"), "main.PY.txt");
+    }
+
+    #[test]
+    fn prepares_a_json_file_as_plain_text_and_scans_it_for_secrets() {
+        let l = layout();
+        let path = l.grant.join("config.json");
+        fs::write(&path, b"{\"name\": \"demo\"}").expect("write");
+        let upload = prepare(&l, &file(&path), public_meta()).expect("ok");
+        assert_eq!(upload.filename, "config.json.txt");
+        assert_eq!(upload.content_type, "text/plain");
+        let leaky = l.grant.join("keys.yaml");
+        fs::write(&leaky, b"key: sk-abcdefghijklmnop1234").expect("write");
+        let err = prepare(&l, &file(&leaky), public_meta()).expect_err("secret");
+        assert_eq!(err, ArtifactError::PossibleSecret);
     }
 
     #[test]

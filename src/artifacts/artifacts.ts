@@ -11,7 +11,7 @@
 // error -> copy mapping.
 
 import { invoke } from "@tauri-apps/api/core";
-import { extensionOf, type PreviewTarget } from "../preview/kind";
+import { extensionOf, previewKind, type PreviewTarget } from "../preview/kind";
 
 /** The only tenant with orgs (members and org scopes, the admin list). */
 export const ENTERPRISE_PROFILE = "helmcode";
@@ -218,18 +218,20 @@ export function ackCovers(acked: Risk | null, current: Risk | null): boolean {
 
 // -------------------------------------------------------------- source --
 
-const SHAREABLE_EXTENSIONS = new Set([
-  "pdf", "png", "jpg", "jpeg", "webp", "gif", "md", "markdown", "txt", "csv", "html", "htm", "docx", "xlsx",
-]);
+/** Previewable, but never shareable (R20-C): types neither server stores
+ *  (BMP/AVIF images, legacy XLS and ODS sheets) and dotenv files, which
+ *  are credential stores by definition. Everything else the preview shows
+ *  is shareable; the core maps the plain-text family (json, yaml, code...)
+ *  to text/plain, and sniffs the bytes again either way. */
+export const PREVIEW_ONLY_EXTENSIONS: ReadonlySet<string> = new Set(["bmp", "avif", "xls", "ods", "env"]);
 
-/** A preview target that can be shared (design 1.1 allowlist). Web pages
- *  never are; generated images always are. */
+/** A preview target that can be shared: every local file kind the preview
+ *  shows except [`PREVIEW_ONLY_EXTENSIONS`], and generated images. Web
+ *  pages never are. */
 export function shareSourceFor(target: PreviewTarget): ShareSource | null {
   if (target.kind === "media") return { kind: "media", path: target.ref };
-  if (target.kind === "file" && SHAREABLE_EXTENSIONS.has(extensionOf(target.ref))) {
-    return { kind: "file", path: target.ref };
-  }
-  return null;
+  if (target.kind !== "file" || previewKind(target) === "unsupported") return null;
+  return PREVIEW_ONLY_EXTENSIONS.has(extensionOf(target.ref)) ? null : { kind: "file", path: target.ref };
 }
 
 // ---------------------------------------------------------------- meta --

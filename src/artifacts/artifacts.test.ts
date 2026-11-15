@@ -3,6 +3,7 @@
 // parsing, error mapping) and the IPC wrappers over the mocked Tauri core.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invokedWith, resetTauri } from "../test/tauriMock";
+import { PREVIEWABLE_EXTENSIONS, TEXT_EXTENSIONS, previewKind } from "../preview/kind";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).coreModule());
 
@@ -40,6 +41,7 @@ import {
   scopeOptions,
   shareArtifact,
   shareSourceFor,
+  PREVIEW_ONLY_EXTENSIONS,
   type ShareDraft,
 } from "./artifacts";
 
@@ -192,9 +194,35 @@ describe("source", () => {
       kind: "media",
       path: "/data/images/x.png",
     });
-    expect(shareSourceFor({ kind: "file", ref: "/p/script.sh" })).toBeNull();
-    expect(shareSourceFor({ kind: "file", ref: "/p/a.svg" })).toBeNull();
     expect(shareSourceFor({ kind: "web", ref: "https://x.io/a.pdf" })).toBeNull();
+  });
+
+  // R20-C: Share is offered for EVERY kind the preview shows, except the
+  // few the servers cannot store (and dotenv files, credential stores by
+  // definition). Each exclusion is deliberate and listed here.
+  it("every previewable file kind is shareable, except the documented exclusions", () => {
+    expect([...PREVIEW_ONLY_EXTENSIONS].sort()).toEqual(["avif", "bmp", "env", "ods", "xls"]);
+    for (const ext of PREVIEWABLE_EXTENSIONS) {
+      const target = { kind: "file" as const, ref: `/p/file.${ext}` };
+      expect(previewKind(target), ext).not.toBe("unsupported");
+      if (PREVIEW_ONLY_EXTENSIONS.has(ext)) expect(shareSourceFor(target), ext).toBeNull();
+      else expect(shareSourceFor(target), ext).toEqual({ kind: "file", path: target.ref });
+    }
+    for (const ext of ["pdf", "txt", "md", "csv", "html", "png", "jpg", "jpeg", "webp", "gif", "docx", "xlsx", "json", "yaml", "log", "sh", "svg"]) {
+      expect(shareSourceFor({ kind: "file", ref: `/p/a.${ext.toUpperCase()}` }), ext).not.toBeNull();
+    }
+    // Nothing the preview cannot show is shareable.
+    expect(shareSourceFor({ kind: "file", ref: "/p/a.exe" })).toBeNull();
+    expect(shareSourceFor({ kind: "file", ref: "/p/noext" })).toBeNull();
+  });
+
+  it("the core shares the same plain-text family the preview shows as text", async () => {
+    const { readFileSync } = await import("node:fs");
+    const rust = readFileSync("src-tauri/src/artifacts.rs", "utf8");
+    const block = /pub const PLAIN_TEXT_EXTENSIONS: &\[&str\] = &\[([^\]]*)\]/.exec(rust)?.[1] ?? "";
+    const core = [...block.matchAll(/"([a-z0-9]+)"/g)].map((m) => m[1]).sort();
+    const renderer = [...TEXT_EXTENSIONS].filter((ext) => !PREVIEW_ONLY_EXTENSIONS.has(ext) && ext !== "txt").sort();
+    expect(core).toEqual(renderer);
   });
 });
 
