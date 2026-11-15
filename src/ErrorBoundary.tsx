@@ -8,8 +8,9 @@
 // happens silently:
 //
 // - `AppErrorBoundary` wraps the whole app (main.tsx). A crash anywhere
-//   renders a calm recovery screen with "Retry" (re-mounts the app) and
-//   "Reload app" (location.reload).
+//   renders a calm recovery screen with "Try again" (primary: re-mounts the
+//   app) and "Restart the app" (secondary, with a hint saying what it does:
+//   location.reload, the closest thing to closing and reopening).
 // - `installCrashGuard` listens for window `error` and `unhandledrejection`.
 //   Every one is logged; when the app root is blank (React gave up), the
 //   same recovery screen is shown instead of a dead window. A rejection
@@ -124,10 +125,18 @@ export function RecoveryScreen({
           <button type="button" className="btn btn-primary" onClick={onRetry}>
             {s.retry}
           </button>
-          <button type="button" className="btn btn-ghost" onClick={onReload}>
-            {s.reload}
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={onReload}
+            aria-describedby="crash-restart-hint"
+          >
+            {s.restart}
           </button>
         </div>
+        <p className="hint" id="crash-restart-hint">
+          {s.restartHint}
+        </p>
       </div>
     </main>
   );
@@ -227,8 +236,8 @@ export function installCrashGuard(
 /**
  * Mount the app under the root boundary and the crash guard. When React
  * gives up anyway (an error that escaped every boundary) the recovery
- * screen is rendered in its own container: "Retry" mounts a brand-new app
- * root, "Reload app" reloads the page. Returns a disposer (tests).
+ * screen is rendered in its own container: "Try again" mounts a brand-new
+ * app root, "Restart the app" reloads the page. Returns a disposer (tests).
  */
 export function startApp(
   rootEl: HTMLElement,
@@ -270,9 +279,17 @@ export function startApp(
 
   function showRecovery(): void {
     if (recoveryRoot) return;
-    recoveryEl = rootEl.ownerDocument.createElement("div");
+    // INVARIANT: a direct child of <body> styled by `#crash-recovery` in
+    // App.css (position: fixed; inset: 0; z-index above everything).
+    // #root is height:100% and body is overflow:hidden, so a plain sibling
+    // after #root would render BELOW the visible window: the user would
+    // still see black. jsdom cannot do layout, so the test pins the
+    // placement and the CSS rule; release checklist: force a throw once in
+    // the real app and check the screen is visible.
+    const doc = rootEl.ownerDocument;
+    recoveryEl = doc.createElement("div");
     recoveryEl.id = "crash-recovery";
-    rootEl.after(recoveryEl);
+    doc.body.appendChild(recoveryEl);
     recoveryRoot = createRoot(recoveryEl);
     recoveryRoot.render(<RecoveryScreen onRetry={retry} onReload={onReload} />);
   }

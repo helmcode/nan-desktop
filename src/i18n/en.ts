@@ -4,10 +4,11 @@
 
 export const en = {
   crash: {
-    title: "Something cut out unexpectedly",
+    title: "Something went wrong",
     body: "The app stopped for a moment. Your conversations are saved on this computer.",
-    retry: "Retry",
-    reload: "Reload app",
+    retry: "Try again",
+    restart: "Restart the app",
+    restartHint: "If trying again does not help, this closes the app and opens it again. Your conversations stay saved.",
   },
   app: {
     name: "Helmcode",

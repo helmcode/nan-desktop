@@ -66,6 +66,16 @@ body {
   overflow: hidden;
 }
 
+/* R19-A: the fallback recovery screen (ErrorBoundary.tsx, startApp) is a
+   body child appended AFTER #root. #root is height:100% and body clips its
+   overflow, so in normal flow it would sit below the window and the user
+   would still see black. Pin it over the whole window instead. */
+#crash-recovery {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
 h1,
 h2,
 p {

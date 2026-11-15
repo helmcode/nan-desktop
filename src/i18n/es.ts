@@ -5,10 +5,13 @@ import type { Strings } from "./en";
 
 export const es: Strings = {
   crash: {
-    title: "Algo se ha cortado inesperadamente",
+    // "Algo no ha ido bien": calmer than "se ha cortado" (no hint of lost
+    // work) and the same wording as app.errorTitle.
+    title: "Algo no ha ido bien",
     body: "La app se ha detenido un momento. Tus conversaciones siguen guardadas en este equipo.",
-    retry: "Reintentar",
-    reload: "Recargar app",
+    retry: "Probar de nuevo",
+    restart: "Cerrar y volver a abrir",
+    restartHint: "Si probar de nuevo no funciona, esto cierra la app y la vuelve a abrir. Tus conversaciones siguen guardadas.",
   },
   app: {
     name: "Helmcode",

@@ -495,7 +495,7 @@ describe("Save as skill", () => {
     expect(
       screen.getByText("We could not summarize this chat, so we copied its start. Review it before saving."),
     ).toBeTruthy();
-    expect(screen.queryByText("Something cut out unexpectedly")).toBeNull();
+    expect(screen.queryByText("Something went wrong")).toBeNull();
   });
 
   it("round 15 (F4): without a tool call the deterministic template is the fallback", async () => {
