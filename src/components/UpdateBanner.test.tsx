@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 // Round 7 spec: a newer release shows a non-invasive banner with "Update";
-// the app checks on startup and every 2 h (R20-E; it was 6 h), never installs by itself, and the
-// close button hides the banner until the next check.
-import { afterEach, describe, expect, it, vi } from "vitest";
+// it never installs by itself, and the close button hides the banner until
+// the next check. R20-E: the shell owns the schedule (startup, every 2 h,
+// on return; see updateSchedule.test.ts and App.updateSchedule.test.tsx);
+// the banner only shows the result it is handed.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("../test/tauriMock")).eventModule());
@@ -12,66 +14,50 @@ import { invokedWith, resetTauri } from "../test/tauriMock";
 import { I18nProvider } from "../i18n";
 import type { Locale } from "../i18n/locale";
 import type { UpdateInfo } from "../core";
-import { UPDATE_CHECK_INTERVAL_MS, UpdateBanner } from "./UpdateBanner";
+import { UpdateBanner } from "./UpdateBanner";
 
 const NEXT: UpdateInfo = { version: "0.3.0", current_version: "0.2.0" };
 
-afterEach(() => {
-  cleanup();
-  vi.useRealTimers();
-});
+afterEach(cleanup);
 
-function renderBanner(
-  props: Partial<Parameters<typeof UpdateBanner>[0]> = {},
-  locale: Locale = "en",
-) {
+type Props = Parameters<typeof UpdateBanner>[0];
+
+function renderBanner(props: Partial<Props> = {}, locale: Locale = "en") {
+  const all: Props = { update: NEXT, checkSeq: 1, ...props };
   return render(
     <I18nProvider initial={locale}>
-      <UpdateBanner {...props} />
+      <UpdateBanner {...all} />
     </I18nProvider>,
   );
 }
 
 describe("UpdateBanner (round 7)", () => {
-  it("checks once on startup and shows the new version with an Update button", async () => {
-    const check = vi.fn(async () => NEXT);
+  it("shows the new version with an Update button, and never installs by itself", async () => {
     const install = vi.fn(async () => {});
-    renderBanner({ check, install });
-    expect(await screen.findByText("A new version is available: 0.3.0")).toBeTruthy();
+    renderBanner({ install });
+    expect(screen.getByText("A new version is available: 0.3.0")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Update" })).toBeTruthy();
-    expect(check).toHaveBeenCalledTimes(1);
-    // Never installs by itself.
+    await act(async () => {});
     expect(install).not.toHaveBeenCalled();
   });
 
-  it("speaks Spanish", async () => {
-    renderBanner({ check: async () => NEXT }, "es");
-    expect(await screen.findByText("Hay una versión nueva: 0.3.0")).toBeTruthy();
+  it("speaks Spanish", () => {
+    renderBanner({}, "es");
+    expect(screen.getByText("Hay una versión nueva: 0.3.0")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Actualizar" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Cerrar" })).toBeTruthy();
   });
 
-  it("shows nothing when there is no update", async () => {
-    const check = vi.fn(async () => null);
-    const { container } = renderBanner({ check });
-    await waitFor(() => expect(check).toHaveBeenCalledTimes(1));
-    expect(container.querySelector(".update-banner")).toBeNull();
-  });
-
-  it("stays silent when the check fails (offline, no feed yet)", async () => {
-    const check = vi.fn(async () => {
-      throw new Error("network");
-    });
-    const { container } = renderBanner({ check });
-    await waitFor(() => expect(check).toHaveBeenCalledTimes(1));
+  it("shows nothing when there is no update", () => {
+    const { container } = renderBanner({ update: null });
     expect(container.querySelector(".update-banner")).toBeNull();
   });
 
   it("Update downloads, installs and relaunches through the core, once", async () => {
     let finish: () => void = () => {};
     const install = vi.fn(() => new Promise<void>((resolve) => (finish = resolve)));
-    renderBanner({ check: async () => NEXT, install });
-    fireEvent.click(await screen.findByRole("button", { name: "Update" }));
+    renderBanner({ install });
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
     const busy = await screen.findByRole("button", { name: "Updating…" });
     // Round 14 (C3): aria-disabled, not `disabled`, so focus is not lost.
     expect(busy.getAttribute("aria-disabled")).toBe("true");
@@ -86,8 +72,8 @@ describe("UpdateBanner (round 7)", () => {
       .fn<() => Promise<void>>()
       .mockRejectedValueOnce(new Error("bad signature"))
       .mockResolvedValueOnce(undefined);
-    renderBanner({ check: async () => NEXT, install });
-    fireEvent.click(await screen.findByRole("button", { name: "Update" }));
+    renderBanner({ install });
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
     // Round 14 (C3): the failure is a role="alert", not just status text.
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Could not update. Try again.");
@@ -95,11 +81,11 @@ describe("UpdateBanner (round 7)", () => {
     await waitFor(() => expect(install).toHaveBeenCalledTimes(2));
   });
 
-  it("round 14 QA: another surface installing keeps this banner inert", async () => {
+  it("round 14 QA: another surface installing keeps this banner inert", () => {
     const install = vi.fn(async () => {});
-    const { container } = renderBanner({ check: async () => NEXT, install, externalBusy: true });
+    const { container } = renderBanner({ install, externalBusy: true });
 
-    const busy = await screen.findByRole("button", { name: "Updating…" });
+    const busy = screen.getByRole("button", { name: "Updating…" });
     expect(busy.getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(busy);
     expect(install).not.toHaveBeenCalled();
@@ -110,61 +96,21 @@ describe("UpdateBanner (round 7)", () => {
     expect(container.querySelector(".update-banner")).not.toBeNull();
   });
 
-  it("dismiss hides the banner until the next check, which brings it back", async () => {
-    vi.useFakeTimers();
-    const check = vi.fn(async () => NEXT);
-    const { container } = renderBanner({ check, intervalMs: 1000 });
-    await act(async () => {});
-    expect(container.querySelector(".update-banner")).not.toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
-    expect(container.querySelector(".update-banner")).toBeNull();
-
-    await act(async () => {
-      vi.advanceTimersByTime(999);
-    });
-    expect(container.querySelector(".update-banner")).toBeNull();
-    await act(async () => {
-      vi.advanceTimersByTime(1);
-    });
-    expect(check).toHaveBeenCalledTimes(2);
-    expect(container.querySelector(".update-banner")).not.toBeNull();
-  });
-
-  it("re-checks every 2 hours by default (R20-E)", async () => {
-    vi.useFakeTimers();
-    const check = vi.fn(async () => null);
-    renderBanner({ check });
-    await act(async () => {});
-    expect(check).toHaveBeenCalledTimes(1);
-    expect(UPDATE_CHECK_INTERVAL_MS).toBe(2 * 60 * 60 * 1000);
-    await act(async () => {
-      vi.advanceTimersByTime(UPDATE_CHECK_INTERVAL_MS);
-    });
-    expect(check).toHaveBeenCalledTimes(2);
-  });
-
-  it("defaults to the core commands update_check and update_install", async () => {
-    resetTauri({ update_check: () => NEXT, update_install: () => undefined });
+  it("installs through the core command update_install by default", async () => {
+    resetTauri({ update_install: () => undefined });
     renderBanner();
-    fireEvent.click(await screen.findByRole("button", { name: "Update" }));
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
     await waitFor(() => expect(invokedWith("update_install")).toHaveLength(1));
-    expect(invokedWith("update_check")).toHaveLength(1);
   });
-});
 
-// R20-E: in the app the shell owns the schedule; the banner only shows the
-// result it is handed, and every new check brings a dismissed banner back.
-describe("UpdateBanner, controlled by the shell (R20-E)", () => {
-  it("never checks by itself and shows the update it is given", async () => {
-    const check = vi.fn(async () => NEXT);
-    renderBanner({ check, update: NEXT, checkSeq: 1 });
-    expect(screen.getByText("A new version is available: 0.3.0")).toBeTruthy();
+  it("never checks by itself: the shell owns the schedule (R20-E)", async () => {
+    resetTauri({ update_check: () => NEXT });
+    renderBanner({ update: null, checkSeq: 0 });
     await act(async () => {});
-    expect(check).not.toHaveBeenCalled();
+    expect(invokedWith("update_check")).toHaveLength(0);
   });
 
-  it("no update: nothing; a dismissed banner comes back on the next check only", () => {
+  it("dismiss hides the banner until the next check, which brings it back", () => {
     const { container, rerender } = renderBanner({ update: null, checkSeq: 1 });
     expect(container.querySelector(".update-banner")).toBeNull();
     const show = (seq: number) =>
@@ -177,6 +123,7 @@ describe("UpdateBanner, controlled by the shell (R20-E)", () => {
     expect(container.querySelector(".update-banner")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(container.querySelector(".update-banner")).toBeNull();
+    // A re-render without a new check keeps it dismissed.
     show(2);
     expect(container.querySelector(".update-banner")).toBeNull();
     show(3);

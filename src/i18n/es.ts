@@ -248,7 +248,7 @@ export const es: Strings = {
       delete_path: "Borrar un archivo",
       run_command: "Ejecutar una orden",
       save_image: "Guardar una imagen",
-      write_website: "Guardar una web",
+      write_website: "Guardar un sitio web",
       unknown: "Usar tus archivos",
     },
     to: "a",
@@ -391,7 +391,8 @@ export const es: Strings = {
     crashed: "Esta vista previa ha dejado de funcionar. Ciérrala y vuelve a abrir el archivo.",
     messageCrashed: "No se ha podido mostrar este mensaje.",
     shellCrashed: "No se ha podido mostrar esta conversación. Elige otra o empieza un chat nuevo.",
-    siteCaption: "Vista previa de sitio aislado. Su código se ejecuta separado de la aplicación y sin acceso a la red.",
+    siteCaption: "Vista previa aislada: el código del sitio se ejecuta aparte de la aplicación y sin acceso a la red.",
+    siteScriptsOff: "Los scripts no se ejecutan en esta vista previa.",
     siteFrame: (name: string) => `Sitio web ${name}`,
   },
   skills: {

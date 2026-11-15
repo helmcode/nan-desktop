@@ -88,4 +88,59 @@ describe("R20-E: the app's update schedule", () => {
     await act(async () => {});
     expect(invokedWith("update_check")).toHaveLength(1);
   });
+
+  it("a failed check keeps the visible banner (and Update in the menu)", async () => {
+    let fail = false;
+    setup(() => {
+      if (fail) throw new Error("offline");
+      return { version: "0.2.9", current_version: "0.2.8" };
+    });
+    render(
+      <I18nProvider initial="en">
+        <App />
+      </I18nProvider>,
+    );
+    expect(await screen.findByText("A new version is available: 0.2.9")).toBeTruthy();
+
+    // Back from a 3-hour sleep before the network is up: the check fails.
+    const start = Date.now();
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    fail = true;
+    vi.spyOn(Date, "now").mockReturnValue(start + 3 * HOUR);
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(invokedWith("update_check")).toHaveLength(2));
+    await act(async () => {});
+    expect(screen.getByText("A new version is available: 0.2.9")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/ }));
+    expect(await screen.findByRole("menuitem", { name: "Update" })).toBeTruthy();
+  });
+
+  it("online right after a failed check runs a new check", async () => {
+    let fail = true;
+    setup(() => {
+      if (fail) throw new Error("offline");
+      return { version: "0.2.9", current_version: "0.2.8" };
+    });
+    render(
+      <I18nProvider initial="en">
+        <App />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(invokedWith("update_check")).toHaveLength(1));
+    await act(async () => {});
+    expect(screen.queryByText(/A new version is available/)).toBeNull();
+
+    // The network comes back a minute later, well inside the 30-minute gap.
+    fail = false;
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60 * 1000);
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(invokedWith("update_check")).toHaveLength(2));
+    expect(await screen.findByText("A new version is available: 0.2.9")).toBeTruthy();
+  });
 });

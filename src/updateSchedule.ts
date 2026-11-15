@@ -6,11 +6,13 @@
 // - When the window comes back (focus, visible again, back online) after
 //   more than 2 hours away: hidden, in the background, or asleep (a sleep
 //   shows up as a last check older than the interval).
-// - Never more than once per 30 minutes, and never two at a time.
+// - Never more than once per 30 minutes, and never two at a time. One
+//   exception: back online right after a failed check (woke up before the
+//   network) checks again at once.
 //
 // The decisions are pure and unit-tested; `startUpdateSchedule` wires them
-// to the window. A failing check is silent (the caller's `run` decides
-// what to show).
+// to the window. A failing check is silent: `run` rejects and the caller
+// keeps showing what it had.
 
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
@@ -50,7 +52,7 @@ type Win = Pick<EventTarget, "addEventListener" | "removeEventListener"> &
 type Doc = Pick<EventTarget, "addEventListener" | "removeEventListener"> & { visibilityState: DocumentVisibilityState };
 
 export interface UpdateScheduleOptions {
-  /** One check; its failure is swallowed here. */
+  /** One check; it rejects when the check failed (swallowed here). */
   run: () => Promise<unknown>;
   win?: Win;
   doc?: Doc;
@@ -74,6 +76,7 @@ export function startUpdateSchedule({
   let lastCheckAt: number | null = null;
   let awaySince: number | null = null;
   let inFlight = false;
+  let lastFailed = false;
   let stopped = false;
 
   const fire = (): void => {
@@ -82,7 +85,14 @@ export function startUpdateSchedule({
     lastCheckAt = now();
     void Promise.resolve()
       .then(run)
-      .catch(() => {})
+      .then(
+        () => {
+          lastFailed = false;
+        },
+        () => {
+          lastFailed = true;
+        },
+      )
       .finally(() => {
         inFlight = false;
       });
@@ -96,6 +106,12 @@ export function startUpdateSchedule({
     awaySince = null;
     if (shouldCheckOnReturn(now(), lastCheckAt, since, { resumeAfterMs, minGapMs })) fire();
   };
+  // Back online after a failed check: that failure was most likely the
+  // missing network, so retry now instead of waiting out the gap.
+  const onOnline = (): void => {
+    if (lastFailed) fire();
+    else back();
+  };
   const onVisibility = (): void => {
     if (doc.visibilityState === "hidden") leave();
     else back();
@@ -107,7 +123,7 @@ export function startUpdateSchedule({
   }, intervalMs);
   win.addEventListener("blur", leave);
   win.addEventListener("focus", back);
-  win.addEventListener("online", back);
+  win.addEventListener("online", onOnline);
   doc.addEventListener("visibilitychange", onVisibility);
 
   return () => {
@@ -115,7 +131,7 @@ export function startUpdateSchedule({
     win.clearInterval(timer);
     win.removeEventListener("blur", leave);
     win.removeEventListener("focus", back);
-    win.removeEventListener("online", back);
+    win.removeEventListener("online", onOnline);
     doc.removeEventListener("visibilitychange", onVisibility);
   };
 }

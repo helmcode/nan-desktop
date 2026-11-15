@@ -1058,18 +1058,15 @@ function ChatShell({
   // coming back after 2 hours away; never more than once per 30 minutes);
   // the banner shows its result.
   const [updateCheckSeq, setUpdateCheckSeq] = useState(0);
+  // A failed check (dev build, offline, no release feed yet, a wake-up
+  // before the network) is silent and changes nothing: the banner and the
+  // menu keep what the last good check found, and a dismissed banner stays
+  // dismissed. It rejects so the schedule can retry once back online.
   const runUpdateCheck = useCallback(async (): Promise<UpdateInfo | null> => {
-    try {
-      const found = await checkForUpdate();
-      setAvailableUpdate(found);
-      return found;
-    } catch {
-      // Silent by design: dev builds, offline and a missing release feed.
-      setAvailableUpdate(null);
-      return null;
-    } finally {
-      setUpdateCheckSeq((n) => n + 1);
-    }
+    const found = await checkForUpdate();
+    setAvailableUpdate(found);
+    setUpdateCheckSeq((n) => n + 1);
+    return found;
   }, []);
 
   useEffect(() => startUpdateSchedule({ run: runUpdateCheck }), [runUpdateCheck]);

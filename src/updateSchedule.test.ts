@@ -174,6 +174,42 @@ describe("startUpdateSchedule", () => {
     stop();
   });
 
+  it("online right after a failed check runs a new check (no 30-minute wait)", async () => {
+    let fail = true;
+    const run = vi.fn(async () => {
+      if (fail) throw new Error("offline");
+    });
+    const { win, doc } = fakeEnv();
+    const stop = startUpdateSchedule({ run, win, doc, now, intervalMs: 100 * HOUR });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run).toHaveBeenCalledTimes(1);
+    fail = false;
+    await advance(MIN);
+    win.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run).toHaveBeenCalledTimes(2);
+    // That one worked: the next online within the gap is debounced again.
+    win.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it("a failed check still debounces focus (no retry storm on every return)", async () => {
+    const run = vi.fn(async () => {
+      throw new Error("no feed");
+    });
+    const { win, doc } = fakeEnv();
+    const stop = startUpdateSchedule({ run, win, doc, now, intervalMs: 100 * HOUR });
+    await vi.advanceTimersByTimeAsync(0);
+    win.dispatchEvent(new Event("blur"));
+    await advance(5 * MIN);
+    win.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
   it("the interval respects the 30-minute gap after a return check", async () => {
     const run = vi.fn(async () => {});
     const { win, doc } = fakeEnv();

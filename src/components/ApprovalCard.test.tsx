@@ -72,6 +72,15 @@ describe("ApprovalCard (S14)", () => {
     }
   });
 
+  it("names the website action naturally in Spanish", () => {
+    render(
+      <I18nProvider initial="es">
+        <ApprovalCard card={{ ...base, action: "write_website" }} onRespond={vi.fn()} />
+      </I18nProvider>,
+    );
+    expect(screen.getByText("Guardar un sitio web")).toBeTruthy();
+  });
+
   it("shows the command folder, the permanent-delete warning and the diff", () => {
     renderCard({ action: "run_command", target: "ls", cwd: "/Users/ana/Proyecto" });
     expect(screen.getByText("/Users/ana/Proyecto")).toBeTruthy();

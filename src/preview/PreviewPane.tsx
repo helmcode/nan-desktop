@@ -80,6 +80,12 @@ function WebBody({ profileId, url, onOpenLink }: { profileId: string; url: strin
   );
 }
 
+/// The name write_website gives its files (mirrors the core's
+/// `is_tool_website` name check). Display only: never a reason to run code.
+function isWebsiteFileName(name: string): boolean {
+  return name.startsWith("website-") && name.endsWith(".html");
+}
+
 function FileBody({
   profileId,
   path,
@@ -112,7 +118,14 @@ function FileBody({
     case "text":
       return <Renderers.text bytes={bytes} path={path} markdown={false} />;
     case "html":
-      return <Renderers.html bytes={bytes} onOpenLink={onOpenLink} />;
+      // A website from a previous session (the core only flags this
+      // session's) falls back to the whitelist: say why it looks static.
+      return (
+        <>
+          {isWebsiteFileName(folderName(path)) && <p className="preview-note">{t.preview.siteScriptsOff}</p>}
+          <Renderers.html bytes={bytes} onOpenLink={onOpenLink} />
+        </>
+      );
     case "sheet":
       return <Renderers.sheet bytes={bytes} />;
     case "docx":

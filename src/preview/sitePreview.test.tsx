@@ -80,7 +80,7 @@ describe("PreviewPane: gating between the sandboxed site and the whitelist", () 
     expect(frame.hasAttribute("srcdoc")).toBe(false);
     expect(
       within(pane).getByText(
-        "Vista previa de sitio aislado. Su código se ejecuta separado de la aplicación y sin acceso a la red.",
+        "Vista previa aislada: el código del sitio se ejecuta aparte de la aplicación y sin acceso a la red.",
       ),
     ).toBeTruthy();
     // Nothing of the site runs or lands in the app's own DOM.
@@ -95,7 +95,26 @@ describe("PreviewPane: gating between the sandboxed site and the whitelist", () 
     const pane = screen.getByRole("complementary", { name: "Vista previa" });
     expect(await within(pane).findByText("Pan del día")).toBeTruthy();
     expect(pane.querySelector("iframe, script, style")).toBeNull();
-    expect(within(pane).queryByText(/Vista previa de sitio aislado/)).toBeNull();
+    expect(within(pane).queryByText(/Vista previa aislada/)).toBeNull();
+  });
+
+  it("a website-*.html the core did not flag (a previous session) says its scripts do not run", async () => {
+    resetTauri({ preview_read_file: () => ({ base64: b64(SITE), size: SITE.length, selfContainedWebsite: false }) });
+    renderPane(`${SESSION}/website-de-ayer.html`);
+    const pane = screen.getByRole("complementary", { name: "Vista previa" });
+    expect(await within(pane).findByText("Pan del día")).toBeTruthy();
+    expect(within(pane).getByText("Los scripts no se ejecutan en esta vista previa.")).toBeTruthy();
+    expect(pane.querySelector("iframe")).toBeNull();
+  });
+
+  it("the scripts note is English in English, and absent from any other .html", async () => {
+    resetTauri({ preview_read_file: () => ({ base64: b64(SITE), size: SITE.length, selfContainedWebsite: false }) });
+    const { unmount } = renderPane(`${SESSION}/website-old.html`, "en");
+    expect(await screen.findByText("Scripts do not run in this preview.")).toBeTruthy();
+    unmount();
+    renderPane("/Users/ana/Proyecto/landing.html", "en");
+    expect(await screen.findByText("Pan del día")).toBeTruthy();
+    expect(screen.queryByText("Scripts do not run in this preview.")).toBeNull();
   });
 
   it("keeps the whitelist when the reply carries a URL the frame must not load", async () => {
@@ -134,7 +153,7 @@ describe("SitePreview", () => {
     const frame = screen.getByTitle("Website website-bakery.html");
     expect(frame.getAttribute("sandbox")).toBe(SITE_SANDBOX);
     expect(SITE_SANDBOX).toBe("allow-scripts");
-    expect(screen.getByText("Isolated site preview. Its code runs apart from the app, with no network access.")).toBeTruthy();
+    expect(screen.getByText("Isolated preview: the site's code runs apart from the app, with no network access.")).toBeTruthy();
   });
 });
 
