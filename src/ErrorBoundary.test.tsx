@@ -231,6 +231,154 @@ describe("startApp", () => {
   });
 });
 
+// Every console.error argument flattened to text (Error message + stack too),
+// so a token cannot hide inside an Error object React logs as-is.
+function everythingLogged(): string {
+  return consoleError.mock.calls
+    .flat()
+    .map((arg: unknown) =>
+      arg instanceof Error
+        ? `${arg.name} ${arg.message} ${arg.stack ?? ""}`
+        : typeof arg === "string"
+          ? arg
+          : (() => {
+              try {
+                return JSON.stringify(arg);
+              } catch {
+                return String(arg);
+              }
+            })(),
+    )
+    .join("\n");
+}
+
+describe("startApp: caught errors take the redaction path", () => {
+  it("a regional boundary catch never logs the raw token (React 19 default onCaughtError bypass)", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    function Leaky(): never {
+      throw new Error("chat failed for sk-hke_leakleakleak123456");
+    }
+    let dispose = (): void => {};
+    await act(async () => {
+      dispose = startApp(root, () => (
+        <ErrorBoundary resetKey="x" fallback={<p>regional fallback</p>}>
+          <Leaky />
+        </ErrorBoundary>
+      ));
+    });
+    expect(screen.getByText("regional fallback")).toBeTruthy();
+    const logged = everythingLogged();
+    expect(logged).not.toContain("sk-hke_leakleakleak123456");
+    expect(logged).toContain("[redacted]");
+    const report = crashLog();
+    expect(report?.source).toBe("render");
+    expect(report?.message).toBe("chat failed for [redacted]");
+    act(() => dispose());
+    root.remove();
+  });
+
+  it("a root-boundary catch is logged exactly once, redacted", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    shouldThrow = true;
+    let dispose = (): void => {};
+    await act(async () => {
+      dispose = startApp(root, () => <Flaky />, { onReload: () => {} });
+    });
+    expect(screen.getByText("Something went wrong")).toBeTruthy();
+    expect(everythingLogged()).not.toContain("sk-hke_abcdef1234567890");
+    const reports = consoleError.mock.calls.filter(
+      (args) => args[0] === "[renderer] crash",
+    );
+    expect(reports).toHaveLength(1);
+    act(() => dispose());
+    root.remove();
+  });
+});
+
+describe("startApp: no stale recovery over a healthy app", () => {
+  function rejectionEvent(): Event {
+    return Object.assign(new Event("unhandledrejection"), {
+      reason: new Error("late"),
+    });
+  }
+  const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // After "Try again" the new app paints a moment later: until then #root is
+  // empty, exactly the window a stale crash check can land in.
+  let mode: "blank" | "slow" = "blank";
+  function SlowApp() {
+    const [ready, setReady] = useState(false);
+    useEffect(() => {
+      if (mode !== "slow") return;
+      const t = setTimeout(() => setReady(true), 30);
+      return () => clearTimeout(t);
+    }, []);
+    return ready ? <p>app is back</p> : null;
+  }
+
+  async function blankAppWithRecovery() {
+    mode = "blank";
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    let dispose = (): void => {};
+    await act(async () => {
+      dispose = startApp(root, () => <SlowApp />, { onReload: () => {} });
+    });
+    await act(async () => {
+      window.dispatchEvent(rejectionEvent());
+      await tick();
+    });
+    expect(screen.getByText("Something went wrong")).toBeTruthy();
+    return () => {
+      act(() => dispose());
+      root.remove();
+    };
+  }
+
+  it("an error logged during the retry window leaves no recovery once the app is back", async () => {
+    const dispose = await blankAppWithRecovery();
+    mode = "slow";
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    });
+    // #root is still empty: this error's check pops the recovery up again...
+    await act(async () => {
+      window.dispatchEvent(rejectionEvent());
+      await tick();
+    });
+    // ...but once the re-mounted app paints, it must not stay over it.
+    await act(async () => {
+      await tick(60);
+    });
+    expect(screen.getByText("app is back")).toBeTruthy();
+    expect(screen.queryByText("Something went wrong")).toBeNull();
+    expect(document.getElementById("crash-recovery")).toBeNull();
+    dispose();
+  });
+
+  it("a check scheduled right before Try again does not fire after the retry", async () => {
+    const dispose = await blankAppWithRecovery();
+    mode = "slow";
+    await act(async () => {
+      // Logged while the app is still blank: its check is pending...
+      window.dispatchEvent(rejectionEvent());
+      // ...and Try again lands before it runs.
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await tick();
+    });
+    // #root is still empty here, so a surviving check would have shown it.
+    expect(document.getElementById("crash-recovery")).toBeNull();
+    await act(async () => {
+      await tick(60);
+    });
+    expect(screen.getByText("app is back")).toBeTruthy();
+    expect(document.getElementById("crash-recovery")).toBeNull();
+    dispose();
+  });
+});
+
 describe("redaction", () => {
   it("strips keys, bearer headers and JWTs", () => {
     const text = redactSecrets(

@@ -117,7 +117,7 @@ export function RecoveryScreen({
 }) {
   const s = crashStrings();
   return (
-    <main className="center-screen crash-screen">
+    <main className="center-screen">
       <div className="center-card" role="alert" aria-labelledby="crash-title">
         <h1 id="crash-title">{s.title}</h1>
         <p className="lede">{s.body}</p>
@@ -200,20 +200,35 @@ export function isBlank(rootEl: HTMLElement): boolean {
   return rootEl.childElementCount === 0;
 }
 
+/** The uninstaller, plus a way to drop checks that have not run yet. */
+export interface CrashGuard {
+  (): void;
+  /** Cancel every blank check still waiting to run. */
+  cancelPending: () => void;
+}
+
 /**
  * Log every window `error` / `unhandledrejection` and call `onBlank` when
  * the app root is empty afterwards (checked after the current task, so
- * React has finished tearing down). Returns the uninstaller.
+ * React has finished tearing down). Returns the uninstaller, which also
+ * cancels pending checks.
  */
 export function installCrashGuard(
   target: Window,
   rootEl: HTMLElement,
   onBlank: () => void,
-): () => void {
+): CrashGuard {
+  const pending = new Set<ReturnType<typeof setTimeout>>();
   const check = (): void => {
-    setTimeout(() => {
+    const id = setTimeout(() => {
+      pending.delete(id);
       if (isBlank(rootEl)) onBlank();
     }, 0);
+    pending.add(id);
+  };
+  const cancelPending = (): void => {
+    pending.forEach((id) => clearTimeout(id));
+    pending.clear();
   };
   const onError = (event: ErrorEvent): void => {
     logCrash("error", event.error ?? event.message);
@@ -225,10 +240,12 @@ export function installCrashGuard(
   };
   target.addEventListener("error", onError);
   target.addEventListener("unhandledrejection", onRejection);
-  return () => {
+  const uninstall = (): void => {
     target.removeEventListener("error", onError);
     target.removeEventListener("unhandledrejection", onRejection);
+    cancelPending();
   };
+  return Object.assign(uninstall, { cancelPending });
 }
 
 // ------------------------------------------------------------ bootstrap --
@@ -238,6 +255,17 @@ export function installCrashGuard(
  * gives up anyway (an error that escaped every boundary) the recovery
  * screen is rendered in its own container: "Try again" mounts a brand-new
  * app root, "Restart the app" reloads the page. Returns a disposer (tests).
+ *
+ * INVARIANT: the detached recovery only ever covers a blank #root. Blank
+ * checks still pending when "Try again" starts are canceled, and the moment
+ * #root has content again (the re-mounted app painted) pending checks are
+ * canceled and the recovery is hidden. Without this, an error logged while
+ * #root is transiently empty during a retry would pop the recovery over the
+ * healthy app, with nothing to take it down.
+ *
+ * Every error React reports (caught by any boundary, or uncaught) goes
+ * through `logCrash`: React 19's default `onCaughtError` console.errors the
+ * raw error, which would put unredacted tokens in the webview log.
  */
 export function startApp(
   rootEl: HTMLElement,
@@ -257,13 +285,28 @@ export function startApp(
     recoveryEl = null;
   };
 
+  let guard: CrashGuard | null = null;
+  const uncaughtChecks = new Set<ReturnType<typeof setTimeout>>();
+  const cancelChecks = (): void => {
+    uncaughtChecks.forEach((id) => clearTimeout(id));
+    uncaughtChecks.clear();
+    guard?.cancelPending();
+  };
+
   const mount = (): void => {
     appRoot = createRoot(rootEl, {
+      onCaughtError: (error, info) => {
+        // AppErrorBoundary.componentDidCatch already logs its own catches.
+        if (info.errorBoundary instanceof AppErrorBoundary) return;
+        logCrash("render", error, info.componentStack);
+      },
       onUncaughtError: (error, info) => {
         logCrash("uncaught", error, info.componentStack);
-        setTimeout(() => {
+        const id = setTimeout(() => {
+          uncaughtChecks.delete(id);
           if (isBlank(rootEl)) showRecovery();
         }, 0);
+        uncaughtChecks.add(id);
       },
     });
     appRoot.render(
@@ -272,6 +315,7 @@ export function startApp(
   };
 
   const retry = (): void => {
+    cancelChecks();
     hideRecovery();
     appRoot?.unmount();
     mount();
@@ -294,10 +338,20 @@ export function startApp(
     recoveryRoot.render(<RecoveryScreen onRetry={retry} onReload={onReload} />);
   }
 
-  const uninstall = installCrashGuard(target, rootEl, showRecovery);
+  // #root has content again: the app is alive, so no recovery may cover it.
+  const observer = new MutationObserver(() => {
+    if (isBlank(rootEl)) return;
+    cancelChecks();
+    hideRecovery();
+  });
+  observer.observe(rootEl, { childList: true });
+
+  guard = installCrashGuard(target, rootEl, showRecovery);
   mount();
   return () => {
-    uninstall();
+    observer.disconnect();
+    guard?.();
+    cancelChecks();
     hideRecovery();
     appRoot?.unmount();
   };
