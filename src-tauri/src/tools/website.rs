@@ -196,6 +196,13 @@ fn lower(html: &str) -> String {
     html.to_ascii_lowercase()
 }
 
+/// Attributes whose value is a whole HTML document (rendered as-is by the
+/// browser): the value is validated like the top-level document.
+const MARKUP_ATTRIBUTES: &[&str] = &["srcdoc"];
+
+/// How deep `srcdoc` documents may nest before the app refuses them.
+const MAX_SRCDOC_DEPTH: usize = 2;
+
 /// Check a whole document: size, text, and no network reference.
 pub fn validate_html(html: &str) -> Result<(), String> {
     if html.trim().is_empty() {
@@ -210,8 +217,13 @@ pub fn validate_html(html: &str) -> Result<(), String> {
     if html.contains('\0') {
         return Err("html contains NUL bytes; it must be text".into());
     }
+    check_document(html, 0)
+}
+
+/// The network checks for one document (the top level, or a `srcdoc`).
+fn check_document(html: &str, depth: usize) -> Result<(), String> {
     let low = lower(html);
-    check_attributes(html, &low)?;
+    check_attributes(html, &low, depth)?;
     check_blocks(
         &low,
         "<script",
@@ -231,8 +243,77 @@ pub fn validate_html(html: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Every `name=value` attribute inside a tag, for the URL attributes.
-fn check_attributes(html: &str, low: &str) -> Result<(), String> {
+/// One attribute of a tag: byte ranges of its name and value.
+struct Attribute {
+    name: (usize, usize),
+    value: (usize, usize),
+}
+
+/// Tokenize the tag starting at `low[start] == '<'` the way the HTML
+/// tokenizer does: a `>` inside a quoted attribute value does not end the
+/// tag, while a quote anywhere else (an attribute name) is plain text.
+/// Returns the index of the closing `>` (or the document length) and every
+/// attribute that has a value.
+fn scan_tag(low: &str, start: usize) -> (usize, Vec<Attribute>) {
+    let b = low.as_bytes();
+    let ws = |c: u8| matches!(c, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ');
+    let mut attributes = Vec::new();
+    // The tag name: up to whitespace, `/` or `>` (`</` is part of it).
+    let mut i = start + 1;
+    if b.get(i) == Some(&b'/') {
+        i += 1;
+    }
+    while i < b.len() && !ws(b[i]) && b[i] != b'/' && b[i] != b'>' {
+        i += 1;
+    }
+    loop {
+        // Before an attribute name.
+        while i < b.len() && (ws(b[i]) || b[i] == b'/') {
+            i += 1;
+        }
+        if i >= b.len() || b[i] == b'>' {
+            return (i, attributes);
+        }
+        // The attribute name (a leading `=` belongs to it, as in browsers).
+        let name_start = i;
+        i += 1;
+        while i < b.len() && !ws(b[i]) && !matches!(b[i], b'/' | b'>' | b'=') {
+            i += 1;
+        }
+        let name = (name_start, i);
+        // After the name: only `=` introduces a value.
+        while i < b.len() && ws(b[i]) {
+            i += 1;
+        }
+        if b.get(i) != Some(&b'=') {
+            continue;
+        }
+        i += 1;
+        while i < b.len() && ws(b[i]) {
+            i += 1;
+        }
+        let value = match b.get(i) {
+            Some(&q @ (b'"' | b'\'')) => {
+                let from = i + 1;
+                let to = low[from..].find(q as char).map_or(b.len(), |at| from + at);
+                i = (to + 1).min(b.len());
+                (from, to)
+            }
+            Some(b'>') | None => continue,
+            _ => {
+                let from = i;
+                while i < b.len() && !ws(b[i]) && b[i] != b'>' {
+                    i += 1;
+                }
+                (from, i)
+            }
+        };
+        attributes.push(Attribute { name, value });
+    }
+}
+
+/// Every `name=value` attribute of every tag, for the URL attributes.
+fn check_attributes(html: &str, low: &str, depth: usize) -> Result<(), String> {
     let bytes = low.as_bytes();
     let mut i = 0;
     while let Some(open) = low[i..].find('<') {
@@ -245,14 +326,30 @@ fn check_attributes(html: &str, low: &str) -> Result<(), String> {
                 .map_or(low.len(), |end| start + end + 3);
             continue;
         }
-        let Some(close) = low[start..].find('>') else {
-            break;
-        };
-        let end = start + close;
+        let next = bytes.get(start + 1).copied();
+        let after_slash = bytes.get(start + 2).copied();
+        let is_tag = next.is_some_and(|c| c.is_ascii_alphabetic())
+            || (next == Some(b'/') && after_slash.is_some_and(|c| c.is_ascii_alphabetic()));
+        if !is_tag {
+            // `<!doctype>`, `<?...>`, `</ ...>` end at the first `>`; a `<`
+            // followed by anything else is text.
+            i = if matches!(next, Some(b'!' | b'?' | b'/')) {
+                low[start..]
+                    .find('>')
+                    .map_or(low.len(), |end| start + end + 1)
+            } else {
+                start + 1
+            };
+            continue;
+        }
+        let (end, attributes) = scan_tag(low, start);
+        for attribute in &attributes {
+            let name = &low[attribute.name.0..attribute.name.1];
+            let value = &html[attribute.value.0..attribute.value.1];
+            check_attribute(name, value, depth)?;
+        }
+        i = (end + 1).min(low.len());
         let tag = &low[start + 1..end];
-        let original = &html[start + 1..end];
-        check_tag(tag, original)?;
-        i = end + 1;
         for raw in ["script", "style"] {
             if tag.starts_with(raw)
                 && bytes
@@ -267,70 +364,85 @@ fn check_attributes(html: &str, low: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The attributes of one tag (`tag` lowercased, `original` as written).
-fn check_tag(tag: &str, original: &str) -> Result<(), String> {
-    let b = tag.as_bytes();
-    // Skip the element name.
-    let mut i = b
-        .iter()
-        .position(|c| c.is_ascii_whitespace())
-        .unwrap_or(b.len());
-    while i < b.len() {
-        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b'/') {
-            i += 1;
-        }
-        let name_start = i;
-        while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'=' && b[i] != b'/' {
-            i += 1;
-        }
-        let name = &tag[name_start..i];
-        while i < b.len() && b[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= b.len() || b[i] != b'=' {
-            continue;
-        }
-        i += 1;
-        while i < b.len() && b[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        let (value_start, value_end) = match b.get(i) {
-            Some(q @ (b'"' | b'\'')) => {
-                let from = i + 1;
-                let to = tag[from..].find(*q as char).map_or(b.len(), |at| from + at);
-                i = (to + 1).min(b.len());
-                (from, to)
+/// One attribute (`name` lowercased, `value` as written).
+fn check_attribute(name: &str, value: &str, depth: usize) -> Result<(), String> {
+    if URL_ATTRIBUTES.contains(&name) && !local_value(name, &decode_entities(value)) {
+        return Err(refused(&format!(
+            "the {name} attribute points outside the file ({})",
+            shorten(value)
+        )));
+    }
+    if MARKUP_ATTRIBUTES.contains(&name) {
+        let inner = decode_markup(value);
+        if !inner.trim().is_empty() {
+            if depth >= MAX_SRCDOC_DEPTH {
+                return Err(refused("srcdoc documents are nested too deeply"));
             }
-            _ => {
-                let from = i;
-                while i < b.len() && !b[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-                (from, i)
-            }
-        };
-        let value = &original[value_start..value_end];
-        if URL_ATTRIBUTES.contains(&name) && !local_value(name, &decode_entities(value)) {
-            return Err(refused(&format!(
-                "the {name} attribute points outside the file ({})",
-                shorten(value)
-            )));
-        }
-        if name == "http-equiv" && value.trim().eq_ignore_ascii_case("refresh") {
-            return Err(refused("a meta refresh is not allowed"));
-        }
-        if name == "style" && css_remote(&value.to_ascii_lowercase()) {
-            return Err(refused("an inline style loads a remote URL"));
-        }
-        if name.starts_with("on")
-            && REMOTE_MARKERS
-                .iter()
-                .any(|m| value.to_ascii_lowercase().contains(m))
-        {
-            return Err(refused("an event handler references a remote URL"));
+            check_document(&inner, depth + 1)?;
         }
     }
+    if name == "http-equiv" && value.trim().eq_ignore_ascii_case("refresh") {
+        return Err(refused("a meta refresh is not allowed"));
+    }
+    if name == "style" && css_remote(&value.to_ascii_lowercase()) {
+        return Err(refused("an inline style loads a remote URL"));
+    }
+    if name.starts_with("on")
+        && REMOTE_MARKERS
+            .iter()
+            .any(|m| value.to_ascii_lowercase().contains(m))
+    {
+        return Err(refused("an event handler references a remote URL"));
+    }
     Ok(())
+}
+
+/// Decode an attribute value that holds markup (`srcdoc`), in one pass:
+/// numeric references and the named ones markup is written with.
+fn decode_markup(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let body_end = rest[1..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '#'))
+            .map_or(rest.len(), |e| e + 1);
+        let body = &rest[1..body_end];
+        let decoded = if let Some(num) = body.strip_prefix('#') {
+            let code = match num.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                None => num.parse::<u32>().ok(),
+            };
+            code.and_then(char::from_u32)
+        } else {
+            match body.to_ascii_lowercase().as_str() {
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "amp" => Some('&'),
+                "colon" => Some(':'),
+                "sol" => Some('/'),
+                "tab" => Some('\t'),
+                "newline" => Some('\n'),
+                _ => None,
+            }
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                let consumed = body_end + usize::from(rest[body_end..].starts_with(';'));
+                rest = &rest[consumed..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The few entities that could hide a scheme (`&#58;` for `:`...).
@@ -498,6 +610,66 @@ mod tests {
         let doc = "<html><body><p>Visítanos en https://panaderia.es</p>\
             <!-- <script src=\"https://x.io/a.js\"></script> --></body></html>";
         validate_html(doc).expect("plain text and comments are not loaded");
+    }
+
+    #[test]
+    fn a_quoted_gt_does_not_end_the_tag_early() {
+        for html in [
+            "<img alt=\"a > b\" src=\"https://cdn.example.com/a.png\">",
+            "<img alt='a > b' src='https://cdn.example.com/a.png'>",
+            "<img title=\"x>\" alt=\"y>\" srcset=\"https://x.io/a.png 2x\">",
+            "<a title=\"1 > 0\" href=\"https://example.com\">x</a>",
+            "<div data-x=\"a>b\" style=\"background:url(https://x.io/a.png)\"></div>",
+            "<button title=\"a>b\" onclick=\"location='https://x.io'\">go</button>",
+            "<meta name=\"x\" content=\"a>b\" http-equiv=\"refresh\">",
+            // A quote that is part of an attribute NAME does not open a value
+            // (as in browsers): the tag ends at the first `>`.
+            "<p =\"x><img src=\"https://x.io/a.png\">",
+            // Quotes inside an unquoted value are plain characters.
+            "<p a=b\"c><img src=\"https://x.io/a.png\">",
+        ] {
+            let doc = format!("<!doctype html><html><body>{html}</body></html>");
+            assert!(validate_html(&doc).is_err(), "should refuse: {html}");
+        }
+    }
+
+    #[test]
+    fn srcdoc_markup_is_validated_like_the_document() {
+        for html in [
+            "<iframe srcdoc=\"<img src='https://x.io/a.png'>\"></iframe>",
+            "<iframe srcdoc=\"&lt;img src=&quot;https://x.io/a.png&quot;&gt;\"></iframe>",
+            "<iframe srcdoc=\"&lt;script&gt;fetch('https://x.io')&lt;/script&gt;\"></iframe>",
+            "<iframe srcdoc=\"<a href='otra.html'>x</a>\"></iframe>",
+            "<iframe srcdoc=\"<link rel=stylesheet href=//x.io/a.css>\"></iframe>",
+            "<iframe srcdoc=\"&lt;img src=&#x27;https&#58;//x.io/a.png&#x27;&gt;\"></iframe>",
+            "<iframe title=\"a>b\" srcdoc=\"<img src='https://x.io/a.png'>\"></iframe>",
+            "<iframe srcdoc=\"<iframe srcdoc='&lt;iframe srcdoc=&quot;x&quot;&gt;'></iframe>\"></iframe>",
+        ] {
+            let doc = format!("<!doctype html><html><body>{html}</body></html>");
+            assert!(validate_html(&doc).is_err(), "should refuse: {html}");
+        }
+        validate_html(
+            "<html><body><iframe srcdoc=\"&lt;p class=&quot;x&quot;&gt;Hola &amp; adiós&lt;/p&gt;\
+             &lt;a href=&quot;#top&quot;&gt;arriba&lt;/a&gt;\"></iframe>\
+             <iframe srcdoc=\"\"></iframe></body></html>",
+        )
+        .expect("a local srcdoc is fine");
+    }
+
+    #[test]
+    fn quoted_gt_without_remote_urls_still_passes() {
+        validate_html(
+            "<!doctype html><html><head><title>1 > 0</title>\
+             <style>a > b{color:red}</style></head><body>\
+             <img alt=\"a > b\" src=\"data:image/png;base64,AAAA\">\
+             <p title='x > y' data-rule=\"a>b>c\">3 > 2 &gt; 1 and \"quoted > text\"</p>\
+             <a title=\"next >\" href=\"#next\">next</a>\
+             <input value=\"a=>b\" placeholder='>'>\
+             <script>if (1 > 0 && \"a>b\") { console.log('<p>') }</script>\
+             <p>5 < 6 = \"no tag here\" and x<y</p>\
+             </body></html>",
+        )
+        .expect("quoted > with no remote URL");
     }
 
     #[test]
