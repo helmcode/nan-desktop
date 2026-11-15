@@ -4,6 +4,12 @@
 import type { Strings } from "./en";
 
 export const es: Strings = {
+  crash: {
+    title: "Algo se ha cortado inesperadamente",
+    body: "La app se ha detenido un momento. Tus conversaciones siguen guardadas en este equipo.",
+    retry: "Reintentar",
+    reload: "Recargar app",
+  },
   app: {
     name: "Helmcode",
     windowTitle: "Helmcode Desktop",
@@ -247,6 +253,7 @@ export const es: Strings = {
     permanent: "Aquí no hay papelera: este borrado no se puede deshacer.",
   },
   settings: {
+    surfaceCrashed: "Esta sección ha dejado de funcionar. Lo que tenías sigue guardado; vuelve a intentarlo.",
     title: "Ajustes",
     sections: "Secciones de ajustes",
     back: "Volver al chat",

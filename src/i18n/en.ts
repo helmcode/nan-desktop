@@ -3,6 +3,12 @@
 // language, and never an em dash.
 
 export const en = {
+  crash: {
+    title: "Something cut out unexpectedly",
+    body: "The app stopped for a moment. Your conversations are saved on this computer.",
+    retry: "Retry",
+    reload: "Reload app",
+  },
   app: {
     name: "Helmcode",
     windowTitle: "Helmcode Desktop",
@@ -249,6 +255,7 @@ export const en = {
     permanent: "There is no trash here: this deletion cannot be undone.",
   },
   settings: {
+    surfaceCrashed: "This section stopped working. Your work is saved; try again.",
     title: "Settings",
     sections: "Settings sections",
     back: "Back to chat",
