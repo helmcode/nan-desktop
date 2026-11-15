@@ -129,8 +129,6 @@ export const en = {
     settings: "Settings",
     emptyTitle: "How can I help?",
     emptyHint: "Enter sends. Shift + Enter adds a line.",
-    freshRealm: (email: string | null) =>
-      `${email ? `This is your space as ${email} on this device` : "This is your space on this device"} and it is empty for now. What other accounts saved stays here: only someone who signs in as that account sees it.`,
     interrupted: "The reply was interrupted.",
     thinking: "Thinking…",
     searching: "Searching the web…",

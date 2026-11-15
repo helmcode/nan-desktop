@@ -5,8 +5,8 @@
 // whichever realm is active, exactly like the Rust core resolves every
 // command through the active user's realm. The renderer surfaces covered:
 // the history sidebar (conversation_list), the open transcript
-// (messages_list), the identity chip, the fresh-realm notice and the
-// per-conversation localStorage (folder selection, shown suggestions).
+// (messages_list), the identity chip, the absence of any empty-realm
+// notice (isolation is self-evident) and the per-conversation localStorage (folder selection, shown suggestions).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { emit, invokedWith, resetTauri } from "./test/tauriMock";
@@ -125,19 +125,16 @@ describe("privacy fix: per-user realms in the UI", () => {
     await signOut();
     await signIn(state, "realm-b", true);
 
-    // B: the chip names B, the sidebar and the chat are empty, and the
-    // empty state says this is a fresh space on this computer.
+    // B: the chip names B, the sidebar and the chat are empty, and no
+    // empty-realm notice is shown (owner: isolation is self-evident).
     expect(await screen.findByText("bea@example.com")).toBeTruthy();
-    expect(
-      await screen.findByText(
-        "This is your space as bea@example.com on this device and it is empty for now. What other accounts saved stays here: only someone who signs in as that account sees it.",
-      ),
-    ).toBeTruthy();
+    expect(await screen.findByText("How can I help?")).toBeTruthy();
+    expect(screen.queryByText(/This is your space/)).toBeNull();
     expect(screen.queryByText("Ana private plans")).toBeNull();
     expect(screen.queryByText(/A-SECRET/)).toBeNull();
     expect(screen.queryByText("ana@example.com")).toBeNull();
 
-    // A signs back in: their realm (and only theirs) is back, no notice.
+    // A signs back in: their realm (and only theirs) is back.
     await signOut();
     await signIn(state, "realm-a", false);
     expect(await screen.findByText("Ana private plans")).toBeTruthy();

@@ -127,8 +127,6 @@ export const es: Strings = {
     settings: "Ajustes",
     emptyTitle: "¿En qué puedo ayudarte?",
     emptyHint: "Intro envía. Mayús + Intro añade una línea.",
-    freshRealm: (email: string | null) =>
-      `${email ? `Este es tu espacio como ${email} en este dispositivo` : "Este es tu espacio en este dispositivo"} y de momento está vacío. Lo que guardaron otras cuentas sigue aquí: solo lo ve quien entra con esa cuenta.`,
     interrupted: "La respuesta se interrumpió.",
     thinking: "Pensando…",
     searching: "Buscando en internet…",

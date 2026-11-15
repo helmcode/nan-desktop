@@ -153,8 +153,6 @@ interface DeviceStarted {
 interface DeviceApproved {
   key_alias: string;
   profile_id: string;
-  /** The account has no data on this device yet (privacy fix). */
-  fresh_realm?: boolean;
 }
 interface DeviceError {
   kind: string;
@@ -696,14 +694,10 @@ function ChatShell({
   overview,
   busy,
   onSignOut,
-  freshRealm = false,
 }: {
   overview: ProfileOverview;
   busy: boolean;
   onSignOut: () => void;
-  /** This account signed in for the first time on this device (privacy
-   * fix): its realm starts empty and the empty state says so. */
-  freshRealm?: boolean;
 }) {
   const t = useT();
   // Privacy fix: per-conversation renderer storage is scoped to the realm.
@@ -2533,11 +2527,6 @@ function ChatShell({
                     <BrandMark size="xl" />
                     <p className="empty-title">{t.chat.emptyTitle}</p>
                     <p className="empty-hint">{t.chat.emptyHint}</p>
-                    {freshRealm && conversations.length === 0 && (
-                      <p className="empty-fresh" role="status">
-                        {t.chat.freshRealm(overview.active_user?.email ?? null)}
-                      </p>
-                    )}
                   </div>
                 )}
                 <ApprovalCards cards={placed.after.get(0)} onRespond={(id, g) => void respondApproval(id, g)} />
@@ -2853,8 +2842,6 @@ function App() {
   const [overview, setOverview] = useState<ProfileOverview | null>(null);
   const [pickerError, setPickerError] = useState(false);
   const [busy, setBusy] = useState(false);
-  // Privacy fix: the account that just signed in starts with a fresh realm.
-  const [freshRealm, setFreshRealm] = useState(false);
 
   // Device-flow login state.
   const [authProfileId, setAuthProfileId] = useState<string | null>(null);
@@ -2896,7 +2883,6 @@ function App() {
         refreshOverview()
           .then((next) => {
             setOverview(next);
-            setFreshRealm(event.payload.fresh_realm === true);
             setAuthProfileId(null);
             setScreen("chat");
           })
@@ -2953,7 +2939,6 @@ function App() {
       await invoke("device_logout", { profileId });
       const next = await refreshOverview();
       setOverview(next);
-      setFreshRealm(false);
       setScreen("picker");
     } catch {
       setScreen("error");
@@ -3032,7 +3017,6 @@ function App() {
       overview={overview}
       busy={busy}
       onSignOut={() => void signOut()}
-      freshRealm={freshRealm}
     />
   );
 }
