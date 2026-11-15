@@ -391,6 +391,8 @@ export const en = {
     crashed: "This preview stopped working. Close it and open the file again.",
     messageCrashed: "This message could not be shown.",
     shellCrashed: "This conversation could not be shown. Pick another one or start a new chat.",
+    siteCaption: "Isolated site preview. Its code runs apart from the app, with no network access.",
+    siteFrame: (name: string) => `Website ${name}`,
   },
   skills: {
     title: "Skills",

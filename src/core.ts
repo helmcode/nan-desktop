@@ -183,11 +183,37 @@ export interface FilePreviewPayload {
   /// Standard base64 of the file bytes.
   base64: string;
   size: number;
+  /// R20-D: set by the CORE only, when its gating marker says this is a
+  /// website write_website wrote this session (src-tauri/src/site_preview.rs).
+  selfContainedWebsite?: boolean;
+  /// The sandboxed site URL, present with selfContainedWebsite.
+  siteUrl?: string;
+}
+
+export interface FileForPreview {
+  bytes: Uint8Array;
+  /// The sandboxed site URL when the core flagged the file as a
+  /// self-contained website; null for every other file.
+  siteUrl: string | null;
+}
+
+/// The only origins a sandboxed site may be loaded from (the core's custom
+/// scheme; WebView2 serves it as http://nan-site.localhost). Anything else
+/// in the reply is ignored, so the frame never loads an arbitrary URL.
+const SITE_URL = /^(?:nan-site:\/\/localhost|http:\/\/nan-site\.localhost)\/[0-9a-f]{32}$/;
+
+export function sandboxedSiteUrl(payload: FilePreviewPayload): string | null {
+  if (payload.selfContainedWebsite !== true || typeof payload.siteUrl !== "string") return null;
+  return SITE_URL.test(payload.siteUrl) ? payload.siteUrl : null;
+}
+
+export async function readFileWithSiteForPreview(profileId: string, path: string): Promise<FileForPreview> {
+  const payload = await invoke<FilePreviewPayload>("preview_read_file", { profileId, path });
+  return { bytes: base64ToBytes(payload.base64), siteUrl: sandboxedSiteUrl(payload) };
 }
 
 export async function readFileForPreview(profileId: string, path: string): Promise<Uint8Array> {
-  const payload = await invoke<FilePreviewPayload>("preview_read_file", { profileId, path });
-  return base64ToBytes(payload.base64);
+  return (await readFileWithSiteForPreview(profileId, path)).bytes;
 }
 
 // ---------------------------------------------------------------------------

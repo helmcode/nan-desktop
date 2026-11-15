@@ -40,12 +40,16 @@ pub fn navigation_allowed(raw: &str) -> bool {
     };
     match url.scheme() {
         // App custom protocol + asset protocol (local image previews).
-        "tauri" | "asset" => url.host_str() == Some("localhost"),
+        // R20-D: the sandboxed site preview frame (`site_preview`), which
+        // is served with its own CSP and a `sandbox` directive.
+        "tauri" | "asset" | "nan-site" => url.host_str() == Some("localhost"),
         // Windows app/asset origins and the Vite dev server.
         "http" | "https" => {
             let host = url.host_str().unwrap_or_default();
-            matches!(host, "tauri.localhost" | "asset.localhost")
-                || matches!(host, "localhost" | "127.0.0.1") && url.port() == Some(1420)
+            matches!(
+                host,
+                "tauri.localhost" | "asset.localhost" | "nan-site.localhost"
+            ) || matches!(host, "localhost" | "127.0.0.1") && url.port() == Some(1420)
         }
         // Pseudo-URLs: blank frames, blob previews, inline data URIs.
         "about" | "blob" | "data" | "ipc" => true,
@@ -129,5 +133,15 @@ mod tests {
         // A spoofed host on the tauri scheme is not the app origin.
         assert!(!navigation_allowed("tauri://evil.example/index.html"));
         assert!(!navigation_allowed("https://tauri.localhost.evil.example/"));
+    }
+
+    #[test]
+    fn navigation_guard_allows_only_the_local_sandboxed_site_origin() {
+        assert!(navigation_allowed("nan-site://localhost/0123abcd"));
+        assert!(navigation_allowed("http://nan-site.localhost/0123abcd"));
+        assert!(!navigation_allowed("nan-site://evil.example/0123abcd"));
+        assert!(!navigation_allowed(
+            "http://nan-site.localhost.evil.example/x"
+        ));
     }
 }

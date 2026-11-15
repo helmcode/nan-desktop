@@ -366,6 +366,8 @@ fn stop_realm_tasks(app: &AppHandle) {
     crate::images::abort_all_images(&app.state::<crate::images::ImagesState>());
     app.state::<crate::tools::ToolsState>()
         .reset_for_realm_switch();
+    // The previous user's sandboxed site previews go with their realm.
+    app.state::<crate::site_preview::SiteRegistry>().clear();
     // A previous user's rejected session must not park the next user's
     // account memory for the rest of the run.
     let memory = app.state::<crate::memory::MemoryState>();

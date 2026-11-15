@@ -391,6 +391,8 @@ export const es: Strings = {
     crashed: "Esta vista previa ha dejado de funcionar. Ciérrala y vuelve a abrir el archivo.",
     messageCrashed: "No se ha podido mostrar este mensaje.",
     shellCrashed: "No se ha podido mostrar esta conversación. Elige otra o empieza un chat nuevo.",
+    siteCaption: "Vista previa de sitio aislado. Su código se ejecuta separado de la aplicación y sin acceso a la red.",
+    siteFrame: (name: string) => `Sitio web ${name}`,
   },
   skills: {
     title: "Skills",

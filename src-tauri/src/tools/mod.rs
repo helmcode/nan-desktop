@@ -265,6 +265,13 @@ pub struct ToolsState {
     /// Parent of the session temp folders (the OS temp dir in production;
     /// tests point it at a tempdir).
     pub scratch_base: PathBuf,
+    /// R20-D sandboxed website preview: the gating marker. Canonical path
+    /// of every file `write_website` wrote this session -> SHA-256 of the
+    /// exact validated bytes. Only a file whose path AND current bytes
+    /// match qualifies for the sandboxed site preview; anything else (a
+    /// user's own .html, a website-*.html another tool overwrote) keeps the
+    /// whitelist renderer. Cleared on every realm switch.
+    websites: Mutex<HashMap<PathBuf, [u8; 32]>>,
 }
 
 impl Default for ToolsState {
@@ -276,6 +283,7 @@ impl Default for ToolsState {
             scopes: Mutex::new(HashMap::new()),
             session_id: Mutex::new(uuid::Uuid::new_v4().to_string()),
             scratch_base: std::env::temp_dir(),
+            websites: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -335,7 +343,47 @@ impl ToolsState {
         if let Ok(mut id) = self.session_id.lock() {
             *id = uuid::Uuid::new_v4().to_string();
         }
+        if let Ok(mut websites) = self.websites.lock() {
+            websites.clear();
+        }
     }
+
+    /// Record that `write_website` wrote these validated `bytes` at the
+    /// canonical `path` (the gating marker of the sandboxed site preview).
+    pub fn record_website(&self, path: &Path, bytes: &[u8]) {
+        if let Ok(mut websites) = self.websites.lock() {
+            websites.insert(path.to_path_buf(), sha256(bytes));
+        }
+    }
+
+    /// Whether the file at the canonical `path`, holding `bytes` now,
+    /// is a website `write_website` wrote this session: named
+    /// `website-*.html`, inside this session's temp folders, recorded by
+    /// the tool, and byte-for-byte what it validated and wrote.
+    pub fn is_tool_website(&self, path: &Path, bytes: &[u8]) -> bool {
+        let named = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("website-") && name.ends_with(".html"));
+        let in_session = self
+            .scratch_dir(0)
+            .parent()
+            .and_then(|root| std::fs::canonicalize(root).ok())
+            .is_some_and(|root| grants::is_under(&root, path));
+        if !named || !in_session {
+            return false;
+        }
+        self.websites
+            .lock()
+            .ok()
+            .and_then(|websites| websites.get(path).copied())
+            .is_some_and(|recorded| recorded == sha256(bytes))
+    }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes).into()
 }
 
 /// The synthetic grant over a conversation's session temp folder: ask mode
@@ -3144,7 +3192,13 @@ pub(crate) async fn write_website_in<A: Approver>(
     };
     let proposal = propose_in(dir, state, profile_id, Some(conversation_id), &action, true)?;
     approve_proposal(dir, state, approver, &proposal).await?;
-    execute(dir, state, &proposal.id)
+    let outcome = execute(dir, state, &proposal.id)?;
+    // The gating marker of the sandboxed site preview: this exact file,
+    // with these exact validated bytes, was written by write_website.
+    if let Some(written) = outcome.produced.first() {
+        state.record_website(Path::new(written), draft.html.as_bytes());
+    }
+    Ok(outcome)
 }
 
 /// [`write_website_in`] against the running app.
@@ -5153,6 +5207,52 @@ mod tests {
                 DeliverableKind::Document
             )]
         );
+    }
+
+    #[test]
+    fn only_the_file_write_website_wrote_carries_the_sandboxed_site_marker() {
+        let (folder, _guard) = tempdir();
+        let (dir, _guard2) = granted_dir(&folder);
+        let (scratch, _guard3) = tempdir();
+        let st = state_with_scratch(&scratch);
+        let approver = FakeApprover::answering(true);
+        let outcome = tauri::async_runtime::block_on(write_website_in(
+            &dir,
+            &st,
+            &approver,
+            "nan",
+            1,
+            &site_draft("Panadería Ana", SITE),
+        ))
+        .expect("written");
+        let site = PathBuf::from(&outcome.produced[0]);
+        assert!(
+            st.is_tool_website(&site, SITE.as_bytes()),
+            "the tool's file"
+        );
+
+        // The same name with other bytes (overwritten afterwards) does not.
+        assert!(!st.is_tool_website(&site, b"<p>changed</p>"));
+        // A same-named file the tool never wrote, in the session folder.
+        let other = canon(&st.scratch_dir(1)).join("website-otra.html");
+        fs::write(&other, SITE).expect("write");
+        assert!(!st.is_tool_website(&other, SITE.as_bytes()));
+        // A user's .html in a granted folder, even with identical bytes.
+        let user = canon(&folder).join("website-panaderia-ana.html");
+        fs::write(&user, SITE).expect("write");
+        assert!(!st.is_tool_website(&user, SITE.as_bytes()));
+        // A recorded path outside the session folder or misnamed never
+        // qualifies, even when the bytes match.
+        st.record_website(&user, SITE.as_bytes());
+        assert!(!st.is_tool_website(&user, SITE.as_bytes()));
+        let misnamed = canon(&st.scratch_dir(1)).join("site.html");
+        fs::write(&misnamed, SITE).expect("write");
+        st.record_website(&misnamed, SITE.as_bytes());
+        assert!(!st.is_tool_website(&misnamed, SITE.as_bytes()));
+
+        // A realm switch forgets every marker.
+        st.reset_for_realm_switch();
+        assert!(!st.is_tool_website(&site, SITE.as_bytes()));
     }
 
     #[test]
