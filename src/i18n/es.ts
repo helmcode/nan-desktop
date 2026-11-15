@@ -546,6 +546,7 @@ export const es: Strings = {
     membersSearch: "Buscar miembros…",
     membersLoading: "Cargando miembros…",
     membersUnavailable: "No se pudo cargar tu equipo. Usa correos concretos.",
+    membersOnlyYou: "Aún no hay nadie más en tu organización.",
     membersNone: "Ningún miembro coincide.",
     membersSelected: (n: number) => (n === 1 ? "1 miembro seleccionado" : `${n} miembros seleccionados`),
     notify: "Enviarles el enlace por correo",

@@ -52,7 +52,9 @@ export type Member = { userId: string; email: string };
  *  - off: hidden (flag off, unknown, or not deployed for this tenant) */
 export type Availability = "on" | "paywall" | "off";
 
-export type ArtifactsAccess = { availability: Availability; admin: boolean };
+/** `email`: the signed-in account per `/api/auth/me`, lowercased, when it
+ *  says (the member picker leaves it out). */
+export type ArtifactsAccess = { availability: Availability; admin: boolean; email?: string };
 
 /** One link as the list and the create reply describe it (tolerant). */
 export type SharedArtifact = {
@@ -395,6 +397,23 @@ export function parseMembers(body: unknown): Member[] | null {
   return members;
 }
 
+/** The member picker's rows: the org members minus the signed-in user,
+ *  whom a share is never addressed to (R20-B). With no known email
+ *  nobody is hidden. The FULL list still decides who is internal. */
+export function pickableMembers(members: Member[], selfEmail: string | null | undefined): Member[] {
+  const self = (selfEmail ?? "").trim().toLowerCase();
+  return self ? members.filter((member) => member.email !== self) : members;
+}
+
+/** The signed-in email in a `/api/auth/me` body (top-level or `user`). */
+export function accountEmail(body: unknown): string | null {
+  const me = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  if (!me) return null;
+  const user = me.user && typeof me.user === "object" ? (me.user as Record<string, unknown>) : null;
+  const email = str(me.email) ?? str(user?.email);
+  return email ? email.trim().toLowerCase() : null;
+}
+
 export function linkState(artifact: SharedArtifact, now = Date.now()): LinkState {
   if (artifact.revokedAt || artifact.status === "revoked") return "revoked";
   if (artifact.status === "expired") return "expired";
@@ -474,6 +493,12 @@ function entitlementsUnknown(me: Record<string, unknown>): boolean {
 export function parseAccess(profileId: string, body: unknown): ArtifactsAccess {
   const me = record(body);
   if (!me) return { availability: "off", admin: false };
+  const email = accountEmail(me);
+  const access = availabilityOf(profileId, me);
+  return email ? { ...access, email } : access;
+}
+
+function availabilityOf(profileId: string, me: Record<string, unknown>): ArtifactsAccess {
   const flag = artifactsFlag(me);
   if (profileId === ENTERPRISE_PROFILE) {
     const org = record(me.org) ?? {};

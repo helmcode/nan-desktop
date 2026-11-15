@@ -545,6 +545,7 @@ export const en = {
     membersSearch: "Search members…",
     membersLoading: "Loading members…",
     membersUnavailable: "Could not load your team. Use specific emails instead.",
+    membersOnlyYou: "There is nobody else in your organization yet.",
     membersNone: "No members match.",
     membersSelected: (n: number) => (n === 1 ? "1 member selected" : `${n} members selected`),
     notify: "Email them the link",

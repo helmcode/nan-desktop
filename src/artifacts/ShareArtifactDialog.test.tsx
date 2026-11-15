@@ -35,7 +35,8 @@ function renderDialog({
   availability = "on" as const,
   locale = "en" as Locale,
   table = core(),
-}: { profileId?: string; availability?: "on" | "paywall"; locale?: Locale; table?: Table } = {}) {
+  selfEmail = null as string | null,
+}: { profileId?: string; availability?: "on" | "paywall"; locale?: Locale; table?: Table; selfEmail?: string | null } = {}) {
   resetTauri(table);
   const props = {
     onClose: vi.fn(),
@@ -46,7 +47,13 @@ function renderDialog({
   };
   render(
     <I18nProvider initial={locale}>
-      <ShareArtifactDialog profileId={profileId} source={SOURCE} availability={availability} {...props} />
+      <ShareArtifactDialog
+        profileId={profileId}
+        source={SOURCE}
+        availability={availability}
+        selfEmail={selfEmail}
+        {...props}
+      />
     </I18nProvider>,
   );
   return props;
@@ -143,6 +150,41 @@ describe("ShareArtifactDialog: scopes", () => {
     fireEvent.click(create());
     await screen.findByText("Your link is ready");
     expect((invokedWith("artifact_share")[0]?.meta as Record<string, unknown>).member_ids).toEqual(["u2"]);
+  });
+});
+
+describe("ShareArtifactDialog: the member picker excludes me (R20-B)", () => {
+  it("the signed-in user is never offered as a recipient", async () => {
+    renderDialog({ selfEmail: "Ana@Acme.com" });
+    fireEvent.click(screen.getByRole("radio", { name: /Team members/ }));
+    expect(await screen.findByRole("checkbox", { name: "bob@acme.com" })).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: "ana@acme.com" })).toBeNull();
+    // Searching for myself finds nobody.
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "ana" } });
+    expect(screen.getByText("No members match.")).toBeTruthy();
+  });
+
+  it("an org where I am the only member says there is nobody else to pick", async () => {
+    renderDialog({
+      selfEmail: "ana@acme.com",
+      table: core({
+        artifacts_request: (args) =>
+          args?.path === "/api/members"
+            ? { status: 200, body: { items: [{ userId: "u1", email: "ana@acme.com" }] } }
+            : { status: 200, body: {} },
+      }),
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /Team members/ }));
+    expect(await screen.findByText("There is nobody else in your organization yet.")).toBeTruthy();
+    expect(screen.queryAllByRole("checkbox", { name: /@acme.com/ })).toHaveLength(0);
+  });
+
+  it("I still count as internal: emailing myself shows no external warning", async () => {
+    renderDialog({ selfEmail: "ana@acme.com" });
+    await waitFor(() => expect(invokedWith("artifacts_request").length).toBeGreaterThan(0));
+    await act(async () => {});
+    addEmail("ana@acme.com");
+    expect(screen.queryByTestId("artifact-risk")).toBeNull();
   });
 });
 

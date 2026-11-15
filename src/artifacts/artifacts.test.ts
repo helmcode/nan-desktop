@@ -29,6 +29,8 @@ import {
   parseArtifact,
   parseArtifactList,
   parseMembers,
+  pickableMembers,
+  accountEmail,
   parseShareReply,
   problemForError,
   problemForReply,
@@ -289,6 +291,32 @@ describe("reply parsing", () => {
     ]);
     expect(parseMembers({ members: [{ user_id: "u2", email: "b@x.io" }] })).toEqual([{ userId: "u2", email: "b@x.io" }]);
     expect(parseMembers("x")).toBeNull();
+  });
+
+  it("the member picker never offers the signed-in user (R20-B)", () => {
+    const members = [
+      { userId: "u1", email: "ana@acme.com" },
+      { userId: "u2", email: "bob@acme.com" },
+    ];
+    expect(pickableMembers(members, "Ana@Acme.com")).toEqual([{ userId: "u2", email: "bob@acme.com" }]);
+    expect(pickableMembers(members, " ana@acme.com ")).toEqual([{ userId: "u2", email: "bob@acme.com" }]);
+    // Unknown self: nothing to filter, nobody is hidden.
+    expect(pickableMembers(members, null)).toEqual(members);
+    expect(pickableMembers(members, "")).toEqual(members);
+    expect(pickableMembers([], "ana@acme.com")).toEqual([]);
+  });
+
+  it("the signed-in email from /api/auth/me (top-level or user.email), lowercased", () => {
+    expect(accountEmail({ email: "Ana@Acme.com" })).toBe("ana@acme.com");
+    expect(accountEmail({ user: { email: "b@x.io" } })).toBe("b@x.io");
+    expect(accountEmail({ email: 3 })).toBeNull();
+    expect(accountEmail(null)).toBeNull();
+  });
+
+  it("parseAccess carries the signed-in email for the picker", () => {
+    expect(parseAccess("helmcode", { email: "Ana@Acme.com", artifacts: true }).email).toBe("ana@acme.com");
+    expect(parseAccess("nan", { email: "a@x.io", entitlements: { artifacts: true } }).email).toBe("a@x.io");
+    expect(parseAccess("helmcode", { artifacts: true }).email).toBeUndefined();
   });
 
   it("link state: revoked beats expired beats active", () => {

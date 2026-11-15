@@ -22,11 +22,16 @@ function row(id: number, role: string, content: string): ChatMessageRow {
   return { id, conversation_id: 7, role, content, model: null, created_at: "", partial: false, media_path: null, sources: [] };
 }
 
-function setup(profile: "nan" | "helmcode", me: Record<string, unknown> | null) {
+function setup(
+  profile: "nan" | "helmcode",
+  me: Record<string, unknown> | null,
+  { activeEmail = null as string | null, members = [] as Array<{ userId: string; email: string }> } = {},
+) {
   resetTauri({
     profiles_load: () => ({
       profiles: [{ id: profile, name: profile, has_key: true, key_mask: "sk-…abcd" }],
       active_profile: profile,
+      active_user: activeEmail ? { email: activeEmail, realm: "r1" } : null,
     }),
     conversation_list: () => [{ id: 7, title: "Report", updated_at: "", last_message: null }],
     messages_list: () => [
@@ -46,7 +51,7 @@ function setup(profile: "nan" | "helmcode", me: Record<string, unknown> | null) 
     preview_read_file: () => ({ base64: btoa("# Notes"), size: 7 }),
     artifacts_request: (args) => {
       if (args?.path === "/api/auth/me") return me ? { status: 200, body: me } : { status: 401, body: null };
-      if (args?.path === "/api/members") return { status: 200, body: { items: [] } };
+      if (args?.path === "/api/members") return { status: 200, body: { items: members } };
       return { status: 200, body: { artifacts: [] } };
     },
   });
@@ -173,5 +178,32 @@ describe("entry points", () => {
     await waitFor(() =>
       expect(invokedWith("artifacts_request")).toContainEqual({ profileId: "helmcode", method: "GET", path: "/api/artifacts" }),
     );
+  });
+});
+
+describe("member picker (R20-B)", () => {
+  const MEMBERS = [
+    { userId: "u1", email: "ana@acme.com" },
+    { userId: "u2", email: "bob@acme.com" },
+  ];
+
+  it("never offers the signed-in account (the realm's email)", async () => {
+    setup("helmcode", { featureFlags: ["artifacts"] }, { activeEmail: "Ana@Acme.com", members: MEMBERS });
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
+    const dialog = await screen.findByRole("dialog", { name: "Share as a link" });
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Team members/ }));
+    expect(await within(dialog).findByRole("checkbox", { name: "bob@acme.com" })).toBeTruthy();
+    expect(within(dialog).queryByRole("checkbox", { name: "ana@acme.com" })).toBeNull();
+  });
+
+  it("falls back to the email /api/auth/me reports", async () => {
+    setup("helmcode", { email: "ana@acme.com", featureFlags: ["artifacts"] }, { members: MEMBERS });
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
+    const dialog = await screen.findByRole("dialog", { name: "Share as a link" });
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Team members/ }));
+    expect(await within(dialog).findByRole("checkbox", { name: "bob@acme.com" })).toBeTruthy();
+    expect(within(dialog).queryByRole("checkbox", { name: "ana@acme.com" })).toBeNull();
   });
 });

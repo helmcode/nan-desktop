@@ -2843,6 +2843,7 @@ function ChatShell({
           profileId={overview.active_profile}
           source={sharingSource}
           availability={artifactsAccess.availability === "paywall" ? "paywall" : "on"}
+          selfEmail={overview.active_user?.email ?? artifactsAccess.email ?? null}
           onClose={closeShare}
           onManage={() => {
             setSharingSource(null);
