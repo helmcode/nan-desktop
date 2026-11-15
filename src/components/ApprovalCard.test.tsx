@@ -62,6 +62,9 @@ describe("ApprovalCard (S14)", () => {
       ["write_file", "Write a file"],
       ["replace_file", "Change a file"],
       ["run_command", "Run a command"],
+      ["save_image", "Save an image"],
+      // R20-D: the assistant's website, written to the session folder.
+      ["write_website", "Save a website"],
     ]) {
       cleanup();
       renderCard({ action });

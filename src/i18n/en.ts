@@ -248,6 +248,7 @@ export const en = {
       delete_path: "Delete a file",
       run_command: "Run a command",
       save_image: "Save an image",
+      write_website: "Save a website",
       unknown: "Use your files",
     } as Record<string, string>,
     to: "to",

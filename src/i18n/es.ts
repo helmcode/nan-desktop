@@ -248,6 +248,7 @@ export const es: Strings = {
       delete_path: "Borrar un archivo",
       run_command: "Ejecutar una orden",
       save_image: "Guardar una imagen",
+      write_website: "Guardar una web",
       unknown: "Usar tus archivos",
     },
     to: "a",

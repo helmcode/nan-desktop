@@ -794,11 +794,15 @@ pub async fn artifact_share(
     // Per-user realms: the grants are the signed-in user's (same scoping
     // as `preview_read_file`); `dir` stays the app-data root so the
     // app-data protection and the shared images folder still apply.
+    // R20-D: a file in this run's session folders (a website the assistant
+    // built) is shareable like any granted file.
+    let session = crate::preview::app_session_grant(&app, &profile_id);
     let upload = {
         let profile_id = profile_id.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let store = crate::preview::realm_grants_in(&dir, &profile_id)
                 .map_err(|rej| ArtifactError::SourceRefused { reason: rej.kind })?;
+            let store = crate::preview::with_session_grant(store, session);
             let home = std::env::home_dir();
             prepare_upload(&store, &profile_id, &source, meta, &dir, home.as_deref())
         })

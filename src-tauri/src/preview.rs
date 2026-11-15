@@ -74,6 +74,23 @@ pub fn realm_grants_in(root: &Path, profile_id: &str) -> Result<GrantsStore, Rej
     grants::load_or_seed(&realm).map_err(|err| Rejection::new("io", err))
 }
 
+/// R20-D: add this run's session temp folders (where the assistant's
+/// approved websites and fallback image copies land) to the grants the
+/// preview and the share reader resolve against. See
+/// `tools::session_read_grant`.
+pub fn with_session_grant(mut store: GrantsStore, session: Option<grants::Grant>) -> GrantsStore {
+    if let Some(grant) = session {
+        store.grants.push(grant);
+    }
+    store
+}
+
+/// The session read grant of the running app, for `profile_id`.
+pub fn app_session_grant(app: &AppHandle, profile_id: &str) -> Option<grants::Grant> {
+    let state = app.try_state::<crate::tools::ToolsState>()?;
+    crate::tools::session_read_grant(&state, profile_id)
+}
+
 /// Resolve `raw` to a previewable regular file: inside an active grant of
 /// `profile_id`, outside the app data folder and the sensitive deny-list,
 /// reached without any symlink. Returns the canonical path and its size.
@@ -270,8 +287,9 @@ pub async fn preview_read_file(
         .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
     // Privacy fix: the grants are the signed-in user's (realm); the
     // protection still covers the whole app data root (`dir`).
+    let session = app_session_grant(&app, &profile_id);
     tauri::async_runtime::spawn_blocking(move || {
-        let store = realm_grants_in(&dir, &profile_id)?;
+        let store = with_session_grant(realm_grants_in(&dir, &profile_id)?, session);
         let home = std::env::home_dir();
         read_preview_file(&store, &profile_id, &path, &dir, home.as_deref())
     })
@@ -295,8 +313,9 @@ pub async fn preview_reveal_location(
         .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
     // Same realm scoping as `preview_read_file`: the grants are the
     // signed-in user's; the app-data protection covers the whole root.
+    let session = app_session_grant(&app, &profile_id);
     tauri::async_runtime::spawn_blocking(move || {
-        let store = realm_grants_in(&dir, &profile_id)?;
+        let store = with_session_grant(realm_grants_in(&dir, &profile_id)?, session);
         let home = std::env::home_dir();
         reveal_preview_file(&store, &profile_id, &path, &dir, home.as_deref(), os_reveal)
     })
@@ -507,6 +526,49 @@ mod tests {
                 .expect("grant");
         }
         store
+    }
+
+    // ------------------------------------------- session folders (R20-D) --
+
+    #[test]
+    fn the_session_grant_lets_the_preview_read_an_approved_session_file() {
+        let l = layout();
+        let mut st = crate::tools::ToolsState::default();
+        st.scratch_base = l.outside.clone();
+        let folder = st.scratch_dir(3);
+        fs::create_dir_all(&folder).expect("session folder");
+        let site = folder.join("website-hola.html");
+        fs::write(&site, b"<html><body>hola</body></html>").expect("site");
+        let raw = site.display().to_string();
+
+        let bare = store_with(&[&l.grant]);
+        let err = read_granted_bytes(&bare, "nan", &raw, &l.app_data, Some(&l.home))
+            .expect_err("no grant without the session one");
+        assert!(
+            matches!(err.kind.as_str(), "no_grant" | "escape"),
+            "{err:?}"
+        );
+
+        let store = with_session_grant(bare, crate::tools::session_read_grant(&st, "nan"));
+        assert_eq!(
+            read_granted_bytes(&store, "nan", &raw, &l.app_data, Some(&l.home)).expect("read"),
+            b"<html><body>hola</body></html>"
+        );
+        // Another profile never reads it, and nothing outside the session
+        // root comes with it.
+        assert!(read_granted_bytes(&store, "helmcode", &raw, &l.app_data, Some(&l.home)).is_err());
+        let beside = l.outside.join("beside.txt");
+        fs::write(&beside, b"x").expect("beside");
+        assert!(
+            read_granted_bytes(
+                &store,
+                "nan",
+                &beside.display().to_string(),
+                &l.app_data,
+                Some(&l.home)
+            )
+            .is_err()
+        );
     }
 
     // ------------------------------------------------- realm scoping --
