@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Round 7 spec: a newer release shows a non-invasive banner with "Update";
-// the app checks on startup and every 6 h, never installs by itself, and the
+// the app checks on startup and every 2 h (R20-E; it was 6 h), never installs by itself, and the
 // close button hides the banner until the next check.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -131,13 +131,13 @@ describe("UpdateBanner (round 7)", () => {
     expect(container.querySelector(".update-banner")).not.toBeNull();
   });
 
-  it("re-checks every 6 hours by default", async () => {
+  it("re-checks every 2 hours by default (R20-E)", async () => {
     vi.useFakeTimers();
     const check = vi.fn(async () => null);
     renderBanner({ check });
     await act(async () => {});
     expect(check).toHaveBeenCalledTimes(1);
-    expect(UPDATE_CHECK_INTERVAL_MS).toBe(6 * 60 * 60 * 1000);
+    expect(UPDATE_CHECK_INTERVAL_MS).toBe(2 * 60 * 60 * 1000);
     await act(async () => {
       vi.advanceTimersByTime(UPDATE_CHECK_INTERVAL_MS);
     });
@@ -150,5 +150,36 @@ describe("UpdateBanner (round 7)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Update" }));
     await waitFor(() => expect(invokedWith("update_install")).toHaveLength(1));
     expect(invokedWith("update_check")).toHaveLength(1);
+  });
+});
+
+// R20-E: in the app the shell owns the schedule; the banner only shows the
+// result it is handed, and every new check brings a dismissed banner back.
+describe("UpdateBanner, controlled by the shell (R20-E)", () => {
+  it("never checks by itself and shows the update it is given", async () => {
+    const check = vi.fn(async () => NEXT);
+    renderBanner({ check, update: NEXT, checkSeq: 1 });
+    expect(screen.getByText("A new version is available: 0.3.0")).toBeTruthy();
+    await act(async () => {});
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("no update: nothing; a dismissed banner comes back on the next check only", () => {
+    const { container, rerender } = renderBanner({ update: null, checkSeq: 1 });
+    expect(container.querySelector(".update-banner")).toBeNull();
+    const show = (seq: number) =>
+      rerender(
+        <I18nProvider initial="en">
+          <UpdateBanner update={NEXT} checkSeq={seq} />
+        </I18nProvider>,
+      );
+    show(2);
+    expect(container.querySelector(".update-banner")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(container.querySelector(".update-banner")).toBeNull();
+    show(2);
+    expect(container.querySelector(".update-banner")).toBeNull();
+    show(3);
+    expect(container.querySelector(".update-banner")).not.toBeNull();
   });
 });

@@ -33,7 +33,8 @@ import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
 import { SaveImageButton, type SaveImageResult } from "./components/SaveImageButton";
 import { Toast, type ToastNotice } from "./components/Toast";
-import { UpdateBanner, UPDATE_CHECK_INTERVAL_MS } from "./components/UpdateBanner";
+import { UpdateBanner } from "./components/UpdateBanner";
+import { startUpdateSchedule } from "./updateSchedule";
 import { UserMenu, type SettingsPane, type SettingsSection } from "./components/UserMenu";
 import {
   DEFAULT_IMAGE_SIZE,
@@ -1049,10 +1050,14 @@ function ChatShell({
     };
   }, []);
 
-  // Auto-update (round 7): a silent check on startup and every 6 hours. The
+  // Auto-update (round 7): a silent check on a schedule (R20-E below). The
   // result is kept here (round 14/S1) so the user menu can offer "Update"
   // after the banner is dismissed; the banner is given this same check and
   // the same install flow, so there is one update path, not two.
+  // R20-E: the shell owns the ONE schedule (startup, every 2 hours, and on
+  // coming back after 2 hours away; never more than once per 30 minutes);
+  // the banner shows its result.
+  const [updateCheckSeq, setUpdateCheckSeq] = useState(0);
   const runUpdateCheck = useCallback(async (): Promise<UpdateInfo | null> => {
     try {
       const found = await checkForUpdate();
@@ -1062,14 +1067,12 @@ function ChatShell({
       // Silent by design: dev builds, offline and a missing release feed.
       setAvailableUpdate(null);
       return null;
+    } finally {
+      setUpdateCheckSeq((n) => n + 1);
     }
   }, []);
 
-  useEffect(() => {
-    void runUpdateCheck();
-    const timer = window.setInterval(() => void runUpdateCheck(), UPDATE_CHECK_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [runUpdateCheck]);
+  useEffect(() => startUpdateSchedule({ run: runUpdateCheck }), [runUpdateCheck]);
 
   // Team library (S4): one sync now, then again when the previous round is
   // due, and whenever the Skills view opens. ETag-conditional, so a quiet
@@ -2543,7 +2546,12 @@ function ChatShell({
                 </button>
               )}
             </header>
-            <UpdateBanner check={runUpdateCheck} install={startInstall} externalBusy={installing} />
+            <UpdateBanner
+              update={availableUpdate}
+              checkSeq={updateCheckSeq}
+              install={startInstall}
+              externalBusy={installing}
+            />
 
             <div className="messages" ref={messagesRef}>
               <div className="messages-inner">
