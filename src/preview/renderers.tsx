@@ -60,7 +60,26 @@ export function ImagePreview({ bytes, alt }: { bytes: Uint8Array; alt: string })
 interface PdfDoc {
   numPages: number;
   getPage: (n: number) => Promise<PdfPage>;
+}
+/// pdf.js 6: only the LOADING TASK has `destroy()` (the document proxy
+/// lost it). Calling `doc.destroy()` threw a synchronous TypeError in the
+/// effect cleanup, so every unmount of a loaded PDF (leaving the chat for
+/// Settings, say) crashed the surrounding surface (R20-A).
+interface PdfLoadingTask {
+  promise: Promise<unknown>;
   destroy: () => Promise<void>;
+}
+
+/// Release a pdf.js loading task (and its document and worker). Never
+/// throws, synchronously or not: it runs in an effect cleanup, where a
+/// throw would escape the boundaries being deleted with the preview.
+export function releasePdf(task: PdfLoadingTask | null): void {
+  if (!task) return;
+  try {
+    void Promise.resolve(task.destroy()).catch(() => {});
+  } catch {
+    // Already gone: nothing left to release.
+  }
 }
 interface PdfPage {
   getViewport: (opts: { scale: number }) => { width: number; height: number };
@@ -195,22 +214,21 @@ export function PdfPreview({ bytes }: { bytes: Uint8Array }) {
 
   useEffect(() => {
     let cancelled = false;
-    let loaded: PdfDoc | null = null;
+    let task: PdfLoadingTask | null = null;
     (async () => {
       const pdfjs = await import("pdfjs-dist");
       const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+      if (cancelled) return;
       pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
       // pdf.js may transfer the buffer: hand it a copy. (pdfjs-dist 5 moved
       // isEvalSupported out of DocumentInitParameters; the worker is a
       // bundled same-origin asset, so the default is fine.)
-      const task = pdfjs.getDocument({ data: bytes.slice() });
-      loaded = (await task.promise) as unknown as PdfDoc;
+      const opened = pdfjs.getDocument({ data: bytes.slice() }) as unknown as PdfLoadingTask;
+      task = opened;
+      const loaded = (await opened.promise) as PdfDoc;
       // Page 1 sizes every placeholder until each page reports its own.
       const first = (await loaded.getPage(1)).getViewport({ scale: 1 });
-      if (cancelled) {
-        void loaded.destroy().catch(() => {});
-        return;
-      }
+      if (cancelled) return;
       setDoc({ pdf: loaded, ratio: first.width > 0 && first.height > 0 ? first.width / first.height : 1 / Math.SQRT2 });
       setCurrent(1);
     })().catch(() => {
@@ -218,7 +236,10 @@ export function PdfPreview({ bytes }: { bytes: Uint8Array }) {
     });
     return () => {
       cancelled = true;
-      if (loaded) void loaded.destroy().catch(() => {});
+      // The task owns the document: one release covers a load still in
+      // flight and a document already shown.
+      releasePdf(task);
+      task = null;
     };
   }, [bytes]);
 

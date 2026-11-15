@@ -474,3 +474,26 @@ describe("ShareArtifactDialog: no key material in logs", () => {
     expect(document.body.textContent).not.toContain("sk-hke_");
   });
 });
+
+// R20-A audit: opening the dialog never throws, whatever the members list
+// answers (empty, unreadable, unavailable) and in every scope.
+describe("ShareArtifactDialog: first open never throws (R20-A)", () => {
+  const answers: Array<[string, unknown]> = [
+    ["an empty members list", { status: 200, body: { items: [] } }],
+    ["a null members list", { status: 200, body: { items: null } }],
+    ["a failed members list", { status: 500, body: null }],
+    ["no reply at all", undefined],
+  ];
+  for (const [name, reply] of answers) {
+    it(`${name}: every scope renders`, async () => {
+      renderDialog({ table: core({ artifacts_request: () => reply }) });
+      for (const scope of [/Team members/, /Everyone in your organization/, /Public/, /Specific people/]) {
+        fireEvent.click(screen.getByRole("radio", { name: scope }));
+      }
+      fireEvent.click(screen.getByRole("radio", { name: /Team members/ }));
+      // Whatever the list said, the members field settles (no endless loading).
+      await waitFor(() => expect(screen.queryByText(/Loading members/i)).toBeNull());
+      expect(screen.getByRole("dialog", { name: "Share as a link" })).toBeTruthy();
+    });
+  }
+});
