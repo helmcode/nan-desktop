@@ -534,22 +534,27 @@ export const es: Strings = {
     titleTooLong: (max: number) => `El título admite ${max} caracteres como máximo.`,
     scopeLegend: "Quién puede abrirlo",
     scopes: {
-      emails: "Personas concretas (por correo)",
+      emails: "Miembros concretos de NaN (por correo)",
       members: "Miembros del equipo",
       org: "Toda tu organización",
       public: "Público: cualquiera con el enlace",
     },
     emailsLabel: "Direcciones de correo",
     emailsPlaceholder: "Añadir correo…",
-    emailsHint: "Pulsa Intro o pega varios separados por comas.",
+    emailsHint: "Necesitan una cuenta en NaN: abrirán el enlace iniciando sesión. Pulsa Intro o pega varios separados por comas.",
     emailInvalid: (value: string) => `«${value}» no es un correo válido.`,
     emailsFull: (max: number) => `Puedes añadir ${max} personas como máximo.`,
     removeEmail: (email: string) => `Quitar ${email}`,
-    external: "Externo",
+    notUser: "No está en NaN",
+    /** `list`: the rejected emails joined with ", "; `n`: how many. */
+    notUsers: (list: string, n: number) =>
+      n === 1
+        ? `«${list}» no es un usuario de NaN. Quítalo para crear el enlace.`
+        : `Estos correos no son de usuarios de NaN: ${list}. Quítalos para crear el enlace.`,
     membersLabel: "Miembros del equipo",
     membersSearch: "Buscar miembros…",
     membersLoading: "Cargando miembros…",
-    membersUnavailable: "No se pudo cargar tu equipo. Usa correos concretos.",
+    membersUnavailable: "No se pudo cargar tu equipo. Comparte con toda la organización o vuelve a intentarlo más tarde.",
     membersOnlyYou: "Aún no hay nadie más en tu organización.",
     membersNone: "Ningún miembro coincide.",
     membersSelected: (n: number) => (n === 1 ? "1 miembro seleccionado" : `${n} miembros seleccionados`),
@@ -560,12 +565,8 @@ export const es: Strings = {
     riskV1: {
       public:
         "Cualquiera con este enlace podrá abrir este archivo sin iniciar sesión. Se puede reenviar e indexar. Comparte solo contenido que puedas hacer público.",
-      external: (n: number) =>
-        n === 1
-          ? "1 destinatario es externo a tu organización. Podrá abrir este archivo tras verificar su correo. Asegúrate de que puedes compartir este contenido con esa persona."
-          : `${n} destinatarios son externos a tu organización. Podrán abrir este archivo tras verificar su correo. Asegúrate de que puedes compartir este contenido con ellos.`,
       community:
-        "Estas personas podrán abrir este archivo tras verificar su correo. Asegúrate de que puedes compartir este contenido con ellas.",
+        "Solo estas personas podrán abrir este archivo, iniciando sesión con su cuenta de NaN. Asegúrate de que puedes compartir este contenido con ellas.",
       accept: "Entiendo el riesgo y quiero compartirlo",
     },
     secretWarning:
@@ -591,10 +592,11 @@ export const es: Strings = {
       unsupported_type: "Este tipo de archivo no se puede compartir. Usa PDF, imagen, Markdown, texto, CSV, HTML, Word o Excel.",
       empty: "Este archivo está vacío.",
       quota_exceeded: "Has llegado a tu límite de enlaces compartidos. Revoca alguno antiguo y vuelve a intentarlo.",
-      risk_ack_required: "Hay destinatarios externos a tu organización. Lee el aviso y acéptalo para continuar.",
+      risk_ack_required: "Falta aceptar el aviso. Léelo y márcalo para continuar.",
       possible_secret: "Este archivo parece contener una contraseña o clave de acceso. Lee el aviso antes de compartir.",
       scope_not_allowed: "Esta opción no está disponible para tu cuenta.",
       recipient_not_member: "Alguien que elegiste ya no está en tu equipo. Actualiza la lista y vuelve a intentarlo.",
+      recipient_not_user: "Alguno de esos correos no es de un usuario de NaN. Solo puedes compartir con personas que ya tienen cuenta en NaN.",
       too_many_recipients: (max: number) => `Puedes compartir con ${max} personas como máximo.`,
       invalid: "Algo del formulario no es válido. Revísalo y vuelve a intentarlo.",
       source_refused: "Ya no se puede leer este archivo. Tiene que estar dentro de una de tus carpetas de trabajo.",

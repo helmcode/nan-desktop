@@ -63,7 +63,7 @@ const create = () => screen.getByRole("button", { name: /Create link|Crear enlac
 const accept = () => screen.getByRole("checkbox", { name: /I understand the risk|Entiendo el riesgo/ });
 
 function addEmail(value: string): void {
-  const input = screen.getByRole("textbox", { name: /Email addresses|Direcciones de email/ });
+  const input = screen.getByRole("textbox", { name: /Email addresses|Direcciones de correo/ });
   fireEvent.change(input, { target: { value } });
   fireEvent.keyDown(input, { key: "Enter" });
 }
@@ -82,18 +82,39 @@ afterEach(() => {
 });
 
 describe("ShareArtifactDialog: scopes", () => {
-  it("enterprise offers four scopes", async () => {
+  it("enterprise offers members, the whole org and public, never free emails (R21)", async () => {
     renderDialog();
     const radios = screen.getAllByRole("radio").map((radio) => (radio as HTMLInputElement).value);
-    expect(radios).toEqual(["emails", "members", "org", "public"]);
+    expect(radios).toEqual(["members", "org", "public"]);
+    // Starts on the member picker; there is no email field on any scope.
+    expect((screen.getByRole("radio", { name: /Team members/ }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByRole("textbox", { name: /Email addresses/ })).toBeNull();
+    for (const name of [/Everyone in your organization/, /Public/]) {
+      fireEvent.click(screen.getByRole("radio", { name }));
+      expect(screen.queryByRole("textbox", { name: /Email addresses/ })).toBeNull();
+    }
     await waitFor(() => expect(invokedWith("artifacts_request")).toHaveLength(1));
   });
 
-  it("community offers emails and public only, and never asks for members", () => {
+  it("community offers NaN members by email and public, and never asks for members", () => {
     renderDialog({ profileId: "nan" });
     const radios = screen.getAllByRole("radio").map((radio) => (radio as HTMLInputElement).value);
     expect(radios).toEqual(["emails", "public"]);
+    expect(screen.getByRole("radio", { name: "Specific NaN members (by email)" })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Email addresses" })).toBeTruthy();
+    expect(screen.getByText(/They need a NaN account and will sign in to open the link/)).toBeTruthy();
     expect(invokedWith("artifacts_request")).toHaveLength(0);
+  });
+
+  it("no verification codes anywhere in the community email flow (R21)", () => {
+    for (const locale of ["en", "es"] as const) {
+      renderDialog({ profileId: "nan", locale });
+      addEmail("ana@example.com");
+      const text = screen.getByRole("dialog").textContent ?? "";
+      expect(text).not.toMatch(/c[oó]digo|\bcode\b|verif|OTP/i);
+      expect(text).toMatch(locale === "en" ? /signing in with their NaN account/ : /iniciando sesión con su cuenta de NaN/);
+      cleanup();
+    }
   });
 
   it("opens prefilled with the file name, focus on Cancel", () => {
@@ -108,7 +129,7 @@ describe("ShareArtifactDialog: scopes", () => {
     renderDialog();
     const options = () =>
       Array.from(screen.getByRole("combobox").querySelectorAll("option")).map((o) => o.textContent);
-    expect(options()).toEqual(["1 day", "7 days", "30 days", "90 days"]);
+    expect(options()).toEqual(["7 days", "30 days", "90 days", "No expiry"]);
     fireEvent.click(screen.getByRole("radio", { name: /Public/ }));
     expect(options()).toEqual(["1 day", "7 days", "30 days"]);
     fireEvent.click(screen.getByRole("radio", { name: /Everyone in your organization/ }));
@@ -178,14 +199,6 @@ describe("ShareArtifactDialog: the member picker excludes me (R20-B)", () => {
     expect(await screen.findByText("There is nobody else in your organization yet.")).toBeTruthy();
     expect(screen.queryAllByRole("checkbox", { name: /@acme.com/ })).toHaveLength(0);
   });
-
-  it("I still count as internal: emailing myself shows no external warning", async () => {
-    renderDialog({ selfEmail: "ana@acme.com" });
-    await waitFor(() => expect(invokedWith("artifacts_request").length).toBeGreaterThan(0));
-    await act(async () => {});
-    addEmail("ana@acme.com");
-    expect(screen.queryByTestId("artifact-risk")).toBeNull();
-  });
 });
 
 describe("ShareArtifactDialog: risk warning and consent", () => {
@@ -205,34 +218,13 @@ describe("ShareArtifactDialog: risk warning and consent", () => {
     expect(meta.expires_days).toBe(7);
   });
 
-  it("enterprise: internal recipients need no warning, an external one does", async () => {
-    renderDialog();
-    await waitFor(() => expect(invokedWith("artifacts_request")).toHaveLength(1));
-    addEmail("ana@acme.com");
-    expect(screen.queryByTestId("artifact-risk")).toBeNull();
-    expect(create().hasAttribute("disabled")).toBe(false);
-    addEmail("eve@other.io");
-    expect(screen.getByText("External")).toBeTruthy();
-    expect(screen.getByTestId("artifact-risk").textContent).toContain("1 recipient is outside your organization");
-    expect(create().hasAttribute("disabled")).toBe(true);
-    fireEvent.click(accept());
-    fireEvent.click(create());
-    await screen.findByText("Your link is ready");
-    const meta = invokedWith("artifact_share")[0]?.meta as Record<string, unknown>;
-    expect(meta.emails).toEqual(["ana@acme.com", "eve@other.io"]);
-    expect(meta.risk_ack).toEqual({ kind: "external", version: RISK_VERSION });
-    expect(meta.notify).toBe(true);
-  });
-
-  it("the acceptance resets when another external recipient is added or the scope turns public", async () => {
-    renderDialog();
-    await waitFor(() => expect(invokedWith("artifacts_request")).toHaveLength(1));
+  it("the acceptance resets when another recipient is added or the scope turns public", () => {
+    renderDialog({ profileId: "nan" });
     addEmail("eve@other.io");
     fireEvent.click(accept());
     expect((accept() as HTMLInputElement).checked).toBe(true);
     addEmail("zed@else.io");
     expect((accept() as HTMLInputElement).checked).toBe(false);
-    expect(screen.getByTestId("artifact-risk").textContent).toContain("2 recipients are outside");
     fireEvent.click(accept());
     // Removing one keeps it.
     fireEvent.click(screen.getByRole("button", { name: "Remove zed@else.io" }));
@@ -242,17 +234,22 @@ describe("ShareArtifactDialog: risk warning and consent", () => {
     expect(create().hasAttribute("disabled")).toBe(true);
   });
 
-  it("community: every email share carries the warning", () => {
+  it("community: every email share carries the warning", async () => {
     renderDialog({ profileId: "nan" });
     addEmail("Ana@Example.com, bob@x.io");
     expect(screen.getByText("ana@example.com")).toBeTruthy();
-    expect(screen.queryByText("External")).toBeNull();
     expect(screen.getByTestId("artifact-risk").textContent).toContain(
-      "These people will be able to open this file after verifying their email.",
+      "Only these people can open this file, by signing in with their NaN account.",
     );
     expect(create().hasAttribute("disabled")).toBe(true);
     fireEvent.click(accept());
     expect(create().hasAttribute("disabled")).toBe(false);
+    fireEvent.click(create());
+    await screen.findByText("Your link is ready");
+    const meta = invokedWith("artifact_share")[0]?.meta as Record<string, unknown>;
+    expect(meta.emails).toEqual(["ana@example.com", "bob@x.io"]);
+    expect(meta.risk_ack).toEqual({ kind: "external", version: RISK_VERSION });
+    expect(meta.notify).toBe(true);
   });
 
   it("a server 422 risk_ack_required shows the warning again, unchecked", async () => {
@@ -266,12 +263,13 @@ describe("ShareArtifactDialog: risk warning and consent", () => {
             : { status: 201, body: { url: URL_OK } };
         },
       }),
+      profileId: "nan",
     });
-    await waitFor(() => expect(invokedWith("artifacts_request")).toHaveLength(1));
     addEmail("ana@acme.com");
+    fireEvent.click(accept());
     fireEvent.click(create());
     const problem = await screen.findByTestId("artifact-problem");
-    expect(problem.textContent).toContain("outside your organization");
+    expect(problem.textContent).toContain("The warning still needs your acceptance");
     expect((accept() as HTMLInputElement).checked).toBe(false);
     expect(create().hasAttribute("disabled")).toBe(true);
     fireEvent.click(accept());
@@ -317,6 +315,82 @@ describe("ShareArtifactDialog: risk warning and consent", () => {
 });
 
 describe("ShareArtifactDialog: emails", () => {
+  function rejectWith(body: unknown) {
+    return core({ artifact_share: () => ({ status: 422, body }) });
+  }
+
+  it("an email that is not a NaN user is named and marked (R21)", async () => {
+    renderDialog({ profileId: "nan", table: rejectWith({ error: "recipient_not_user", emails: ["eve@x.io"] }) });
+    addEmail("ana@x.io, eve@x.io");
+    fireEvent.click(accept());
+    fireEvent.click(create());
+    const problem = await screen.findByTestId("artifact-problem");
+    expect(problem.textContent).toBe('"eve@x.io" is not a NaN user. Remove it to create the link.');
+    const chips = screen.getByRole("list", { name: "Email addresses" });
+    expect(within(chips).getAllByText("Not on NaN")).toHaveLength(1);
+    expect(within(chips).getByText("Not on NaN").closest("li")?.textContent).toContain("eve@x.io");
+    // Removing it clears the mark and the message.
+    fireEvent.click(screen.getByRole("button", { name: "Remove eve@x.io" }));
+    expect(screen.queryByText("Not on NaN")).toBeNull();
+    expect(screen.queryByTestId("artifact-problem")).toBeNull();
+  });
+
+  it("without the list, the generic copy; Spanish reads naturally", async () => {
+    renderDialog({ profileId: "nan", locale: "es", table: rejectWith({ error: "recipient_not_member" }) });
+    addEmail("eve@x.io");
+    fireEvent.click(accept());
+    fireEvent.click(create());
+    const problem = await screen.findByTestId("artifact-problem");
+    expect(problem.textContent).toContain("Alguno de esos correos no es de un usuario de NaN.");
+  });
+
+  it("an unnamed rejection keeps its message while chips are removed, until the next submit", async () => {
+    renderDialog({ profileId: "nan", table: rejectWith({ error: "recipient_not_user" }) });
+    addEmail("ana@x.io, eve@x.io, bob@x.io");
+    fireEvent.click(accept());
+    fireEvent.click(create());
+    const problem = await screen.findByTestId("artifact-problem");
+    const generic = problem.textContent;
+    expect(generic).toBeTruthy();
+    // The server did not say which one: any could still be the bad one.
+    fireEvent.click(screen.getByRole("button", { name: "Remove ana@x.io" }));
+    expect(screen.getByTestId("artifact-problem").textContent).toBe(generic);
+    fireEvent.click(screen.getByRole("button", { name: "Remove eve@x.io" }));
+    expect(screen.getByTestId("artifact-problem").textContent).toBe(generic);
+    // Only the next submit settles it.
+    resetTauri(core());
+    if (!(accept() as HTMLInputElement).checked) fireEvent.click(accept());
+    fireEvent.click(create());
+    await screen.findByText("Your link is ready");
+  });
+
+  it("a named rejection survives removing an accepted email and clears with the last rejected one", async () => {
+    renderDialog({ profileId: "nan", table: rejectWith({ error: "recipient_not_user", emails: ["eve@x.io"] }) });
+    addEmail("ana@x.io, eve@x.io");
+    fireEvent.click(accept());
+    fireEvent.click(create());
+    const text = '"eve@x.io" is not a NaN user. Remove it to create the link.';
+    expect((await screen.findByTestId("artifact-problem")).textContent).toBe(text);
+    fireEvent.click(screen.getByRole("button", { name: "Remove ana@x.io" }));
+    expect(screen.getByTestId("artifact-problem").textContent).toBe(text);
+    fireEvent.click(screen.getByRole("button", { name: "Remove eve@x.io" }));
+    expect(screen.queryByTestId("artifact-problem")).toBeNull();
+  });
+
+  it("names several rejected emails in Spanish", async () => {
+    renderDialog({
+      profileId: "nan",
+      locale: "es",
+      table: rejectWith({ error: "recipient_not_user", emails: ["a@x.io", "b@x.io"] }),
+    });
+    addEmail("a@x.io, b@x.io");
+    fireEvent.click(accept());
+    fireEvent.click(create());
+    const problem = await screen.findByTestId("artifact-problem");
+    expect(problem.textContent).toBe("Estos correos no son de usuarios de NaN: a@x.io, b@x.io. Quítalos para crear el enlace.");
+    expect(screen.getAllByText("No está en NaN")).toHaveLength(2);
+  });
+
   it("keeps an invalid address in the input with an error", () => {
     renderDialog({ profileId: "nan" });
     addEmail("nope");
@@ -517,6 +591,22 @@ describe("ShareArtifactDialog: no key material in logs", () => {
   });
 });
 
+describe("ShareArtifactDialog: members unavailable copy", () => {
+  const cases: Array<[Locale, RegExp, string]> = [
+    ["en", /Team members/, "Could not load your team. Share with your whole organization or try again later."],
+    ["es", /Miembros del equipo/, "No se pudo cargar tu equipo. Comparte con toda la organización o vuelve a intentarlo más tarde."],
+  ];
+  for (const [locale, radio, copy] of cases) {
+    it(`${locale}: a failed members list says so instead of an empty picker`, async () => {
+      renderDialog({ locale, table: core({ artifacts_request: () => ({ status: 500, body: null }) }) });
+      fireEvent.click(screen.getByRole("radio", { name: radio }));
+      const alert = await screen.findByText(copy);
+      expect(alert.getAttribute("role")).toBe("alert");
+      expect(screen.queryByRole("searchbox")).toBeNull();
+    });
+  }
+});
+
 // R20-A audit: opening the dialog never throws, whatever the members list
 // answers (empty, unreadable, unavailable) and in every scope.
 describe("ShareArtifactDialog: first open never throws (R20-A)", () => {
@@ -529,7 +619,7 @@ describe("ShareArtifactDialog: first open never throws (R20-A)", () => {
   for (const [name, reply] of answers) {
     it(`${name}: every scope renders`, async () => {
       renderDialog({ table: core({ artifacts_request: () => reply }) });
-      for (const scope of [/Team members/, /Everyone in your organization/, /Public/, /Specific people/]) {
+      for (const scope of [/Team members/, /Everyone in your organization/, /Public/]) {
         fireEvent.click(screen.getByRole("radio", { name: scope }));
       }
       fireEvent.click(screen.getByRole("radio", { name: /Team members/ }));

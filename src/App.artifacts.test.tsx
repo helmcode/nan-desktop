@@ -71,12 +71,16 @@ beforeEach(() => window.localStorage.clear());
 afterEach(() => cleanup());
 
 describe("share action gating", () => {
-  it("Helmcode with the org flag: share from the chip opens the four-scope dialog", async () => {
+  it("Helmcode with the org flag: share from the chip opens the three-scope dialog (no free emails, R21)", async () => {
     setup("helmcode", { email: "ana@acme.com", featureFlags: ["chat", "artifacts"] });
     renderApp();
     fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
     const dialog = await screen.findByRole("dialog", { name: "Share as a link" });
-    expect(within(dialog).getAllByRole("radio")).toHaveLength(4);
+    expect(within(dialog).getAllByRole("radio").map((radio) => (radio as HTMLInputElement).value)).toEqual([
+      "members",
+      "org",
+      "public",
+    ]);
   });
 
   it("Helmcode's real /me (top-level artifacts: true, featureFlags list): share shows", async () => {

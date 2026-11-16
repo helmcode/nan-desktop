@@ -18,7 +18,6 @@ import {
   expiryFor,
   expiryOptions,
   NO_EXPIRY,
-  externalEmails,
   fetchAccess,
   fetchMembers,
   isValidEmail,
@@ -34,7 +33,9 @@ import {
   accountEmail,
   parseShareReply,
   problemForError,
+  problemForProfile,
   problemForReply,
+  rejectedRecipients,
   revokeArtifact,
   riskFor,
   safeLink,
@@ -56,8 +57,9 @@ function draft(patch: Partial<ShareDraft> = {}): ShareDraft {
 }
 
 describe("scopes and expiry", () => {
-  it("enterprise offers four scopes, community two", () => {
-    expect(scopeOptions("helmcode")).toEqual(["emails", "members", "org", "public"]);
+  it("enterprise offers members, org and public (no free emails); community emails and public (R21)", () => {
+    expect(scopeOptions("helmcode")).toEqual(["members", "org", "public"]);
+    expect(scopeOptions("helmcode")).not.toContain("emails");
     expect(scopeOptions("nan")).toEqual(["emails", "public"]);
   });
 
@@ -104,31 +106,16 @@ describe("emails", () => {
 });
 
 describe("risk warning", () => {
-  it("public always needs acceptance, on both tenants", () => {
-    expect(riskFor("helmcode", "public", [], MEMBERS)).toEqual({ kind: "public", external: [] });
-    expect(riskFor("nan", "public", [], null)).toEqual({ kind: "public", external: [] });
+  it("public always needs acceptance", () => {
+    expect(riskFor("public", [])).toEqual({ kind: "public", external: [] });
+    expect(riskFor("public", ["a@x.io"])).toEqual({ kind: "public", external: [] });
   });
 
-  it("enterprise: only external recipients need it", () => {
-    expect(riskFor("helmcode", "emails", ["ana@acme.com"], MEMBERS)).toBeNull();
-    expect(riskFor("helmcode", "emails", ["ana@acme.com", "eve@other.io"], MEMBERS)).toEqual({
-      kind: "external",
-      external: ["eve@other.io"],
-    });
-    expect(riskFor("helmcode", "members", [], MEMBERS)).toBeNull();
-    expect(riskFor("helmcode", "org", [], MEMBERS)).toBeNull();
-  });
-
-  it("enterprise without a members list treats everyone as external", () => {
-    expect(externalEmails("helmcode", ["ana@acme.com"], null)).toEqual(["ana@acme.com"]);
-  });
-
-  it("community: every email recipient is external", () => {
-    expect(riskFor("nan", "emails", ["ana@acme.com"], MEMBERS)).toEqual({
-      kind: "external",
-      external: ["ana@acme.com"],
-    });
-    expect(riskFor("nan", "emails", [], null)).toBeNull();
+  it("email recipients (NaN members) need it; members and org never do", () => {
+    expect(riskFor("emails", ["ana@acme.com"])).toEqual({ kind: "external", external: ["ana@acme.com"] });
+    expect(riskFor("emails", [])).toBeNull();
+    expect(riskFor("members", [])).toBeNull();
+    expect(riskFor("org", [])).toBeNull();
   });
 
   it("the acceptance resets when the risk grows, never when it shrinks", () => {
@@ -445,6 +432,25 @@ describe("error mapping", () => {
     expect(problemForReply(403, { error: "entitlement_required" })).toBe("paywall");
   });
 
+  it("an email that is not a NaN user has its own problem (R21)", () => {
+    for (const code of ["recipient_not_user", "recipient_not_found", "unknown_recipient"]) {
+      expect(problemForReply(422, { error: code })).toBe("recipient_not_user");
+    }
+    // Community has no team: its 'not a member' always means 'not a NaN user'.
+    expect(problemForProfile("nan", "recipient_not_member")).toBe("recipient_not_user");
+    expect(problemForProfile("helmcode", "recipient_not_member")).toBe("recipient_not_member");
+    expect(problemForProfile("nan", "quota_exceeded")).toBe("quota_exceeded");
+  });
+
+  it("reads which recipients were rejected, tolerantly", () => {
+    expect(rejectedRecipients({ error: "recipient_not_user", emails: ["Eve@X.io"] })).toEqual(["eve@x.io"]);
+    expect(rejectedRecipients({ error: { code: "recipient_not_user", recipients: ["a@x.io", 3] } })).toEqual(["a@x.io"]);
+    expect(rejectedRecipients({ error: "recipient_not_user", invalid_emails: ["b@y.io"] })).toEqual(["b@y.io"]);
+    expect(rejectedRecipients({ error: "recipient_not_user" })).toEqual([]);
+    expect(rejectedRecipients("<html>")).toEqual([]);
+    expect(rejectedRecipients(null)).toEqual([]);
+  });
+
   it("falls back on the status for unknown or missing codes", () => {
     expect(problemForReply(400, { error: "weird" })).toBe("invalid");
     expect(problemForReply(401, null)).toBe("expired");
@@ -500,6 +506,29 @@ describe("IPC", () => {
     expect(await shareArtifact("nan", { kind: "file", path: "/p/a.pdf" }, buildMeta(draft(), null, false))).toEqual({
       ok: false,
       problem: "generic",
+    });
+  });
+
+  it("share: an email that is not a NaN user comes back with the rejected recipients (R21)", async () => {
+    const meta = buildMeta(draft({ emails: ["ana@x.io", "eve@x.io"] }), null, false);
+    resetTauri({ artifact_share: () => ({ status: 422, body: { error: "recipient_not_user", emails: ["eve@x.io"] } }) });
+    expect(await shareArtifact("nan", { kind: "file", path: "/p/a.pdf" }, meta)).toEqual({
+      ok: false,
+      problem: "recipient_not_user",
+      rejected: ["eve@x.io"],
+    });
+    // The community spelling of the same rejection.
+    resetTauri({ artifact_share: () => ({ status: 422, body: { error: "recipient_not_member" } }) });
+    expect(await shareArtifact("nan", { kind: "file", path: "/p/a.pdf" }, meta)).toEqual({
+      ok: false,
+      problem: "recipient_not_user",
+      rejected: [],
+    });
+    // Enterprise keeps its member-picker meaning.
+    resetTauri({ artifact_share: () => ({ status: 422, body: { error: "recipient_not_member" } }) });
+    expect(await shareArtifact("helmcode", { kind: "file", path: "/p/a.pdf" }, meta)).toEqual({
+      ok: false,
+      problem: "recipient_not_member",
     });
   });
 

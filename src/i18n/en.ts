@@ -533,22 +533,27 @@ export const en = {
     titleTooLong: (max: number) => `The title can have ${max} characters at most.`,
     scopeLegend: "Who can open it",
     scopes: {
-      emails: "Specific people (by email)",
+      emails: "Specific NaN members (by email)",
       members: "Team members",
       org: "Everyone in your organization",
       public: "Public: anyone with the link",
     },
     emailsLabel: "Email addresses",
     emailsPlaceholder: "Add email…",
-    emailsHint: "Press Enter or paste several, separated by commas.",
+    emailsHint: "They need a NaN account and will sign in to open the link. Press Enter or paste several, separated by commas.",
     emailInvalid: (value: string) => `"${value}" is not a valid email address.`,
     emailsFull: (max: number) => `You can add ${max} people at most.`,
     removeEmail: (email: string) => `Remove ${email}`,
-    external: "External",
+    notUser: "Not on NaN",
+    /** `list`: the rejected emails joined with ", "; `n`: how many. */
+    notUsers: (list: string, n: number) =>
+      n === 1
+        ? `"${list}" is not a NaN user. Remove it to create the link.`
+        : `These emails are not NaN users: ${list}. Remove them to create the link.`,
     membersLabel: "Team members",
     membersSearch: "Search members…",
     membersLoading: "Loading members…",
-    membersUnavailable: "Could not load your team. Use specific emails instead.",
+    membersUnavailable: "Could not load your team. Share with your whole organization or try again later.",
     membersOnlyYou: "There is nobody else in your organization yet.",
     membersNone: "No members match.",
     membersSelected: (n: number) => (n === 1 ? "1 member selected" : `${n} members selected`),
@@ -560,12 +565,8 @@ export const en = {
     riskV1: {
       public:
         "Anyone with this link can open this file, without signing in. It can be forwarded and indexed. Only share content you are allowed to make public.",
-      external: (n: number) =>
-        n === 1
-          ? "1 recipient is outside your organization. They will be able to open this file after verifying their email. Make sure you are allowed to share this content with them."
-          : `${n} recipients are outside your organization. They will be able to open this file after verifying their email. Make sure you are allowed to share this content with them.`,
       community:
-        "These people will be able to open this file after verifying their email. Make sure you are allowed to share this content with them.",
+        "Only these people can open this file, by signing in with their NaN account. Make sure you are allowed to share this content with them.",
       accept: "I understand the risk and want to share",
     },
     secretWarning:
@@ -591,10 +592,11 @@ export const en = {
       unsupported_type: "This file type cannot be shared. Use PDF, an image, Markdown, text, CSV, HTML, Word or Excel.",
       empty: "This file is empty.",
       quota_exceeded: "You reached your limit of shared links. Revoke some old ones and try again.",
-      risk_ack_required: "Some recipients are outside your organization. Read the warning and accept it to continue.",
+      risk_ack_required: "The warning still needs your acceptance. Read it and check it to continue.",
       possible_secret: "This file seems to contain a password or access key. Read the warning before sharing.",
       scope_not_allowed: "This option is not available for your account.",
       recipient_not_member: "Someone you picked is no longer in your team. Refresh the list and try again.",
+      recipient_not_user: "One of those emails does not belong to a NaN user. You can only share with people who already have a NaN account.",
       too_many_recipients: (max: number) => `You can share with ${max} people at most.`,
       invalid: "Something in the form is not valid. Check it and try again.",
       source_refused: "This file can no longer be read. It must be inside one of your working folders.",
