@@ -738,10 +738,13 @@ mod tests {
     }
 
     // ------------------------------------------------- realm scoping --
+    // The helpers below only serve the unix-gated realm tests; the
+    // `cfg_attr` keeps Windows clippy from flagging them as dead code.
 
     /// A verified login of `user` to `profile_id`, persisted like
     /// `device_flow::store_credentials` does (claims legacy data when the
     /// profile has no bound user yet).
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn login(root: &Path, profile_id: &str, user: &str) -> PathBuf {
         let identity = crate::realm::Identity {
             id: user.into(),
@@ -753,6 +756,7 @@ mod tests {
     }
 
     /// A grant of `folder` for `profile_id` saved in `dir/tools.json`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn grant_in(dir: &Path, profile_id: &str, id: &str, folder: &Path) {
         let mut store = grants::load_or_seed(dir).expect("load");
         store
@@ -767,6 +771,7 @@ mod tests {
     }
 
     /// The command path minus the AppHandle: realm grants, then the bytes.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn realm_read(
         root: &Path,
         home: &Path,
@@ -783,6 +788,7 @@ mod tests {
         )
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn realm_reveal(
         root: &Path,
         home: &Path,
