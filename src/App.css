@@ -2545,6 +2545,47 @@ button:disabled {
   gap: 0.6rem;
 }
 
+.grant-still-asking {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid rgba(255, 189, 46, 0.5);
+  border-radius: var(--radius);
+  background-color: var(--warn-soft);
+  color: var(--warn);
+  font-size: 0.87rem;
+}
+
+.grant-still-asking > svg {
+  flex: none;
+  margin-top: 0.15rem;
+}
+
+.grant-still-asking p {
+  margin: 0 0 0.35rem;
+  color: var(--text);
+}
+
+.grant-still-asking ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--text-2);
+}
+
+.modal .mode-switch-wrap {
+  margin: 0.9rem 0 0;
+}
+
+.modal-warn-line {
+  margin-top: 0.5rem;
+  font-size: 0.87rem;
+  color: var(--warn);
+}
+
 .grant-card-wide {
   border-color: rgba(255, 189, 46, 0.5);
   background-color: var(--warn-soft);

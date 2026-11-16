@@ -21,9 +21,10 @@
 //! - every grant carries an approval mode (S13): `ask` (default, every
 //!   action is approved one by one) or `allow` (covered actions run without
 //!   a prompt). Switching a grant to `allow` requires a NATIVE confirmation
-//!   in the command layer. Computer-wide grants always ask natively,
-//!   whatever their stored mode, and the sensitive-path deny-list and the
-//!   protected app data dir are refused under every mode.
+//!   in the command layer. The computer-wide grant carries the same two
+//!   modes (R22); it can never loosen a folder grant's `ask` (see
+//!   [`GrantsStore::governing_mode`]), and the sensitive-path deny-list and
+//!   the protected app data dir are refused under every mode.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -39,9 +40,11 @@ pub const STORE_VERSION: u32 = 1;
 /// How wide a grant is. `Folder` is the normal, user-picked private folder.
 /// `ComputerWide` roots the grant at `$HOME` ("the whole computer" in the
 /// UI): it is only ever created by `tools_grant_computer_wide` after the user
-/// confirmed a NATIVE warning dialog, and every action under it is still
-/// approved one by one. The app data dir stays protected under both scopes
-/// (see [`is_protected`]).
+/// confirmed a NATIVE warning dialog. It carries an [`ApprovalMode`] like a
+/// folder grant (R22): `ask` approves every action natively, `allow` runs
+/// covered actions without a prompt except inside folders that ask (see
+/// [`GrantsStore::governing_mode`]). The app data dir stays protected under
+/// both scopes (see [`is_protected`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantScope {
@@ -52,8 +55,9 @@ pub enum GrantScope {
 
 /// Per-grant approval mode (S13). `Ask` (the default, and what every grant
 /// written before modes existed loads as) approves each action one by one;
-/// `Allow` runs covered actions without a prompt. Computer-wide grants
-/// ignore the stored mode and always ask natively.
+/// `Allow` runs covered actions without a prompt. The same two modes apply
+/// to the computer-wide grant (R22), under the precedence rule of
+/// [`GrantsStore::governing_mode`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
@@ -94,16 +98,6 @@ pub struct Grant {
     /// field and load as `Ask` (no schema bump needed).
     #[serde(default)]
     pub mode: ApprovalMode,
-}
-
-impl Grant {
-    /// The mode that actually applies: computer-wide grants always ask.
-    pub fn effective_mode(&self) -> ApprovalMode {
-        match self.scope {
-            GrantScope::ComputerWide => ApprovalMode::Ask,
-            GrantScope::Folder => self.mode,
-        }
-    }
 }
 
 fn default_true() -> bool {
@@ -243,18 +237,26 @@ impl GrantsStore {
         Ok(grant)
     }
 
-    /// Add (or return the existing) computer-wide grant for a profile,
-    /// rooted at the canonical `$HOME`. Callers MUST have validated the root
-    /// with [`validate_computer_wide_root`] and obtained the user's native
-    /// confirmation first.
+    /// Add (or update) the computer-wide grant for a profile, rooted at the
+    /// canonical `$HOME`, with approval `mode` (R22). An existing grant is
+    /// kept (same id) and takes `mode`: the user just confirmed that mode
+    /// natively. Callers MUST have validated the root with
+    /// [`validate_computer_wide_root`] and obtained the user's native
+    /// confirmation (whose text names `mode`) first.
     pub fn add_computer_wide_grant(
         &mut self,
         grant_id: String,
         profile_id: &str,
         canonical_home: PathBuf,
         granted_at: String,
+        mode: ApprovalMode,
     ) -> Grant {
-        if let Some(existing) = self.computer_wide_grant(profile_id) {
+        if let Some(existing) = self
+            .grants
+            .iter_mut()
+            .find(|grant| grant.profile_id == profile_id && grant.scope == GrantScope::ComputerWide)
+        {
+            existing.mode = mode;
             return existing.clone();
         }
         let grant = Grant {
@@ -263,7 +265,7 @@ impl GrantsStore {
             granted_at,
             profile_id: profile_id.to_string(),
             scope: GrantScope::ComputerWide,
-            mode: ApprovalMode::Ask,
+            mode,
         };
         self.grants.push(grant.clone());
         grant
@@ -307,24 +309,58 @@ impl GrantsStore {
         self.grants.iter().find(|grant| grant.id == grant_id)
     }
 
-    /// Switch a grant's approval mode. Computer-wide grants cannot be put in
-    /// `allow` (they always ask natively); unknown ids are `not_found`.
-    /// Returns the updated grant. Callers obtain the user's NATIVE
-    /// confirmation before switching to `allow`.
+    /// Switch a grant's approval mode (folder or computer-wide, R22);
+    /// unknown ids are `not_found`. Returns the updated grant. Callers
+    /// obtain the user's NATIVE confirmation before switching to `allow`.
     pub fn set_mode(&mut self, grant_id: &str, mode: ApprovalMode) -> Result<Grant, Rejection> {
         let grant = self
             .grants
             .iter_mut()
             .find(|grant| grant.id == grant_id)
             .ok_or_else(|| Rejection::new("not_found", "no grant with this id"))?;
-        if grant.scope == GrantScope::ComputerWide && mode == ApprovalMode::Allow {
-            return Err(Rejection::new(
-                "scope",
-                "computer-wide access always asks before every action",
-            ));
-        }
         grant.mode = mode;
         Ok(grant.clone())
+    }
+
+    /// The approval mode that governs an action on `canonical` reached
+    /// through the grant `resolved` (R22 precedence rule).
+    ///
+    /// RULE: the STRICTEST mode wins per path. The candidates are
+    /// - the grant the action was resolved through (`resolved`: the deepest
+    ///   grant of the conversation's scope covering the path, which is the
+    ///   computer-wide grant only when no selected folder covers it), and
+    /// - EVERY folder grant of the same profile that covers the path,
+    ///   whether or not the conversation selected it.
+    ///
+    /// If any candidate asks, the action asks; it runs without a prompt only
+    /// when all of them allow. Consequences:
+    /// - whole computer `allow` + a folder in `ask` -> actions inside that
+    ///   folder ask (the folder is stricter);
+    /// - whole computer `allow` + a folder in `allow` -> allow;
+    /// - whole computer `allow`, no folder covers the path -> allow;
+    /// - a folder in `allow` reached as the resolved grant keeps its own mode
+    ///   whatever the whole computer says (S13, unchanged), because the
+    ///   computer-wide grant is a candidate only when it is the resolved one.
+    ///
+    /// Fails closed to `Ask` when `resolved` does not cover the path. The
+    /// always-refused deny-lists are enforced elsewhere under every mode.
+    pub fn governing_mode(&self, resolved: &Grant, canonical: &Path) -> ApprovalMode {
+        if !is_under(&resolved.canonical_path, canonical) {
+            return ApprovalMode::Ask;
+        }
+        let folder_asks = self
+            .grants_for(&resolved.profile_id)
+            .into_iter()
+            .any(|grant| {
+                grant.scope == GrantScope::Folder
+                    && grant.mode == ApprovalMode::Ask
+                    && is_under(&grant.canonical_path, canonical)
+            });
+        if folder_asks {
+            ApprovalMode::Ask
+        } else {
+            resolved.mode
+        }
     }
 }
 
@@ -896,20 +932,176 @@ mod tests {
         );
     }
 
+    // ------------------------------------- R22 whole-computer modes --
+
     #[test]
-    fn computer_wide_grants_always_ask() {
+    fn computer_wide_mode_is_stored_switched_and_persisted() {
         let mut store = default_store();
-        store.add_computer_wide_grant("cw".into(), "nan", PathBuf::from("/Users/x"), "t".into());
-        let err = store
-            .set_mode("cw", ApprovalMode::Allow)
-            .expect_err("computer-wide cannot allow");
-        assert_eq!(err.kind, "scope");
-        // Even a hand-edited store cannot make it effectively allow.
-        store.grants[0].mode = ApprovalMode::Allow;
-        assert_eq!(store.grants[0].effective_mode(), ApprovalMode::Ask);
+        let grant = store.add_computer_wide_grant(
+            "cw".into(),
+            "nan",
+            PathBuf::from("/Users/x"),
+            "t".into(),
+            ApprovalMode::Ask,
+        );
+        assert_eq!(grant.mode, ApprovalMode::Ask, "default ask");
+        let updated = store.set_mode("cw", ApprovalMode::Allow).expect("allow");
+        assert_eq!(updated.mode, ApprovalMode::Allow);
+        let (dir, _tmp) = tempdir();
+        save(&dir, &store).expect("save");
+        let loaded = load_or_seed(&dir).expect("load");
+        let cw = loaded.computer_wide_grant("nan").expect("cw");
+        assert_eq!(cw.mode, ApprovalMode::Allow, "mode survives a reload");
+        assert_eq!(cw.scope, GrantScope::ComputerWide);
+        // Legacy computer-wide grants (no `mode` field) load as ask.
+        let raw = r#"{"version":1,"grants":[{"id":"cw","canonical_path":"/Users/x","granted_at":"t","profile_id":"nan","scope":"computer_wide"}]}"#;
+        assert_eq!(
+            parse_store(raw).expect("legacy").grants[0].mode,
+            ApprovalMode::Ask
+        );
+    }
+
+    #[test]
+    fn re_enabling_computer_wide_keeps_the_id_and_takes_the_confirmed_mode() {
+        let mut store = default_store();
+        store.add_computer_wide_grant(
+            "cw".into(),
+            "nan",
+            PathBuf::from("/Users/x"),
+            "t".into(),
+            ApprovalMode::Allow,
+        );
+        let again = store.add_computer_wide_grant(
+            "cw2".into(),
+            "nan",
+            PathBuf::from("/Users/x"),
+            "t2".into(),
+            ApprovalMode::Ask,
+        );
+        assert_eq!(again.id, "cw");
+        assert_eq!(again.mode, ApprovalMode::Ask);
+        assert_eq!(store.grants.len(), 1);
+    }
+
+    fn mixed_store(cw_mode: ApprovalMode) -> GrantsStore {
+        let mut store = default_store();
+        store.add_computer_wide_grant(
+            "cw".into(),
+            "nan",
+            PathBuf::from("/Users/x"),
+            "t".into(),
+            cw_mode,
+        );
+        for (id, path) in [("strict", "/Users/x/Strict"), ("open", "/Users/x/Open")] {
+            store
+                .add_grant(id.into(), "nan", PathBuf::from(path), "t".into())
+                .expect("add");
+        }
+        store.set_mode("open", ApprovalMode::Allow).expect("allow");
+        // Another profile's asking folder over the same path never counts.
         store
-            .set_mode("cw", ApprovalMode::Ask)
-            .expect("ask is fine");
+            .add_grant(
+                "other".into(),
+                "helmcode",
+                PathBuf::from("/Users/x/Docs"),
+                "t".into(),
+            )
+            .expect("other");
+        store
+    }
+
+    fn governing(store: &GrantsStore, resolved: &str, path: &str) -> ApprovalMode {
+        let grant = store.grant_by_id(resolved).expect("grant").clone();
+        store.governing_mode(&grant, Path::new(path))
+    }
+
+    #[test]
+    fn folder_that_asks_beats_whole_computer_allow() {
+        let store = mixed_store(ApprovalMode::Allow);
+        // Reached through the computer-wide grant (folder not selected in
+        // this conversation) or through the folder itself: it asks.
+        assert_eq!(
+            governing(&store, "cw", "/Users/x/Strict/a.txt"),
+            ApprovalMode::Ask
+        );
+        assert_eq!(
+            governing(&store, "cw", "/Users/x/Strict"),
+            ApprovalMode::Ask
+        );
+        assert_eq!(
+            governing(&store, "strict", "/Users/x/Strict/sub/a.txt"),
+            ApprovalMode::Ask
+        );
+    }
+
+    #[test]
+    fn whole_computer_allow_is_honored_outside_asking_folders() {
+        let store = mixed_store(ApprovalMode::Allow);
+        assert_eq!(
+            governing(&store, "cw", "/Users/x/notes.txt"),
+            ApprovalMode::Allow
+        );
+        assert_eq!(
+            governing(&store, "cw", "/Users/x/Docs/a.txt"),
+            ApprovalMode::Allow,
+            "other profile ignored"
+        );
+        // A sibling whose name only shares a prefix is not inside `Strict`.
+        assert_eq!(
+            governing(&store, "cw", "/Users/x/Strict-old/a.txt"),
+            ApprovalMode::Allow
+        );
+        assert_eq!(
+            governing(&store, "cw", "/Users/x/Open/a.txt"),
+            ApprovalMode::Allow
+        );
+        assert_eq!(
+            governing(&store, "open", "/Users/x/Open/a.txt"),
+            ApprovalMode::Allow
+        );
+    }
+
+    #[test]
+    fn whole_computer_ask_asks_and_never_takes_a_folders_allow_away() {
+        let store = mixed_store(ApprovalMode::Ask);
+        assert_eq!(
+            governing(&store, "cw", "/Users/x/notes.txt"),
+            ApprovalMode::Ask
+        );
+        // S13 unchanged: a folder in allow reached as itself keeps allowing.
+        assert_eq!(
+            governing(&store, "open", "/Users/x/Open/a.txt"),
+            ApprovalMode::Allow
+        );
+    }
+
+    #[test]
+    fn nested_asking_folder_beats_an_allowing_parent_and_uncovered_paths_ask() {
+        let mut store = default_store();
+        store
+            .add_grant("parent".into(), "nan", PathBuf::from("/w"), "t".into())
+            .expect("p");
+        store
+            .add_grant(
+                "child".into(),
+                "nan",
+                PathBuf::from("/w/private"),
+                "t".into(),
+            )
+            .expect("c");
+        store
+            .set_mode("parent", ApprovalMode::Allow)
+            .expect("allow");
+        assert_eq!(
+            governing(&store, "parent", "/w/private/a"),
+            ApprovalMode::Ask
+        );
+        assert_eq!(governing(&store, "parent", "/w/a"), ApprovalMode::Allow);
+        // Fail closed: the resolved grant does not cover the path.
+        assert_eq!(
+            governing(&store, "parent", "/elsewhere/a"),
+            ApprovalMode::Ask
+        );
     }
 
     #[test]
@@ -935,7 +1127,13 @@ mod tests {
         assert!(store.scoped_to("nan", &[]).grants_for("nan").is_empty());
 
         // The computer-wide mode is profile-level: never scoped away.
-        store.add_computer_wide_grant("cw".into(), "nan", PathBuf::from("/Users/x"), "t".into());
+        store.add_computer_wide_grant(
+            "cw".into(),
+            "nan",
+            PathBuf::from("/Users/x"),
+            "t".into(),
+            ApprovalMode::Ask,
+        );
         let scoped = store.scoped_to("nan", &[]);
         assert_eq!(ids(&scoped), vec!["other", "cw"]);
         assert!(scoped.computer_wide_grant("nan").is_some());
@@ -1556,8 +1754,20 @@ mod tests {
     fn computer_wide_grant_is_idempotent_and_scoped_per_profile() {
         let (home, _app_data, _guard) = home_with_app_data();
         let mut store = default_store();
-        let first = store.add_computer_wide_grant("cw1".into(), "nan", home.clone(), "t".into());
-        let again = store.add_computer_wide_grant("cw2".into(), "nan", home.clone(), "t".into());
+        let first = store.add_computer_wide_grant(
+            "cw1".into(),
+            "nan",
+            home.clone(),
+            "t".into(),
+            ApprovalMode::Ask,
+        );
+        let again = store.add_computer_wide_grant(
+            "cw2".into(),
+            "nan",
+            home.clone(),
+            "t".into(),
+            ApprovalMode::Ask,
+        );
         assert_eq!(first, again, "re-enabling returns the existing grant");
         assert_eq!(first.scope, GrantScope::ComputerWide);
         assert!(store.computer_wide_grant("nan").is_some());

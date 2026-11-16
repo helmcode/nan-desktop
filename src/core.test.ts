@@ -16,7 +16,7 @@ import {
   respondToApproval,
   setGrantMode,
 } from "./core";
-import { effectiveMode, useWorkspace } from "./workspace";
+import { foldersStillAsking, loadGrants, useWorkspace } from "./workspace";
 import type { GrantView } from "./types";
 
 const grant = (overrides: Partial<GrantView> = {}): GrantView => ({
@@ -66,9 +66,67 @@ describe("core IPC contract", () => {
 });
 
 describe("workspace modes", () => {
-  it("computer-wide grants are always ask, whatever is stored", () => {
-    expect(effectiveMode(grant({ scope: "computer_wide", mode: "allow" }))).toBe("ask");
-    expect(effectiveMode(grant({ mode: "allow" }))).toBe("allow");
+  it("R22: the whole-computer grant reports its stored mode like a folder", async () => {
+    resetTauri({
+      tools_grant_list: () => [
+        grant({ id: "cw", scope: "computer_wide", canonical_path: "/Users/ana", mode: "allow" }),
+        grant({ mode: "allow" }),
+        grant({ id: "g2", mode: "bogus" as never }),
+      ],
+    });
+    const { modes } = await loadGrants("nan");
+    expect(modes).toEqual({ cw: "allow", g1: "allow", g2: "ask" });
+  });
+
+  it("R22: enabling the whole computer sends the chosen mode (ask by default)", async () => {
+    resetTauri({
+      tools_grant_list: () => [],
+      tools_grant_computer_wide: () => grant({ id: "cw", scope: "computer_wide" }),
+    });
+    const { result } = renderHook(() => useWorkspace("nan"));
+    await act(async () => {
+      await result.current.enableComputerWide();
+    });
+    await act(async () => {
+      await result.current.enableComputerWide("allow");
+    });
+    expect(invokedWith("tools_grant_computer_wide")).toEqual([
+      { profileId: "nan", mode: "ask" },
+      { profileId: "nan", mode: "allow" },
+    ]);
+  });
+
+  it("R22: the whole-computer mode switch persists through the core", async () => {
+    let stored = grant({ id: "cw", scope: "computer_wide", canonical_path: "/Users/ana" });
+    resetTauri({
+      tools_grant_list: () => [stored],
+      tools_grant_set_mode: (args: { mode: "ask" | "allow" }) => {
+        stored = { ...stored, mode: args.mode };
+        return stored;
+      },
+    });
+    const { result } = renderHook(() => useWorkspace("nan"));
+    await waitFor(() => expect(result.current.computerWide?.id).toBe("cw"));
+    await act(() => result.current.setMode("cw", "allow"));
+    expect(invokedWith("tools_grant_set_mode")).toEqual([{ grantId: "cw", mode: "allow" }]);
+    expect(result.current.modes.cw).toBe("allow");
+    // A fresh load (restart) reads the persisted mode back.
+    expect((await loadGrants("nan")).modes.cw).toBe("allow");
+  });
+
+  it("R22: lists the folders that still ask only in the mixed state", () => {
+    const cw = grant({ id: "cw", scope: "computer_wide", canonical_path: "/Users/ana" });
+    const strict = grant({ id: "s", canonical_path: "/Users/ana/Strict" });
+    const open = grant({ id: "o", canonical_path: "/Users/ana/Open" });
+    const folders = [strict, open];
+    const mixed = { cw: "allow", s: "ask", o: "allow" } as const;
+    expect(foldersStillAsking({ computerWide: cw, folders, modes: mixed })).toEqual([strict]);
+    // A folder with no known mode is ask (the core default).
+    expect(foldersStillAsking({ computerWide: cw, folders, modes: { cw: "allow" } })).toEqual(folders);
+    // Whole computer asks itself, is off, or every folder allows: nothing.
+    expect(foldersStillAsking({ computerWide: cw, folders, modes: { ...mixed, cw: "ask" } })).toEqual([]);
+    expect(foldersStillAsking({ computerWide: null, folders, modes: mixed })).toEqual([]);
+    expect(foldersStillAsking({ computerWide: cw, folders: [open], modes: mixed })).toEqual([]);
   });
 
   it("trusts the grant the core returns when the native confirmation is declined", async () => {

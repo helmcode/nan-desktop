@@ -2,9 +2,9 @@
 //
 // The Rust core owns every decision: folders are only added through the
 // native picker it opens, the whole-computer mode only after the user
-// confirms the core's native warning, and the approval mode of a grant is
-// stored and enforced by the core (S13). The renderer lists grants and asks
-// for changes.
+// confirms the core's native warning, and the approval mode of a grant
+// (folder or whole computer) is stored and enforced by the core (S13, R22).
+// The renderer lists grants and asks for changes.
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -36,27 +36,34 @@ export interface Workspace {
   /// Resolves to the mode the core actually stored (null on failure): a
   /// declined native confirmation leaves the previous mode.
   setMode: (grantId: string, mode: GrantMode) => Promise<GrantMode | null>;
-  /// Asks the core to enable the whole-computer mode (native confirmation).
-  enableComputerWide: () => Promise<boolean>;
+  /// Asks the core to enable the whole-computer mode with `mode` (default
+  /// ask); the core's native confirmation names the mode.
+  enableComputerWide: (mode?: GrantMode) => Promise<boolean>;
   /// Back to private folders only.
   disableComputerWide: () => Promise<void>;
   removeGrant: (grantId: string) => Promise<void>;
 }
 
-/// The mode that actually applies (core `Grant::effective_mode`):
-/// computer-wide grants always ask, whatever is stored.
-export function effectiveMode(grant: GrantView): GrantMode {
-  return isComputerWide(grant) ? DEFAULT_GRANT_MODE : normalizeGrantMode(grant.mode);
-}
-
-/// Grants of one profile with their effective modes. Every grant in
+/// Grants of one profile with their modes. Every grant in
 /// `tools_grant_list` carries its `mode`, so no per-grant round trip.
 export async function loadGrants(
   profileId: string | null,
 ): Promise<{ grants: GrantView[]; modes: Record<string, GrantMode> }> {
   const list = await invoke<GrantView[]>("tools_grant_list");
   const grants = list.filter((g) => g.profile_id === profileId);
-  return { grants, modes: Object.fromEntries(grants.map((g) => [g.id, effectiveMode(g)])) };
+  return { grants, modes: Object.fromEntries(grants.map((g) => [g.id, normalizeGrantMode(g.mode)])) };
+}
+
+/// R22 warning: the folders that keep asking while the whole computer is in
+/// allow. The core applies "the strictest mode wins per path" (see
+/// `GrantsStore::governing_mode`), so every folder in ask still asks; the
+/// list is empty when the whole computer is off or asks itself.
+export function foldersStillAsking(
+  workspace: Pick<Workspace, "computerWide" | "folders" | "modes">,
+): GrantView[] {
+  const { computerWide, folders, modes } = workspace;
+  if (!computerWide || modes[computerWide.id] !== "allow") return [];
+  return folders.filter((grant) => (modes[grant.id] ?? DEFAULT_GRANT_MODE) !== "allow");
 }
 
 export function useWorkspace(profileId: string | null): Workspace {
@@ -132,7 +139,7 @@ export function useWorkspace(profileId: string | null): Workspace {
       // confirmation leaves it unchanged, and the refresh in `run` shows that.
       return run(async (): Promise<GrantMode | null> => {
         const updated = await setGrantMode(grantId, mode);
-        const stored = effectiveMode(updated);
+        const stored = normalizeGrantMode(updated.mode);
         setModes((current) => ({ ...current, [updated.id]: stored }));
         return stored;
       }, null);
@@ -140,13 +147,16 @@ export function useWorkspace(profileId: string | null): Workspace {
     [run],
   );
 
-  const enableComputerWide = useCallback(async (): Promise<boolean> => {
-    if (!profileId) return false;
-    return run(async () => {
-      const grant = await invoke<GrantView | null>("tools_grant_computer_wide", { profileId });
-      return grant !== null;
-    }, false);
-  }, [profileId, run]);
+  const enableComputerWide = useCallback(
+    async (mode: GrantMode = DEFAULT_GRANT_MODE): Promise<boolean> => {
+      if (!profileId) return false;
+      return run(async () => {
+        const grant = await invoke<GrantView | null>("tools_grant_computer_wide", { profileId, mode });
+        return grant !== null;
+      }, false);
+    },
+    [profileId, run],
+  );
 
   const removeGrant = useCallback(
     async (grantId: string): Promise<void> => {

@@ -416,6 +416,43 @@ describe("round 14 review fixes (B1/B2, C6, QA busy state)", () => {
     expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
   });
 
+  it("R22: the whole-computer dialog offers both modes, ask by default", async () => {
+    resetTauri({
+      ...chatHandlers([row(1, "user", "hi")]),
+      ...settingsHandlers,
+      tools_grant_computer_wide: () => null,
+    });
+    renderApp("en");
+    await screen.findByText("hi");
+    await openSettings("Working folders");
+
+    fireEvent.click(await screen.findByRole("button", { name: /Give access to the whole computer/ }));
+    let dialog = await screen.findByRole("alertdialog");
+    const group = within(dialog).getByRole("radiogroup", { name: "Approval mode for the whole computer" });
+    expect(within(group).getByRole("radio", { name: "Ask every time" }).getAttribute("aria-checked")).toBe("true");
+    expect(within(dialog).queryByText("Covered actions run without asking, including deletes.")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Continue at my own risk" }));
+    await waitFor(() => expect(invokedWith("tools_grant_computer_wide")).toEqual([{ profileId: "nan", mode: "ask" }]));
+
+    // Allow: the warning tone and the deletes line appear before continuing.
+    fireEvent.click(await screen.findByRole("button", { name: /Give access to the whole computer/ }));
+    dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("radio", { name: "Allow without asking" }));
+    expect(within(dialog).getByText("Covered actions run without asking, including deletes.")).toBeTruthy();
+    expect(
+      within(dialog).getByText(
+        "It will not ask: it runs actions directly, including deletes. Folders set to Ask every time keep asking.",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Continue at my own risk" }));
+    await waitFor(() =>
+      expect(invokedWith("tools_grant_computer_wide")).toEqual([
+        { profileId: "nan", mode: "ask" },
+        { profileId: "nan", mode: "allow" },
+      ]),
+    );
+  });
+
   it("C6: the Account section offers the update and shares the busy state", async () => {
     let finish: () => void = () => {};
     resetTauri({
