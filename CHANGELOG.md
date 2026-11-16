@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.12 - 2026-11-16 - Todo se ve como debe
+
+### New
+- Los HTML se previsualizan como webs reales en un marco aislado (scripts separados de la app y sin red), tambien los tuyos; hasta 8 MB.
+- La Cuenta incluye enlaces para dar una estrella al repositorio y reportar incidencias.
+- El acceso a todo el equipo admite "Permitir sin preguntar"; en las carpetas marcadas como "Preguntar siempre" se sigue preguntando, y la pagina de carpetas avisa de esa mezcla.
+
 ## 0.2.11 - 2026-11-16 - Quien comparte tambien abre su enlace
 
 ### Changed
