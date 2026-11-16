@@ -344,6 +344,39 @@ describe("ShareArtifactDialog: emails", () => {
     expect(problem.textContent).toContain("Alguno de esos correos no es de un usuario de NaN.");
   });
 
+  it("an unnamed rejection keeps its message while chips are removed, until the next submit", async () => {
+    renderDialog({ profileId: "nan", table: rejectWith({ error: "recipient_not_user" }) });
+    addEmail("ana@x.io, eve@x.io, bob@x.io");
+    fireEvent.click(accept());
+    fireEvent.click(create());
+    const problem = await screen.findByTestId("artifact-problem");
+    const generic = problem.textContent;
+    expect(generic).toBeTruthy();
+    // The server did not say which one: any could still be the bad one.
+    fireEvent.click(screen.getByRole("button", { name: "Remove ana@x.io" }));
+    expect(screen.getByTestId("artifact-problem").textContent).toBe(generic);
+    fireEvent.click(screen.getByRole("button", { name: "Remove eve@x.io" }));
+    expect(screen.getByTestId("artifact-problem").textContent).toBe(generic);
+    // Only the next submit settles it.
+    resetTauri(core());
+    if (!(accept() as HTMLInputElement).checked) fireEvent.click(accept());
+    fireEvent.click(create());
+    await screen.findByText("Your link is ready");
+  });
+
+  it("a named rejection survives removing an accepted email and clears with the last rejected one", async () => {
+    renderDialog({ profileId: "nan", table: rejectWith({ error: "recipient_not_user", emails: ["eve@x.io"] }) });
+    addEmail("ana@x.io, eve@x.io");
+    fireEvent.click(accept());
+    fireEvent.click(create());
+    const text = '"eve@x.io" is not a NaN user. Remove it to create the link.';
+    expect((await screen.findByTestId("artifact-problem")).textContent).toBe(text);
+    fireEvent.click(screen.getByRole("button", { name: "Remove ana@x.io" }));
+    expect(screen.getByTestId("artifact-problem").textContent).toBe(text);
+    fireEvent.click(screen.getByRole("button", { name: "Remove eve@x.io" }));
+    expect(screen.queryByTestId("artifact-problem")).toBeNull();
+  });
+
   it("names several rejected emails in Spanish", async () => {
     renderDialog({
       profileId: "nan",
@@ -556,6 +589,22 @@ describe("ShareArtifactDialog: no key material in logs", () => {
     // The dialog never renders anything but the https link from the reply.
     expect(document.body.textContent).not.toContain("sk-hke_");
   });
+});
+
+describe("ShareArtifactDialog: members unavailable copy", () => {
+  const cases: Array<[Locale, RegExp, string]> = [
+    ["en", /Team members/, "Could not load your team. Share with your whole organization or try again later."],
+    ["es", /Miembros del equipo/, "No se pudo cargar tu equipo. Comparte con toda la organización o vuelve a intentarlo más tarde."],
+  ];
+  for (const [locale, radio, copy] of cases) {
+    it(`${locale}: a failed members list says so instead of an empty picker`, async () => {
+      renderDialog({ locale, table: core({ artifacts_request: () => ({ status: 500, body: null }) }) });
+      fireEvent.click(screen.getByRole("radio", { name: radio }));
+      const alert = await screen.findByText(copy);
+      expect(alert.getAttribute("role")).toBe("alert");
+      expect(screen.queryByRole("searchbox")).toBeNull();
+    });
+  }
 });
 
 // R20-A audit: opening the dialog never throws, whatever the members list

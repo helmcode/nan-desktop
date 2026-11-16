@@ -241,8 +241,13 @@ export function ShareArtifactDialog({
   const removeEmail = (email: string): void => {
     const next = emails.filter((item) => item !== email);
     setEmails(next);
-    // Once every rejected email is gone, so is its message.
-    if (problem === "recipient_not_user" && !next.some((item) => rejected.includes(item))) {
+    // Once every named rejected email is gone, so is its message. A rejection
+    // that named nobody stays until the next submit: the bad email may remain.
+    if (
+      problem === "recipient_not_user" &&
+      rejected.includes(email) &&
+      !next.some((item) => rejected.includes(item))
+    ) {
       setRejected([]);
       setProblem(null);
     }

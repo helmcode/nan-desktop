@@ -541,7 +541,7 @@ export const es: Strings = {
     },
     emailsLabel: "Direcciones de correo",
     emailsPlaceholder: "Añadir correo…",
-    emailsHint: "Tienen que tener cuenta en NaN: abrirán el enlace iniciando sesión. Pulsa Intro o pega varios separados por comas.",
+    emailsHint: "Necesitan una cuenta en NaN: abrirán el enlace iniciando sesión. Pulsa Intro o pega varios separados por comas.",
     emailInvalid: (value: string) => `«${value}» no es un correo válido.`,
     emailsFull: (max: number) => `Puedes añadir ${max} personas como máximo.`,
     removeEmail: (email: string) => `Quitar ${email}`,
