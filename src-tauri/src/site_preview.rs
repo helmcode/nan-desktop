@@ -26,6 +26,21 @@
 //!    ([`with_csp_meta`]). No network: `connect-src 'none'`, `default-src
 //!    'none'`, only inline code and `data:` assets.
 //!
+//! R22: a user's own `.html` / `.htm` file (any granted file the preview
+//! opens, not only a tool website) is ALSO rendered for real, through the
+//! very same scheme, header, sandbox and frame, but as a separate class:
+//! [`SiteRegistry::register_document`]. Those tokens are ephemeral: the
+//! renderer releases one when its preview closes
+//! ([`SiteRegistry::release_document`]), they live in their own small
+//! ring (opening user files can never evict a tool website, and a release
+//! can never drop one), and they never set `selfContainedWebsite`.
+//! Why real rendering of an arbitrary file is safe here: the guarantees
+//! above never depended on the marker. The marker only proves WHO wrote
+//! the bytes; the isolation (opaque origin, no Tauri bridge, no storage,
+//! no network, no popups, no forms, no top navigation) comes from the
+//! sandbox and the header policy, which apply to every token alike. What a
+//! hostile document can reach is its own bytes, which the user already has.
+//!
 //! The handler never touches the disk: it only serves bytes the preview
 //! command already read through every grant check. Nothing here logs.
 
@@ -48,40 +63,91 @@ connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
 /// the 8 MiB preview cap.
 pub const MAX_SITES: usize = 4;
 
-/// Bytes registered for the sandboxed preview, by random token.
+/// How many user HTML documents (R22, the ephemeral class) the registry
+/// keeps at once. The renderer releases each one on close; the ring is the
+/// backstop when it does not (a crash, a reload). Each is at most the
+/// 8 MiB preview cap.
+pub const MAX_DOCUMENTS: usize = 4;
+
+type Ring = Mutex<VecDeque<(String, Arc<Vec<u8>>)>>;
+
+/// Bytes registered for the sandboxed preview, by random token. Two
+/// classes with their own rings: `sites` (tool websites, pinned by the
+/// `write_website` marker) and `documents` (a user's own HTML, ephemeral).
 #[derive(Default)]
 pub struct SiteRegistry {
-    sites: Mutex<VecDeque<(String, Arc<Vec<u8>>)>>,
+    sites: Ring,
+    documents: Ring,
+}
+
+fn push(ring: &Ring, bytes: Vec<u8>, max: usize) -> String {
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    if let Ok(mut entries) = ring.lock() {
+        entries.push_back((token.clone(), Arc::new(bytes)));
+        while entries.len() > max {
+            entries.pop_front();
+        }
+    }
+    token
+}
+
+fn find(ring: &Ring, token: &str) -> Option<Arc<Vec<u8>>> {
+    let entries = ring.lock().ok()?;
+    entries
+        .iter()
+        .find(|(known, _)| known == token)
+        .map(|(_, bytes)| bytes.clone())
 }
 
 impl SiteRegistry {
     /// Register a site's (already gated) bytes; returns its fresh token.
     /// The oldest site is forgotten past [`MAX_SITES`].
     pub fn register(&self, bytes: Vec<u8>) -> String {
-        let token = uuid::Uuid::new_v4().simple().to_string();
-        if let Ok(mut sites) = self.sites.lock() {
-            sites.push_back((token.clone(), Arc::new(bytes)));
-            while sites.len() > MAX_SITES {
-                sites.pop_front();
-            }
-        }
-        token
+        push(&self.sites, bytes, MAX_SITES)
+    }
+
+    /// R22: register a user's own HTML document (already read through
+    /// every grant check) in the ephemeral class; returns its fresh token.
+    /// The oldest document is forgotten past [`MAX_DOCUMENTS`]; tool sites
+    /// are never touched.
+    pub fn register_document(&self, bytes: Vec<u8>) -> String {
+        push(&self.documents, bytes, MAX_DOCUMENTS)
+    }
+
+    /// R22: forget a document token (its preview closed). Only the
+    /// ephemeral class is affected: a tool site's token is left alone.
+    /// Returns whether a document was dropped.
+    pub fn release_document(&self, token: &str) -> bool {
+        let Ok(mut entries) = self.documents.lock() else {
+            return false;
+        };
+        let before = entries.len();
+        entries.retain(|(known, _)| known != token);
+        entries.len() != before
     }
 
     fn get(&self, token: &str) -> Option<Arc<Vec<u8>>> {
-        let sites = self.sites.lock().ok()?;
-        sites
-            .iter()
-            .find(|(known, _)| known == token)
-            .map(|(_, bytes)| bytes.clone())
+        find(&self.sites, token).or_else(|| find(&self.documents, token))
     }
 
-    /// Forget every site (a realm switch).
+    /// Forget every site and document (a realm switch).
     pub fn clear(&self) {
-        if let Ok(mut sites) = self.sites.lock() {
-            sites.clear();
+        for ring in [&self.sites, &self.documents] {
+            if let Ok(mut entries) = ring.lock() {
+                entries.clear();
+            }
         }
     }
+}
+
+/// R22: the token a site URL ends with (what the renderer hands back to
+/// release a document). `None` for anything that is not exactly 32
+/// lowercase hex characters.
+pub fn valid_token(token: &str) -> bool {
+    token.len() == 32
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// The URL the renderer loads a registered site from. Windows WebView2
@@ -332,6 +398,88 @@ mod tests {
             respond(&registry, "GET", &format!("/{}", tokens[0])).status(),
             404
         );
+    }
+
+    #[test]
+    fn a_user_document_is_served_exactly_like_a_site_header_sandbox_and_meta() {
+        let registry = SiteRegistry::default();
+        let token = registry.register_document(SITE.as_bytes().to_vec());
+        let response = respond(&registry, "GET", &format!("/{token}"));
+        assert_eq!(response.status(), 200);
+        let csp = response.headers()["Content-Security-Policy"]
+            .to_str()
+            .expect("csp");
+        assert_eq!(csp, format!("{SITE_CSP}; sandbox allow-scripts"));
+        assert!(csp.contains("connect-src 'none'"), "no network");
+        assert!(csp.contains("script-src 'unsafe-inline'"), "scripts run");
+        assert!(!csp.contains("allow-same-origin"));
+        assert_eq!(body(&response), with_csp_meta(SITE));
+    }
+
+    #[test]
+    fn a_large_document_is_served_whole() {
+        // The owner's report (a ~159 KB styled report): nothing is cut.
+        let mut html =
+            String::from("<!doctype html><html><head><style>p{color:#333}</style></head><body>");
+        while html.len() < 200 * 1024 {
+            html.push_str("<p>Row of the research report with enough text to add up.</p>");
+        }
+        html.push_str("<p id=\"end\">THE END</p></body></html>");
+        let registry = SiteRegistry::default();
+        let token = registry.register_document(html.clone().into_bytes());
+        let served = body(&respond(&registry, "GET", &format!("/{token}")));
+        assert_eq!(served, with_csp_meta(&html));
+        assert!(served.ends_with("<p id=\"end\">THE END</p></body></html>"));
+    }
+
+    #[test]
+    fn documents_are_ephemeral_and_never_touch_tool_sites() {
+        let registry = SiteRegistry::default();
+        let site = registry.register(b"<p>site</p>".to_vec());
+        let doc = registry.register_document(b"<p>doc</p>".to_vec());
+        assert_ne!(site, doc);
+        // Releasing a site token through the document path is a no-op.
+        assert!(!registry.release_document(&site));
+        assert_eq!(respond(&registry, "GET", &format!("/{site}")).status(), 200);
+        // Releasing the document drops it (and only once).
+        assert!(registry.release_document(&doc));
+        assert!(!registry.release_document(&doc));
+        assert_eq!(respond(&registry, "GET", &format!("/{doc}")).status(), 404);
+        // A flood of documents never evicts a tool site.
+        let docs: Vec<String> = (0..MAX_DOCUMENTS + 3)
+            .map(|i| registry.register_document(format!("<p>{i}</p>").into_bytes()))
+            .collect();
+        assert_eq!(respond(&registry, "GET", &format!("/{site}")).status(), 200);
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{}", docs[0])).status(),
+            404
+        );
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{}", docs[docs.len() - 1])).status(),
+            200
+        );
+        // A realm switch forgets both classes.
+        registry.clear();
+        assert_eq!(respond(&registry, "GET", &format!("/{site}")).status(), 404);
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{}", docs[docs.len() - 1])).status(),
+            404
+        );
+    }
+
+    #[test]
+    fn only_a_32_char_lowercase_hex_token_is_valid() {
+        let registry = SiteRegistry::default();
+        assert!(valid_token(&registry.register_document(Vec::new())));
+        for bad in [
+            "",
+            "abc",
+            "0123456789ABCDEF0123456789abcdef",
+            "../0123456789abcdef0123456789ab",
+            "0123456789abcdef0123456789abcdeg",
+        ] {
+            assert!(!valid_token(bad), "{bad}");
+        }
     }
 
     #[test]

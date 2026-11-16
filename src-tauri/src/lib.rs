@@ -325,6 +325,7 @@ pub fn run() {
             tools::tools_settings_get,
             tools::tools_set_run_command_enabled,
             preview::preview_read_file,
+            preview::preview_release_site,
             preview::preview_reveal_location,
             preview::web_preview_fetch,
             links::open_external,

@@ -29,7 +29,7 @@ vi.mock("./preview/renderers", async () => {
     return <p>PDF READY ({bytes.length} bytes)</p>;
   }
   const Stub = () => <p>stub</p>;
-  return { PdfPreview, ImagePreview: Stub, TextPreview: Stub, HtmlPreview: Stub, SheetPreview: Stub, DocxPreview: Stub };
+  return { PdfPreview, ImagePreview: Stub, TextPreview: Stub, SheetPreview: Stub, DocxPreview: Stub };
 });
 
 import App from "./App";

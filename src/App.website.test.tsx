@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 // R20-D in the shell: the assistant builds a mini website (write_website),
 // the core writes it to the session folder and declares it the turn's
-// deliverable. The preview opens it, shows its text safely (the HTML
-// preview is the whitelist renderer: no scripts, styles, images or frames
-// run inside the app) and the header offers Share, which uploads exactly
-// that file.
+// deliverable. The preview opens it in the core's sandboxed frame (the core
+// flags it as the tool's website; nothing of the site runs or lands in the
+// app's own DOM) and the header offers Share, which uploads exactly that
+// file.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { readFileSync } from "node:fs";
@@ -19,6 +19,7 @@ import type { ChatMessageRow } from "./types";
 
 const SESSION = "/private/var/folders/x/T/helmcode-desktop/abc/conversation-7";
 const SITE_PATH = `${SESSION}/website-panaderia-ana.html`;
+const SITE_URL = "nan-site://localhost/0123456789abcdef0123456789abcdef";
 const PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 const SITE = `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Panadería Ana</title>
 <style>body{font-family:system-ui;background:url(data:image/png;base64,${PIXEL})}</style></head>
@@ -43,7 +44,13 @@ function setup(messages: ChatMessageRow[]): void {
     tts_stop: () => undefined,
     skills_list: () => [],
     chat_send: () => undefined,
-    preview_read_file: () => ({ base64: Buffer.from(SITE, "utf8").toString("base64"), size: SITE.length }),
+    // What the core replies for a website write_website wrote this session.
+    preview_read_file: () => ({
+      base64: Buffer.from(SITE, "utf8").toString("base64"),
+      size: SITE.length,
+      selfContainedWebsite: true,
+      siteUrl: SITE_URL,
+    }),
     artifacts_request: (args) =>
       args?.path === "/api/auth/me"
         ? { status: 200, body: { email: "ana@acme.com", featureFlags: ["artifacts"], artifacts: true } }
@@ -59,7 +66,7 @@ beforeEach(() => window.localStorage.clear());
 afterEach(() => cleanup());
 
 describe("R20-D: a website the assistant built", () => {
-  it("opens in the preview, renders its text safely, and shares that exact file", async () => {
+  it("opens in the sandboxed preview frame and shares that exact file", async () => {
     const messages = [row(1, "user", "hola")];
     setup(messages);
     render(
@@ -84,10 +91,13 @@ describe("R20-D: a website the assistant built", () => {
 
     const pane = await screen.findByRole("complementary", { name: "Vista previa" });
     await waitFor(() => expect(within(pane).getByTitle(SITE_PATH)).toBeTruthy());
-    // The text renders; nothing executable or fetched does (whitelist).
-    expect(await within(pane).findByText("Pan del día")).toBeTruthy();
-    expect(within(pane).getByText("Abrimos a las 8.")).toBeTruthy();
-    expect(pane.querySelector("script, style, img, iframe")).toBeNull();
+    // The site renders in the core's sandboxed frame; nothing of it runs or
+    // lands in the app's own DOM.
+    const frame = await within(pane).findByTitle("Sitio web website-panaderia-ana.html");
+    expect(frame.getAttribute("src")).toBe(SITE_URL);
+    expect(frame.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(within(pane).queryByText("Pan del día")).toBeNull();
+    expect(pane.querySelector("script, style, img")).toBeNull();
     expect(document.body.dataset.ran).toBeUndefined();
 
     fireEvent.click(within(pane).getByRole("button", { name: "Compartir website-panaderia-ana.html como enlace" }));
