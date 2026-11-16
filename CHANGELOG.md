@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.9 - 2026-11-16 - Enlaces, sitios y avisos que funcionan a la primera
+
+### Fixes
+- Abrir "Enlaces compartidos" tras ver un PDF ya no rompe la seccion: los PDF se liberan a traves de la tarea de carga de pdf.js al desmontar la vista previa.
+- El aviso de actualizacion ya no desaparece cuando una comprobacion falla (por ejemplo al despertar sin red) y el reintento por `online` es inmediato. Un aviso cerrado permanece cerrado.
+
+### New
+- Nueva herramienta `write_website`: el agente construye pequenos sitios estaticos en un unico HTML autocontenido, se previsualizan en un marco aislado (scripts separados de la app y sin red) y se pueden compartir como artifacts.
+- La accion Compartir se ofrece para todo lo que muestra la vista previa (json, yaml, logs y codigo se suben como texto); los selectores de miembros ya no te ofrecen a ti mismo como destinatario.
+
+### Updates
+- Las comprobaciones de actualizacion pasan de cada 6 horas a cada 2, y ademas se lanzan al recuperar el foco tras estar fuera (el aviso 0.2.8 nunca llego por los intervalos largos y el sueno del Mac).
+
 ## 0.2.8 - 2026-11-15 - The app recovers instead of going dark
 
 ### Reliability
