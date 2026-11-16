@@ -73,10 +73,7 @@ export function UpdateBanner({
         className="btn btn-primary btn-sm"
         aria-disabled={busy}
         aria-busy={busy}
-        onClick={() => {
-          if (busy) return;
-          void onUpdate();
-        }}
+        onClick={() => void onUpdate()}
       >
         {busy ? t.updater.updating : t.updater.update}
       </button>
