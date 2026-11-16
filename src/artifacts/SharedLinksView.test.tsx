@@ -253,6 +253,24 @@ describe("SharedLinksView", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 
+  it("the sharer can open and copy their own restricted links, not just public ones (R21-b)", async () => {
+    const restricted = [
+      { ...ROWS[1], id: A, title: "Notes", scope: "emails", recipient_count: 2, expires_at: iso(3) },
+      { ...ROWS[1], id: B, title: "Team deck", scope: "org", expires_at: null, url: "https://share.helmcode.com/a/ccc" },
+    ];
+    renderView({
+      core: table({ artifacts_request: () => ({ status: 200, body: { artifacts: restricted } }) }),
+    });
+    expect(await screen.findAllByTestId("link-row")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Copy the link of Notes" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open Notes in the browser" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Team deck in the browser" }));
+    expect(invokedWith("open_external")).toEqual([
+      { url: "https://share.helmcode.com/a/bbb" },
+      { url: "https://share.helmcode.com/a/ccc" },
+    ]);
+  });
+
   it("Spanish copy", async () => {
     renderView({ locale: "es" });
     expect(await screen.findByRole("heading", { name: "Enlaces compartidos" })).toBeTruthy();

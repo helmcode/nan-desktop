@@ -112,7 +112,7 @@ describe("ShareArtifactDialog: scopes", () => {
       addEmail("ana@example.com");
       const text = screen.getByRole("dialog").textContent ?? "";
       expect(text).not.toMatch(/c[oó]digo|\bcode\b|verif|OTP/i);
-      expect(text).toMatch(locale === "en" ? /signing in with their NaN account/ : /iniciando sesión con su cuenta de NaN/);
+      expect(text).toMatch(locale === "en" ? /signing in with your NaN accounts/ : /iniciando sesión con vuestra cuenta de NaN/);
       cleanup();
     }
   });
@@ -239,7 +239,7 @@ describe("ShareArtifactDialog: risk warning and consent", () => {
     addEmail("Ana@Example.com, bob@x.io");
     expect(screen.getByText("ana@example.com")).toBeTruthy();
     expect(screen.getByTestId("artifact-risk").textContent).toContain(
-      "Only these people can open this file, by signing in with their NaN account.",
+      "Only you and these people can open this file, by signing in with your NaN accounts.",
     );
     expect(create().hasAttribute("disabled")).toBe(true);
     fireEvent.click(accept());
@@ -485,6 +485,40 @@ describe("ShareArtifactDialog: success", () => {
     expect(invokedWith("open_external")[0]).toEqual({ url: URL_OK });
     fireEvent.click(screen.getByRole("button", { name: "Manage links" }));
     expect(props.onManage).toHaveBeenCalled();
+  });
+
+  it("a restricted link tells the sharer they can open it too, and offers Open and Copy (R21-b)", async () => {
+    await shareOrg();
+    const note = screen.getByTestId("artifact-access");
+    expect(note.textContent).toBe("You and the people you shared it with can open this link by signing in with your account.");
+    expect(screen.getByRole("button", { name: /Open in browser/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/only the recipient/i);
+  });
+
+  it("Spanish: the sharer and the people it is shared with can open it, natural copy (R21-b)", async () => {
+    renderDialog({ profileId: "nan", locale: "es" });
+    addEmail("ana@example.com");
+    expect(screen.getByTestId("artifact-risk").textContent).toContain(
+      "Solo tú y estas personas podréis abrir este archivo, iniciando sesión con vuestra cuenta de NaN.",
+    );
+    fireEvent.click(accept());
+    fireEvent.click(create());
+    await screen.findByText("Tu enlace está listo");
+    const note = screen.getByTestId("artifact-access").textContent ?? "";
+    expect(note).toBe("Tú y las personas con las que lo compartes podéis abrir este enlace iniciando sesión con vuestra cuenta.");
+    expect(note).not.toContain("—");
+    expect(screen.getByRole("button", { name: /Abrir en el navegador/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copiar" })).toBeTruthy();
+  });
+
+  it("a public link says anyone can open it, not the account note", async () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole("radio", { name: /Public/ }));
+    fireEvent.click(accept());
+    fireEvent.click(create());
+    await screen.findByText("Your link is ready");
+    expect(screen.queryByTestId("artifact-access")).toBeNull();
   });
 
   it("a public link repeats the reminder", async () => {

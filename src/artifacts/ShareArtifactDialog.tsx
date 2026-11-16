@@ -563,9 +563,13 @@ function SuccessDialog({
             onFocus={(e) => e.target.select()}
           />
         </label>
-        {success.scope === "public" && (
+        {success.scope === "public" ? (
           <p className="share-warning">
             <strong>{a.publicReminder}</strong>
+          </p>
+        ) : (
+          <p className="skill-hint" data-testid="artifact-access">
+            {a.accessReminder}
           </p>
         )}
         <p className="skills-notice" role="status" aria-live="polite">

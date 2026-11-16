@@ -566,7 +566,7 @@ export const en = {
       public:
         "Anyone with this link can open this file, without signing in. It can be forwarded and indexed. Only share content you are allowed to make public.",
       community:
-        "Only these people can open this file, by signing in with their NaN account. Make sure you are allowed to share this content with them.",
+        "Only you and these people can open this file, by signing in with your NaN accounts. Make sure you are allowed to share this content with them.",
       accept: "I understand the risk and want to share",
     },
     secretWarning:
@@ -584,6 +584,8 @@ export const en = {
     done: "Done",
     paywallOk: "Got it",
     publicReminder: "Anyone with this link can open the file.",
+    /** Restricted links: the sharer can open their own link too (R21-b). */
+    accessReminder: "You and the people you shared it with can open this link by signing in with your account.",
     paywallTitle: "Sharing links is part of the membership",
     paywallBody: "Shareable links are included with an active NaN membership. Renew it to share files from your chats.",
     signIn: "Sign in again",

@@ -566,7 +566,7 @@ export const es: Strings = {
       public:
         "Cualquiera con este enlace podrá abrir este archivo sin iniciar sesión. Se puede reenviar e indexar. Comparte solo contenido que puedas hacer público.",
       community:
-        "Solo estas personas podrán abrir este archivo, iniciando sesión con su cuenta de NaN. Asegúrate de que puedes compartir este contenido con ellas.",
+        "Solo tú y estas personas podréis abrir este archivo, iniciando sesión con vuestra cuenta de NaN. Asegúrate de que puedes compartir este contenido con ellas.",
       accept: "Entiendo el riesgo y quiero compartirlo",
     },
     secretWarning:
@@ -584,6 +584,7 @@ export const es: Strings = {
     done: "Hecho",
     paywallOk: "Entendido",
     publicReminder: "Cualquiera con este enlace puede abrir el archivo.",
+    accessReminder: "Tú y las personas con las que lo compartes podéis abrir este enlace iniciando sesión con vuestra cuenta.",
     paywallTitle: "Compartir enlaces es parte de la membresía",
     paywallBody: "Los enlaces para compartir están incluidos en una membresía de NaN activa. Renuévala para compartir archivos de tus chats.",
     signIn: "Volver a entrar",
