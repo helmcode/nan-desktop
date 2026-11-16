@@ -130,8 +130,11 @@ afterEach(() => {
 
 async function openPdfPreview(): Promise<void> {
   fireEvent.click(await screen.findByRole("button", { name: "Abrir la vista previa: informe.pdf" }));
-  const pane = await screen.findByRole("complementary", { name: "Vista previa" });
-  await within(pane).findByRole("group", { name: /Documento PDF/ });
+  // The pane and the PDF renderer are lazy chunks: the first test in the
+  // file pays their cold import, which outlasts findBy's 1s default on the
+  // slower Windows runners.
+  const pane = await screen.findByRole("complementary", { name: "Vista previa" }, { timeout: 3000 });
+  await within(pane).findByRole("group", { name: /Documento PDF/ }, { timeout: 3000 });
 }
 
 describe("R20-A: the first open of Shared links", () => {
