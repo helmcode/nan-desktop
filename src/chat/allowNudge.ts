@@ -11,8 +11,9 @@
 //   reset;
 // - actions outside every grant (the session temp folder) never count.
 // The suggestion only calls `tools_grant_set_mode` (the core asks for its
-// own native confirmation); a computer-wide grant can never be allow, so
-// that variant points to Settings instead.
+// own native confirmation). The whole-computer variant points to Settings
+// instead: switching the whole computer to allow is a decision the user
+// makes there, never one click away in the chat.
 
 import type { GrantView } from "../types";
 import { isInsideRoots } from "./filePaths";

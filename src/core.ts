@@ -117,7 +117,7 @@ export function onApprovalResolved(handler: (res: ApprovalResolved) => void): Pr
 // ---------------------------------------------------------------------------
 
 /// `ApprovalMode` (serde snake_case). `Grant.mode` is part of every grant
-/// in `tools_grant_list`; computer-wide grants always ask.
+/// in `tools_grant_list`, the whole-computer grant included (R22).
 export type GrantMode = "ask" | "allow";
 
 export const DEFAULT_GRANT_MODE: GrantMode = "ask";
@@ -126,7 +126,7 @@ export function normalizeGrantMode(value: unknown): GrantMode {
   return value === "allow" ? "allow" : "ask";
 }
 
-/// The EFFECTIVE mode of one grant (computer-wide always reports ask).
+/// The stored mode of one grant.
 export async function getGrantMode(grantId: string): Promise<GrantMode> {
   return normalizeGrantMode(await invoke<unknown>("tools_grant_mode_get", { grantId }));
 }

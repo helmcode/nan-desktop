@@ -44,7 +44,7 @@ describe("AllowNudgeCard", () => {
     expect(handlers.onOpenSettings).not.toHaveBeenCalled();
   });
 
-  it("points to Settings for whole-computer access (it can never be allow)", () => {
+  it("points to Settings for whole-computer access (allow is chosen there, never in the chat)", () => {
     const handlers = renderNudge({ ...folderNudge, target: { kind: "computer_wide" } });
     expect(screen.queryByRole("button", { name: "Always allow" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));

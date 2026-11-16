@@ -9,13 +9,14 @@ import type { SettingsSection } from "./components/UserMenu";
 import { UpdateAction } from "./components/UpdateAction";
 import { VOICES, folderName, grantErrorLabel, profileTitle } from "./copy";
 import { DEFAULT_GRANT_MODE, type GrantMode } from "./core";
+import { ModeSwitch } from "./components/ModeSwitch";
 import { VOICE_UI } from "./flags";
 import { LOCALES, useI18n } from "./i18n";
 import { REPORT_ISSUE_URL, REPOSITORY_URL } from "./communityLinks";
 import { IconArrowLeft, IconCheck, IconComputer, IconFolder, IconIssue, IconPlus, IconStar, IconWarning } from "./icons";
 import { openExternal } from "./Markdown";
 import type { AppInfo, MemoryMode, MemorySettingsView, ProfileView, ToolsSettingsView } from "./types";
-import type { Workspace } from "./workspace";
+import { foldersStillAsking, type Workspace } from "./workspace";
 
 export function Settings({
   profile,
@@ -123,6 +124,9 @@ export function Settings({
 
   const f = t.settings.folders;
   const errorText = grantErrorLabel(t, workspace.error);
+  const wideId = workspace.computerWide?.id ?? null;
+  const wideMode = wideId ? (workspace.modes[wideId] ?? DEFAULT_GRANT_MODE) : DEFAULT_GRANT_MODE;
+  const stillAsking = foldersStillAsking(workspace);
 
   return (
     // Round 14 review (F4): every section carries an h1 and CSS shows one at a
@@ -141,6 +145,23 @@ export function Settings({
           <h1 id="ws-title">{f.title}</h1>
           <p className="section-lede">{f.lede}</p>
 
+          {stillAsking.length > 0 && (
+            <div className="grant-still-asking" role="status">
+              <IconWarning size={16} />
+              <div>
+                <p>{f.stillAsking(stillAsking.length)}</p>
+                <ul>
+                  {stillAsking.map((grant) => (
+                    <li key={grant.id}>
+                      <strong>{folderName(grant.canonical_path)}</strong>{" "}
+                      <code className="grant-path">{grant.canonical_path}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
           <ul className="grant-list">
             {workspace.computerWide && (
               <li className="grant-card grant-card-wide">
@@ -149,7 +170,16 @@ export function Settings({
                 </span>
                 <div className="grant-text">
                   <strong>{f.wideTitle}</strong>
-                  <span>{f.wideBody}</span>
+                  <span>{wideMode === "allow" ? f.wideBodyAllow : f.wideBodyAsk}</span>
+                  <ModeSwitch
+                    label={f.wideModeLabel}
+                    value={wideMode}
+                    disabled={workspace.busy}
+                    onChange={(next) => {
+                      if (wideId) void workspace.setMode(wideId, next);
+                    }}
+                  />
+                  {wideMode === "allow" && <span className="grant-mode-hint">{f.modeAllowHint}</span>}
                 </div>
                 <button
                   type="button"
@@ -383,46 +413,6 @@ function CommunityLink({ href, icon, label }: { href: string; icon: ReactNode; l
 }
 
 /// Two-option segmented switch for a grant's approval mode (S13).
-function ModeSwitch({
-  label,
-  value,
-  onChange,
-  disabled,
-  showLabel = false,
-}: {
-  label: string;
-  value: GrantMode;
-  onChange: (mode: GrantMode) => void;
-  disabled?: boolean;
-  showLabel?: boolean;
-}) {
-  const { t } = useI18n();
-  const options: Array<{ id: GrantMode; text: string }> = [
-    { id: "ask", text: t.settings.folders.modeAsk },
-    { id: "allow", text: t.settings.folders.modeAllow },
-  ];
-  return (
-    <div className="mode-switch-wrap">
-      {showLabel && <span className="mode-switch-label">{label}</span>}
-      <div className="mode-switch" role="radiogroup" aria-label={label}>
-        {options.map((option) => (
-          <button
-            key={option.id}
-            type="button"
-            role="radio"
-            aria-checked={value === option.id}
-            className={`mode-option${value === option.id ? " selected" : ""}${option.id === "allow" ? " allow" : ""}`}
-            onClick={() => value !== option.id && onChange(option.id)}
-            disabled={disabled}
-          >
-            {option.text}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function ChoiceCard({
   selected,
   disabled,

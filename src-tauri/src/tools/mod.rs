@@ -2291,19 +2291,32 @@ pub async fn tools_grant_add(
     Ok(Some(grant))
 }
 
-/// Native confirmation before a grant stops asking (S13). The renderer
-/// cannot fake it, so a compromised renderer cannot silently switch a
-/// folder to `allow`.
-async fn confirm_allow_mode(app: &AppHandle, folder: &Path) -> bool {
+/// Native text confirming that the WHOLE computer stops asking (R22).
+const COMPUTER_WIDE_ALLOW_TEXT: &str = "El asistente podrá leer, crear, cambiar, \
+mover y borrar CUALQUIER archivo de tu usuario SIN preguntarte cada vez: \
+documentos, fotos, descargas…\n\nLas acciones cubiertas se hacen sin preguntar, \
+también los borrados. También podrá ejecutar órdenes sin preguntar, si tienes \
+activadas las órdenes.\n\nLas carpetas que tengas en \"Preguntar siempre\" \
+seguirán preguntando. Los datos de esta aplicación, las carpetas protegidas y \
+los archivos sensibles siguen bloqueados. Puedes volver a \"Preguntar siempre\" \
+cuando quieras.";
+
+/// Native confirmation before a grant stops asking (S13; computer-wide
+/// since R22). The renderer cannot fake it, so a compromised renderer
+/// cannot silently switch a grant to `allow`.
+async fn confirm_allow_mode(app: &AppHandle, grant: &grants::Grant) -> bool {
     let dialog_app = app.clone();
-    let text = format!(
-        "El asistente podrá leer, crear, cambiar, mover y borrar archivos en esta \
-         carpeta SIN preguntarte cada vez:\n\n{}\n\nTambién podrá ejecutar órdenes \
-         dentro de ella sin preguntar, si tienes activadas las órdenes.\n\n\
-         Las carpetas protegidas y los archivos sensibles siguen bloqueados. \
-         Puedes volver a \"Preguntar siempre\" cuando quieras.",
-        folder.display()
-    );
+    let text = match grant.scope {
+        GrantScope::ComputerWide => COMPUTER_WIDE_ALLOW_TEXT.to_string(),
+        GrantScope::Folder => format!(
+            "El asistente podrá leer, crear, cambiar, mover y borrar archivos en esta \
+             carpeta SIN preguntarte cada vez:\n\n{}\n\nTambién podrá ejecutar órdenes \
+             dentro de ella sin preguntar, si tienes activadas las órdenes.\n\n\
+             Las carpetas protegidas y los archivos sensibles siguen bloqueados. \
+             Puedes volver a \"Preguntar siempre\" cuando quieras.",
+            grant.canonical_path.display()
+        ),
+    };
     off_main_thread(move || {
         native_confirm(
             &dialog_app,
@@ -2329,30 +2342,23 @@ async fn apply_mode(
         .grant_by_id(grant_id)
         .cloned()
         .ok_or_else(|| Rejection::new("not_found", "no grant with this id"))?;
-    if mode == ApprovalMode::Allow {
-        if current.scope == GrantScope::ComputerWide {
-            return Err(Rejection::new(
-                "scope",
-                "computer-wide access always asks before every action",
-            ));
-        }
-        if current.mode != ApprovalMode::Allow
-            && !confirm_allow_mode(app, &current.canonical_path).await
-        {
-            audit_event(
-                dir,
-                AuditEntry {
-                    ts: audit::timestamp_now_rfc3339(),
-                    event: "settings".into(),
-                    action: "grant_mode".into(),
-                    outcome: "ignored".into(),
-                    grant_id: Some(grant_id.to_string()),
-                    profile_id: Some(current.profile_id.clone()),
-                    detail: Some("allow mode declined in the native dialog".into()),
-                },
-            )?;
-            return Ok(current);
-        }
+    if mode == ApprovalMode::Allow
+        && current.mode != ApprovalMode::Allow
+        && !confirm_allow_mode(app, &current).await
+    {
+        audit_event(
+            dir,
+            AuditEntry {
+                ts: audit::timestamp_now_rfc3339(),
+                event: "settings".into(),
+                action: "grant_mode".into(),
+                outcome: "ignored".into(),
+                grant_id: Some(grant_id.to_string()),
+                profile_id: Some(current.profile_id.clone()),
+                detail: Some("allow mode declined in the native dialog".into()),
+            },
+        )?;
+        return Ok(current);
     }
     // Reload after the (possibly long) dialog: never write back a stale store.
     let mut store = load_store(dir)?;
@@ -2380,18 +2386,19 @@ async fn apply_mode(
     Ok(updated)
 }
 
-/// The EFFECTIVE approval mode of a grant (computer-wide always `ask`).
+/// The stored approval mode of a grant (folder or computer-wide).
 #[tauri::command]
 pub fn tools_grant_mode_get(app: AppHandle, grant_id: String) -> Result<ApprovalMode, Rejection> {
     let dir = data_dir(&app).map_err(|err| Rejection::new("io", err))?;
     load_store(&dir)?
         .grant_by_id(&grant_id)
-        .map(grants::Grant::effective_mode)
+        .map(|grant| grant.mode)
         .ok_or_else(|| Rejection::new("not_found", "no grant with this id"))
 }
 
-/// Switch a grant between `ask` and `allow` (Settings, S13). `allow`
-/// requires the native confirmation; computer-wide grants refuse `allow`.
+/// Switch a grant between `ask` and `allow` (Settings, S13; the
+/// computer-wide grant too since R22). `allow` requires the native
+/// confirmation.
 /// Returns the grant as stored afterwards (unchanged when declined).
 ///
 /// `async` on purpose (P0-3): it may show a native dialog.
@@ -2406,8 +2413,8 @@ pub async fn tools_grant_set_mode(
     apply_mode(&app, &dir, &grant_id, mode).await
 }
 
-/// Native warning shown before the computer-wide mode is enabled. Plain
-/// language: the target user is not technical.
+/// Native warning shown before the computer-wide mode is enabled in `ask`
+/// mode. Plain language: the target user is not technical.
 const COMPUTER_WIDE_WARNING: &str = "Vas a dar acceso a TODO tu equipo.\n\n\
 El asistente podrá pedirte permiso para leer, crear o cambiar cualquier \
 archivo de tu usuario: documentos, fotos, descargas…\n\n\
@@ -2416,17 +2423,38 @@ por error puede borrar o estropear archivos importantes.\n\n\
 Úsalo solo si sabes lo que estás haciendo. Puedes volver a una carpeta \
 privada en cualquier momento.";
 
+/// The native warning for enabling the computer-wide mode with `mode`
+/// (R22): `allow` gets its own, louder text, so ONE native confirmation
+/// covers both the scope and the mode the user picked.
+fn computer_wide_warning(mode: ApprovalMode) -> String {
+    match mode {
+        ApprovalMode::Ask => COMPUTER_WIDE_WARNING.to_string(),
+        ApprovalMode::Allow => format!(
+            "Vas a dar acceso a TODO tu equipo SIN que te pregunte.\n\n\
+             {COMPUTER_WIDE_ALLOW_TEXT}\n\nÚsalo solo si sabes lo que estás haciendo."
+        ),
+    }
+}
+
 /// Enable the computer-wide workspace mode for a profile (P1-5): a grant
 /// rooted at `$HOME` with scope `computer_wide`. The core accepts it ONLY
 /// after the user confirms a NATIVE warning dialog (the renderer cannot
-/// fake that confirmation). Per-action approval still applies to every tool
-/// action, and the app data dir stays off limits. Returns None when the
+/// fake that confirmation). `mode` (R22, `"ask"` by default) is the
+/// approval mode the user picked; the native warning names it, so `allow`
+/// is confirmed natively like a folder's. The app data dir and the
+/// deny-lists stay off limits under both modes, and folders in `ask` keep
+/// asking ([`grants::GrantsStore::governing_mode`]). Returns None when the
 /// user declines.
 #[tauri::command]
 pub async fn tools_grant_computer_wide(
     app: AppHandle,
     profile_id: String,
+    mode: Option<String>,
 ) -> Result<Option<grants::Grant>, Rejection> {
+    let mode = match mode.as_deref() {
+        Some(raw) => ApprovalMode::parse(raw)?,
+        None => ApprovalMode::Ask,
+    };
     let dir = data_dir(&app).map_err(|err| Rejection::new("io", err))?;
     if !profile::is_known_profile_id(&profile_id) {
         return Err(Rejection::new("protocol", "unknown profile"));
@@ -2442,7 +2470,7 @@ pub async fn tools_grant_computer_wide(
         native_confirm(
             &dialog_app,
             "Acceso a todo el equipo",
-            COMPUTER_WIDE_WARNING.to_string(),
+            computer_wide_warning(mode),
             "Activar bajo mi responsabilidad",
             "Cancelar",
         )
@@ -2471,6 +2499,7 @@ pub async fn tools_grant_computer_wide(
         &profile_id,
         canonical_home.clone(),
         audit::timestamp_now_rfc3339(),
+        mode,
     );
     grants::save(&dir, &store).map_err(|err| Rejection::new("io", err))?;
     audit_event(
@@ -2483,8 +2512,12 @@ pub async fn tools_grant_computer_wide(
             grant_id: Some(grant.id.clone()),
             profile_id: Some(profile_id),
             detail: Some(format!(
-                "computer-wide mode enabled at {}",
-                canonical_home.display()
+                "computer-wide mode enabled at {} (mode {})",
+                canonical_home.display(),
+                match mode {
+                    ApprovalMode::Ask => "ask",
+                    ApprovalMode::Allow => "allow",
+                }
             )),
         },
     )?;
@@ -2743,38 +2776,50 @@ pub enum ApprovalRoute {
     Auto,
     /// `ask` mode: an inline card in the chat stream.
     Inline,
-    /// A computer-wide grant is involved: the native per-action dialog,
-    /// always, whatever the stored mode.
+    /// A computer-wide grant is involved and the action must ask: the
+    /// native per-action dialog.
     Native,
 }
 
-/// Decide the approval route from the CURRENT store. Every grant the
-/// proposal touches (the source/cwd grant and, for move_path, the
-/// destination grant) must be in effective `allow` mode for `Auto`; any
-/// computer-wide grant forces `Native`; a missing grant fails closed to
-/// `Inline` (execute rejects it anyway). run_command follows the same rule
-/// through its cwd grant: it asks in `ask` mode and runs without a prompt
-/// only when its cwd sits in an `allow`-mode grant. The always-refused
-/// deny-lists were applied at propose time and are applied again at
-/// execute time, so `Auto` never reaches them.
+/// Decide the approval route from the CURRENT store. Every end the
+/// proposal touches (the source/cwd path and, for move_path, the
+/// destination path) must be governed by `allow` for `Auto`, where the
+/// governing mode is the STRICTEST of its resolved grant and every folder
+/// grant covering that path ([`GrantsStore::governing_mode`], R22): a
+/// folder in `ask` keeps asking even under a whole-computer `allow`. When
+/// something asks, a computer-wide grant on either end routes to the
+/// `Native` dialog, otherwise `Inline`. A missing grant or path fails
+/// closed to `Inline` (execute rejects it anyway). run_command follows the
+/// same rule through its cwd. The always-refused deny-lists were applied at
+/// propose time and are applied again at execute time, so `Auto` never
+/// reaches them.
 pub fn approval_route(store: &GrantsStore, proposal: &PendingProposal) -> ApprovalRoute {
     let Some(grant_id) = proposal.grant_id.as_deref() else {
         return ApprovalRoute::Inline;
     };
+    let ends = std::iter::once((grant_id, proposal.canonical_path.as_deref())).chain(
+        proposal
+            .dest_grant_id
+            .as_deref()
+            .map(|id| (id, proposal.dest_path.as_deref())),
+    );
     let mut all_allow = true;
-    for id in std::iter::once(grant_id).chain(proposal.dest_grant_id.as_deref()) {
-        let Some(grant) = store.grant_by_id(id) else {
+    let mut native = false;
+    for (id, path) in ends {
+        let (Some(grant), Some(path)) = (store.grant_by_id(id), path) else {
             return ApprovalRoute::Inline;
         };
         if grant.scope == GrantScope::ComputerWide {
-            return ApprovalRoute::Native;
+            native = true;
         }
-        if grant.effective_mode() != ApprovalMode::Allow {
+        if store.governing_mode(grant, path) != ApprovalMode::Allow {
             all_allow = false;
         }
     }
     if all_allow {
         ApprovalRoute::Auto
+    } else if native {
+        ApprovalRoute::Native
     } else {
         ApprovalRoute::Inline
     }
@@ -4598,7 +4643,13 @@ mod tests {
         let app_data = home.join("Library").join("app-data");
         fs::create_dir_all(&app_data).expect("app data");
         let mut store = grants::default_store();
-        store.add_computer_wide_grant("cw".into(), "nan", home.clone(), "t".into());
+        store.add_computer_wide_grant(
+            "cw".into(),
+            "nan",
+            home.clone(),
+            "t".into(),
+            ApprovalMode::Ask,
+        );
         grants::save(&app_data, &store).expect("save");
         (home, app_data, tmp)
     }
@@ -4714,7 +4765,13 @@ mod tests {
         let (home, _app_data, _guard) = computer_wide_layout();
         let mut store = grants::default_store();
         assert_eq!(workspace_from_store(&store, "nan"), None);
-        store.add_computer_wide_grant("cw".into(), "nan", home.clone(), "t".into());
+        store.add_computer_wide_grant(
+            "cw".into(),
+            "nan",
+            home.clone(),
+            "t".into(),
+            ApprovalMode::Ask,
+        );
         store.set_run_command_enabled(true);
         let ws = workspace_from_store(&store, "nan").expect("workspace");
         assert_eq!(ws.roots, vec![home]);
@@ -4905,13 +4962,9 @@ mod tests {
     }
 
     #[test]
-    fn computer_wide_always_uses_the_native_dialog_whatever_the_mode() {
+    fn computer_wide_in_ask_mode_uses_the_native_dialog() {
         let (home, app_data, _guard) = computer_wide_layout();
         fs::write(home.join("notes.txt"), "hola").expect("write");
-        // Even a hand-edited store claiming allow cannot skip the dialog.
-        let mut store = grants::load_or_seed(&app_data).expect("load");
-        store.grants[0].mode = ApprovalMode::Allow;
-        grants::save(&app_data, &store).expect("save");
         let st = state();
         let approver = FakeApprover::answering(true);
         let (route, outcome) = run_with(
@@ -4926,6 +4979,138 @@ mod tests {
         assert_eq!(route, ApprovalRoute::Native);
         assert_eq!(approver.prompts(), (1, 0));
         assert_eq!(outcome.content.as_deref(), Some("hola"));
+    }
+
+    // ------------------------------- R22 whole-computer allow mode --
+
+    /// Whole computer in `allow` plus a `Strict` folder in `ask` and an
+    /// `Open` folder in `allow`, all under `$HOME`.
+    fn mixed_computer_wide_layout() -> (PathBuf, PathBuf, tempfile::TempDir) {
+        let (home, app_data, guard) = computer_wide_layout();
+        let mut store = grants::load_or_seed(&app_data).expect("load");
+        for (id, name) in [("strict", "Strict"), ("open", "Open")] {
+            fs::create_dir_all(home.join(name)).expect("mkdir");
+            fs::write(home.join(name).join("a.txt"), "hola").expect("write");
+            store
+                .add_grant(id.into(), "nan", home.join(name), "t".into())
+                .expect("add");
+        }
+        store
+            .set_mode("open", ApprovalMode::Allow)
+            .expect("open allow");
+        store.set_mode("cw", ApprovalMode::Allow).expect("cw allow");
+        grants::save(&app_data, &store).expect("save");
+        fs::write(home.join("notes.txt"), "hola").expect("write");
+        (home, app_data, guard)
+    }
+
+    fn read(path: &Path) -> ToolAction {
+        ToolAction::ReadFile {
+            path: path_str(path),
+        }
+    }
+
+    #[test]
+    fn computer_wide_allow_runs_without_a_prompt_outside_asking_folders() {
+        let (home, app_data, _guard) = mixed_computer_wide_layout();
+        let st = state();
+        // An approver that would DENY everything: allow must never ask.
+        let approver = FakeApprover::answering(false);
+        let (route, outcome) =
+            run_with(&app_data, &st, &approver, &read(&home.join("notes.txt"))).expect("read");
+        assert_eq!(route, ApprovalRoute::Auto);
+        assert_eq!(outcome.content.as_deref(), Some("hola"));
+        let (route, _) =
+            run_with(&app_data, &st, &approver, &read(&home.join("Open/a.txt"))).expect("open");
+        assert_eq!(
+            route,
+            ApprovalRoute::Auto,
+            "a folder in allow keeps allowing"
+        );
+        // A write anywhere else in $HOME also runs without a prompt.
+        let (route, _) = run_with(
+            &app_data,
+            &st,
+            &approver,
+            &ToolAction::WriteFile {
+                path: path_str(&home.join("new.txt")),
+                content: "x".into(),
+            },
+        )
+        .expect("write");
+        assert_eq!(route, ApprovalRoute::Auto);
+        assert_eq!(approver.prompts(), (0, 0));
+    }
+
+    #[test]
+    fn a_folder_that_asks_keeps_asking_under_computer_wide_allow() {
+        let (home, app_data, _guard) = mixed_computer_wide_layout();
+        let strict_file = home.join("Strict/a.txt");
+
+        // Folder selected in the conversation: its own inline card.
+        let st = state();
+        let approver = FakeApprover::answering(true);
+        let (route, _) = run_with(&app_data, &st, &approver, &read(&strict_file)).expect("read");
+        assert_eq!(route, ApprovalRoute::Inline);
+        assert_eq!(approver.prompts(), (0, 1));
+
+        // Folder NOT selected: reached through the computer-wide grant, it
+        // still asks (natively, as the whole computer does).
+        let st = state();
+        st.set_conversation_scope(1, Some(Vec::new()));
+        let approver = FakeApprover::answering(true);
+        let (route, _) = run_with(&app_data, &st, &approver, &read(&strict_file)).expect("read");
+        assert_eq!(route, ApprovalRoute::Native);
+        assert_eq!(approver.prompts(), (1, 0));
+
+        // Declined: nothing runs.
+        let approver = FakeApprover::answering(false);
+        let err = run_with(&app_data, &st, &approver, &read(&strict_file)).expect_err("declined");
+        assert_eq!(err.kind, "declined");
+
+        // A move from the open part of $HOME INTO the asking folder asks.
+        let proposal = propose(
+            &app_data,
+            &st,
+            "nan",
+            Some(1),
+            &ToolAction::MovePath {
+                from: path_str(&home.join("notes.txt")),
+                to: path_str(&home.join("Strict/notes.txt")),
+                overwrite: false,
+            },
+        )
+        .expect("propose");
+        let store = grants::load_or_seed(&app_data).expect("load");
+        assert_eq!(approval_route(&store, &proposal), ApprovalRoute::Native);
+    }
+
+    #[test]
+    fn computer_wide_allow_never_unlocks_the_app_data_or_the_deny_list() {
+        let (home, app_data, _guard) = mixed_computer_wide_layout();
+        let st = state();
+        let approver = FakeApprover::answering(true);
+        let err = run_with(
+            &app_data,
+            &st,
+            &approver,
+            &read(&app_data.join(grants::STORE_FILE)),
+        )
+        .expect_err("app data");
+        assert_eq!(err.kind, "scope");
+        let err = run_with(
+            &app_data,
+            &st,
+            &approver,
+            &ToolAction::WriteFile {
+                path: path_str(&home.join(".zshrc")),
+                content: "x".into(),
+            },
+        )
+        .expect_err("deny-list");
+        assert_ne!(err.kind, "declined");
+        assert!(!home.join(".zshrc").exists());
+        assert_eq!(approver.prompts(), (0, 0));
     }
 
     #[test]

@@ -661,9 +661,26 @@ existed load as `folder`) or `computer_wide`. A computer-wide grant is
 rooted at the canonical `$HOME` and is created ONLY by
 `tools_grant_computer_wide`, after the user confirms the core's native
 warning (the UI shows a plain-language explanation first). `$HOME` stays
-rejected for normal folder grants. Even in this mode:
+rejected for normal folder grants.
 
-- every action is still approved one by one in a native dialog;
+Since R22 the computer-wide grant carries the same approval `mode` as a
+folder: `ask` (default; every action is approved in a native dialog) or
+`allow` (covered actions run without a prompt). The mode is picked in the
+UI dialog and named in the core's native warning, so `allow` is always
+confirmed natively; Settings can switch it later (native confirmation again
+for `allow`).
+
+**Precedence: the strictest mode wins per path**
+(`GrantsStore::governing_mode`, used by `approval_route`). The candidates
+for a path are the grant the action resolved through plus EVERY folder grant
+of the profile that covers the path, selected in the conversation or not.
+If any asks, the action asks. So a folder in "Preguntar siempre" keeps
+asking even when the whole computer is in "Permitir sin preguntar"
+(Settings lists those folders in a warning), a folder in allow keeps
+allowing, and a nested folder in ask wins over an allowing parent.
+
+Under both modes:
+
 - the app data dir (tool policy, audit log, profiles, chat DB) is off
   limits: `is_protected` is checked at propose time AND again right before
   execution, whatever the grant;

@@ -216,7 +216,7 @@ export const es: Strings = {
       `Estás aprobando muchas acciones en ${name}. ¿Quieres permitir siempre en esta carpeta?`,
     allowAlways: "Permitir siempre",
     computerWide:
-      "Estás aprobando muchas acciones. Con acceso a todo el equipo el asistente siempre pregunta. Para no aprobar cada una, añade una carpeta concreta en Ajustes y ponla en permitir.",
+      "Estás aprobando muchas acciones. Para no aprobar cada una, en Ajustes puedes poner en permitir una carpeta concreta o el acceso a todo el equipo.",
     openSettings: "Abrir ajustes",
     dismiss: "Descartar sugerencia",
     switching: "Esperando tu confirmación…",
@@ -226,6 +226,8 @@ export const es: Strings = {
     title: "¿Dar acceso a todo tu equipo?",
     point1: "El asistente podrá pedirte leer, crear o cambiar cualquier archivo de tu usuario.",
     point2: "Te pedirá confirmación antes de cada acción. Si aceptas algo por error, podría estropear archivos importantes.",
+    point2Allow: "No te pedirá confirmación: hará las acciones directamente, también los borrados. Las carpetas que tengas en Preguntar siempre seguirán preguntando.",
+    modeLabel: "Modo de permiso para todo el equipo",
     point3: "Los datos de esta aplicación siempre quedan protegidos.",
     point4: "Puedes volver a una carpeta privada cuando quieras.",
     note: "Tu equipo te pedirá una última confirmación.",
@@ -266,7 +268,13 @@ export const es: Strings = {
       title: "Carpetas de trabajo",
       lede: "El asistente solo trabaja con archivos de estas carpetas.",
       wideTitle: "Todo el equipo",
-      wideBody: "El asistente puede pedirte cualquier archivo de tu usuario. Siempre pregunta antes.",
+      wideBodyAsk: "El asistente puede pedirte cualquier archivo de tu usuario. Pregunta antes de cada acción.",
+      wideBodyAllow: "El asistente puede usar cualquier archivo de tu usuario sin preguntarte.",
+      wideModeLabel: "Modo de permiso para todo el equipo",
+      stillAsking: (count: number) =>
+        count === 1
+          ? "Tienes una carpeta que sigue preguntando: aunque el acceso a todo el equipo no pregunte, en esa carpeta sí se preguntará."
+          : `Tienes ${count} carpetas que siguen preguntando: aunque el acceso a todo el equipo no pregunte, en esas carpetas sí se preguntará.`,
       disable: "Desactivar",
       folderBody: (name: string) => `El asistente puede leer y escribir en ${name}.`,
       remove: "Quitar",

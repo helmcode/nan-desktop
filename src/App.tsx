@@ -60,8 +60,11 @@ import {
   onNativeDecision,
   respondToApproval,
   sendChat,
+  DEFAULT_GRANT_MODE,
+  type GrantMode,
   type UpdateInfo,
 } from "./core";
+import { ModeSwitch } from "./components/ModeSwitch";
 import { isTopLayer, useEscapeLayer } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
 import { useI18n, useT, type Strings } from "./i18n";
@@ -609,11 +612,20 @@ function IconDots({ size = 16 }: { size?: number }) {
 // Whole-computer confirmation (the composer folder picker opens it)
 // ---------------------------------------------------------------------------
 
-/// Plain-language warning before the whole-computer mode. Continuing asks
-/// the Rust core, which shows its own native confirmation: this dialog
-/// explains, the native one decides (the renderer cannot grant anything).
-function ComputerWideDialog({ onCancel, onContinue }: { onCancel: () => void; onContinue: () => void }) {
+/// Plain-language warning before the whole-computer mode, with the same
+/// two approval modes as a folder (R22, default ask). Continuing asks the
+/// Rust core, which shows its own native confirmation naming the mode: this
+/// dialog explains, the native one decides (the renderer cannot grant
+/// anything).
+function ComputerWideDialog({
+  onCancel,
+  onContinue,
+}: {
+  onCancel: () => void;
+  onContinue: (mode: GrantMode) => void;
+}) {
   const t = useT();
+  const [mode, setMode] = useState<GrantMode>(DEFAULT_GRANT_MODE);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const layer = useEscapeLayer(true);
   // Focus once on open; re-renders of the shell must not steal focus back.
@@ -652,17 +664,19 @@ function ComputerWideDialog({ onCancel, onContinue }: { onCancel: () => void; on
         <div id="cw-body">
           <ul className="modal-points">
             <li>{t.computerWide.point1}</li>
-            <li>{t.computerWide.point2}</li>
+            <li>{mode === "allow" ? t.computerWide.point2Allow : t.computerWide.point2}</li>
             <li>{t.computerWide.point3}</li>
             <li>{t.computerWide.point4}</li>
           </ul>
+          <ModeSwitch label={t.computerWide.modeLabel} value={mode} onChange={setMode} />
+          {mode === "allow" && <p className="modal-warn-line">{t.settings.folders.modeAllowHint}</p>}
           <p className="modal-note">{t.computerWide.note}</p>
         </div>
         <div className="modal-actions">
           <button ref={cancelRef} type="button" className="btn btn-ghost" onClick={onCancel}>
             {t.app.cancel}
           </button>
-          <button type="button" className="btn btn-warn-solid" onClick={onContinue}>
+          <button type="button" className="btn btn-warn-solid" onClick={() => onContinue(mode)}>
             {t.computerWide.continue}
           </button>
         </div>
@@ -1924,10 +1938,13 @@ function ChatShell({
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, activeDraft, activeActivity, streamingActive, imageGeneratingActive, approvals, nudges.active]);
 
-  const confirmComputerWide = useCallback(async (): Promise<void> => {
-    setAskComputerWide(false);
-    await workspace.enableComputerWide();
-  }, [workspace]);
+  const confirmComputerWide = useCallback(
+    async (mode: GrantMode): Promise<void> => {
+      setAskComputerWide(false);
+      await workspace.enableComputerWide(mode);
+    },
+    [workspace],
+  );
 
   // Settings' Back returns to where it was opened from: the Studio (its
   // grant refusal's "Open Settings") or the chat. `null` asks for the first
@@ -2841,7 +2858,7 @@ function ChatShell({
       </ErrorBoundary>
 
       {askComputerWide && (
-        <ComputerWideDialog onCancel={() => setAskComputerWide(false)} onContinue={() => void confirmComputerWide()} />
+        <ComputerWideDialog onCancel={() => setAskComputerWide(false)} onContinue={(mode) => void confirmComputerWide(mode)} />
       )}
       {/* Stays open if the server turns the feature off mid-share (404), so
           the dialog can say so; the share buttons are gone by then. */}

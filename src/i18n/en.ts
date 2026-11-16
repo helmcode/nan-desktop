@@ -215,7 +215,7 @@ export const en = {
     folder: (name: string) => `You are approving many actions in ${name}. Always allow in this folder?`,
     allowAlways: "Always allow",
     computerWide:
-      "You are approving many actions. With whole-computer access the assistant always asks. To stop approving each one, add a specific folder in Settings and set it to allow.",
+      "You are approving many actions. To stop approving each one, set a specific folder or the whole-computer access to allow in Settings.",
     openSettings: "Open Settings",
     dismiss: "Dismiss suggestion",
     switching: "Waiting for your confirmation…",
@@ -225,6 +225,8 @@ export const en = {
     title: "Give access to your whole computer?",
     point1: "The assistant can ask to read, create or change any file in your user account.",
     point2: "It asks before every action. If you accept something by mistake, it could break important files.",
+    point2Allow: "It will not ask: it runs actions directly, including deletes. Folders set to Ask every time keep asking.",
+    modeLabel: "Approval mode for the whole computer",
     point3: "This app's own data always stays protected.",
     point4: "You can go back to a private folder anytime.",
     note: "Your computer will ask for one last confirmation.",
@@ -266,7 +268,13 @@ export const en = {
       title: "Working folders",
       lede: "The assistant only works with files in these folders.",
       wideTitle: "Whole computer",
-      wideBody: "The assistant can ask for any file in your user account. It always asks first.",
+      wideBodyAsk: "The assistant can ask for any file in your user account. It asks before every action.",
+      wideBodyAllow: "The assistant can use any file in your user account without asking.",
+      wideModeLabel: "Approval mode for the whole computer",
+      stillAsking: (count: number) =>
+        count === 1
+          ? "One folder still asks: even though whole-computer access does not ask, that folder will."
+          : `${count} folders still ask: even though whole-computer access does not ask, those folders will.`,
       disable: "Turn off",
       folderBody: (name: string) => `The assistant can read and write in ${name}.`,
       remove: "Remove",
