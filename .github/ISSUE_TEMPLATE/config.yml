@@ -1,8 +1,14 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/helmcode/nan-desktop/blob/main/SECURITY.md
+    about: Please do not open public issues for security problems. Follow the private process instead.
+  - name: Ask a question
+    url: https://github.com/helmcode/nan-desktop/discussions/categories/q-a
+    about: Usage and development questions go to GitHub Discussions.
   - name: NaN community
     url: https://nan.builders
     about: Questions about the community and memberships.
   - name: Helmcode enterprise console
     url: https://console.helmcode.com
-    about: Enterprise accounts, orgs and API keys.
+    about: Enterprise accounts, organizations and API keys.

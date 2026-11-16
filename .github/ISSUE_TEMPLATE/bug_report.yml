@@ -4,7 +4,12 @@ labels: ["bug"]
 body:
   - type: markdown
     attributes:
-      value: Thanks for reporting! Please never paste API keys, session tokens or conversation content you don't own.
+      value: |
+        Thanks for reporting! Before you start:
+        - **Security issue?** Do not file it here. Follow [SECURITY.md](https://github.com/helmcode/nan-desktop/blob/main/SECURITY.md).
+        - **Account, billing or membership problem?** See [SUPPORT.md](https://github.com/helmcode/nan-desktop/blob/main/SUPPORT.md); this tracker is only for the app.
+        - Search [existing issues](https://github.com/helmcode/nan-desktop/issues) first.
+        - Never paste API keys, session tokens, device codes or conversation content you don't own.
   - type: textarea
     id: what-happened
     attributes:
@@ -16,7 +21,18 @@ body:
     id: steps
     attributes:
       label: Steps to reproduce
-      placeholder: 1. Open... 2. Click...
+      placeholder: |
+        1. Sign in to ...
+        2. Open ...
+        3. Click ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Settings → About shows it (also in the release you installed).
+      placeholder: "0.2.10"
     validations:
       required: true
   - type: dropdown
@@ -31,14 +47,42 @@ body:
     validations:
       required: true
   - type: input
-    id: version
+    id: os-version
     attributes:
-      label: App version
-      placeholder: "0.1.0"
+      label: OS version
+      placeholder: "macOS 15.4 / Windows 11 24H2 / Ubuntu 24.04 (GNOME)"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Installer from helmcode.com/download or a GitHub release
+        - Updated in-app (auto-update)
+        - Built from source
+    validations:
+      required: true
+  - type: dropdown
+    id: account
+    attributes:
+      label: Account type
+      options:
+        - NaN community
+        - Helmcode enterprise
+        - Not signed in
     validations:
       required: true
   - type: textarea
     id: logs
     attributes:
-      label: Relevant output
-      description: Console output if any. Redact anything that looks like a token.
+      label: Logs and screenshots
+      description: |
+        Error messages, screenshots, or terminal output if you ran the app from a terminal / `pnpm tauri dev`.
+        Redact anything that looks like a token (`sk-...`, `Bearer ...`, long random strings).
+      render: shell
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Did it work in a previous version? Does it happen every time?

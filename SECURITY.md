@@ -2,11 +2,23 @@
 
 ## Reporting a vulnerability
 
-**Do not open a public issue for security reports.**
+**Do not open a public issue, discussion or pull request for security
+reports.**
 
-Use GitHub's **private vulnerability reporting** on this repository
-(Security → Report a vulnerability), or contact the maintainers through the
-Helmcode organization. We aim to acknowledge reports within 2 business days.
+1. **Preferred:** GitHub private vulnerability reporting on this repository:
+   [Security → Report a vulnerability](https://github.com/helmcode/nan-desktop/security/advisories/new).
+2. **If that is unavailable to you:** email **support@helmcode.com** with the
+   subject `[security] nan-desktop` and ask for a private channel. Do not
+   include exploit details in that first email.
+
+Please include the app version, OS, the affected component and steps to
+reproduce. Never send real credentials or other people's data; redact
+tokens.
+
+What to expect: we acknowledge reports within 2 business days, keep you
+updated while we work on a fix, and credit you in the release notes if you
+wish. Please give us a reasonable time to ship a fix before any public
+disclosure, and do not test against other users' accounts or data.
 
 ## Scope
 
@@ -15,12 +27,14 @@ In scope:
   handling (encrypted vault + OS keychain master key, Rust core), Tauri IPC
   boundaries, the device login
   flow, markdown/sanitization of model output, the tool executor and its
-  permission model, the auto-update pipeline.
+  permission model, per-user data realms, artifact sharing, the sandboxed
+  website preview, the auto-update pipeline.
 - Anything that would exfiltrate data, keys or conversations outside the two
   owned services (NaN community, Helmcode enterprise).
 
-Out of scope (report to those teams instead): the inference services
-themselves, the web portals, LiteLLM.
+Out of scope here: the inference platforms themselves (`api.nan.builders`,
+`api.helmcode.com`), the web portals and the artifact pages. Report those
+through the same private channel; we route them to the right team.
 
 ## Security model (what we promise)
 
@@ -37,6 +51,19 @@ themselves, the web portals, LiteLLM.
 - **Local data is isolated per signed-in user** (see
   [Per-user data realms](#per-user-data-realms) below): another account on the
   same device, even of the same tenant, sees nothing of yours.
+- **Websites built by the assistant are isolated.** A site written by the
+  `write_website` tool is previewed from its own `nan-site:` scheme inside an
+  `<iframe sandbox="allow-scripts">` (opaque origin, no `allow-same-origin`)
+  with a CSP header of `default-src 'none'; connect-src 'none'`: its scripts
+  reach neither the app, nor storage, nor the Tauri bridge, nor the network.
+  Implementation: `src-tauri/src/site_preview.rs`.
+- **Sharing is explicit and scoped.** Artifacts are uploaded only when the
+  user presses Share and confirms; requests go through a closed route
+  allowlist in the Rust core (`src-tauri/src/artifacts.rs`). Helmcode links
+  are limited to org members or the whole org; NaN links to NaN members, who
+  must sign in to open them. A detected secret needs its own confirmation.
+- **Crash logs are redacted.** Errors reaching the recovery screen are logged
+  with tokens (`sk-`, `hke_`, `nan_`, `Bearer`, JWTs) redacted.
 
 ## Credential storage
 
@@ -89,9 +116,10 @@ each secret is stored under the signed-in user's realm key
   desktop AI clients make. The previous design (one keychain item per secret)
   did not materially change this threat model but prompted users repeatedly,
   so we chose one well-protected key over many prompts.
-- Unsigned builds: macOS binds "Always Allow" to the code signature, so until
-  installers are code-signed (see Known limitations) an update may ask for
-  the keychain password once more.
+- Unsigned or ad-hoc signed builds (older macOS releases, local builds from
+  source): macOS binds "Always Allow" to the code signature, so on such a
+  build an update may ask for the keychain password once more. Developer ID
+  signed releases keep a stable identity.
 
 The storage backend sits behind a `CredentialStore` trait; a per-item
 keychain backend (`KeyringStore`) remains available behind the same seam if a
@@ -153,10 +181,19 @@ device.
 
 ## Known limitations
 
-- Installers are **not Developer ID / Authenticode signed yet**. macOS builds
-  carry a verified ad-hoc bundle seal only (not notarized); Windows builds are
-  unsigned. The release pipeline switches to Developer ID + notarization and
-  Authenticode automatically once the signing secrets are configured; each
-  release body states the actual signing status. Current state, user
-  workarounds and the owner setup checklist: [SIGNING.md](SIGNING.md).
+- **Code signing** (state as of v0.2.10, stated in every release body):
+  - macOS: signed with an Apple **Developer ID** and **notarized**.
+  - Windows: **not Authenticode signed yet**; SmartScreen warns on first
+    run. The pipeline enables signing automatically once the certificate
+    secrets are configured.
+  - Linux: packages are unsigned (standard for AppImage/deb/rpm on GitHub
+    releases).
+
+  Updates delivered by the auto-updater are always verified against the
+  updater public key embedded in the app (`src-tauri/tauri.conf.json`).
   Verify installer hashes against the values shown on the GitHub release.
+  Details and the owner setup checklist: [SIGNING.md](SIGNING.md).
+- **Linux sign-in** needs a Secret Service provider (GNOME Keyring or
+  KWallet) for the keychain.
+- **Same OS account:** realms are not encrypted at rest; anyone using the
+  same OS account can read the app data folder. Use separate OS accounts.
