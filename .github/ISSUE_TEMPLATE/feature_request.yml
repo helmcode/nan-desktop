@@ -2,24 +2,50 @@ name: Feature request
 description: Suggest an improvement for the desktop app
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        For open-ended ideas you'd like to discuss first, use [Discussions → Ideas](https://github.com/helmcode/nan-desktop/discussions/categories/ideas).
+        Planning to implement it yourself? Great: wait for a maintainer to agree on the approach before opening a big PR (see [CONTRIBUTING.md](https://github.com/helmcode/nan-desktop/blob/main/CONTRIBUTING.md)).
   - type: textarea
     id: problem
     attributes:
       label: Problem to solve
-      description: What are you trying to do that the app doesn't let you?
+      description: What are you trying to do that the app doesn't let you? Who is it for?
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
       label: Proposed solution
+      description: How would it work from the user's point of view?
     validations:
       required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: account
+    attributes:
+      label: Which accounts is this for?
+      options:
+        - Both
+        - NaN community
+        - Helmcode enterprise
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to implement this myself
   - type: checkboxes
     id: constraints
     attributes:
       label: Constraints acknowledgment
-      description: The app supports only NaN community and Helmcode enterprise endpoints, with zero telemetry.
+      description: The app supports only the NaN community and Helmcode enterprise platforms, with zero telemetry.
       options:
         - label: My proposal respects the locked endpoints and zero-telemetry policy
           required: true
