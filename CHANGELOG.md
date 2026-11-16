@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.11 - 2026-11-16 - Quien comparte tambien abre su enlace
+
+### Changed
+- Al crear un enlace compartido, el aviso dice que quien comparte y las personas destinatarias pueden abrirlo con su cuenta, con botones para Abrir y Copiar.
+- Tus propios enlaces en "Enlaces compartidos" ofrecen abrirlos en el navegador.
+
 ## 0.2.10 - 2026-11-16 - Compartir por fin sin codigos
 
 ### Changed
