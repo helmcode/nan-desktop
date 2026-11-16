@@ -2,8 +2,9 @@
 // the heavy libraries (pdf.js, SheetJS, mammoth) load on first use only.
 //
 // CSP notes: images and PDF pages are painted on a <canvas> from bytes the
-// core returned, so no data:/blob: URL is ever created. HTML (files and
-// docx output) goes through SafeHtml; markdown/text through Markdown.
+// core returned, so no data:/blob: URL is ever created. Docx output goes
+// through SafeHtml; markdown/text through Markdown. HTML files render for
+// real in the core's sandboxed frame (sitePreview.tsx), never here.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Markdown } from "../Markdown";
@@ -285,10 +286,6 @@ export function PdfPreview({ bytes }: { bytes: Uint8Array }) {
 export function TextPreview({ bytes, path, markdown }: { bytes: Uint8Array; path: string; markdown: boolean }) {
   const text = decodeText(bytes);
   return <Markdown text={markdown ? text : fenced(text, codeLanguage(path))} />;
-}
-
-export function HtmlPreview({ bytes, onOpenLink }: { bytes: Uint8Array; onOpenLink?: (url: string) => void }) {
-  return <SafeHtml html={decodeText(bytes)} onOpenLink={onOpenLink} />;
 }
 
 type Cell = string | number | boolean | null | undefined;

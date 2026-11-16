@@ -63,9 +63,26 @@ pub struct FilePreview {
     /// sandboxed frame; otherwise it keeps the whitelist HTML renderer.
     #[serde(rename = "selfContainedWebsite")]
     pub self_contained_website: bool,
-    /// The sandboxed site URL (set exactly when `selfContainedWebsite`).
+    /// R22: true when the file is a user's own `.html` / `.htm` the core
+    /// registered in the EPHEMERAL document class (`crate::site_preview`):
+    /// rendered in the same sandboxed frame under the same no-network
+    /// policy, released by the renderer when its preview closes. Never set
+    /// together with `selfContainedWebsite`. Omitted when false.
+    #[serde(rename = "htmlDocument", skip_serializing_if = "std::ops::Not::not")]
+    pub html_document: bool,
+    /// The sandboxed site URL (set exactly when `selfContainedWebsite` or
+    /// `htmlDocument`).
     #[serde(rename = "siteUrl", skip_serializing_if = "Option::is_none")]
     pub site_url: Option<String>,
+}
+
+/// What the sandboxed-site gate decided for a file it was shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SiteMode {
+    /// A website `write_website` wrote this session (pinned by its marker).
+    Website(String),
+    /// R22: a user's own HTML file (ephemeral document class).
+    Document(String),
 }
 
 /// The folder grants a command naming `profile_id` may use: those of the
@@ -168,24 +185,30 @@ pub fn read_preview_file(
 }
 
 /// [`read_preview_file`] with the sandboxed-site gate: `site` gets the
-/// CANONICAL path and the exact bytes read, and returns the site URL when
-/// (and only when) the core's marker says the file is a website
-/// `write_website` wrote (registering the bytes). The decision is the
-/// core's alone: nothing the renderer sends can turn it on.
+/// CANONICAL path and the exact bytes read, and returns the mode and URL:
+/// [`SiteMode::Website`] when (and only when) the core's marker says the
+/// file is a website `write_website` wrote, [`SiteMode::Document`] for any
+/// other `.html` / `.htm` (R22), registering the bytes either way. The
+/// decision is the core's alone: nothing the renderer sends can turn it on.
 pub fn read_preview_file_gated(
     store: &GrantsStore,
     profile_id: &str,
     raw: &str,
     app_data: &Path,
     home: Option<&Path>,
-    site: impl FnOnce(&Path, &[u8]) -> Option<String>,
+    site: impl FnOnce(&Path, &[u8]) -> Option<SiteMode>,
 ) -> Result<FilePreview, Rejection> {
     let (canonical, bytes) = read_granted(store, profile_id, raw, app_data, home)?;
-    let site_url = site(&canonical, &bytes);
+    let (self_contained_website, html_document, site_url) = match site(&canonical, &bytes) {
+        Some(SiteMode::Website(url)) => (true, false, Some(url)),
+        Some(SiteMode::Document(url)) => (false, true, Some(url)),
+        None => (false, false, None),
+    };
     Ok(FilePreview {
         size: bytes.len() as u64,
         base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-        self_contained_website: site_url.is_some(),
+        self_contained_website,
+        html_document,
         site_url,
     })
 }
@@ -348,11 +371,12 @@ pub async fn preview_read_file(
     .map_err(|_| Rejection::new("io", "preview read was interrupted"))?
 }
 
-/// R20-D: the running app's sandboxed-site gate. A file qualifies only
-/// when the tools state's marker says `write_website` wrote exactly these
-/// bytes at this canonical path this session; its bytes are then
-/// registered with the site registry and the sandboxed URL returned.
-fn app_site_gate(app: &AppHandle, canonical: &Path, bytes: &[u8]) -> Option<String> {
+/// R20-D: the running app's sandboxed-site gate. A file is a tool website
+/// only when the tools state's marker says `write_website` wrote exactly
+/// these bytes at this canonical path this session; R22: any other HTML
+/// file is a user document. Its bytes are then registered with the site
+/// registry (in the matching class) and the sandboxed URL returned.
+fn app_site_gate(app: &AppHandle, canonical: &Path, bytes: &[u8]) -> Option<SiteMode> {
     site_gate(
         app.try_state::<crate::tools::ToolsState>()?.inner(),
         app.try_state::<crate::site_preview::SiteRegistry>()?
@@ -362,18 +386,45 @@ fn app_site_gate(app: &AppHandle, canonical: &Path, bytes: &[u8]) -> Option<Stri
     )
 }
 
-/// The AppHandle-free gate (testable): marker check, then register.
+/// The AppHandle-free gate (testable): marker check first (a tool website
+/// keeps its pinned class exactly as before), then the HTML extension
+/// check for the ephemeral document class, then register.
 pub fn site_gate(
     tools: &crate::tools::ToolsState,
     sites: &crate::site_preview::SiteRegistry,
     canonical: &Path,
     bytes: &[u8],
-) -> Option<String> {
-    if !tools.is_tool_website(canonical, bytes) {
+) -> Option<SiteMode> {
+    if tools.is_tool_website(canonical, bytes) {
+        let token = sites.register(bytes.to_vec());
+        return Some(SiteMode::Website(crate::site_preview::site_url(&token)));
+    }
+    if !is_html_path(canonical) {
         return None;
     }
-    let token = sites.register(bytes.to_vec());
-    Some(crate::site_preview::site_url(&token))
+    let token = sites.register_document(bytes.to_vec());
+    Some(SiteMode::Document(crate::site_preview::site_url(&token)))
+}
+
+/// R22: whether a path names an HTML document (`.html` / `.htm`, any case),
+/// the same extensions the renderer's `previewKind` maps to `html`.
+pub fn is_html_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm"))
+}
+
+/// R22: release a user document's sandboxed preview (its pane closed or
+/// moved on). Only the ephemeral document class is affected; a malformed
+/// token or a tool website's token is a silent no-op. Nothing is logged.
+#[tauri::command]
+pub fn preview_release_site(app: AppHandle, token: String) {
+    if !crate::site_preview::valid_token(&token) {
+        return;
+    }
+    if let Some(sites) = app.try_state::<crate::site_preview::SiteRegistry>() {
+        sites.release_document(&token);
+    }
 }
 
 /// Reveal a previewed file in Finder / Explorer / the Linux file manager.
@@ -691,13 +742,37 @@ mod tests {
         let served = crate::site_preview::respond(&sites, "GET", &format!("/{token}"));
         assert_eq!(served.status(), 200, "the exact bytes are registered");
 
-        // A user's own .html (same name, same bytes) keeps the whitelist.
+        assert!(!website.html_document, "a tool website keeps its class");
+        assert!(!sites.release_document(token), "a release never drops it");
+
+        // R22: a user's own .html (same name, same bytes) is NOT a website,
+        // it is an ephemeral document rendered in the same sandbox.
         let plain = read(&user);
         assert!(!plain.self_contained_website);
-        assert_eq!(plain.site_url, None);
-        // So does the tool's file once its bytes changed on disk.
+        assert!(plain.html_document);
+        let doc_url = plain.site_url.clone().expect("document url");
+        let doc_token = doc_url.rsplit('/').next().expect("token");
+        assert_ne!(doc_token, token);
+        assert_eq!(
+            crate::site_preview::respond(&sites, "GET", &format!("/{doc_token}")).status(),
+            200
+        );
+        assert!(sites.release_document(doc_token));
+        assert_eq!(
+            crate::site_preview::respond(&sites, "GET", &format!("/{doc_token}")).status(),
+            404
+        );
+        // So is the tool's file once its bytes changed on disk.
         fs::write(&site, b"<p>changed</p>").expect("overwrite");
-        assert!(!read(&site).self_contained_website);
+        let changed = read(&site);
+        assert!(!changed.self_contained_website);
+        assert!(changed.html_document);
+        // A non-HTML file gets no frame at all.
+        let notes = l.grant.join("notes.txt");
+        fs::write(&notes, html).expect("notes");
+        let text = read(&notes);
+        assert!(!text.self_contained_website && !text.html_document);
+        assert_eq!(text.site_url, None);
         // And the plain read never turns it on.
         fs::write(&site, html).expect("restore");
         let ungated = read_preview_file(
@@ -709,6 +784,75 @@ mod tests {
         )
         .expect("read");
         assert!(!ungated.self_contained_website);
+        assert!(!ungated.html_document);
+    }
+
+    #[test]
+    fn a_large_user_html_is_read_whole_and_served_whole() {
+        // The owner's report: a ~159 KB styled HTML must not be cut.
+        let l = layout();
+        let st = crate::tools::ToolsState::default();
+        let sites = crate::site_preview::SiteRegistry::default();
+        let mut html = String::from(
+            "<!doctype html><html><head><style>td{padding:4px}</style></head><body><table>",
+        );
+        while html.len() < 159 * 1024 {
+            html.push_str("<tr><td>deepinfer</td><td>throughput tokens per second</td></tr>");
+        }
+        html.push_str("</table><p>FIN</p></body></html>");
+        let path = l.grant.join("deepinfer.HTML");
+        fs::write(&path, &html).expect("report");
+        let store = store_with(&[&l.grant]);
+        let reply = read_preview_file_gated(
+            &store,
+            "nan",
+            &path.display().to_string(),
+            &l.app_data,
+            Some(&l.home),
+            |canonical, bytes| site_gate(&st, &sites, canonical, bytes),
+        )
+        .expect("read");
+        assert_eq!(reply.size, html.len() as u64);
+        assert!(reply.html_document);
+        let token = reply
+            .site_url
+            .expect("url")
+            .rsplit('/')
+            .next()
+            .expect("t")
+            .to_string();
+        let served = crate::site_preview::respond(&sites, "GET", &format!("/{token}"));
+        let body = String::from_utf8(served.body().clone()).expect("utf8");
+        assert_eq!(body, crate::site_preview::with_csp_meta(&html));
+        assert!(body.ends_with("<p>FIN</p></body></html>"));
+    }
+
+    #[test]
+    fn a_user_html_over_the_cap_is_refused_as_too_large() {
+        let l = layout();
+        let path = l.grant.join("huge.html");
+        let file = fs::File::create(&path).expect("create");
+        file.set_len(MAX_PREVIEW_FILE_BYTES + 1).expect("len");
+        let store = store_with(&[&l.grant]);
+        let err = read_preview_file(
+            &store,
+            "nan",
+            &path.display().to_string(),
+            &l.app_data,
+            Some(&l.home),
+        )
+        .expect_err("too large");
+        assert_eq!(err.kind, "too_large");
+    }
+
+    #[test]
+    fn html_paths_are_the_renderers_html_extensions_in_any_case() {
+        for yes in ["a.html", "a.htm", "A.HTML", "dir.x/b.Htm"] {
+            assert!(is_html_path(Path::new(yes)), "{yes}");
+        }
+        for no in ["a.txt", "a.html.txt", "html", "a.xhtml", "a.md", "a"] {
+            assert!(!is_html_path(Path::new(no)), "{no}");
+        }
     }
 
     #[test]
@@ -717,6 +861,7 @@ mod tests {
             base64: "aGk=".into(),
             size: 2,
             self_contained_website: false,
+            html_document: false,
             site_url: None,
         };
         assert_eq!(
@@ -726,13 +871,25 @@ mod tests {
         let site = FilePreview {
             self_contained_website: true,
             site_url: Some("nan-site://localhost/t".into()),
-            ..plain
+            ..plain.clone()
         };
         assert_eq!(
             serde_json::to_value(&site).expect("json"),
             serde_json::json!({
                 "base64": "aGk=", "size": 2,
                 "selfContainedWebsite": true, "siteUrl": "nan-site://localhost/t"
+            })
+        );
+        let document = FilePreview {
+            html_document: true,
+            site_url: Some("nan-site://localhost/d".into()),
+            ..plain
+        };
+        assert_eq!(
+            serde_json::to_value(&document).expect("json"),
+            serde_json::json!({
+                "base64": "aGk=", "size": 2, "selfContainedWebsite": false,
+                "htmlDocument": true, "siteUrl": "nan-site://localhost/d"
             })
         );
     }

@@ -5,7 +5,14 @@
 
 import { lazy, Suspense, useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { fetchWebPreview, readFileWithSiteForPreview, type FileForPreview, type WebPreview } from "../core";
+import {
+  fetchWebPreview,
+  readFileWithSiteForPreview,
+  rejectionKind,
+  releaseSitePreview,
+  type FileForPreview,
+  type WebPreview,
+} from "../core";
 import { SitePreview } from "./sitePreview";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { folderName, hostOf } from "../copy";
@@ -23,27 +30,36 @@ const Renderers = {
   image: lazy(() => import("./renderers").then((m) => ({ default: m.ImagePreview }))),
   pdf: lazy(() => import("./renderers").then((m) => ({ default: m.PdfPreview }))),
   text: lazy(() => import("./renderers").then((m) => ({ default: m.TextPreview }))),
-  html: lazy(() => import("./renderers").then((m) => ({ default: m.HtmlPreview }))),
   sheet: lazy(() => import("./renderers").then((m) => ({ default: m.SheetPreview }))),
   docx: lazy(() => import("./renderers").then((m) => ({ default: m.DocxPreview }))),
 };
 
-type LoadState<T> = { status: "loading" } | { status: "ready"; value: T } | { status: "error" };
+type LoadState<T> = { status: "loading" } | { status: "ready"; value: T } | { status: "error"; kind: string | null };
 
-function useLoad<T>(key: string, load: () => Promise<T>): LoadState<T> {
+/// `release` (R22) runs once for every value this load produced when that
+/// value is no longer shown: the target changed, the pane closed, or the
+/// load resolved after it was cancelled.
+function useLoad<T>(key: string, load: () => Promise<T>, release?: (value: T) => void): LoadState<T> {
   const [state, setState] = useState<LoadState<T>>({ status: "loading" });
   useEffect(() => {
     let cancelled = false;
+    let loaded: { value: T } | null = null;
     setState({ status: "loading" });
     load()
       .then((value) => {
-        if (!cancelled) setState({ status: "ready", value });
+        if (cancelled) {
+          release?.(value);
+          return;
+        }
+        loaded = { value };
+        setState({ status: "ready", value });
       })
-      .catch(() => {
-        if (!cancelled) setState({ status: "error" });
+      .catch((err: unknown) => {
+        if (!cancelled) setState({ status: "error", kind: rejectionKind(err) });
       });
     return () => {
       cancelled = true;
+      if (loaded) release?.(loaded.value);
     };
     // `key` identifies the target; `load` is recreated per render.
   }, [key]);
@@ -80,10 +96,10 @@ function WebBody({ profileId, url, onOpenLink }: { profileId: string; url: strin
   );
 }
 
-/// The name write_website gives its files (mirrors the core's
-/// `is_tool_website` name check). Display only: never a reason to run code.
-function isWebsiteFileName(name: string): boolean {
-  return name.startsWith("website-") && name.endsWith(".html");
+/// R22: a user HTML document's ephemeral token goes back to the core when
+/// its preview is gone (a tool website's token is never released).
+function releaseFile(file: FileForPreview): void {
+  if (file.releasable && file.siteUrl !== null) releaseSitePreview(file.siteUrl);
 }
 
 function FileBody({
@@ -97,17 +113,28 @@ function FileBody({
 }) {
   const t = useT();
   const kind = previewKind({ kind: "file", ref: path });
-  const state = useLoad<FileForPreview>(`file:${path}`, () =>
-    kind === "unsupported" ? Promise.reject(new Error("unsupported")) : readFileWithSiteForPreview(profileId, path),
+  const state = useLoad<FileForPreview>(
+    `file:${path}`,
+    () => (kind === "unsupported" ? Promise.reject(new Error("unsupported")) : readFileWithSiteForPreview(profileId, path)),
+    releaseFile,
   );
   if (kind === "unsupported") return <p className="preview-note">{t.preview.unsupported}</p>;
   if (state.status === "loading") return <p className="preview-note">{t.preview.loading}</p>;
-  if (state.status === "error") return <p className="preview-note">{t.preview.failed}</p>;
+  if (state.status === "error") {
+    return <p className="preview-note">{state.kind === "too_large" ? t.preview.tooLarge : t.preview.failed}</p>;
+  }
   const { bytes, siteUrl } = state.value;
-  // R20-D: only a website the core flagged (write_website wrote it this
-  // session) runs in the sandboxed frame; every other HTML keeps the
-  // whitelist renderer.
-  if (kind === "html" && siteUrl !== null) return <SitePreview url={siteUrl} name={folderName(path)} />;
+  // R20-D + R22: every HTML file renders for real in the sandboxed frame,
+  // served by the core under its no-network policy: a website
+  // write_website wrote (pinned class) or a user's own document (ephemeral
+  // class). The core decides; the whitelist renderer is for non-HTML only.
+  if (kind === "html") {
+    return siteUrl !== null ? (
+      <SitePreview url={siteUrl} name={folderName(path)} />
+    ) : (
+      <p className="preview-note">{t.preview.failed}</p>
+    );
+  }
   switch (kind) {
     case "image":
       return <Renderers.image bytes={bytes} alt={folderName(path)} />;
@@ -117,15 +144,6 @@ function FileBody({
       return <Renderers.text bytes={bytes} path={path} markdown />;
     case "text":
       return <Renderers.text bytes={bytes} path={path} markdown={false} />;
-    case "html":
-      // A website from a previous session (the core only flags this
-      // session's) falls back to the whitelist: say why it looks static.
-      return (
-        <>
-          {isWebsiteFileName(folderName(path)) && <p className="preview-note">{t.preview.siteScriptsOff}</p>}
-          <Renderers.html bytes={bytes} onOpenLink={onOpenLink} />
-        </>
-      );
     case "sheet":
       return <Renderers.sheet bytes={bytes} />;
     case "docx":

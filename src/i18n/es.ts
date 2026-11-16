@@ -384,7 +384,7 @@ export const es: Strings = {
     unsupported: "No hay vista previa para este tipo de archivo.",
     failed: "No se ha podido cargar la vista previa.",
     webUnavailable: "La vista previa web no está disponible. Abre la página en tu navegador.",
-    tooLarge: "Este archivo es demasiado grande para la vista previa.",
+    tooLarge: "Este archivo supera el límite de 8 MB de la vista previa.",
     sheet: "Hoja",
     page: (n: number, total: number) => `Página ${n} de ${total}`,
     pdfPages: (total: number) => `Documento PDF, ${total} ${total === 1 ? "página" : "páginas"}`,
@@ -394,7 +394,6 @@ export const es: Strings = {
     messageCrashed: "No se ha podido mostrar este mensaje.",
     shellCrashed: "No se ha podido mostrar esta conversación. Elige otra o empieza un chat nuevo.",
     siteCaption: "Vista previa aislada: el código del sitio se ejecuta aparte de la aplicación y sin acceso a la red.",
-    siteScriptsOff: "Los scripts no se ejecutan en esta vista previa.",
     siteFrame: (name: string) => `Sitio web ${name}`,
   },
   skills: {

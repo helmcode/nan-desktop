@@ -186,15 +186,22 @@ export interface FilePreviewPayload {
   /// R20-D: set by the CORE only, when its gating marker says this is a
   /// website write_website wrote this session (src-tauri/src/site_preview.rs).
   selfContainedWebsite?: boolean;
-  /// The sandboxed site URL, present with selfContainedWebsite.
+  /// R22: set by the CORE only, for a user's own .html/.htm it registered
+  /// in the ephemeral document class (same sandbox and no-network policy;
+  /// released with releaseSitePreview when the preview closes).
+  htmlDocument?: boolean;
+  /// The sandboxed site URL, present with selfContainedWebsite or htmlDocument.
   siteUrl?: string;
 }
 
 export interface FileForPreview {
   bytes: Uint8Array;
   /// The sandboxed site URL when the core flagged the file as a
-  /// self-contained website; null for every other file.
+  /// self-contained website or a user HTML document; null otherwise.
   siteUrl: string | null;
+  /// R22: true when siteUrl is an ephemeral user-document token the
+  /// renderer must release on close (never for a tool website).
+  releasable: boolean;
 }
 
 /// The only origins a sandboxed site may be loaded from (the core's custom
@@ -203,13 +210,37 @@ export interface FileForPreview {
 const SITE_URL = /^(?:nan-site:\/\/localhost|http:\/\/nan-site\.localhost)\/[0-9a-f]{32}$/;
 
 export function sandboxedSiteUrl(payload: FilePreviewPayload): string | null {
-  if (payload.selfContainedWebsite !== true || typeof payload.siteUrl !== "string") return null;
+  const flagged = payload.selfContainedWebsite === true || payload.htmlDocument === true;
+  if (!flagged || typeof payload.siteUrl !== "string") return null;
   return SITE_URL.test(payload.siteUrl) ? payload.siteUrl : null;
 }
 
 export async function readFileWithSiteForPreview(profileId: string, path: string): Promise<FileForPreview> {
   const payload = await invoke<FilePreviewPayload>("preview_read_file", { profileId, path });
-  return { bytes: base64ToBytes(payload.base64), siteUrl: sandboxedSiteUrl(payload) };
+  const siteUrl = sandboxedSiteUrl(payload);
+  return {
+    bytes: base64ToBytes(payload.base64),
+    siteUrl,
+    releasable: siteUrl !== null && payload.selfContainedWebsite !== true && payload.htmlDocument === true,
+  };
+}
+
+/// R22: tell the core a user HTML document's preview closed, so it forgets
+/// the bytes. Fire and forget: a failure only leaves the bytes to the
+/// core's small ring, which evicts them anyway.
+export function releaseSitePreview(siteUrl: string): void {
+  const token = siteUrl.slice(siteUrl.lastIndexOf("/") + 1);
+  void Promise.resolve()
+    .then(() => invoke("preview_release_site", { token }))
+    .catch(() => {});
+}
+
+/// The typed rejection kind a core command failed with, when it has one.
+export function rejectionKind(err: unknown): string | null {
+  if (typeof err === "object" && err !== null && typeof (err as { kind?: unknown }).kind === "string") {
+    return (err as { kind: string }).kind;
+  }
+  return null;
 }
 
 export async function readFileForPreview(profileId: string, path: string): Promise<Uint8Array> {

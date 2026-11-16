@@ -384,7 +384,7 @@ export const en = {
     unsupported: "No preview for this file type.",
     failed: "Could not load the preview.",
     webUnavailable: "Web preview is not available. Open the page in your browser.",
-    tooLarge: "This file is too large to preview.",
+    tooLarge: "This file is over the 8 MB preview limit.",
     sheet: "Sheet",
     page: (n: number, total: number) => `Page ${n} of ${total}`,
     pdfPages: (total: number) => `PDF document, ${total} ${total === 1 ? "page" : "pages"}`,
@@ -394,7 +394,6 @@ export const en = {
     messageCrashed: "This message could not be shown.",
     shellCrashed: "This conversation could not be shown. Pick another one or start a new chat.",
     siteCaption: "Isolated preview: the site's code runs apart from the app, with no network access.",
-    siteScriptsOff: "Scripts do not run in this preview.",
     siteFrame: (name: string) => `Website ${name}`,
   },
   skills: {
