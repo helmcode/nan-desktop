@@ -24,38 +24,28 @@ very welcome: start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 <!-- Screenshots: add images under docs/images/ and reference them here. -->
 
-## Features (v0.2.10)
+## Features
 
-- **Chat** with streaming replies, markdown and highlighted code, a curated
-  model picker, a stop button and crash-safe persistence of partial replies.
-- **Sign in through the browser** (device flow) to a NaN community or a
-  Helmcode enterprise account. No API keys to paste.
-- **Conversation memory** synced to your account across devices, or kept
-  only on this device (Settings → Memory).
-- **Per-account private data**: conversations, skills, folder permissions
-  and tool settings live in a separate realm per signed-in account, so
-  another account on the same computer sees none of it.
-- **Work with your files**: grant folders and the assistant can list, read,
-  write, move and delete files there, with a native confirmation for every
-  single action. Running commands is experimental and off by default.
-- **Websites**: the `write_website` tool builds small self-contained static
-  sites, previewed in an isolated frame (no network, no access to the app).
-- **Previews** of what the assistant produces: PDF, Word, spreadsheets,
-  images, code, JSON/YAML, logs and websites, with "show in folder".
-- **Share artifacts as links**: on Helmcode, with members of your
-  organization or the whole organization; on NaN, with other NaN members by
-  email (they sign in to open it). "Shared links" lists and revokes them.
+- **AI chat with your local files and workspaces**: streaming replies with
+  markdown and code, a curated model picker, and conversation memory. Grant
+  folders and the assistant can work with the files in them, with a native
+  confirmation for every action.
+- **Artifacts sharing**: share what the assistant produces as links. Access
+  is sign-in-gated, so only the people you share with can open them, and you
+  can revoke a link at any time.
+- **Mini-sites**: the `write_website` tool builds small self-contained static
+  websites you can preview and share.
 - **Skills**: save reusable instructions as skills; Helmcode organizations
   can share approved skills with their team.
-- **Images**: generate images in the chat and edit them in the Image Studio
-  (where the platform offers it).
-- **Voice**: read replies aloud and dictate messages.
-- **Web search** the model can call on its own, where the platform offers it.
-- **Recovery screen** instead of a blank window if something breaks; your
-  conversations are never lost.
-- **Signed auto-updates**, checked every 2 hours and when you come back to
-  the app.
-- **English and Spanish** interface.
+- **Per-account data privacy**: conversations, skills, folder permissions and
+  settings are kept separate per signed-in account.
+- **Sandboxed previews** of documents, spreadsheets, images, code and
+  websites, rendered in an isolated frame with no access to the app.
+- **Crash recovery**: a recovery screen instead of a blank window if
+  something breaks; your conversations are never lost.
+- **Cross-platform**: macOS, Windows and Linux, with signed auto-updates.
+- **Browser sign-in** to a NaN community or Helmcode enterprise account. No
+  API keys to paste.
 
 ## Download
 
@@ -63,14 +53,15 @@ Get the installer for your system at
 **[helmcode.com/es/download](https://helmcode.com/es/download)**, or from the
 [latest GitHub release](https://github.com/helmcode/nan-desktop/releases/latest).
 
-| Platform | Package | Status |
-|----------|---------|--------|
-| macOS (Apple silicon and Intel) | `.dmg` | Validated. Signed with Apple Developer ID and notarized |
-| Windows x64 | `.msi` / setup `.exe` | Pending validation. Not code-signed yet: SmartScreen shows "Windows protected your PC" → "More info" → "Run anyway" |
-| Linux x64 | AppImage / `.deb` / `.rpm` | Built and smoke-tested in CI. Unsigned. Signing in needs a Secret Service provider (GNOME Keyring or KWallet) |
+| Platform | Packages |
+|----------|----------|
+| macOS (Apple silicon and Intel) | `.dmg` |
+| Windows x64 | `.msi` / setup `.exe` |
+| Linux x64 | AppImage / `.deb` / `.rpm` |
 
 Verify the SHA-256 shown next to each asset on the GitHub release before
-installing. Signing details: [SIGNING.md](SIGNING.md).
+installing. Code-signing status per platform: [SIGNING.md](SIGNING.md). On Linux,
+signing in needs a Secret Service provider (GNOME Keyring or KWallet).
 
 ## Build from source
 
