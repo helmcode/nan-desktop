@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invokedWith, resetTauri } from "./test/tauriMock";
+import { createRoot } from "react-dom/client";
 
 const pdf = vi.hoisted(() => ({ destroy: vi.fn() }));
 
@@ -130,11 +131,8 @@ afterEach(() => {
 
 async function openPdfPreview(): Promise<void> {
   fireEvent.click(await screen.findByRole("button", { name: "Abrir la vista previa: informe.pdf" }));
-  // The pane and the PDF renderer are lazy chunks: the first test in the
-  // file pays their cold import, which outlasts findBy's 1s default on the
-  // slower Windows runners.
-  const pane = await screen.findByRole("complementary", { name: "Vista previa" }, { timeout: 3000 });
-  await within(pane).findByRole("group", { name: /Documento PDF/ }, { timeout: 3000 });
+  const pane = await screen.findByRole("complementary", { name: "Vista previa" });
+  await within(pane).findByRole("group", { name: /Documento PDF/ });
 }
 
 describe("R20-A: the first open of Shared links", () => {
@@ -172,5 +170,47 @@ describe("R20-A: the first open of Shared links", () => {
     expect(await screen.findByRole("heading", { name: "Enlaces compartidos", level: 1 })).toBeTruthy();
     expect(await screen.findByText("Informe")).toBeTruthy();
     expect(screen.queryByText(/Esta sección ha dejado de funcionar/)).toBeNull();
+  });
+});
+
+// CI regression (windows-latest, macos-latest): at boot the open
+// conversation and its messages commit together, so a file chip can be
+// clicked before React's passive effects run. The conversation ref was
+// synced in a useEffect, so that click opened the preview under "new
+// chat" and the pane never showed. Click at the very first commit that
+// shows the chip, outside act(), like a fast user (or findByRole) can.
+describe("R20-A: a file chip clicked as soon as it appears", () => {
+  it("opens the preview of the conversation on screen", async () => {
+    const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const wasAct = env.IS_REACT_ACT_ENVIRONMENT;
+    env.IS_REACT_ACT_ENVIRONMENT = false; // real scheduling, no act() flushing
+    setup({ artifacts: [], total: 0 });
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    try {
+      await new Promise<void>((resolve) => {
+        const seen = new MutationObserver(() => {
+          const chip = host.querySelector<HTMLButtonElement>('button[aria-label="Abrir la vista previa: informe.pdf"]');
+          if (!chip) return;
+          seen.disconnect();
+          chip.click(); // before the commit's passive effects ran
+          resolve();
+        });
+        seen.observe(host, { childList: true, subtree: true });
+        root.render(
+          <I18nProvider initial="es">
+            <App />
+          </I18nProvider>,
+        );
+      });
+      await waitFor(() => expect(within(host).getByRole("complementary", { name: "Vista previa" })).toBeTruthy(), {
+        timeout: 3000,
+      });
+    } finally {
+      root.unmount();
+      host.remove();
+      env.IS_REACT_ACT_ENVIRONMENT = wasAct;
+    }
   });
 });

@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -889,7 +889,10 @@ function ChatShell({
     activeProfileRef.current = overview.active_profile;
   }, [overview.active_profile]);
   const activeConvRef = useRef<number | null>(activeConvId);
-  useEffect(() => {
+  // Synced in the commit (layout effect), not after it: at boot the open
+  // conversation and its messages paint together, and a click on a file
+  // chip before passive effects ran keyed the preview to "new chat".
+  useLayoutEffect(() => {
     activeConvRef.current = activeConvId;
   }, [activeConvId]);
   const messageCountRef = useRef(0);
