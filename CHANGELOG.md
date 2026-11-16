@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.10 - 2026-11-16 - Compartir por fin sin codigos
+
+### Changed
+- Compartir con miembros de Helmcode: solo miembros de la organizacion o toda la organizacion; las direcciones externas desaparecen del dialogo.
+- Compartir con usuarios de NaN: los destinatarios tienen que tener cuenta en NaN y abriran el enlace iniciando sesion. Si un correo no es usuario de NaN, el dialogo lo dice y lo marca.
+
 ## 0.2.9 - 2026-11-16 - Enlaces, sitios y avisos que funcionan a la primera
 
 ### Fixes
