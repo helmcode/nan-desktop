@@ -1,8 +1,18 @@
-# How memory works
+# How memory and your data work
+
+> What the app stores, where, and what (if anything) leaves your device.
+> Credential storage and per-user realms are specified in
+> [SECURITY.md](../SECURITY.md).
 
 **Principle: the working copy is always local.** The chat reads and writes a
-SQLite database on your device (`chat.db`). The cloud is a *sync*, never a
+SQLite database on your device (`chat.db`, inside your account's realm
+folder, `<app data>/realms/<id>/`). The cloud is a *sync*, never a
 dependency: if it is unreachable, everything keeps working.
+
+**One realm per account.** Each signed-in account gets its own folder on the
+device (conversations, skills, team skills cache, folder grants, memory
+settings). Another account on the same computer, even on the same platform,
+sees none of it; signing out keeps it for when you sign back in.
 
 ## Cloud sync (default)
 
@@ -44,7 +54,10 @@ chat never blocks and you are never signed out because of it.
 - **Credentials** (the encrypted local vault, see SECURITY.md).
 - **Your prompts and responses**: the platform keeps a strict zero-logs
   policy — no prompt or response content is recorded anywhere.
-- **Your skills** (`app_data/skills/`), unless you explicitly press
+- **Files you share as artifacts** are uploaded only when you press
+  **Share** and confirm the recipients (see the README); "Shared links"
+  lets you revoke them.
+- **Your skills** (`<realm>/skills/`), unless you explicitly press
   **Share with my team** on one (Helmcode organizations with sharing on).
   Only that skill's bundle (`SKILL.md` + its reference files) is uploaded,
   after a confirmation that shows exactly what teammates will see.
@@ -52,7 +65,7 @@ chat never blocks and you are never signed out because of it.
 ## Skills shared by your team (Helmcode)
 
 - The team library is not synced like conversations: it is a read-only
-  cache of what the org approved. `app_data/skills-cache/<profile>/`
+  cache of what the org approved. `<realm>/skills-cache/<profile>/`
   holds `index.json` (the last list, its ETag, which bundles are cached
   and which local skills you shared) and one `<id>/<sha>.json` per cached
   bundle, written atomically.
