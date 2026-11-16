@@ -52,10 +52,15 @@ const REQUIRED_TESTS = [
   // S13 approval modes
   "tools::grants::tests::approval_mode_round_trips_and_parses_strictly",
   "tools::grants::tests::legacy_grants_load_in_ask_mode",
-  "tools::grants::tests::computer_wide_grants_always_ask",
+  "tools::grants::tests::computer_wide_mode_is_stored_switched_and_persisted",
+  "tools::grants::tests::folder_that_asks_beats_whole_computer_allow",
   "tools::tests::allow_mode_runs_every_covered_action_without_a_prompt",
   "tools::tests::allow_mode_never_unlocks_the_deny_list_or_protected_targets",
-  "tools::tests::computer_wide_always_uses_the_native_dialog_whatever_the_mode",
+  "tools::tests::computer_wide_in_ask_mode_uses_the_native_dialog",
+  // R22 whole-computer modes (strictest wins per path)
+  "tools::tests::computer_wide_allow_runs_without_a_prompt_outside_asking_folders",
+  "tools::tests::a_folder_that_asks_keeps_asking_under_computer_wide_allow",
+  "tools::tests::computer_wide_allow_never_unlocks_the_app_data_or_the_deny_list",
   // S14 inline approvals
   "tools::tests::ask_mode_prompts_inline_and_a_deny_executes_nothing",
   "tools::approvals::tests::renderer_cannot_answer_an_id_the_core_never_created",
