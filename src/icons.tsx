@@ -261,3 +261,18 @@ export const IconShare = (p: IconProps) => (
     <path d="m8.2 10.8 7.6-4.4M8.2 13.2l7.6 4.4" />
   </Icon>
 );
+
+/** Settings > Account: star the public repository. */
+export const IconStar = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" />
+  </Icon>
+);
+
+/** Settings > Account: report an issue (open circle with a dot). */
+export const IconIssue = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <circle cx="12" cy="12" r="1.5" />
+  </Icon>
+);
