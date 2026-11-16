@@ -1,0 +1,128 @@
+// @vitest-environment jsdom
+//
+// R22: the Account section offers two community links (star the repository,
+// report an issue). Both carry their real href (visible on hover, readable by
+// assistive tech) but never navigate the main window: a click goes through
+// the same open_external core command every other surface uses.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { invokedWith, resetTauri } from "./test/tauriMock";
+
+vi.mock("@tauri-apps/api/core", async () => (await import("./test/tauriMock")).coreModule());
+vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).eventModule());
+
+import { Settings } from "./Settings";
+import { REPOSITORY_URL, REPORT_ISSUE_URL } from "./communityLinks";
+import { I18nProvider } from "./i18n";
+import { en } from "./i18n/en";
+import { es } from "./i18n/es";
+import type { Locale } from "./i18n/locale";
+import type { Workspace } from "./workspace";
+
+const workspace: Workspace = {
+  folders: [],
+  computerWide: null,
+  modes: {},
+  busy: false,
+  error: null,
+  clearError: () => {},
+  refresh: async () => {},
+  addFolder: async () => false,
+  pickFolder: async () => null,
+  repickFolder: async () => false,
+  setMode: async () => null,
+  enableComputerWide: async () => false,
+} as unknown as Workspace;
+
+function renderAccount(locale: Locale) {
+  return render(
+    <I18nProvider initial={locale}>
+      <Settings
+        profile={undefined}
+        workspace={workspace}
+        voice="ef_dora"
+        onVoiceChange={() => {}}
+        onAskComputerWide={() => {}}
+        onBack={() => {}}
+        onSignOut={() => {}}
+        signingOut={false}
+        focusSection={null}
+      />
+    </I18nProvider>,
+  );
+}
+
+beforeEach(() => {
+  resetTauri({
+    tools_settings_get: () => ({ tools_allow_run_command: true }),
+    memory_settings_get: () => ({ mode: "remote" }),
+    app_info: () => ({ version: "0.2.11" }),
+    open_external: () => null,
+  });
+});
+
+afterEach(cleanup);
+
+describe("community link targets", () => {
+  it("point at the public repository and its new-issue form", () => {
+    expect(REPOSITORY_URL).toBe("https://github.com/helmcode/nan-desktop");
+    expect(REPORT_ISSUE_URL).toBe("https://github.com/helmcode/nan-desktop/issues/new");
+  });
+});
+
+describe.each([
+  ["en", en],
+  ["es", es],
+] as const)("Account community links (%s)", (locale, strings) => {
+  it("renders both links with their hrefs inside the Account section", () => {
+    renderAccount(locale);
+    const section = screen.getByRole("region", { name: strings.settings.about.title });
+    const star = screen.getByRole("link", { name: strings.settings.about.starRepo });
+    const issue = screen.getByRole("link", { name: strings.settings.about.reportIssue });
+    expect(section.contains(star)).toBe(true);
+    expect(section.contains(issue)).toBe(true);
+    expect(star.getAttribute("href")).toBe(REPOSITORY_URL);
+    expect(issue.getAttribute("href")).toBe(REPORT_ISSUE_URL);
+    // Each link carries a decorative icon, hidden from assistive tech.
+    for (const link of [star, issue]) {
+      const svg = link.querySelector("svg");
+      expect(svg).not.toBeNull();
+      expect(svg?.getAttribute("aria-hidden")).toBe("true");
+    }
+  });
+
+  it("opens the star link in the system browser, never in the window", async () => {
+    renderAccount(locale);
+    const star = screen.getByRole("link", { name: strings.settings.about.starRepo });
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    star.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+    await waitFor(() => expect(invokedWith("open_external")).toEqual([{ url: REPOSITORY_URL }]));
+  });
+
+  it("opens the report link in the system browser, never in the window", async () => {
+    renderAccount(locale);
+    fireEvent.click(screen.getByRole("link", { name: strings.settings.about.reportIssue }));
+    await waitFor(() => expect(invokedWith("open_external")).toEqual([{ url: REPORT_ISSUE_URL }]));
+  });
+});
+
+describe("community link copy", () => {
+  it("uses the agreed wording in both languages", () => {
+    expect(en.settings.about.starRepo).toBe("Star on GitHub");
+    expect(en.settings.about.reportIssue).toBe("Report an issue");
+    expect(es.settings.about.starRepo).toBe("Dar una estrella en GitHub");
+    expect(es.settings.about.reportIssue).toBe("Reportar una incidencia");
+  });
+
+  it("keeps Spanish free of anglicisms and both free of em dashes", () => {
+    const emDash = String.fromCharCode(0x2014);
+    const spanish = [es.settings.about.starRepo, es.settings.about.reportIssue];
+    for (const s of spanish) {
+      expect(s.toLowerCase()).not.toMatch(/\b(star|issue|report|bug|link)\b/);
+    }
+    for (const s of [...spanish, en.settings.about.starRepo, en.settings.about.reportIssue]) {
+      expect(s).not.toContain(emDash);
+    }
+  });
+});

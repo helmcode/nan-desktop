@@ -3479,6 +3479,23 @@ button:disabled {
   margin-top: 0.75rem;
 }
 
+/* R22: community links (star the repository, report an issue). */
+.about-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.about-link {
+  text-decoration: none;
+}
+
+.about-link svg {
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+
 /* ---- shared artifacts (share as a link) ------------------------------- */
 
 .artifact-dialog {

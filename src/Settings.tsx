@@ -2,7 +2,7 @@
 // memory, language, voice (hidden this round) and about/sign-out.
 // Plain language only; the target user is not technical.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { BrandMark } from "./brand";
 import type { SettingsSection } from "./components/UserMenu";
@@ -11,7 +11,9 @@ import { VOICES, folderName, grantErrorLabel, profileTitle } from "./copy";
 import { DEFAULT_GRANT_MODE, type GrantMode } from "./core";
 import { VOICE_UI } from "./flags";
 import { LOCALES, useI18n } from "./i18n";
-import { IconArrowLeft, IconCheck, IconComputer, IconFolder, IconPlus, IconWarning } from "./icons";
+import { REPORT_ISSUE_URL, REPOSITORY_URL } from "./communityLinks";
+import { IconArrowLeft, IconCheck, IconComputer, IconFolder, IconIssue, IconPlus, IconStar, IconWarning } from "./icons";
+import { openExternal } from "./Markdown";
 import type { AppInfo, MemoryMode, MemorySettingsView, ProfileView, ToolsSettingsView } from "./types";
 import type { Workspace } from "./workspace";
 
@@ -348,12 +350,35 @@ export function Settings({
               <UpdateAction version={update.version} onUpdate={update.onUpdate} busy={update.busy} />
             </div>
           )}
+          <div className="about-links">
+            <CommunityLink href={REPOSITORY_URL} icon={<IconStar />} label={t.settings.about.starRepo} />
+            <CommunityLink href={REPORT_ISSUE_URL} icon={<IconIssue />} label={t.settings.about.reportIssue} />
+          </div>
           <button type="button" className="btn btn-ghost btn-danger" onClick={onSignOut} disabled={signingOut}>
             {t.settings.about.signOut}
           </button>
         </section>
       </div>
     </section>
+  );
+}
+
+/// R22: an Account-section link to the public repository. The href is real
+/// (hover and assistive tech show the target) but the click never navigates
+/// the window: it goes to the system browser through the core.
+function CommunityLink({ href, icon, label }: { href: string; icon: ReactNode; label: string }) {
+  return (
+    <a
+      className="btn btn-ghost btn-sm about-link"
+      href={href}
+      onClick={(event) => {
+        event.preventDefault();
+        openExternal(href);
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+    </a>
   );
 }
 

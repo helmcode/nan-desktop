@@ -310,6 +310,8 @@ export const en = {
       version: "Version",
       none: "None",
       signOut: "Sign out",
+      starRepo: "Star on GitHub",
+      reportIssue: "Report an issue",
     },
   },
   voices: {

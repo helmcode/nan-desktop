@@ -310,6 +310,8 @@ export const es: Strings = {
       version: "Versión",
       none: "Ninguna",
       signOut: "Cerrar sesión",
+      starRepo: "Dar una estrella en GitHub",
+      reportIssue: "Reportar una incidencia",
     },
   },
   voices: {
