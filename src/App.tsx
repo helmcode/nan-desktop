@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -33,7 +33,8 @@ import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
 import { SaveImageButton, type SaveImageResult } from "./components/SaveImageButton";
 import { Toast, type ToastNotice } from "./components/Toast";
-import { UpdateBanner, UPDATE_CHECK_INTERVAL_MS } from "./components/UpdateBanner";
+import { UpdateBanner } from "./components/UpdateBanner";
+import { startUpdateSchedule } from "./updateSchedule";
 import { UserMenu, type SettingsPane, type SettingsSection } from "./components/UserMenu";
 import {
   DEFAULT_IMAGE_SIZE,
@@ -888,7 +889,10 @@ function ChatShell({
     activeProfileRef.current = overview.active_profile;
   }, [overview.active_profile]);
   const activeConvRef = useRef<number | null>(activeConvId);
-  useEffect(() => {
+  // Synced in the commit (layout effect), not after it: at boot the open
+  // conversation and its messages paint together, and a click on a file
+  // chip before passive effects ran keyed the preview to "new chat".
+  useLayoutEffect(() => {
     activeConvRef.current = activeConvId;
   }, [activeConvId]);
   const messageCountRef = useRef(0);
@@ -1049,27 +1053,26 @@ function ChatShell({
     };
   }, []);
 
-  // Auto-update (round 7): a silent check on startup and every 6 hours. The
+  // Auto-update (round 7): a silent check on a schedule (R20-E below). The
   // result is kept here (round 14/S1) so the user menu can offer "Update"
   // after the banner is dismissed; the banner is given this same check and
   // the same install flow, so there is one update path, not two.
+  // R20-E: the shell owns the ONE schedule (startup, every 2 hours, and on
+  // coming back after 2 hours away; never more than once per 30 minutes);
+  // the banner shows its result.
+  const [updateCheckSeq, setUpdateCheckSeq] = useState(0);
+  // A failed check (dev build, offline, no release feed yet, a wake-up
+  // before the network) is silent and changes nothing: the banner and the
+  // menu keep what the last good check found, and a dismissed banner stays
+  // dismissed. It rejects so the schedule can retry once back online.
   const runUpdateCheck = useCallback(async (): Promise<UpdateInfo | null> => {
-    try {
-      const found = await checkForUpdate();
-      setAvailableUpdate(found);
-      return found;
-    } catch {
-      // Silent by design: dev builds, offline and a missing release feed.
-      setAvailableUpdate(null);
-      return null;
-    }
+    const found = await checkForUpdate();
+    setAvailableUpdate(found);
+    setUpdateCheckSeq((n) => n + 1);
+    return found;
   }, []);
 
-  useEffect(() => {
-    void runUpdateCheck();
-    const timer = window.setInterval(() => void runUpdateCheck(), UPDATE_CHECK_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [runUpdateCheck]);
+  useEffect(() => startUpdateSchedule({ run: runUpdateCheck }), [runUpdateCheck]);
 
   // Team library (S4): one sync now, then again when the previous round is
   // due, and whenever the Skills view opens. ETag-conditional, so a quiet
@@ -2543,7 +2546,12 @@ function ChatShell({
                 </button>
               )}
             </header>
-            <UpdateBanner check={runUpdateCheck} install={startInstall} externalBusy={installing} />
+            <UpdateBanner
+              update={availableUpdate}
+              checkSeq={updateCheckSeq}
+              install={startInstall}
+              externalBusy={installing}
+            />
 
             <div className="messages" ref={messagesRef}>
               <div className="messages-inner">
@@ -2843,6 +2851,7 @@ function ChatShell({
           profileId={overview.active_profile}
           source={sharingSource}
           availability={artifactsAccess.availability === "paywall" ? "paywall" : "on"}
+          selfEmail={overview.active_user?.email ?? artifactsAccess.email ?? null}
           onClose={closeShare}
           onManage={() => {
             setSharingSource(null);

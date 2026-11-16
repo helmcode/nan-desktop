@@ -929,9 +929,10 @@ mod tests {
 
     // ---- wire contract (loopback HTTP) ----------------------------------
 
-    fn mock_server(
-        responses: Vec<(u16, Vec<(&'static str, &'static str)>, &'static str)>,
-    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    /// One canned exchange: (status, headers, body) in response order.
+    type MockResponses = Vec<(u16, Vec<(&'static str, &'static str)>, &'static str)>;
+
+    fn mock_server(responses: MockResponses) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {

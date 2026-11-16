@@ -360,8 +360,8 @@ fn code_sign_fingerprint() -> Option<String> {
         // The dictionary goes to stderr; a few versions also echo a summary
         // on stdout, so accept either.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return parse_codesign_stamp(&stderr)
-            .or_else(|| parse_codesign_stamp(&String::from_utf8_lossy(&output.stdout)));
+        parse_codesign_stamp(&stderr)
+            .or_else(|| parse_codesign_stamp(&String::from_utf8_lossy(&output.stdout)))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -378,6 +378,7 @@ fn code_sign_fingerprint() -> Option<String> {
 /// build with no identity has nothing stable to bind to, so it falls back to
 /// its own code directory hash (which then changes per build, exactly as an
 /// ad-hoc signature does).
+#[cfg(any(target_os = "macos", test))]
 fn parse_codesign_stamp(dictionary: &str) -> Option<String> {
     let field = |prefix: &str| {
         dictionary
@@ -395,6 +396,7 @@ fn parse_codesign_stamp(dictionary: &str) -> Option<String> {
 /// Extract `CDHash=<hex>` from a `codesign -d --verbose=4` dictionary: the
 /// fallback identity of an ad-hoc signed build. The result is prefixed so a
 /// dev marker can never be mistaken for a fingerprint.
+#[cfg(any(target_os = "macos", test))]
 fn parse_cdhash(text: &str) -> Option<String> {
     let hash = text
         .lines()

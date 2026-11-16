@@ -57,6 +57,15 @@ pub struct FilePreview {
     /// Standard base64 of the exact file bytes.
     pub base64: String,
     pub size: u64,
+    /// R20-D: true only when the core's gating marker says this is a
+    /// website `write_website` wrote this session (see
+    /// `crate::site_preview`). The renderer then shows `siteUrl` in a
+    /// sandboxed frame; otherwise it keeps the whitelist HTML renderer.
+    #[serde(rename = "selfContainedWebsite")]
+    pub self_contained_website: bool,
+    /// The sandboxed site URL (set exactly when `selfContainedWebsite`).
+    #[serde(rename = "siteUrl", skip_serializing_if = "Option::is_none")]
+    pub site_url: Option<String>,
 }
 
 /// The folder grants a command naming `profile_id` may use: those of the
@@ -72,6 +81,23 @@ pub fn realm_grants_in(root: &Path, profile_id: &str) -> Result<GrantsStore, Rej
     let realm = crate::realm::dir_for_in(root, profile_id)
         .map_err(|err| Rejection::new("protocol", err.to_string()))?;
     grants::load_or_seed(&realm).map_err(|err| Rejection::new("io", err))
+}
+
+/// R20-D: add this run's session temp folders (where the assistant's
+/// approved websites and fallback image copies land) to the grants the
+/// preview and the share reader resolve against. See
+/// `tools::session_read_grant`.
+pub fn with_session_grant(mut store: GrantsStore, session: Option<grants::Grant>) -> GrantsStore {
+    if let Some(grant) = session {
+        store.grants.push(grant);
+    }
+    store
+}
+
+/// The session read grant of the running app, for `profile_id`.
+pub fn app_session_grant(app: &AppHandle, profile_id: &str) -> Option<grants::Grant> {
+    let state = app.try_state::<crate::tools::ToolsState>()?;
+    crate::tools::session_read_grant(&state, profile_id)
 }
 
 /// Resolve `raw` to a previewable regular file: inside an active grant of
@@ -127,7 +153,10 @@ fn resolve_preview_file(
 /// Read a file for the preview pane. `app_data` and `home` are injected so
 /// tests can use tempdirs.
 ///
-/// Rejections: everything [`read_granted_bytes`] rejects.
+/// Rejections: everything [`read_granted_bytes`] rejects. Never the
+/// sandboxed-site mode (the command goes through
+/// [`read_preview_file_gated`]).
+#[cfg(test)]
 pub fn read_preview_file(
     store: &GrantsStore,
     profile_id: &str,
@@ -135,10 +164,29 @@ pub fn read_preview_file(
     app_data: &Path,
     home: Option<&Path>,
 ) -> Result<FilePreview, Rejection> {
-    let bytes = read_granted_bytes(store, profile_id, raw, app_data, home)?;
+    read_preview_file_gated(store, profile_id, raw, app_data, home, |_, _| None)
+}
+
+/// [`read_preview_file`] with the sandboxed-site gate: `site` gets the
+/// CANONICAL path and the exact bytes read, and returns the site URL when
+/// (and only when) the core's marker says the file is a website
+/// `write_website` wrote (registering the bytes). The decision is the
+/// core's alone: nothing the renderer sends can turn it on.
+pub fn read_preview_file_gated(
+    store: &GrantsStore,
+    profile_id: &str,
+    raw: &str,
+    app_data: &Path,
+    home: Option<&Path>,
+    site: impl FnOnce(&Path, &[u8]) -> Option<String>,
+) -> Result<FilePreview, Rejection> {
+    let (canonical, bytes) = read_granted(store, profile_id, raw, app_data, home)?;
+    let site_url = site(&canonical, &bytes);
     Ok(FilePreview {
         size: bytes.len() as u64,
         base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        self_contained_website: site_url.is_some(),
+        site_url,
     })
 }
 
@@ -158,11 +206,23 @@ pub fn read_granted_bytes(
     app_data: &Path,
     home: Option<&Path>,
 ) -> Result<Vec<u8>, Rejection> {
+    read_granted(store, profile_id, raw, app_data, home).map(|(_, bytes)| bytes)
+}
+
+/// [`read_granted_bytes`] plus the canonical path that was read.
+fn read_granted(
+    store: &GrantsStore,
+    profile_id: &str,
+    raw: &str,
+    app_data: &Path,
+    home: Option<&Path>,
+) -> Result<(PathBuf, Vec<u8>), Rejection> {
     let (canonical, len) = resolve_preview_file(store, profile_id, raw, app_data, home)?;
     if len > MAX_PREVIEW_FILE_BYTES {
         return Err(too_large());
     }
-    read_no_follow(&canonical)
+    let bytes = read_no_follow(&canonical)?;
+    Ok((canonical, bytes))
 }
 
 /// Reveal a previewed file in the OS file manager, selecting it. The file
@@ -270,13 +330,50 @@ pub async fn preview_read_file(
         .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
     // Privacy fix: the grants are the signed-in user's (realm); the
     // protection still covers the whole app data root (`dir`).
+    let session = app_session_grant(&app, &profile_id);
+    let gate_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let store = realm_grants_in(&dir, &profile_id)?;
+        let store = with_session_grant(realm_grants_in(&dir, &profile_id)?, session);
         let home = std::env::home_dir();
-        read_preview_file(&store, &profile_id, &path, &dir, home.as_deref())
+        read_preview_file_gated(
+            &store,
+            &profile_id,
+            &path,
+            &dir,
+            home.as_deref(),
+            |canonical, bytes| app_site_gate(&gate_app, canonical, bytes),
+        )
     })
     .await
     .map_err(|_| Rejection::new("io", "preview read was interrupted"))?
+}
+
+/// R20-D: the running app's sandboxed-site gate. A file qualifies only
+/// when the tools state's marker says `write_website` wrote exactly these
+/// bytes at this canonical path this session; its bytes are then
+/// registered with the site registry and the sandboxed URL returned.
+fn app_site_gate(app: &AppHandle, canonical: &Path, bytes: &[u8]) -> Option<String> {
+    site_gate(
+        app.try_state::<crate::tools::ToolsState>()?.inner(),
+        app.try_state::<crate::site_preview::SiteRegistry>()?
+            .inner(),
+        canonical,
+        bytes,
+    )
+}
+
+/// The AppHandle-free gate (testable): marker check, then register.
+pub fn site_gate(
+    tools: &crate::tools::ToolsState,
+    sites: &crate::site_preview::SiteRegistry,
+    canonical: &Path,
+    bytes: &[u8],
+) -> Option<String> {
+    if !tools.is_tool_website(canonical, bytes) {
+        return None;
+    }
+    let token = sites.register(bytes.to_vec());
+    Some(crate::site_preview::site_url(&token))
 }
 
 /// Reveal a previewed file in Finder / Explorer / the Linux file manager.
@@ -295,8 +392,9 @@ pub async fn preview_reveal_location(
         .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
     // Same realm scoping as `preview_read_file`: the grants are the
     // signed-in user's; the app-data protection covers the whole root.
+    let session = app_session_grant(&app, &profile_id);
     tauri::async_runtime::spawn_blocking(move || {
-        let store = realm_grants_in(&dir, &profile_id)?;
+        let store = with_session_grant(realm_grants_in(&dir, &profile_id)?, session);
         let home = std::env::home_dir();
         reveal_preview_file(&store, &profile_id, &path, &dir, home.as_deref(), os_reveal)
     })
@@ -509,11 +607,144 @@ mod tests {
         store
     }
 
+    // ------------------------------------------- session folders (R20-D) --
+
+    #[test]
+    fn the_session_grant_lets_the_preview_read_an_approved_session_file() {
+        let l = layout();
+        let mut st = crate::tools::ToolsState::default();
+        st.scratch_base = l.outside.clone();
+        let folder = st.scratch_dir(3);
+        fs::create_dir_all(&folder).expect("session folder");
+        let site = folder.join("website-hola.html");
+        fs::write(&site, b"<html><body>hola</body></html>").expect("site");
+        let raw = site.display().to_string();
+
+        let bare = store_with(&[&l.grant]);
+        let err = read_granted_bytes(&bare, "nan", &raw, &l.app_data, Some(&l.home))
+            .expect_err("no grant without the session one");
+        assert!(
+            matches!(err.kind.as_str(), "no_grant" | "escape"),
+            "{err:?}"
+        );
+
+        let store = with_session_grant(bare, crate::tools::session_read_grant(&st, "nan"));
+        assert_eq!(
+            read_granted_bytes(&store, "nan", &raw, &l.app_data, Some(&l.home)).expect("read"),
+            b"<html><body>hola</body></html>"
+        );
+        // Another profile never reads it, and nothing outside the session
+        // root comes with it.
+        assert!(read_granted_bytes(&store, "helmcode", &raw, &l.app_data, Some(&l.home)).is_err());
+        let beside = l.outside.join("beside.txt");
+        fs::write(&beside, b"x").expect("beside");
+        assert!(
+            read_granted_bytes(
+                &store,
+                "nan",
+                &beside.display().to_string(),
+                &l.app_data,
+                Some(&l.home)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_a_tool_written_website_from_the_session_folder_gets_the_sandboxed_mode() {
+        let l = layout();
+        let mut st = crate::tools::ToolsState::default();
+        st.scratch_base = l.outside.clone();
+        let sites = crate::site_preview::SiteRegistry::default();
+        let folder = st.scratch_dir(3);
+        fs::create_dir_all(&folder).expect("session folder");
+        let html = b"<!doctype html><html><head></head><body><script>1</script></body></html>";
+        let site = fs::canonicalize(&folder)
+            .expect("canon")
+            .join("website-hola.html");
+        fs::write(&site, html).expect("site");
+        // What write_website_in records after its approved write.
+        st.record_website(&site, html);
+        let user = l.grant.join("website-hola.html");
+        fs::write(&user, html).expect("user html");
+
+        let store = with_session_grant(
+            store_with(&[&l.grant]),
+            crate::tools::session_read_grant(&st, "nan"),
+        );
+        let read = |path: &Path| {
+            read_preview_file_gated(
+                &store,
+                "nan",
+                &path.display().to_string(),
+                &l.app_data,
+                Some(&l.home),
+                |canonical, bytes| site_gate(&st, &sites, canonical, bytes),
+            )
+            .expect("read")
+        };
+
+        let website = read(&site);
+        assert!(website.self_contained_website);
+        let url = website.site_url.clone().expect("url");
+        let token = url.rsplit('/').next().expect("token");
+        let served = crate::site_preview::respond(&sites, "GET", &format!("/{token}"));
+        assert_eq!(served.status(), 200, "the exact bytes are registered");
+
+        // A user's own .html (same name, same bytes) keeps the whitelist.
+        let plain = read(&user);
+        assert!(!plain.self_contained_website);
+        assert_eq!(plain.site_url, None);
+        // So does the tool's file once its bytes changed on disk.
+        fs::write(&site, b"<p>changed</p>").expect("overwrite");
+        assert!(!read(&site).self_contained_website);
+        // And the plain read never turns it on.
+        fs::write(&site, html).expect("restore");
+        let ungated = read_preview_file(
+            &store,
+            "nan",
+            &site.display().to_string(),
+            &l.app_data,
+            Some(&l.home),
+        )
+        .expect("read");
+        assert!(!ungated.self_contained_website);
+    }
+
+    #[test]
+    fn the_reply_speaks_the_wire_contract_with_and_without_a_site() {
+        let plain = FilePreview {
+            base64: "aGk=".into(),
+            size: 2,
+            self_contained_website: false,
+            site_url: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).expect("json"),
+            serde_json::json!({ "base64": "aGk=", "size": 2, "selfContainedWebsite": false })
+        );
+        let site = FilePreview {
+            self_contained_website: true,
+            site_url: Some("nan-site://localhost/t".into()),
+            ..plain
+        };
+        assert_eq!(
+            serde_json::to_value(&site).expect("json"),
+            serde_json::json!({
+                "base64": "aGk=", "size": 2,
+                "selfContainedWebsite": true, "siteUrl": "nan-site://localhost/t"
+            })
+        );
+    }
+
     // ------------------------------------------------- realm scoping --
+    // The helpers below only serve the unix-gated realm tests; the
+    // `cfg_attr` keeps Windows clippy from flagging them as dead code.
 
     /// A verified login of `user` to `profile_id`, persisted like
     /// `device_flow::store_credentials` does (claims legacy data when the
     /// profile has no bound user yet).
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn login(root: &Path, profile_id: &str, user: &str) -> PathBuf {
         let identity = crate::realm::Identity {
             id: user.into(),
@@ -525,6 +756,7 @@ mod tests {
     }
 
     /// A grant of `folder` for `profile_id` saved in `dir/tools.json`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn grant_in(dir: &Path, profile_id: &str, id: &str, folder: &Path) {
         let mut store = grants::load_or_seed(dir).expect("load");
         store
@@ -539,6 +771,7 @@ mod tests {
     }
 
     /// The command path minus the AppHandle: realm grants, then the bytes.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn realm_read(
         root: &Path,
         home: &Path,
@@ -555,6 +788,7 @@ mod tests {
         )
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn realm_reveal(
         root: &Path,
         home: &Path,

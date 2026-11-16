@@ -62,11 +62,23 @@ describe("ApprovalCard (S14)", () => {
       ["write_file", "Write a file"],
       ["replace_file", "Change a file"],
       ["run_command", "Run a command"],
+      ["save_image", "Save an image"],
+      // R20-D: the assistant's website, written to the session folder.
+      ["write_website", "Save a website"],
     ]) {
       cleanup();
       renderCard({ action });
       expect(screen.getByText(label)).toBeTruthy();
     }
+  });
+
+  it("names the website action naturally in Spanish", () => {
+    render(
+      <I18nProvider initial="es">
+        <ApprovalCard card={{ ...base, action: "write_website" }} onRespond={vi.fn()} />
+      </I18nProvider>,
+    );
+    expect(screen.getByText("Guardar un sitio web")).toBeTruthy();
   });
 
   it("shows the command folder, the permanent-delete warning and the diff", () => {

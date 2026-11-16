@@ -364,6 +364,7 @@ pub fn tool_definitions(workspace: Option<&tools::Workspace>) -> Vec<serde_json:
         web_search::tool_definition(),
         images::tool_definition(),
         tools::save_skill::tool_definition(),
+        tools::website::tool_definition(),
     ];
     if let Some(workspace) = workspace {
         defs.extend(file_tool_definitions(workspace.run_command));
@@ -392,7 +393,11 @@ working folders; for any other place, ask the user to add that folder first.";
 /// The system message for one reply: the working rules, plus the
 /// workspace description when the user set one up.
 pub fn system_prompt(workspace: Option<&tools::Workspace>) -> String {
-    let rules = format!("{ASSISTANT_RULES}\n\n{}", tools::save_skill::GUIDANCE);
+    let rules = format!(
+        "{ASSISTANT_RULES}\n\n{}\n\n{}",
+        tools::save_skill::GUIDANCE,
+        tools::website::GUIDANCE
+    );
     match workspace {
         Some(workspace) => format!("{rules}\n\n{}", workspace_prompt(workspace)),
         None => rules,
@@ -1560,6 +1565,18 @@ async fn run_tool_call(
             Vec::new(),
         );
     }
+    if call.name == tools::website::TOOL_NAME {
+        // R20-D: validated here (self-contained, 8 MiB), then written to
+        // the session folder through the core's write rules (the inline
+        // approval card) and declared the turn's deliverable.
+        let outcome = match tools::website::parse_draft(&call.arguments) {
+            Ok(draft) => tools::write_model_website(app, profile_id, conversation_id, &draft).await,
+            Err(message) => Err(tools::Rejection::new("invalid", message)),
+        };
+        let produced = file_artifacts(&outcome);
+        let declared = declared_outputs(tools::website::TOOL_NAME, &outcome);
+        return (outcome_for_model(outcome), produced, declared);
+    }
     if call.name == images::TOOL_NAME {
         let Some((prompt, size)) = images::parse_tool_args(&call.arguments) else {
             return (
@@ -2270,9 +2287,15 @@ mod tests {
         };
         assert_eq!(
             names(tool_definitions(None)),
-            vec!["web_search", "generate_image", "save_chat_as_skill"],
+            vec![
+                "web_search",
+                "generate_image",
+                "save_chat_as_skill",
+                "write_website"
+            ],
             "round 3: the model can create images without a workspace; round 15: \
-             it can always distill the chat into a skill draft"
+             it can always distill the chat into a skill draft; R20-D: it can always \
+             build a website (it lands in the session folder)"
         );
         let ws = tools::Workspace {
             roots: vec![std::path::PathBuf::from("/Users/me/Proyecto")],
@@ -2286,6 +2309,7 @@ mod tests {
                 "web_search",
                 "generate_image",
                 "save_chat_as_skill",
+                "write_website",
                 "list_files",
                 "read_file",
                 "write_file",
@@ -2692,6 +2716,8 @@ mod tests {
         assert!(bare.contains("generate_image"));
         // Round 15 (F4): the distill-the-chat rule rides on every reply.
         assert!(bare.contains(tools::save_skill::GUIDANCE));
+        // R20-D: so does how to build a self-contained website.
+        assert!(bare.contains(tools::website::GUIDANCE));
         assert!(
             !bare.contains("Workspace folders"),
             "no workspace, no folders"
@@ -2827,6 +2853,43 @@ mod tests {
         );
         assert!(declared_outputs("run_command", &Err(tools::Rejection::new("io", "x"))).is_empty());
         assert!(declared_outputs("write_file", &outcome).is_empty());
+    }
+
+    #[test]
+    fn a_written_website_is_the_document_deliverable_and_its_path_reaches_the_model() {
+        let outcome = Ok(tools::ToolOutcome {
+            action: "write_website".into(),
+            summary: "wrote 120 bytes".into(),
+            produced: vec!["/tmp/s/conversation-7/website-hola.html".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            declared_outputs(tools::website::TOOL_NAME, &outcome),
+            vec![tools::DeclaredOutput::deliverable(
+                "/tmp/s/conversation-7/website-hola.html",
+                tools::DeliverableKind::Document
+            )]
+        );
+        assert_eq!(
+            file_artifacts(&outcome),
+            vec![chat_store::Artifact {
+                path: "/tmp/s/conversation-7/website-hola.html".into(),
+                kind: chat_store::ArtifactKind::File,
+            }]
+        );
+        let message: serde_json::Value =
+            serde_json::from_str(&outcome_for_model(outcome)).expect("json");
+        assert_eq!(
+            message["files"][0],
+            "/tmp/s/conversation-7/website-hola.html"
+        );
+        assert!(
+            declared_outputs(
+                tools::website::TOOL_NAME,
+                &Err(tools::Rejection::new("declined", "no"))
+            )
+            .is_empty()
+        );
     }
 
     #[test]

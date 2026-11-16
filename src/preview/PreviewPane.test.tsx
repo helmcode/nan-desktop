@@ -118,3 +118,58 @@ describe("PreviewPane: share and show in folder together", () => {
     expect(screen.queryByRole("button", { name: "Show in folder" })).toBeNull();
   });
 });
+
+// R20-C: the header's Share is wired for every document kind the pane
+// previews (same source rule as the chat file chips), including an image
+// shown in the removable frame with the Edit button.
+describe("PreviewPane: Share for every previewable kind (R20-C)", () => {
+  const KINDS = [
+    "informe.pdf",
+    "notas.txt",
+    "notas.md",
+    "datos.csv",
+    "web.html",
+    "foto.png",
+    "foto.jpg",
+    "anim.gif",
+    "foto.webp",
+    "carta.docx",
+    "hoja.xlsx",
+    "config.json",
+    "deploy.yaml",
+    "build.log",
+    "main.py",
+  ];
+  for (const name of KINDS) {
+    it(name, () => {
+      resetTauri({ preview_read_file: () => ({ base64: btoa("x"), size: 1 }) });
+      const onShare = vi.fn();
+      const path = `/Users/ana/Proyecto/${name}`;
+      render(
+        <I18nProvider initial="es">
+          <PreviewPane
+            target={{ kind: "file", ref: path }}
+            profileId="helmcode"
+            onClose={() => {}}
+            onOpenLink={() => {}}
+            onEditImage={() => {}}
+            onRemove={() => {}}
+            onShare={onShare}
+          />
+        </I18nProvider>,
+      );
+      fireEvent.click(screen.getByRole("button", { name: `Compartir ${name} como enlace` }));
+      expect(onShare).toHaveBeenCalledWith({ kind: "file", path });
+    });
+  }
+
+  it("a kind the servers cannot store (BMP) previews without Share", () => {
+    resetTauri({ preview_read_file: () => ({ base64: btoa("x"), size: 1 }) });
+    render(
+      <I18nProvider initial="en">
+        <PreviewPane target={{ kind: "file", ref: "/p/scan.bmp" }} profileId="nan" onClose={() => {}} onOpenLink={() => {}} onShare={() => {}} />
+      </I18nProvider>,
+    );
+    expect(screen.queryByRole("button", { name: /as a link$/ })).toBeNull();
+  });
+});

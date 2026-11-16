@@ -1,11 +1,13 @@
 // Auto-update (round 7).
 //
-// The renderer asks `update_check` on startup and every 6 hours; when the
-// signed release feed (`plugins.updater.endpoints` in tauri.conf.json) has a
-// newer version, the renderer shows a non-invasive banner. Nothing is ever
-// downloaded or installed until the user clicks "Update", which calls
-// `update_install`: download, minisign verification against the pubkey
-// embedded in the app, install, relaunch.
+// The renderer asks `update_check` on startup, every 2 hours and when the
+// window comes back after more than 2 hours away (never more than once per
+// 30 minutes; src/updateSchedule.ts); when the signed release feed
+// (`plugins.updater.endpoints` in tauri.conf.json) has a newer version,
+// the renderer shows a non-invasive banner. Nothing is ever downloaded or
+// installed until the user clicks "Update", which calls `update_install`:
+// download, minisign verification against the pubkey embedded in the app,
+// install, relaunch.
 //
 // The update found by the last check is kept here so the install uses
 // exactly the release the banner announced (the renderer never sends a URL

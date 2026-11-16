@@ -40,6 +40,7 @@ pub mod diff;
 pub mod grants;
 pub mod save_skill;
 pub mod trash;
+pub mod website;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -137,6 +138,16 @@ pub enum ToolAction {
         source: String,
         path: String,
     },
+    /// R20-D: a self-contained website the model built (`write_website`),
+    /// written to `path` in the conversation's session temp folder. Same
+    /// write rules as write_file, the website cap (8 MiB) instead of 2 MiB,
+    /// and the document is re-validated ([`website::validate_html`]).
+    /// NEVER deserialized: only the core builds it, with a path it chose.
+    #[serde(skip_deserializing)]
+    WriteWebsite {
+        path: String,
+        content: String,
+    },
 }
 
 impl ToolAction {
@@ -150,6 +161,7 @@ impl ToolAction {
             ToolAction::MovePath { .. } => "move_path",
             ToolAction::DeletePath { .. } => "delete_path",
             ToolAction::SaveImage { .. } => "save_image",
+            ToolAction::WriteWebsite { .. } => "write_website",
         }
     }
 }
@@ -253,6 +265,13 @@ pub struct ToolsState {
     /// Parent of the session temp folders (the OS temp dir in production;
     /// tests point it at a tempdir).
     pub scratch_base: PathBuf,
+    /// R20-D sandboxed website preview: the gating marker. Canonical path
+    /// of every file `write_website` wrote this session -> SHA-256 of the
+    /// exact validated bytes. Only a file whose path AND current bytes
+    /// match qualifies for the sandboxed site preview; anything else (a
+    /// user's own .html, a website-*.html another tool overwrote) keeps the
+    /// whitelist renderer. Cleared on every realm switch.
+    websites: Mutex<HashMap<PathBuf, [u8; 32]>>,
 }
 
 impl Default for ToolsState {
@@ -264,6 +283,7 @@ impl Default for ToolsState {
             scopes: Mutex::new(HashMap::new()),
             session_id: Mutex::new(uuid::Uuid::new_v4().to_string()),
             scratch_base: std::env::temp_dir(),
+            websites: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -323,7 +343,47 @@ impl ToolsState {
         if let Ok(mut id) = self.session_id.lock() {
             *id = uuid::Uuid::new_v4().to_string();
         }
+        if let Ok(mut websites) = self.websites.lock() {
+            websites.clear();
+        }
     }
+
+    /// Record that `write_website` wrote these validated `bytes` at the
+    /// canonical `path` (the gating marker of the sandboxed site preview).
+    pub fn record_website(&self, path: &Path, bytes: &[u8]) {
+        if let Ok(mut websites) = self.websites.lock() {
+            websites.insert(path.to_path_buf(), sha256(bytes));
+        }
+    }
+
+    /// Whether the file at the canonical `path`, holding `bytes` now,
+    /// is a website `write_website` wrote this session: named
+    /// `website-*.html`, inside this session's temp folders, recorded by
+    /// the tool, and byte-for-byte what it validated and wrote.
+    pub fn is_tool_website(&self, path: &Path, bytes: &[u8]) -> bool {
+        let named = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("website-") && name.ends_with(".html"));
+        let in_session = self
+            .scratch_dir(0)
+            .parent()
+            .and_then(|root| std::fs::canonicalize(root).ok())
+            .is_some_and(|root| grants::is_under(&root, path));
+        if !named || !in_session {
+            return false;
+        }
+        self.websites
+            .lock()
+            .ok()
+            .and_then(|websites| websites.get(path).copied())
+            .is_some_and(|recorded| recorded == sha256(bytes))
+    }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes).into()
 }
 
 /// The synthetic grant over a conversation's session temp folder: ask mode
@@ -540,6 +600,11 @@ pub fn declare_outputs(action_kind: &str, produced: &[String]) -> Vec<DeclaredOu
         "move_path" => produced
             .iter()
             .filter(|path| is_document_path(path))
+            .map(|path| DeclaredOutput::deliverable(path.clone(), DeliverableKind::Document))
+            .collect(),
+        // R20-D: the website the user asked for IS the turn's deliverable.
+        "write_website" => produced
+            .iter()
             .map(|path| DeclaredOutput::deliverable(path.clone(), DeliverableKind::Document))
             .collect(),
         _ => Vec::new(),
@@ -771,7 +836,50 @@ pub fn validate_action(
         ToolAction::SaveImage { source, path } => {
             validate_save_image(store, profile_id, source, path)
         }
+        ToolAction::WriteWebsite { path, content } => {
+            validate_write_website(store, profile_id, path, content)
+        }
     }
+}
+
+/// `write_website`: an `.html` file, the website checks, the 8 MiB cap.
+fn validate_write_website(
+    store: &GrantsStore,
+    profile_id: &str,
+    path: &str,
+    content: &str,
+) -> Result<Validated, Rejection> {
+    website::validate_html(content).map_err(|message| Rejection::new("invalid", message))?;
+    let is_html = Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("html"));
+    if !is_html {
+        return Err(Rejection::new(
+            "protocol",
+            "a website is written as an .html file",
+        ));
+    }
+    let (grant_id, canonical) = grants::resolve_under_grant(store, profile_id, path)?;
+    let replaces = if std::fs::symlink_metadata(&canonical).is_ok() {
+        ", replaces the existing file"
+    } else {
+        ""
+    };
+    let summary = format!(
+        "write_website {} ({} bytes{replaces})",
+        canonical.display(),
+        content.len()
+    );
+    Ok(Validated::single(
+        ToolAction::WriteWebsite {
+            path: canonical.display().to_string(),
+            content: content.to_string(),
+        },
+        summary,
+        None,
+        grant_id,
+        canonical,
+    ))
 }
 
 /// `save_image`: `path` is an image file or an existing folder (the image
@@ -1124,6 +1232,7 @@ fn reject_sensitive_write(action: &ToolAction, canonical: &Path) -> Result<(), R
             | ToolAction::MovePath { .. }
             | ToolAction::DeletePath { .. }
             | ToolAction::SaveImage { .. }
+            | ToolAction::WriteWebsite { .. }
     );
     let home = std::env::home_dir();
     if is_write && grants::is_sensitive_write_target(home.as_deref(), canonical) {
@@ -1319,7 +1428,8 @@ fn execute_proposal_with(
         }
         ToolAction::WriteFile { .. }
         | ToolAction::ReplaceFile { .. }
-        | ToolAction::SaveImage { .. } => {
+        | ToolAction::SaveImage { .. }
+        | ToolAction::WriteWebsite { .. } => {
             grants::verify_writable(&grant.canonical_path, canonical)?;
         }
         ToolAction::RunCommand { cwd_in_grant, .. } => {
@@ -1360,6 +1470,18 @@ fn execute_proposal_with(
         }
         ToolAction::DeletePath { .. } => exec_delete_path(canonical, proposal.permanent_delete),
         ToolAction::SaveImage { source, .. } => exec_save_image(Path::new(source), canonical),
+        ToolAction::WriteWebsite { content, .. } => {
+            if std::fs::symlink_metadata(canonical).is_ok_and(|meta| !meta.file_type().is_file()) {
+                return Err(Rejection::new(
+                    "protocol",
+                    "the destination is not a regular file; not replacing it",
+                ));
+            }
+            exec_write_file(canonical, content).map(|outcome| ToolOutcome {
+                action: "write_website".into(),
+                ..outcome
+            })
+        }
         ToolAction::RunCommand { cmd, .. } => {
             let started = SystemTime::now();
             let output = run_captured(cmd, canonical, COMMAND_TIMEOUT)?;
@@ -2568,6 +2690,19 @@ fn confirmation_base(action: &ToolAction, summary: &str) -> (String, String) {
                 }
             ),
         ),
+        ToolAction::WriteWebsite { path, .. } => (
+            "Guardar una web".into(),
+            format!(
+                "El asistente quiere GUARDAR la web que ha creado en:\n\n{path}\n\n{}\
+                 Es un único archivo HTML, sin nada que se descargue de internet. \
+                 ¿Se lo permites?",
+                if summary.contains("replaces the existing file") {
+                    "Ya existe un archivo con ese nombre y se SUSTITUIRÁ.\n\n"
+                } else {
+                    ""
+                }
+            ),
+        ),
         ToolAction::SaveImage { path, .. } => (
             "Guardar una imagen".into(),
             format!(
@@ -2658,7 +2793,8 @@ pub fn approval_request(proposal: &PendingProposal) -> ApprovalRequest {
         | ToolAction::WriteFile { path, .. }
         | ToolAction::ReplaceFile { path, .. }
         | ToolAction::DeletePath { path }
-        | ToolAction::SaveImage { path, .. } => (Some(path.clone()), None, None),
+        | ToolAction::SaveImage { path, .. }
+        | ToolAction::WriteWebsite { path, .. } => (Some(path.clone()), None, None),
         ToolAction::MovePath { from, to, .. } => (Some(from.clone()), Some(to.clone()), None),
         ToolAction::RunCommand { cmd, cwd_in_grant } => {
             (Some(cwd_in_grant.clone()), None, Some(cmd.clone()))
@@ -3030,6 +3166,72 @@ pub(crate) async fn save_model_image(
         save_path,
     )
     .await
+}
+
+// ------------------------------------------------------ write_website --
+
+/// R20-D: write a validated website into the conversation's session temp
+/// folder as `website-<slug>.html`, through the core's write rules:
+/// propose a [`ToolAction::WriteWebsite`] confined to that folder (the
+/// inline approval card, whatever else is granted), approve, execute.
+pub(crate) async fn write_website_in<A: Approver>(
+    dir: &Path,
+    state: &ToolsState,
+    approver: &A,
+    profile_id: &str,
+    conversation_id: i64,
+    draft: &website::WebsiteDraft,
+) -> Result<ToolOutcome, Rejection> {
+    let action = ToolAction::WriteWebsite {
+        path: state
+            .scratch_dir(conversation_id)
+            .join(draft.file_name())
+            .display()
+            .to_string(),
+        content: draft.html.clone(),
+    };
+    let proposal = propose_in(dir, state, profile_id, Some(conversation_id), &action, true)?;
+    approve_proposal(dir, state, approver, &proposal).await?;
+    let outcome = execute(dir, state, &proposal.id)?;
+    // The gating marker of the sandboxed site preview: this exact file,
+    // with these exact validated bytes, was written by write_website.
+    if let Some(written) = outcome.produced.first() {
+        state.record_website(Path::new(written), draft.html.as_bytes());
+    }
+    Ok(outcome)
+}
+
+/// [`write_website_in`] against the running app.
+pub(crate) async fn write_model_website(
+    app: &AppHandle,
+    profile_id: &str,
+    conversation_id: i64,
+    draft: &website::WebsiteDraft,
+) -> Result<ToolOutcome, Rejection> {
+    let dir = data_dir(app).map_err(|err| Rejection::new("io", err))?;
+    let approver = AppApprover { app: app.clone() };
+    let state = app.state::<ToolsState>();
+    write_website_in(&dir, &state, &approver, profile_id, conversation_id, draft).await
+}
+
+/// R20-D: a READ grant over this run's session temp folders (every
+/// conversation's), for the preview and the share reader, so a file the
+/// user approved into a session folder (a website, a saved image) can be
+/// opened and shared. Never in `tools.json`, never a write grant: tool
+/// writes still resolve the per-conversation scratch grant. A realm switch
+/// starts a new session namespace, so another user's folders never match.
+/// None until a session folder exists.
+pub fn session_read_grant(state: &ToolsState, profile_id: &str) -> Option<grants::Grant> {
+    let root = state.scratch_dir(0).parent()?.to_path_buf();
+    let canonical = std::fs::canonicalize(root).ok()?;
+    Some(grants::Grant {
+        id: format!("{SCRATCH_GRANT_PREFIX}session"),
+        canonical_path: canonical,
+        granted_at: audit::timestamp_now_rfc3339(),
+        profile_id: profile_id.to_string(),
+        scope: GrantScope::Folder,
+        mode: ApprovalMode::Ask,
+    })
 }
 
 /// The `save` field of the `generate_image` tool result.
@@ -4963,6 +5165,189 @@ mod tests {
             panic!("expected Failed, got {save:?}");
         };
         assert_eq!(rejection.kind, "protocol");
+    }
+
+    // ------------------------------------------------ write_website --
+
+    fn site_draft(title: &str, html: &str) -> website::WebsiteDraft {
+        website::parse_draft(&serde_json::json!({ "title": title, "html": html }).to_string())
+            .expect("valid draft")
+    }
+
+    const SITE: &str = "<!doctype html><html><head><style>body{color:#222}</style></head>\
+        <body><h1>Hola</h1><img src=\"data:image/png;base64,iVBORw0KGgo=\"></body></html>";
+
+    #[test]
+    fn write_website_lands_in_the_session_folder_after_an_inline_approval() {
+        let (folder, _guard) = tempdir();
+        let (dir, _guard2) = granted_dir(&folder);
+        // Even an allow-mode grant elsewhere never auto-approves it.
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let (scratch, _guard3) = tempdir();
+        let st = state_with_scratch(&scratch);
+        let approver = FakeApprover::answering(true);
+        let draft = site_draft("Panadería Ana", SITE);
+        let outcome = tauri::async_runtime::block_on(write_website_in(
+            &dir, &st, &approver, "nan", 1, &draft,
+        ))
+        .expect("written");
+        let target = canon(&st.scratch_dir(1)).join("website-panaderia-ana.html");
+        assert_eq!(outcome.action, "write_website");
+        assert_eq!(outcome.produced, vec![path_str(&target)]);
+        assert_eq!(fs::read_to_string(&target).expect("site"), SITE);
+        assert_eq!(approver.prompts(), (0, 1), "always the inline card");
+        let card = approver.inline_calls.lock().expect("lock")[0].clone();
+        assert_eq!(card.action, "write_website");
+        assert_eq!(card.path.as_deref(), Some(path_str(&target).as_str()));
+        // The website is the turn's deliverable.
+        assert_eq!(
+            declare_outputs("write_website", &outcome.produced),
+            vec![DeclaredOutput::deliverable(
+                path_str(&target),
+                DeliverableKind::Document
+            )]
+        );
+    }
+
+    #[test]
+    fn only_the_file_write_website_wrote_carries_the_sandboxed_site_marker() {
+        let (folder, _guard) = tempdir();
+        let (dir, _guard2) = granted_dir(&folder);
+        let (scratch, _guard3) = tempdir();
+        let st = state_with_scratch(&scratch);
+        let approver = FakeApprover::answering(true);
+        let outcome = tauri::async_runtime::block_on(write_website_in(
+            &dir,
+            &st,
+            &approver,
+            "nan",
+            1,
+            &site_draft("Panadería Ana", SITE),
+        ))
+        .expect("written");
+        let site = PathBuf::from(&outcome.produced[0]);
+        assert!(
+            st.is_tool_website(&site, SITE.as_bytes()),
+            "the tool's file"
+        );
+
+        // The same name with other bytes (overwritten afterwards) does not.
+        assert!(!st.is_tool_website(&site, b"<p>changed</p>"));
+        // A same-named file the tool never wrote, in the session folder.
+        let other = canon(&st.scratch_dir(1)).join("website-otra.html");
+        fs::write(&other, SITE).expect("write");
+        assert!(!st.is_tool_website(&other, SITE.as_bytes()));
+        // A user's .html in a granted folder, even with identical bytes.
+        let user = canon(&folder).join("website-panaderia-ana.html");
+        fs::write(&user, SITE).expect("write");
+        assert!(!st.is_tool_website(&user, SITE.as_bytes()));
+        // A recorded path outside the session folder or misnamed never
+        // qualifies, even when the bytes match.
+        st.record_website(&user, SITE.as_bytes());
+        assert!(!st.is_tool_website(&user, SITE.as_bytes()));
+        let misnamed = canon(&st.scratch_dir(1)).join("site.html");
+        fs::write(&misnamed, SITE).expect("write");
+        st.record_website(&misnamed, SITE.as_bytes());
+        assert!(!st.is_tool_website(&misnamed, SITE.as_bytes()));
+
+        // A realm switch forgets every marker.
+        st.reset_for_realm_switch();
+        assert!(!st.is_tool_website(&site, SITE.as_bytes()));
+    }
+
+    #[test]
+    fn a_declined_website_writes_nothing() {
+        let (folder, _guard) = tempdir();
+        let (dir, _guard2) = granted_dir(&folder);
+        let (scratch, _guard3) = tempdir();
+        let st = state_with_scratch(&scratch);
+        let approver = FakeApprover::answering(false);
+        let err = tauri::async_runtime::block_on(write_website_in(
+            &dir,
+            &st,
+            &approver,
+            "nan",
+            1,
+            &site_draft("Site", SITE),
+        ))
+        .expect_err("declined");
+        assert_eq!(err.kind, "declined");
+        assert!(!st.scratch_dir(1).join("website-site.html").exists());
+    }
+
+    #[test]
+    fn the_website_action_revalidates_its_content_and_cap() {
+        let (folder, _guard) = tempdir();
+        let (dir, _guard2) = granted_dir(&folder);
+        let root = canon(&folder);
+        let st = state();
+        let remote = ToolAction::WriteWebsite {
+            path: path_str(&root.join("a.html")),
+            content: "<script src=\"https://x.io/a.js\"></script>".into(),
+        };
+        assert_eq!(
+            propose(&dir, &st, "nan", Some(1), &remote)
+                .expect_err("remote")
+                .kind,
+            "invalid"
+        );
+        let big = ToolAction::WriteWebsite {
+            path: path_str(&root.join("a.html")),
+            content: "a".repeat(website::MAX_WEBSITE_BYTES + 1),
+        };
+        assert_eq!(
+            propose(&dir, &st, "nan", Some(1), &big)
+                .expect_err("big")
+                .kind,
+            "invalid"
+        );
+        let not_html = ToolAction::WriteWebsite {
+            path: path_str(&root.join("a.txt")),
+            content: SITE.into(),
+        };
+        assert_eq!(
+            propose(&dir, &st, "nan", Some(1), &not_html)
+                .expect_err("ext")
+                .kind,
+            "protocol"
+        );
+        // Larger than write_file's 2 MiB but under the website cap: fine.
+        let body = format!(
+            "<html><body><img src=\"data:image/png;base64,{}\"></body></html>",
+            "A".repeat(3 * 1024 * 1024)
+        );
+        let large = ToolAction::WriteWebsite {
+            path: path_str(&root.join("big.html")),
+            content: body,
+        };
+        propose(&dir, &st, "nan", Some(1), &large).expect("3 MiB site proposes");
+    }
+
+    #[test]
+    fn write_website_is_never_deserialized_from_the_renderer() {
+        assert_eq!(
+            parse_action(r#"{"type":"write_website","path":"/a.html","content":"x"}"#)
+                .expect_err("not from IPC")
+                .kind,
+            "unknown_action"
+        );
+    }
+
+    #[test]
+    fn the_session_read_grant_covers_every_session_folder_once_one_exists() {
+        let (scratch, _guard) = tempdir();
+        let st = state_with_scratch(&scratch);
+        assert!(session_read_grant(&st, "nan").is_none(), "nothing yet");
+        fs::create_dir_all(st.scratch_dir(4)).expect("session folder");
+        let grant = session_read_grant(&st, "nan").expect("grant");
+        assert_eq!(
+            grant.canonical_path,
+            canon(st.scratch_dir(4).parent().expect("root"))
+        );
+        assert_eq!(grant.profile_id, "nan");
+        // A realm switch starts a new namespace: the old folders fall out.
+        st.reset_for_realm_switch();
+        assert!(session_read_grant(&st, "nan").is_none());
     }
 
     #[test]

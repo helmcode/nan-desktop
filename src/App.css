@@ -3733,3 +3733,32 @@ button:disabled {
   width: 26px;
   height: 26px;
 }
+
+/* R20-D: sandboxed website preview (sitePreview.tsx). The frame fills the
+   pane; a site that sets no background gets the white a browser gives it. */
+.preview-body:has(> .preview-site) {
+  padding: 0;
+  overflow: hidden;
+}
+
+.preview-site {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  margin: 0;
+}
+
+.preview-site-caption {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  font-size: 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.preview-site-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}

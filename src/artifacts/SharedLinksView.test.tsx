@@ -272,3 +272,84 @@ describe("relativeTime", () => {
     expect(relativeTime(null, "en", now)).toBe("");
   });
 });
+
+// R20-A audit: no first open of an artifacts surface may throw, whatever
+// the list looks like (the real wire shapes included) or however the core
+// answers. A throw here would show the crashed-section fallback.
+describe("SharedLinksView: first open never throws (R20-A)", () => {
+  const ENTERPRISE_ROW = {
+    id: A,
+    title: "Informe",
+    filename: "informe.pdf",
+    kind: "document",
+    content_type: "application/pdf",
+    size: 1024,
+    sha256: "ab",
+    scope: "members",
+    status: "active",
+    recipient_count: 2,
+    external_count: 0,
+    risk_ack_kind: null,
+    expires_at: null,
+    created_at: "2026-11-10T10:00:00.123456Z",
+    revoked_at: null,
+    revoked_reason: null,
+    view_count: 0,
+    last_viewed_at: null,
+  };
+  const COMMUNITY_ROW = {
+    id: B,
+    title: "Notas",
+    filename: "notas.md",
+    content_type: "text/markdown",
+    kind: "document",
+    size: 10,
+    scope: "emails",
+    recipient_count: 1,
+    recipients: ["a@b.io"],
+    expires_at: iso(3),
+    created_at: iso(-1),
+    view_count: 2,
+    last_viewed_at: null,
+    revoked_at: null,
+    status: "active",
+    url: null,
+  };
+
+  const replies: Array<[string, unknown]> = [
+    ["an empty enterprise list", { status: 200, body: { artifacts: [], total: 0 } }],
+    ["a real enterprise list", { status: 200, body: { artifacts: [ENTERPRISE_ROW], total: 1 } }],
+    ["a real community list with null urls", { status: 200, body: { artifacts: [COMMUNITY_ROW] } }],
+    ["a null list", { status: 200, body: { artifacts: null } }],
+    ["a null body", { status: 200, body: null }],
+    ["no reply at all", undefined],
+    ["rows of junk", { status: 200, body: { artifacts: [null, 3, "x", { id: 5 }, { id: A, title: { x: 1 } }] } }],
+    ["a server code shaped like a prototype key", { status: 400, body: { error: "constructor" } }],
+  ];
+
+  for (const [name, reply] of replies) {
+    for (const admin of [false, true]) {
+      it(`${name}${admin ? " (admin, then the Organization tab)" : ""}`, async () => {
+        renderView({ admin, locale: "es", core: table({ artifacts_request: () => reply }) });
+        expect(await screen.findByRole("heading", { name: "Enlaces compartidos", level: 1 })).toBeTruthy();
+        await waitFor(() => expect(screen.queryByText("Cargando enlaces…")).toBeNull());
+        if (admin) {
+          fireEvent.click(screen.getByRole("tab", { name: "Organización" }));
+          await waitFor(() => expect(screen.queryByText("Cargando enlaces…")).toBeNull());
+        }
+        expect(screen.getByRole("button", { name: "Actualizar" })).toBeTruthy();
+      });
+    }
+  }
+
+  it("a core refusal that is not an object (a bare string) reads as a generic problem", async () => {
+    renderView({
+      core: table({
+        artifacts_request: () => {
+          throw "no_session";
+        },
+      }),
+    });
+    expect(await screen.findByTestId("artifact-problem")).toBeTruthy();
+  });
+});

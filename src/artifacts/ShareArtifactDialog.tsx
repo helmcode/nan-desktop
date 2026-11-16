@@ -29,6 +29,7 @@ import {
   NO_EXPIRY,
   externalEmails,
   fetchMembers,
+  pickableMembers,
   riskFor,
   scopeOptions,
   shareArtifact,
@@ -113,9 +114,12 @@ export function ShareArtifactDialog({
   onNotice,
   onSignIn,
   onDisabled,
+  selfEmail = null,
 }: {
   profileId: string;
   source: ShareSource;
+  /** The signed-in account: never offered in the member picker (R20-B). */
+  selfEmail?: string | null;
   /** `paywall` shows the membership copy instead of the form. */
   availability: Exclude<Availability, "off">;
   onClose: () => void;
@@ -270,9 +274,8 @@ export function ShareArtifactDialog({
     return <SuccessDialog success={success} onClose={onClose} onManage={onManage} onNotice={onNotice} />;
   }
 
-  const filteredMembers = (members ?? []).filter((member) =>
-    member.email.includes(memberQuery.trim().toLowerCase()),
-  );
+  const others = pickableMembers(members ?? [], selfEmail);
+  const filteredMembers = others.filter((member) => member.email.includes(memberQuery.trim().toLowerCase()));
   const riskText =
     risk?.kind === "public" ? a.riskV1.public : enterprise ? a.riskV1.external(risk?.external.length ?? 0) : a.riskV1.community;
 
@@ -402,7 +405,9 @@ export function ShareArtifactDialog({
                   onChange={(e) => setMemberQuery(e.target.value)}
                 />
                 <ul className="artifact-members" aria-label={a.membersLabel}>
-                  {filteredMembers.length === 0 && <li className="skills-notice">{a.membersNone}</li>}
+                  {filteredMembers.length === 0 && (
+                    <li className="skills-notice">{others.length === 0 ? a.membersOnlyYou : a.membersNone}</li>
+                  )}
                   {filteredMembers.map((member) => (
                     <li key={member.userId}>
                       <label className="artifact-radio">

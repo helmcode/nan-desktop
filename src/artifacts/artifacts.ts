@@ -11,7 +11,7 @@
 // error -> copy mapping.
 
 import { invoke } from "@tauri-apps/api/core";
-import { extensionOf, type PreviewTarget } from "../preview/kind";
+import { extensionOf, previewKind, type PreviewTarget } from "../preview/kind";
 
 /** The only tenant with orgs (members and org scopes, the admin list). */
 export const ENTERPRISE_PROFILE = "helmcode";
@@ -52,7 +52,9 @@ export type Member = { userId: string; email: string };
  *  - off: hidden (flag off, unknown, or not deployed for this tenant) */
 export type Availability = "on" | "paywall" | "off";
 
-export type ArtifactsAccess = { availability: Availability; admin: boolean };
+/** `email`: the signed-in account per `/api/auth/me`, lowercased, when it
+ *  says (the member picker leaves it out). */
+export type ArtifactsAccess = { availability: Availability; admin: boolean; email?: string };
 
 /** One link as the list and the create reply describe it (tolerant). */
 export type SharedArtifact = {
@@ -216,18 +218,20 @@ export function ackCovers(acked: Risk | null, current: Risk | null): boolean {
 
 // -------------------------------------------------------------- source --
 
-const SHAREABLE_EXTENSIONS = new Set([
-  "pdf", "png", "jpg", "jpeg", "webp", "gif", "md", "markdown", "txt", "csv", "html", "htm", "docx", "xlsx",
-]);
+/** Previewable, but never shareable (R20-C): types neither server stores
+ *  (BMP/AVIF images, legacy XLS and ODS sheets) and dotenv files, which
+ *  are credential stores by definition. Everything else the preview shows
+ *  is shareable; the core maps the plain-text family (json, yaml, code...)
+ *  to text/plain, and sniffs the bytes again either way. */
+export const PREVIEW_ONLY_EXTENSIONS: ReadonlySet<string> = new Set(["bmp", "avif", "xls", "ods", "env"]);
 
-/** A preview target that can be shared (design 1.1 allowlist). Web pages
- *  never are; generated images always are. */
+/** A preview target that can be shared: every local file kind the preview
+ *  shows except [`PREVIEW_ONLY_EXTENSIONS`], and generated images. Web
+ *  pages never are. */
 export function shareSourceFor(target: PreviewTarget): ShareSource | null {
   if (target.kind === "media") return { kind: "media", path: target.ref };
-  if (target.kind === "file" && SHAREABLE_EXTENSIONS.has(extensionOf(target.ref))) {
-    return { kind: "file", path: target.ref };
-  }
-  return null;
+  if (target.kind !== "file" || previewKind(target) === "unsupported") return null;
+  return PREVIEW_ONLY_EXTENSIONS.has(extensionOf(target.ref)) ? null : { kind: "file", path: target.ref };
 }
 
 // ---------------------------------------------------------------- meta --
@@ -395,6 +399,23 @@ export function parseMembers(body: unknown): Member[] | null {
   return members;
 }
 
+/** The member picker's rows: the org members minus the signed-in user,
+ *  whom a share is never addressed to (R20-B). With no known email
+ *  nobody is hidden. The FULL list still decides who is internal. */
+export function pickableMembers(members: Member[], selfEmail: string | null | undefined): Member[] {
+  const self = (selfEmail ?? "").trim().toLowerCase();
+  return self ? members.filter((member) => member.email !== self) : members;
+}
+
+/** The signed-in email in a `/api/auth/me` body (top-level or `user`). */
+export function accountEmail(body: unknown): string | null {
+  const me = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  if (!me) return null;
+  const user = me.user && typeof me.user === "object" ? (me.user as Record<string, unknown>) : null;
+  const email = str(me.email) ?? str(user?.email);
+  return email ? email.trim().toLowerCase() : null;
+}
+
 export function linkState(artifact: SharedArtifact, now = Date.now()): LinkState {
   if (artifact.revokedAt || artifact.status === "revoked") return "revoked";
   if (artifact.status === "expired") return "expired";
@@ -474,6 +495,12 @@ function entitlementsUnknown(me: Record<string, unknown>): boolean {
 export function parseAccess(profileId: string, body: unknown): ArtifactsAccess {
   const me = record(body);
   if (!me) return { availability: "off", admin: false };
+  const email = accountEmail(me);
+  const access = availabilityOf(profileId, me);
+  return email ? { ...access, email } : access;
+}
+
+function availabilityOf(profileId: string, me: Record<string, unknown>): ArtifactsAccess {
   const flag = artifactsFlag(me);
   if (profileId === ENTERPRISE_PROFILE) {
     const org = record(me.org) ?? {};

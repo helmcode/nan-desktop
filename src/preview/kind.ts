@@ -41,11 +41,14 @@ const EXTENSIONS: Record<string, PreviewKind> = {
   docx: "docx",
 };
 
-const TEXT_EXTENSIONS = new Set([
+export const TEXT_EXTENSIONS: ReadonlySet<string> = new Set([
   "txt", "log", "json", "jsonl", "yaml", "yml", "toml", "ini", "xml", "svg", "tsv",
   "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "rb", "go", "rs", "java", "kt", "swift",
   "c", "h", "cpp", "hpp", "cs", "php", "sh", "bash", "zsh", "sql", "css", "scss", "env",
 ]);
+
+/// Every file extension the pane can preview (lowercase).
+export const PREVIEWABLE_EXTENSIONS: readonly string[] = [...Object.keys(EXTENSIONS), ...TEXT_EXTENSIONS];
 
 export function extensionOf(path: string): string {
   const name = path.split(/[\\/]/).pop() ?? "";

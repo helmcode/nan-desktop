@@ -31,6 +31,8 @@ mod memory;
 // Preview pane backends (S21): granted-file reads + platform page fetch.
 mod preview;
 mod profile;
+// R20-D: sandboxed preview of the websites write_website built.
+mod site_preview;
 // Per-user data realms (privacy fix): user binding, realm folders, the
 // one-time claim of pre-realm data.
 mod realm;
@@ -221,6 +223,14 @@ pub fn run() {
         .manage(tools::ToolsState::default())
         .manage(memory::MemoryState::default())
         .manage(updater::UpdaterState::default())
+        .manage(site_preview::SiteRegistry::default())
+        // R20-D: the sandboxed website preview frame. Serves ONLY bytes
+        // preview_read_file already gated and registered (never the disk),
+        // under the site CSP header (no network) + a sandbox directive.
+        .register_uri_scheme_protocol(site_preview::SCHEME, |ctx, request| {
+            let registry = ctx.app_handle().state::<site_preview::SiteRegistry>();
+            site_preview::respond(&registry, request.method().as_str(), request.uri().path())
+        })
         // Signed auto-update (round 7). Used only from the core's own
         // update_check / update_install commands, so no updater permission
         // is granted to the renderer.

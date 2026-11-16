@@ -5,7 +5,8 @@
 
 import { lazy, Suspense, useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { fetchWebPreview, readFileForPreview, type WebPreview } from "../core";
+import { fetchWebPreview, readFileWithSiteForPreview, type FileForPreview, type WebPreview } from "../core";
+import { SitePreview } from "./sitePreview";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { folderName, hostOf } from "../copy";
 import { useT } from "../i18n";
@@ -79,6 +80,12 @@ function WebBody({ profileId, url, onOpenLink }: { profileId: string; url: strin
   );
 }
 
+/// The name write_website gives its files (mirrors the core's
+/// `is_tool_website` name check). Display only: never a reason to run code.
+function isWebsiteFileName(name: string): boolean {
+  return name.startsWith("website-") && name.endsWith(".html");
+}
+
 function FileBody({
   profileId,
   path,
@@ -90,13 +97,17 @@ function FileBody({
 }) {
   const t = useT();
   const kind = previewKind({ kind: "file", ref: path });
-  const state = useLoad<Uint8Array>(`file:${path}`, () =>
-    kind === "unsupported" ? Promise.reject(new Error("unsupported")) : readFileForPreview(profileId, path),
+  const state = useLoad<FileForPreview>(`file:${path}`, () =>
+    kind === "unsupported" ? Promise.reject(new Error("unsupported")) : readFileWithSiteForPreview(profileId, path),
   );
   if (kind === "unsupported") return <p className="preview-note">{t.preview.unsupported}</p>;
   if (state.status === "loading") return <p className="preview-note">{t.preview.loading}</p>;
   if (state.status === "error") return <p className="preview-note">{t.preview.failed}</p>;
-  const bytes = state.value;
+  const { bytes, siteUrl } = state.value;
+  // R20-D: only a website the core flagged (write_website wrote it this
+  // session) runs in the sandboxed frame; every other HTML keeps the
+  // whitelist renderer.
+  if (kind === "html" && siteUrl !== null) return <SitePreview url={siteUrl} name={folderName(path)} />;
   switch (kind) {
     case "image":
       return <Renderers.image bytes={bytes} alt={folderName(path)} />;
@@ -107,7 +118,14 @@ function FileBody({
     case "text":
       return <Renderers.text bytes={bytes} path={path} markdown={false} />;
     case "html":
-      return <Renderers.html bytes={bytes} onOpenLink={onOpenLink} />;
+      // A website from a previous session (the core only flags this
+      // session's) falls back to the whitelist: say why it looks static.
+      return (
+        <>
+          {isWebsiteFileName(folderName(path)) && <p className="preview-note">{t.preview.siteScriptsOff}</p>}
+          <Renderers.html bytes={bytes} onOpenLink={onOpenLink} />
+        </>
+      );
     case "sheet":
       return <Renderers.sheet bytes={bytes} />;
     case "docx":

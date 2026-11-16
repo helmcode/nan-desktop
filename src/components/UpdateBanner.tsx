@@ -1,55 +1,42 @@
 // Round 7: non-invasive "new version available" banner at the top of the chat.
 //
-// - Checks silently on startup and every 6 hours. A failed check (offline,
-//   no release feed yet, dev build) shows nothing.
+// - R20-E: the shell owns the one update schedule (`updateSchedule.ts`:
+//   startup, every 2 hours, and when the window comes back after more than
+//   2 hours away) and hands the banner the result (`update` + `checkSeq`).
+//   The banner never checks by itself.
 // - Never installs by itself: only the user's click on "Update" downloads,
 //   verifies, installs and relaunches.
 // - The close button hides the banner until the next check.
 
-import { useCallback, useEffect, useState } from "react";
-import { checkForUpdate, installUpdate, type UpdateInfo } from "../core";
+import { useState } from "react";
+import { installUpdate, type UpdateInfo } from "../core";
 import { useT } from "../i18n";
 import { IconDownload, IconX } from "../icons";
-
-export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 type Phase = "idle" | "installing" | "failed";
 
 export function UpdateBanner({
-  check = checkForUpdate,
+  update,
+  checkSeq,
   install = installUpdate,
   externalBusy = false,
-  intervalMs = UPDATE_CHECK_INTERVAL_MS,
 }: {
-  check?: () => Promise<UpdateInfo | null>;
+  /** The shell's last good check result (null: up to date). */
+  update: UpdateInfo | null;
+  /** Bumped by the shell after every successful check (a new check brings
+   *  a dismissed banner back). */
+  checkSeq: number;
   install?: () => Promise<void>;
   externalBusy?: boolean;
-  intervalMs?: number;
 }) {
-
   const t = useT();
-  const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const [visible, setVisible] = useState(false);
+  // Dismiss hides the banner for the check it was showing; a later check
+  // (a new `checkSeq`) shows it again. Derived, not re-set from an effect:
+  // an effect could run after a dismiss made right as a check landed and
+  // bring the banner back.
+  const [dismissedSeq, setDismissedSeq] = useState<number | null>(null);
+  const visible = dismissedSeq !== checkSeq;
   const [phase, setPhase] = useState<Phase>("idle");
-
-  const runCheck = useCallback(async (): Promise<void> => {
-    try {
-      const found = await check();
-      if (found) {
-        setUpdate(found);
-        // A new check brings a dismissed banner back.
-        setVisible(true);
-      }
-    } catch {
-      // Silent by design: an update check must never bother the user.
-    }
-  }, [check]);
-
-  useEffect(() => {
-    void runCheck();
-    const timer = window.setInterval(() => void runCheck(), intervalMs);
-    return () => window.clearInterval(timer);
-  }, [runCheck, intervalMs]);
 
   const onUpdate = async (): Promise<void> => {
     if (phase === "installing" || externalBusy) return;
@@ -86,10 +73,7 @@ export function UpdateBanner({
         className="btn btn-primary btn-sm"
         aria-disabled={busy}
         aria-busy={busy}
-        onClick={() => {
-          if (busy) return;
-          void onUpdate();
-        }}
+        onClick={() => void onUpdate()}
       >
         {busy ? t.updater.updating : t.updater.update}
       </button>
@@ -103,7 +87,7 @@ export function UpdateBanner({
           // Inert while installing: the banner is the only place that says
           // what is happening (C3).
           if (busy) return;
-          setVisible(false);
+          setDismissedSeq(checkSeq);
         }}
       >
         <IconX size={12} />

@@ -12,15 +12,26 @@ const pdf = vi.hoisted(() => ({
   render: vi.fn(),
   destroy: vi.fn(),
   fail: false,
+  pending: false,
+  opened: 0,
 }));
 
+// The REAL pdfjs-dist 6 shape (R20-A): the document proxy has NO
+// `destroy()`; only the loading task does. A mock with `doc.destroy` hid
+// the TypeError the old cleanup threw on every unmount of a loaded PDF.
 vi.mock("pdfjs-dist", () => ({
   GlobalWorkerOptions: {},
-  getDocument: () => ({
-    promise: pdf.fail
-      ? Promise.reject(new Error("bad pdf"))
-      : Promise.resolve({ numPages: pdf.numPages, getPage: pdf.getPage, destroy: pdf.destroy }),
-  }),
+  getDocument: () => {
+    pdf.opened += 1;
+    return {
+      promise: pdf.pending
+        ? new Promise(() => {})
+        : pdf.fail
+          ? Promise.reject(new Error("bad pdf"))
+          : Promise.resolve({ numPages: pdf.numPages, getPage: pdf.getPage }),
+      destroy: pdf.destroy,
+    };
+  },
 }));
 vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?url", () => ({ default: "/pdf.worker.js" }));
 vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).coreModule());
@@ -37,6 +48,8 @@ const ctx = {} as CanvasRenderingContext2D;
 beforeEach(() => {
   pdf.numPages = 13;
   pdf.fail = false;
+  pdf.pending = false;
+  pdf.opened = 0;
   pdf.getPage.mockReset().mockImplementation(async () => ({
     getViewport: ({ scale }: { scale: number }) => ({ width: pdf.pageSize.width * scale, height: pdf.pageSize.height * scale }),
     render: (params: unknown) => {
@@ -308,10 +321,31 @@ describe("PdfPreview (continuous scroll)", () => {
     expect(canvas.width).toBe(600);
   });
 
-  it("releases the document on unmount", async () => {
+  it("releases the document on unmount through the loading task, without throwing", async () => {
     const { unmount } = render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
     await screen.findByRole("group", { name: "PDF document, 13 pages" });
-    unmount();
-    expect(pdf.destroy).toHaveBeenCalled();
+    expect(() => unmount()).not.toThrow();
+    expect(pdf.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("an unmount while the document is still loading releases it once", async () => {
+    pdf.pending = true;
+    const { unmount } = render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
+    await waitFor(() => expect(pdf.opened).toBe(1));
+    expect(() => unmount()).not.toThrow();
+    expect(pdf.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a release that fails (sync or async) never escapes the cleanup", async () => {
+    pdf.destroy.mockImplementation(() => {
+      throw new Error("worker gone");
+    });
+    const { unmount } = render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
+    await screen.findByRole("group", { name: "PDF document, 13 pages" });
+    expect(() => unmount()).not.toThrow();
+    pdf.destroy.mockReset().mockRejectedValue(new Error("worker gone"));
+    const second = render(wrap(<PdfPreview bytes={new Uint8Array([2])} />));
+    await screen.findByRole("group", { name: "PDF document, 13 pages" });
+    expect(() => second.unmount()).not.toThrow();
   });
 });
