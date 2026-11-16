@@ -8,7 +8,7 @@
 //   verifies, installs and relaunches.
 // - The close button hides the banner until the next check.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { installUpdate, type UpdateInfo } from "../core";
 import { useT } from "../i18n";
 import { IconDownload, IconX } from "../icons";
@@ -30,13 +30,13 @@ export function UpdateBanner({
   externalBusy?: boolean;
 }) {
   const t = useT();
-  const [visible, setVisible] = useState(true);
+  // Dismiss hides the banner for the check it was showing; a later check
+  // (a new `checkSeq`) shows it again. Derived, not re-set from an effect:
+  // an effect could run after a dismiss made right as a check landed and
+  // bring the banner back.
+  const [dismissedSeq, setDismissedSeq] = useState<number | null>(null);
+  const visible = dismissedSeq !== checkSeq;
   const [phase, setPhase] = useState<Phase>("idle");
-
-  // Every completed check shows the banner again.
-  useEffect(() => {
-    setVisible(true);
-  }, [checkSeq]);
 
   const onUpdate = async (): Promise<void> => {
     if (phase === "installing" || externalBusy) return;
@@ -87,7 +87,7 @@ export function UpdateBanner({
           // Inert while installing: the banner is the only place that says
           // what is happening (C3).
           if (busy) return;
-          setVisible(false);
+          setDismissedSeq(checkSeq);
         }}
       >
         <IconX size={12} />

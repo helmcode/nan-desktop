@@ -6,6 +6,7 @@
 // the banner only shows the result it is handed.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createRoot } from "react-dom/client";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("../test/tauriMock")).eventModule());
@@ -128,5 +129,41 @@ describe("UpdateBanner (round 7)", () => {
     expect(container.querySelector(".update-banner")).toBeNull();
     show(3);
     expect(container.querySelector(".update-banner")).not.toBeNull();
+  });
+
+  // CI regression (macos-latest): the user (or findByRole) can click
+  // Dismiss in the gap between the commit that shows the banner and React's
+  // passive-effect flush. An effect re-showing the banner on every check
+  // then ran AFTER the dismiss and brought it back.
+  it("a dismiss right after a check lands stays dismissed", async () => {
+    const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const wasAct = env.IS_REACT_ACT_ENVIRONMENT;
+    env.IS_REACT_ACT_ENVIRONMENT = false; // real scheduling, no act() flushing
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    try {
+      await new Promise<void>((resolve) => {
+        const seen = new MutationObserver(() => {
+          const dismiss = host.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]');
+          if (!dismiss) return;
+          seen.disconnect();
+          dismiss.click(); // before the commit's passive effects ran
+          resolve();
+        });
+        seen.observe(host, { childList: true, subtree: true });
+        root.render(
+          <I18nProvider initial="en">
+            <UpdateBanner update={NEXT} checkSeq={1} />
+          </I18nProvider>,
+        );
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(host.querySelector(".update-banner")).toBeNull();
+    } finally {
+      root.unmount();
+      host.remove();
+      env.IS_REACT_ACT_ENVIRONMENT = wasAct;
+    }
   });
 });
