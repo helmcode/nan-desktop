@@ -166,4 +166,23 @@ describe("UpdateBanner (round 7)", () => {
       env.IS_REACT_ACT_ENVIRONMENT = wasAct;
     }
   });
+
+  it("controlled dismiss: reports the check it closed and follows the app's dismissed check", () => {
+    const onDismiss = vi.fn();
+    const { rerender } = renderBanner({ checkSeq: 3, dismissedSeq: null, onDismiss });
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(onDismiss).toHaveBeenCalledWith(3);
+    // Still shown until the owner records the dismiss (it is the source of truth).
+    expect(screen.queryByText("A new version is available: 0.3.0")).toBeTruthy();
+    const view = (seq: number, dismissed: number | null) => (
+      <I18nProvider initial="en">
+        <UpdateBanner update={NEXT} checkSeq={seq} dismissedSeq={dismissed} onDismiss={onDismiss} />
+      </I18nProvider>
+    );
+    rerender(view(3, 3));
+    expect(screen.queryByText("A new version is available: 0.3.0")).toBeNull();
+    // A later check brings it back.
+    rerender(view(4, 3));
+    expect(screen.getByText("A new version is available: 0.3.0")).toBeTruthy();
+  });
 });
