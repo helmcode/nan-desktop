@@ -161,7 +161,7 @@ describe("SitePreview", () => {
 // when the document has none, an injected <meta>); keep its contract honest
 // from here: nothing remote, only inline code and data: assets.
 describe("the site policy (core source and app config)", () => {
-  const core = readFileSync("src-tauri/src/site_preview.rs", "utf8");
+  const core = readFileSync("src-tauri/src/site_preview.rs", "utf8").replace(/\r\n/g, "\n");
   const policy = /pub const SITE_CSP: &str = "([\s\S]*?)";/.exec(core)?.[1]?.replace(/\\\n/g, "") ?? "";
 
   it("blocks every network load and allows only inline code and data: assets", () => {

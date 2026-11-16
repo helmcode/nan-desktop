@@ -103,8 +103,8 @@ describe("R20-D: a website the assistant built", () => {
 // honest: the tool is offered on every reply and its guidance rides on the
 // system prompt, next to save_chat_as_skill's.
 describe("R20-D: write_website prompt wiring (core source)", () => {
-  const chat = readFileSync("src-tauri/src/chat.rs", "utf8");
-  const website = readFileSync("src-tauri/src/tools/website.rs", "utf8");
+  const chat = readFileSync("src-tauri/src/chat.rs", "utf8").replace(/\r\n/g, "\n");
+  const website = readFileSync("src-tauri/src/tools/website.rs", "utf8").replace(/\r\n/g, "\n");
 
   it("is offered with the always-on tools and its guidance joins the system prompt", () => {
     const defs = /pub fn tool_definitions[\s\S]*?\];/.exec(chat)?.[0] ?? "";
