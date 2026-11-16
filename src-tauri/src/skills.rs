@@ -883,10 +883,10 @@ pub fn parse_skill_md(text: &str) -> Result<(String, String, String), SkillError
 }
 
 fn unquote(value: &str) -> String {
-    if value.starts_with('"') {
-        if let Ok(parsed) = serde_json::from_str::<String>(value) {
-            return parsed;
-        }
+    // A JSON string literal always starts with a double quote, so the probe
+    // below subsumes the quote check (clippy collapsible_if).
+    if let Ok(parsed) = serde_json::from_str::<String>(value) {
+        return parsed;
     }
     if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
         return value[1..value.len() - 1].replace("''", "'");
