@@ -18,7 +18,7 @@ export const ENTERPRISE_PROFILE = "helmcode";
 /** The risk copy version the user accepts (design 3.4). A wording change
  *  that changes the meaning bumps it, together with the i18n key. */
 export const RISK_VERSION = "artifacts-risk-v1";
-/** Most email recipients per share. */
+/** Most email recipients per share (community: NaN members by email). */
 export const MAX_RECIPIENTS = 20;
 /** Longest title (runes). */
 export const MAX_TITLE_CHARS = 120;
@@ -36,8 +36,9 @@ export const ARTIFACTS_FLAGS = ["artifacts", "artifacts_sharing"] as const;
 export type ShareScope = "emails" | "members" | "org" | "public";
 export type RiskKind = "public" | "external";
 
-/** What needs an explicit acceptance: the kind and, for external, which
- *  recipients made it external (an added one resets the acceptance). */
+/** What needs an explicit acceptance: the kind and, for `external` (the
+ *  wire name for email recipients), which ones were accepted (an added
+ *  one resets the acceptance). */
 export type Risk = { kind: RiskKind; external: string[] };
 
 /** What the core reads: a granted file, or an image this app generated. */
@@ -90,6 +91,7 @@ export type ArtifactProblem =
   | "possible_secret"
   | "scope_not_allowed"
   | "recipient_not_member"
+  | "recipient_not_user"
   | "too_many_recipients"
   | "invalid"
   | "source_refused"
@@ -103,9 +105,16 @@ export type ArtifactProblem =
 
 // ------------------------------------------------------------- scopes --
 
-/** The scopes the dialog offers (design 2): the backend stays the judge. */
+/**
+ * The scopes the dialog offers (R21), the first one being the default; the
+ * backend stays the judge.
+ * - Enterprise: specific org members, the whole org, or public. There is
+ *   no free email option: recipients always come from the org.
+ * - Community: specific NaN members by email (they sign in with their NaN
+ *   account to open the link), or public.
+ */
 export function scopeOptions(profileId: string): ShareScope[] {
-  return profileId === ENTERPRISE_PROFILE ? ["emails", "members", "org", "public"] : ["emails", "public"];
+  return profileId === ENTERPRISE_PROFILE ? ["members", "org", "public"] : ["emails", "public"];
 }
 
 /** The wire value for "no expiry" (members/org only). Both servers read an
@@ -178,36 +187,20 @@ export function addEmails(
 
 // ---------------------------------------------------------------- risk --
 
-/**
- * The recipients outside the org, for the warning and the "External"
- * badge. Community: everyone (there is no org). Enterprise: the ones that
- * are not in the cached members list; with no list (it failed to load),
- * everyone counts as external, which only ever shows MORE warning. The
- * server recomputes this and answers 422 if it disagrees.
- */
-export function externalEmails(profileId: string, emails: string[], members: Member[] | null): string[] {
-  if (profileId !== ENTERPRISE_PROFILE || members === null) return [...emails];
-  const internal = new Set(members.map((member) => member.email.toLowerCase()));
-  return emails.filter((email) => !internal.has(email));
-}
-
-/** What the share needs accepted, or null (design 3.4). */
-export function riskFor(
-  profileId: string,
-  scope: ShareScope,
-  emails: string[],
-  members: Member[] | null,
-): Risk | null {
+/** What the share needs accepted, or null (design 3.4). Public always;
+ *  email recipients (community only) always, every one of them listed so
+ *  that adding someone resets the acceptance. Members and org stay inside
+ *  the organization and need none. */
+export function riskFor(scope: ShareScope, emails: string[]): Risk | null {
   if (scope === "public") return { kind: "public", external: [] };
-  if (scope !== "emails") return null;
-  const external = externalEmails(profileId, emails, members);
-  return external.length > 0 ? { kind: "external", external } : null;
+  if (scope !== "emails" || emails.length === 0) return null;
+  return { kind: "external", external: [...emails] };
 }
 
 /**
  * Whether an acceptance given for `acked` still covers `current`. The
  * checkbox resets whenever the risk set grows: a different kind (switching
- * to public) or an external recipient that was not there when it was
+ * to public) or an email recipient that was not there when it was
  * checked. Removing recipients keeps it.
  */
 export function ackCovers(acked: Risk | null, current: Risk | null): boolean {
@@ -535,6 +528,10 @@ const SERVER_CODES: Record<string, ArtifactProblem> = {
   possible_secret: "possible_secret",
   scope_not_allowed: "scope_not_allowed",
   recipient_not_member: "recipient_not_member",
+  // R21: a community email that is not a NaN user (aliases: tolerant client).
+  recipient_not_user: "recipient_not_user",
+  recipient_not_found: "recipient_not_user",
+  unknown_recipient: "recipient_not_user",
   too_many_recipients: "too_many_recipients",
   invalid_request: "invalid",
   entitlement_required: "paywall",
@@ -568,6 +565,30 @@ export function problemForReply(status: number, body: unknown): ArtifactProblem 
   }
 }
 
+/** The community has no team: a "not a member" there always means the
+ *  email is not a NaN user. Enterprise keeps the member-picker meaning. */
+export function problemForProfile(profileId: string, problem: ArtifactProblem): ArtifactProblem {
+  return profileId !== ENTERPRISE_PROFILE && problem === "recipient_not_member" ? "recipient_not_user" : problem;
+}
+
+/** The recipients a `recipient_not_user` reply names (`emails`,
+ *  `recipients` or `invalid_emails`, top-level or under `error`),
+ *  lowercased; empty when it names none. */
+export function rejectedRecipients(body: unknown): string[] {
+  const reply = record(body);
+  if (!reply) return [];
+  for (const scope of [reply, record(reply.error)]) {
+    if (!scope) continue;
+    for (const key of ["emails", "recipients", "invalid_emails"]) {
+      const list = scope[key];
+      if (Array.isArray(list)) {
+        return list.filter((item): item is string => typeof item === "string").map((item) => item.toLowerCase());
+      }
+    }
+  }
+  return [];
+}
+
 const CORE_CODES: Record<string, ArtifactProblem> = {
   no_session: "expired",
   offline: "offline",
@@ -596,7 +617,8 @@ function request(profileId: string, method: "GET" | "DELETE", path: string): Pro
   return invoke<CoreReply>("artifacts_request", { profileId, method, path });
 }
 
-export type Outcome<T> = ({ ok: true } & T) | { ok: false; problem: ArtifactProblem };
+/** `rejected`: on `recipient_not_user`, the emails the server named. */
+export type Outcome<T> = ({ ok: true } & T) | { ok: false; problem: ArtifactProblem; rejected?: string[] };
 
 /** The share action's availability for the active profile. */
 export async function fetchAccess(profileId: string): Promise<ArtifactsAccess> {
@@ -616,7 +638,9 @@ export async function shareArtifact(
 ): Promise<Outcome<{ url: string; artifact: SharedArtifact | null }>> {
   try {
     const reply = await invoke<CoreReply>("artifact_share", { profileId, source, meta });
-    const problem = problemForReply(reply.status, reply.body);
+    const mapped = problemForReply(reply.status, reply.body);
+    const problem = mapped && problemForProfile(profileId, mapped);
+    if (problem === "recipient_not_user") return { ok: false, problem, rejected: rejectedRecipients(reply.body) };
     if (problem) return { ok: false, problem };
     const parsed = parseShareReply(reply.body);
     return parsed ? { ok: true, ...parsed } : { ok: false, problem: "generic" };

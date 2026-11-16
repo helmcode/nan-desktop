@@ -2,11 +2,15 @@
 // the ShareDialog modal pattern: backdrop, role=dialog, Escape cancels as
 // the innermost layer, initial focus on Cancel, a role=alert problem line.
 //
-// The risk warning (public, or recipients outside the org) is bold, sits in
+// Scopes per tenant (R21): enterprise shares with picked org members, the
+// whole org or the public; community with specific NaN members by email
+// (they sign in with their NaN account to open it) or the public.
+//
+// The risk warning (public, or community email recipients) is bold, sits in
 // a role=alert block and comes with a required checkbox: "Create link"
 // stays disabled until it is checked, and it unchecks itself whenever the
-// risk grows (switching to public, an external recipient added). The core
-// does the reading and the upload; this component never sees the bytes.
+// risk grows (switching to public, a recipient added). The core does the
+// reading and the upload; this component never sees the bytes.
 
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { folderName } from "../copy";
@@ -27,7 +31,6 @@ import {
   defaultExpiry,
   expiryOptions,
   NO_EXPIRY,
-  externalEmails,
   fetchMembers,
   pickableMembers,
   riskFor,
@@ -49,6 +52,8 @@ export function artifactProblemText(t: Strings, problem: ArtifactProblem): strin
       return p.too_large(MAX_ARTIFACT_MB);
     case "too_many_recipients":
       return p.too_many_recipients(MAX_RECIPIENTS);
+    case "recipient_not_user":
+      return p.recipient_not_user;
     default:
       return p[problem];
   }
@@ -57,15 +62,18 @@ export function artifactProblemText(t: Strings, problem: ArtifactProblem): strin
 export function ArtifactProblemLine({
   problem,
   onSignIn,
+  text,
 }: {
   problem: ArtifactProblem;
   onSignIn: () => void;
+  /** Overrides the problem's own copy (a more specific message). */
+  text?: string;
 }) {
   const t = useT();
   const soft = problem === "rate_limited" || problem === "offline";
   return (
     <p className={soft ? "skills-notice" : "inline-error"} role="alert" data-testid="artifact-problem">
-      {artifactProblemText(t, problem)}
+      {text ?? artifactProblemText(t, problem)}
       {problem === "expired" && (
         <>
           {" "}
@@ -140,7 +148,7 @@ export function ShareArtifactDialog({
 
   // ---- the form --------------------------------------------------------
   const [title, setTitle] = useState(fileName);
-  const [scope, setScope] = useState<ShareScope>("emails");
+  const [scope, setScope] = useState<ShareScope>(() => scopeOptions(profileId)[0]);
   const [emails, setEmails] = useState<string[]>([]);
   const [emailInput, setEmailInput] = useState("");
   const [emailError, setEmailError] = useState("");
@@ -148,11 +156,11 @@ export function ShareArtifactDialog({
   const [memberQuery, setMemberQuery] = useState("");
   // undefined: loading; null: unavailable.
   const [members, setMembers] = useState<Member[] | null | undefined>(enterprise ? undefined : null);
-  const [expiresDays, setExpiresDays] = useState<number>(defaultExpiry("emails"));
+  const [expiresDays, setExpiresDays] = useState<number>(() => defaultExpiry(scopeOptions(profileId)[0]));
   const [notify, setNotify] = useState(true);
   const [ackedRisk, setAckedRisk] = useState<Risk | null>(null);
-  // The server said some recipients are external (422 risk_ack_required).
-  const [serverExternal, setServerExternal] = useState<string[] | null>(null);
+  // The emails the server said are not NaN users (recipient_not_user).
+  const [rejected, setRejected] = useState<string[]>([]);
   const [secretWarning, setSecretWarning] = useState(false);
   const [secretAck, setSecretAck] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -176,13 +184,7 @@ export function ShareArtifactDialog({
     };
   }, [enterprise, profileId]);
 
-  const knownMembers = members === undefined ? null : members;
-  const risk: Risk | null = useMemo(() => {
-    const local = riskFor(profileId, scope, emails, knownMembers);
-    if (local || scope !== "emails" || !serverExternal) return local;
-    const external = emails.filter((email) => serverExternal.includes(email));
-    return external.length > 0 ? { kind: "external", external } : null;
-  }, [profileId, scope, emails, knownMembers, serverExternal]);
+  const risk: Risk | null = useMemo(() => riskFor(scope, emails), [scope, emails]);
   const acked = ackedRisk !== null && ackCovers(ackedRisk, risk);
 
   // The acceptance resets as soon as the risk grows past what was accepted.
@@ -190,10 +192,8 @@ export function ShareArtifactDialog({
     if (ackedRisk !== null && !ackCovers(ackedRisk, risk)) setAckedRisk(null);
   }, [ackedRisk, risk]);
 
-  const external = useMemo(
-    () => new Set(enterprise ? externalEmails(profileId, emails, knownMembers) : []),
-    [enterprise, profileId, emails, knownMembers],
-  );
+  // Still listed and rejected: the chips to mark and the names to show.
+  const notUsers = emails.filter((email) => rejected.includes(email));
 
   const draft = { title, scope, emails, memberIds, expiresDays, notify };
   const titleTooLong = [...title.trim()].length > MAX_TITLE_CHARS;
@@ -222,7 +222,7 @@ export function ShareArtifactDialog({
       e.preventDefault();
       commitEmails(emailInput);
     } else if (e.key === "Backspace" && emailInput === "" && emails.length > 0) {
-      setEmails(emails.slice(0, -1));
+      removeEmail(emails[emails.length - 1]);
     }
   };
 
@@ -238,10 +238,21 @@ export function ShareArtifactDialog({
     setMemberIds((prev) => (prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]));
   };
 
+  const removeEmail = (email: string): void => {
+    const next = emails.filter((item) => item !== email);
+    setEmails(next);
+    // Once every rejected email is gone, so is its message.
+    if (problem === "recipient_not_user" && !next.some((item) => rejected.includes(item))) {
+      setRejected([]);
+      setProblem(null);
+    }
+  };
+
   const confirm = async (): Promise<void> => {
     if (!ready) return;
     setBusy(true);
     setProblem(null);
+    setRejected([]);
     const result = await shareArtifact(profileId, source, buildMeta(draft, risk, secretWarning && secretAck));
     setBusy(false);
     if (result.ok) {
@@ -250,10 +261,11 @@ export function ShareArtifactDialog({
     }
     switch (result.problem) {
       case "risk_ack_required":
-        // The server disagreed about who is external: show the warning
-        // again, unchecked, for every current recipient.
-        setServerExternal([...emails]);
+        // The server wants the warning accepted again: show it unchecked.
         setAckedRisk(null);
+        break;
+      case "recipient_not_user":
+        setRejected(result.rejected ?? []);
         break;
       case "possible_secret":
         setSecretWarning(true);
@@ -276,8 +288,9 @@ export function ShareArtifactDialog({
 
   const others = pickableMembers(members ?? [], selfEmail);
   const filteredMembers = others.filter((member) => member.email.includes(memberQuery.trim().toLowerCase()));
-  const riskText =
-    risk?.kind === "public" ? a.riskV1.public : enterprise ? a.riskV1.external(risk?.external.length ?? 0) : a.riskV1.community;
+  const riskText = risk?.kind === "public" ? a.riskV1.public : a.riskV1.community;
+  const problemText =
+    problem === "recipient_not_user" && notUsers.length > 0 ? a.notUsers(notUsers.join(", "), notUsers.length) : undefined;
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
@@ -343,12 +356,12 @@ export function ShareArtifactDialog({
                 {emails.map((email) => (
                   <li key={email} className="artifact-chip">
                     <span>{email}</span>
-                    {external.has(email) && <span className="skill-badge artifact-external">{a.external}</span>}
+                    {notUsers.includes(email) && <span className="skill-badge artifact-external">{a.notUser}</span>}
                     <button
                       type="button"
                       className="artifact-chip-remove"
                       aria-label={a.removeEmail(email)}
-                      onClick={() => setEmails(emails.filter((item) => item !== email))}
+                      onClick={() => removeEmail(email)}
                     >
                       <IconX size={12} />
                     </button>
@@ -480,7 +493,9 @@ export function ShareArtifactDialog({
           </div>
         )}
 
-        {problem && problem !== "possible_secret" && <ArtifactProblemLine problem={problem} onSignIn={onSignIn} />}
+        {problem && problem !== "possible_secret" && (
+          <ArtifactProblemLine problem={problem} onSignIn={onSignIn} text={problemText} />
+        )}
 
         <div className="modal-actions">
           <button ref={cancelRef} type="button" className="btn btn-ghost" onClick={onClose}>
