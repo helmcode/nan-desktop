@@ -4577,18 +4577,25 @@ mod tests {
                 ])
                 .output()
                 .expect("powershell");
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
+            assert!(out.status.success(), "powershell failed: {out:?}");
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.trim()
                 .parse()
-                .unwrap_or(0)
+                .unwrap_or_else(|_| panic!("unparseable count: {text:?}"))
         }
-        let (folder, _guard) = tempdir();
-        let out = run_captured(
-            "ping -n 300 127.0.0.42",
-            &folder,
-            Duration::from_millis(1500),
-        )
-        .expect("run");
+        let (folder, guard) = tempdir();
+        let runner = std::thread::spawn(move || {
+            let _guard = guard;
+            run_captured("ping -n 300 127.0.0.42", &folder, Duration::from_secs(8))
+        });
+        // Non-vacuous: the grandchild really runs before the timeout.
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut seen = 0;
+        while seen == 0 && Instant::now() < deadline {
+            seen = pings_alive();
+        }
+        assert!(seen > 0, "ping.exe was running before the timeout");
+        let out = runner.join().expect("join").expect("run");
         assert!(out.timed_out);
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(pings_alive(), 0, "no ping.exe survives the timeout");

@@ -169,9 +169,11 @@ interface ChatDelta {
 interface ChatIdPayload {
   conversation_id: number;
   // Why the turn ended (`chat://done`: completed / tool_cap / stream_cut /
-  // length; `chat://stopped`: user_stop). The stored reply carries it too
-  // (`end_reason`), which is what the transcript renders from.
+  // length / interrupted; `chat://stopped`: user_stop). The stored reply
+  // carries it too (`end_reason`), which is what the transcript renders from.
   reason?: string;
+  // For `interrupted`: the failure kind (`rate_limited` asks to wait).
+  error_kind?: string;
 }
 interface ChatError {
   conversation_id: number;
@@ -754,6 +756,9 @@ function ChatShell({
   // Conversations whose running turn IS that automatic continuation: if it
   // stops the same way, the manual notice is shown instead (never a loop).
   const autoRetryTurnsRef = useRef<Set<number>>(new Set());
+  // Conversations whose last turn was interrupted because the service was
+  // busy (rate limited): the notice asks to wait a moment. Session-only.
+  const [busyInterrupted, setBusyInterrupted] = useState<ReadonlySet<number>>(new Set());
   // Round 14/S1: the newer version the updater found. ONE check (owned by
   // the app window, before sign-in) feeds the banner, the user menu and
   // Settings, so a dismissed banner never hides the update; one install at a
@@ -1185,8 +1190,16 @@ function ChatShell({
         if (parsed) distilledDraftsRef.current.set(parsed.conversationId, parsed.draft);
       }),
       listen<ChatIdPayload>("chat://done", (event) => {
-        const { conversation_id: id, reason } = event.payload;
+        const { conversation_id: id, reason, error_kind } = event.payload;
         const wasAutoRetry = autoRetryTurnsRef.current.delete(id);
+        const busy = reason === "interrupted" && error_kind === "rate_limited";
+        setBusyInterrupted((prev) => {
+          if (busy === prev.has(id)) return prev;
+          const next = new Set(prev);
+          if (busy) next.add(id);
+          else next.delete(id);
+          return next;
+        });
         // Only the conversation on screen resumes by itself.
         if (shouldAutoRetry(reason, wasAutoRetry) && activeConvRef.current === id) setAutoRetryConvId(id);
         finish(id);
@@ -2099,6 +2112,10 @@ function ChatShell({
     if (streamingActive) return;
     const id = autoRetryConvId;
     const timer = window.setTimeout(() => {
+      // Its Cancel button goes away: keep focus in the composer.
+      if (document.activeElement instanceof HTMLElement && document.activeElement.closest(".unfinished-turn")) {
+        composerRef.current?.focus();
+      }
       autoRetryTurnsRef.current.add(id);
       void sendRef.current(t.chat.continuePrompt, true).then((sent) => {
         if (!sent) autoRetryTurnsRef.current.delete(id);
@@ -2278,6 +2295,7 @@ function ChatShell({
             onContinue={continueTurn}
             autoRetrying={autoRetryConvId === m.conversation_id}
             onCancelAutoRetry={cancelAutoRetry}
+            busy={busyInterrupted.has(m.conversation_id)}
           />
         )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />

@@ -144,6 +144,7 @@ export const es: Strings = {
       length: "La respuesta era demasiado larga para un solo mensaje.",
       interrupted: "Algo falló a mitad de la tarea.",
     },
+    unfinishedBusy: "Hay mucha demanda ahora mismo. Espera un momento y pulsa Continuar.",
     continueTurn: "Continuar",
     continuePrompt: "Continúa con la tarea donde lo dejaste.",
     autoRetrying: {

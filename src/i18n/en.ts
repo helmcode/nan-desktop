@@ -144,6 +144,7 @@ export const en = {
       length: "The reply was too long for a single message.",
       interrupted: "Something failed partway through the task.",
     },
+    unfinishedBusy: "It is very busy right now. Wait a moment and press Continue.",
     continueTurn: "Continue",
     continuePrompt: "Continue the task where you left off.",
     autoRetrying: {

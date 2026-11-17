@@ -49,6 +49,7 @@ export function UnfinishedTurn({
   onContinue,
   autoRetrying = false,
   onCancelAutoRetry,
+  busy = false,
 }: {
   reason: string | null | undefined;
   onContinue: () => void;
@@ -56,6 +57,9 @@ export function UnfinishedTurn({
    * Cancel button instead of Continue). */
   autoRetrying?: boolean;
   onCancelAutoRetry?: () => void;
+  /** The `interrupted` turn failed because the service was busy
+   * (rate limited): ask the user to wait a moment before continuing. */
+  busy?: boolean;
 }) {
   const t = useT();
   const noteId = useId();
@@ -80,7 +84,8 @@ export function UnfinishedTurn({
   return (
     <div className="unfinished-turn" role="status">
       <p className="unfinished-note" id={noteId}>
-        <span className="unfinished-title">{t.chat.unfinished}</span> {t.chat.unfinishedReason[reason]}
+        <span className="unfinished-title">{t.chat.unfinished}</span>{" "}
+        {reason === "interrupted" && busy ? t.chat.unfinishedBusy : t.chat.unfinishedReason[reason]}
       </p>
       <button
         type="button"

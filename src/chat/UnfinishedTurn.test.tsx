@@ -58,6 +58,25 @@ describe("UnfinishedTurn", () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
+  it("asks to wait a moment when the service was busy", () => {
+    render(
+      <I18nProvider initial="es">
+        <UnfinishedTurn reason="interrupted" onContinue={() => {}} busy />
+      </I18nProvider>,
+    );
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("Hay mucha demanda ahora mismo. Espera un momento y pulsa Continuar.");
+    expect(status.textContent).not.toContain(es.chat.unfinishedReason.interrupted);
+    cleanup();
+    // `busy` only changes the interrupted line.
+    render(
+      <I18nProvider initial="es">
+        <UnfinishedTurn reason="stream_cut" onContinue={() => {}} busy />
+      </I18nProvider>,
+    );
+    expect(screen.getByRole("status").textContent).toContain(es.chat.unfinishedReason.stream_cut);
+  });
+
   it("never shows the resuming line for the step cap", () => {
     render(
       <I18nProvider initial="en">
@@ -130,6 +149,7 @@ describe("UnfinishedTurn", () => {
       es.chat.continueTurn,
       es.chat.continuePrompt,
       es.chat.cancelAutoRetry,
+      es.chat.unfinishedBusy,
     ];
     for (const line of copy) {
       expect(line).not.toMatch(/token|stream|tool|cap|length|error|API|ronda/i);
