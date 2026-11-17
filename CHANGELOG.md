@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - El asistente termina lo que empieza
+## 0.2.13 - 2026-11-17 - El asistente termina lo que empieza
 
 ### Fixes
 - Las tareas largas ya no se quedan a medias en silencio: el asistente puede dar hasta 60 pasos por respuesta (antes 24) y, cuando le quedan pocos, cierra lo que esta haciendo en lugar de cortarse a mitad.
@@ -12,6 +12,7 @@
 - Los comandos pueden durar hasta 2 minutos (antes 30 segundos): descargas e instalaciones ya no se cortan. Al agotar el tiempo, o al pulsar Detener, se cierra el comando con todo lo que haya lanzado. Limite por respuesta: 60 pasos de hasta 2 minutos cada uno.
 - Windows: los comandos ya no abren una ventana de consola que roba el foco.
 - El registro de herramientas que se guarda en el equipo se limita a las 2 ultimas respuestas de cada conversacion.
+- Escape cierra siempre el menu o dialogo abierto, incluso si se pulsa justo al abrirlo (antes podia salir de Ajustes).
 
 ### Changed
 - Para corregir errores y entender el uso, la app envia datos tecnicos (inicio de la app, como termino una respuesta, que herramienta se uso y si funciono, que tipo de error se mostro y donde fallo la app) a la API de tu propia plataforma, sin terceros. Nunca envia tus conversaciones, archivos, rutas, enlaces, comandos ni nada que escribas. Siempre esta activo; el detalle completo esta en SECURITY.md.
