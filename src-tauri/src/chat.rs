@@ -1319,15 +1319,18 @@ async fn run_chat_stream(
             )
             .await;
             tracker.tool_calls += 1;
-            // Metadata only: registry name, outcome class, duration.
-            crate::telemetry::record(
-                Some(&profile_id),
-                crate::telemetry::tool_call(
-                    &call.name,
-                    crate::telemetry::tool_outcome_from_result(&content),
-                    u64::try_from(tool_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                ),
-            );
+            // Metadata only: registry name, outcome class, duration. Capped
+            // per turn (the rest is counted in `turn_end.tool_calls`).
+            if tracker.tool_calls <= crate::telemetry::TOOL_CALL_EVENTS_PER_TURN {
+                crate::telemetry::record(
+                    Some(&profile_id),
+                    crate::telemetry::tool_call(
+                        &call.name,
+                        crate::telemetry::tool_outcome_from_result(&content),
+                        u64::try_from(tool_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    ),
+                );
+            }
             if merge_artifacts(&mut artifacts, produced) {
                 // Persisted as they appear: a stopped reply keeps its chips.
                 let _ = chat_store::set_message_artifacts(&conn, row, &artifacts);

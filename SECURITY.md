@@ -229,6 +229,13 @@ the process ends; the next launch sends it. Renderer crashes are accepted
 through one IPC command that takes only an error name (validated in Rust,
 at most 20 per launch).
 
+**Volume guards.** At most 5000 events are recorded per UTC day on an
+install (the backends also cap each account at 20,000 per 24 h and answer
+`202` with `dropped`; the app treats any `202` as delivered and never
+retries it), and at most 20 `tool_call` events per reply (longer replies are
+counted in `turn_end.tool_calls`). Automatic and "Continue" turns both
+report `continued: true`.
+
 ## Tool output kept for continuity
 
 To let the assistant continue a long task without redoing it, each reply

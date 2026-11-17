@@ -157,7 +157,10 @@ implementation map (`src-tauri/src/telemetry.rs`):
   KiB) with the profile's session JWT to `device_flow::platform_base` +
   `/api/desktop/telemetry`; `classify_status` maps 2xx = sent, 400/413 and
   other 4xx = drop, 401/403/404 = stop for the session, 408/429/5xx/network
-  = retry with exponential back-off. A background task flushes 15 s after
+  = retry with exponential back-off (any 2xx, including the per-account
+  cap's `202 {"dropped": n}`, is delivered). Volume guards: `DailyCap`
+  (5000 events per UTC day, persisted in `telemetry/daily.json`) and
+  `TOOL_CALL_EVENTS_PER_TURN` (20). A background task flushes 15 s after
   launch, then every 60 s or when 50 events are queued; `RunEvent::Exit`
   runs a 3 s best-effort flush.
 - **Crash capture:** the panic hook reads only `PanicHookInfo::location()`

@@ -65,6 +65,8 @@ const QUEUE_FILE: &str = "queue.jsonl";
 /// Written by the panic hook, merged into the queue on the next launch.
 const CRASH_FILE: &str = "crash.jsonl";
 const INSTALL_FILE: &str = "install_id";
+/// The daily volume guard's counter (`{"day": "YYYY-MM-DD", "count": n}`).
+const DAILY_FILE: &str = "daily.json";
 /// Most events kept on disk; the oldest are dropped first.
 pub const QUEUE_CAP: usize = 1000;
 /// Most events per request (the backends accept 1..=100).
@@ -85,6 +87,14 @@ pub const MAX_EVENT_AGE_SECS: u64 = 30 * 24 * 60 * 60;
 /// Renderer crash reports accepted per app session (a crash loop must not
 /// flood the queue).
 pub const RENDERER_CRASH_CAP: u32 = 20;
+/// Most events recorded per UTC day on this install (a guard far below the
+/// backends' 20,000 per account per 24 h; a normal day is hundreds to low
+/// thousands). Events past it are not recorded. A Rust panic's `crash`
+/// bypasses it (written by the panic hook, at most one per launch).
+pub const DAILY_EVENT_CAP: u32 = 5000;
+/// Most `tool_call` events per turn: the rest of a long turn is only
+/// counted in its `turn_end.tool_calls`.
+pub const TOOL_CALL_EVENTS_PER_TURN: usize = 20;
 /// Request body limit of the backends (413 above it).
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -763,6 +773,43 @@ pub struct FlushTarget {
     pub token: String,
 }
 
+/// The per-day volume guard ([`DAILY_EVENT_CAP`]), persisted so a restart
+/// does not reset it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyCap {
+    pub day: String,
+    pub count: u32,
+}
+
+impl DailyCap {
+    /// Admit one more event on `day` (`YYYY-MM-DD`, UTC); a new day starts
+    /// a new count.
+    pub fn admit(&mut self, day: &str) -> bool {
+        if self.day != day {
+            self.day = day.to_string();
+            self.count = 0;
+        }
+        if self.count >= DAILY_EVENT_CAP {
+            return false;
+        }
+        self.count += 1;
+        true
+    }
+
+    fn load(dir: &Path) -> Self {
+        std::fs::read_to_string(dir.join(DAILY_FILE))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, dir: &Path) {
+        if let Ok(json) = serde_json::to_string(self) {
+            let _ = std::fs::write(dir.join(DAILY_FILE), json);
+        }
+    }
+}
+
 /// Exponential back-off per profile.
 #[derive(Debug, Default)]
 struct Backoff {
@@ -805,6 +852,7 @@ struct Runtime {
     wake: tokio::sync::Notify,
     flushing: tokio::sync::Mutex<()>,
     renderer_crashes: AtomicU32,
+    daily: Mutex<DailyCap>,
     client: Option<reqwest::Client>,
 }
 
@@ -853,6 +901,7 @@ fn tag(root: &Path, profile: Option<&str>) -> Option<(Option<String>, Option<Str
 /// crash), panic hook and the `app_start` event. Called once from `setup`.
 pub fn init(root: &Path, app_version: &str) {
     let dir = root.join(DIR);
+    let daily = DailyCap::load(&dir);
     let runtime = Runtime {
         root: root.to_path_buf(),
         install_id: load_install_id(&dir),
@@ -866,6 +915,7 @@ pub fn init(root: &Path, app_version: &str) {
         wake: tokio::sync::Notify::new(),
         flushing: tokio::sync::Mutex::new(()),
         renderer_crashes: AtomicU32::new(0),
+        daily: Mutex::new(daily),
         client: reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
@@ -891,6 +941,20 @@ pub fn record(profile: Option<&str>, spec: EventSpec) {
     let Some((profile, realm)) = tag(&runtime.root, profile) else {
         return;
     };
+    let now = SystemTime::now();
+    let admitted = match runtime.daily.lock() {
+        Ok(mut daily) => {
+            let admitted = daily.admit(&rfc3339(now)[..10]);
+            if admitted {
+                daily.save(&runtime.dir);
+            }
+            admitted
+        }
+        Err(_) => false,
+    };
+    if !admitted {
+        return;
+    }
     let item = Queued {
         profile,
         realm,
@@ -1456,7 +1520,27 @@ mod tests {
     }
 
     #[test]
+    fn daily_cap_stops_recording_and_resets_the_next_day() {
+        let mut cap = DailyCap::default();
+        for _ in 0..DAILY_EVENT_CAP {
+            assert!(cap.admit("2026-11-17"));
+        }
+        assert!(!cap.admit("2026-11-17"), "over the cap");
+        assert!(cap.admit("2026-11-18"), "new day");
+        assert_eq!(cap.count, 1);
+        let tmp = TempDir::new().unwrap();
+        cap.save(tmp.path());
+        assert_eq!(DailyCap::load(tmp.path()), cap, "survives a restart");
+        assert_eq!(
+            DailyCap::load(&tmp.path().join("missing")),
+            DailyCap::default()
+        );
+    }
+
+    #[test]
     fn status_codes_map_to_the_documented_dispositions() {
+        // Any 2xx is delivered, including the backends' 202 with
+        // `dropped` (per-account cap): never retried.
         assert_eq!(classify_status(202), Disposition::Sent);
         for s in [400, 413, 422] {
             assert_eq!(classify_status(s), Disposition::Drop, "{s}");
@@ -1645,7 +1729,9 @@ mod tests {
                     }
                 }
                 seen.push(String::from_utf8_lossy(&buf).to_string());
-                let body = r#"{"accepted":1,"duplicates":0}"#;
+                // The per-account cap's shape: a 202 that dropped everything is
+                // still delivered (removed from the queue, never retried).
+                let body = r#"{"accepted":0,"duplicates":0,"dropped":3}"#;
                 let reply = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
