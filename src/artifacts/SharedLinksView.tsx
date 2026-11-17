@@ -4,7 +4,7 @@
 // this link will lose access immediately."
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useEscapeLayer, isTopLayer } from "../escapeLayers";
+import { useEscape } from "../escapeLayers";
 import { useI18n, type Strings } from "../i18n";
 import { IconArrowLeft, IconCopy, IconExternal, IconTrash } from "../icons";
 import { openExternal } from "../Markdown";
@@ -263,19 +263,13 @@ function RevokeDialog({
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<ArtifactProblem | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const layer = useEscapeLayer(true);
-
   useEffect(() => {
     cancelRef.current?.focus();
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape" || e.isComposing) return;
-      if (!isTopLayer(layer)) return;
-      e.preventDefault();
-      onCancel();
-    };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [layer, onCancel]);
+  }, []);
+  useEscape(true, (e) => {
+    e.preventDefault();
+    onCancel();
+  });
 
   const confirm = async (): Promise<void> => {
     if (busy) return;

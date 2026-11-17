@@ -62,7 +62,7 @@ import {
   type GrantMode,
 } from "./core";
 import { ModeSwitch } from "./components/ModeSwitch";
-import { isTopLayer, useEscapeLayer } from "./escapeLayers";
+import { useEscape } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
 import { useI18n, useT, type Strings } from "./i18n";
 import {
@@ -513,7 +513,13 @@ function ConversationMenu({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const layer = useEscapeLayer(open);
+  // Round 14 review (F1/F2): only the innermost open surface consumes Escape,
+  // never during an IME composition (see escapeLayers.useEscape).
+  useEscape(open, (e) => {
+    e.preventDefault();
+    setOpen(false);
+    triggerRef.current?.focus();
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -521,20 +527,11 @@ function ConversationMenu({
     const onDown = (e: MouseEvent) => {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.isComposing) return;
-      if (!isTopLayer(layer)) return;
-      e.preventDefault();
-      setOpen(false);
-      triggerRef.current?.focus();
-    };
     window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey, { capture: true });
     return () => {
       window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey, { capture: true });
     };
-  }, [open, layer]);
+  }, [open]);
 
   /** Up/Down move between the items, Home/End jump, Tab closes. */
   const onMenuKey = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
@@ -631,25 +628,17 @@ function ComputerWideDialog({
   const t = useT();
   const [mode, setMode] = useState<GrantMode>(DEFAULT_GRANT_MODE);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const layer = useEscapeLayer(true);
   // Focus once on open; re-renders of the shell must not steal focus back.
   useEffect(() => {
     cancelRef.current?.focus();
   }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // Round 14 review (F1/F2): an Escape that cancels an IME composition is
-      // not a dismissal, and only the innermost open surface consumes the key.
-      if (e.key !== "Escape" || e.isComposing) return;
-      if (!isTopLayer(layer)) return;
-      // Round 14 (B1/B2): an open dialog is the innermost surface and
-      // consumes Escape, so the surface behind it stays where it is.
-      e.preventDefault();
-      onCancel();
-    };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [layer, onCancel]);
+  // Round 14 (B1/B2) + review (F1/F2): an open dialog is the innermost
+  // surface and consumes Escape (not an IME composition), so the surface
+  // behind it stays where it is.
+  useEscape(true, (e) => {
+    e.preventDefault();
+    onCancel();
+  });
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
