@@ -3558,6 +3558,22 @@ button:disabled {
   text-decoration: none;
 }
 
+/* Telemetry notice under the account facts: its own block, spaced like the
+   other About rows, with the "More details" link right below it. */
+.about-telemetry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+  max-width: 40rem;
+}
+
+.about-telemetry > .hint {
+  margin: 0;
+  line-height: 1.45;
+}
+
 .about-link svg {
   flex-shrink: 0;
   color: var(--text-2);

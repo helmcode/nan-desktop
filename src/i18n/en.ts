@@ -335,7 +335,8 @@ export const en = {
       starRepo: "Star on GitHub",
       reportIssue: "Report an issue",
       telemetry:
-        "To fix bugs, the app sends technical usage data (never your conversations or your files).",
+        "To fix bugs, the app sends technical usage data linked to your account to your platform (never your conversations or your files).",
+      telemetryDetails: "More details",
     },
   },
   voices: {

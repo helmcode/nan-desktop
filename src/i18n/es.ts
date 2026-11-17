@@ -335,7 +335,8 @@ export const es: Strings = {
       starRepo: "Dar una estrella en GitHub",
       reportIssue: "Reportar una incidencia",
       telemetry:
-        "Para corregir errores, la app envía datos técnicos de uso (nunca tus conversaciones ni tus archivos).",
+        "Para corregir errores, la app envía a tu plataforma datos técnicos de uso asociados a tu cuenta (nunca tus conversaciones ni tus archivos).",
+      telemetryDetails: "Más detalles",
     },
   },
   voices: {
