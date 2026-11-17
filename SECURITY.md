@@ -199,7 +199,7 @@ with the next flush of the active profile.
 **Every request** carries: `install_id` (random uuid generated once per
 install, stored in the app data dir), `app_version`, `os`
 (`macos` / `windows` / `linux`), `os_version` (e.g. `15.1`,
-`ubuntu 22.04`, `10.0.22631`), `arch` (`aarch64`, `x86_64`). **Every
+`ubuntu 22.04`, `10.0.22631.4317`), `arch` (`aarch64`, `x86_64`). **Every
 event** carries: a random event `id`, its `name`, a client timestamp `ts`
 and a `session_id` (random uuid per app launch).
 
@@ -221,12 +221,13 @@ classify the outcome and are then discarded.
 
 **Delivery.** A bounded queue on disk (`telemetry/queue.jsonl`, at most
 1000 events, oldest dropped, events older than 30 days pruned) is flushed
-in batches of up to 100 events every 60 s, as soon as 50 are queued, and
-best-effort on exit (3 s budget). Network errors, 408, 429 and 5xx back off
-exponentially (60 s up to 15 min, longer when the server sends a
-`Retry-After`, bounded to 15 min); a 400/413 drops that batch; 401/403/404
-keep the events queued and stop sending for that profile until the app
-restarts. Without a session, events only wait in the queue. A Rust panic
+in batches of up to 100 events: first about 15 s after launch, then every
+60 s, as soon as 50 are queued, and best-effort on exit (3 s budget).
+Network errors, 408, 429 and 5xx back off exponentially (60 s up to 15 min,
+longer when the server sends a `Retry-After`, bounded to 15 min);
+401/403/404 keep the events queued and stop sending for that profile until
+the app restarts; any other non-2xx status (400, 413, ...) drops that
+batch. Without a session, events only wait in the queue. A Rust panic
 writes its `crash` event synchronously to `telemetry/crash.jsonl` before
 the process ends; the next launch sends it. Renderer crashes are accepted
 through one IPC command that takes only an error name (checked in Rust
@@ -236,10 +237,11 @@ and props only, timestamp shape, no control characters) and a damaged file
 is repaired on launch.
 
 **Volume guards.** At most 5000 events are recorded per UTC day on an
-install (counted in memory, saved at each flush and on exit) (the backends also cap each account at 20,000 per 24 h and answer
-`202` with `dropped`; the app treats any `202` as delivered and never
-retries it), and at most 20 `tool_call` events per reply (longer replies are
-counted in `turn_end.tool_calls`). Automatic and "Continue" turns both
+install (counted in memory, saved at each flush and on exit), and at most
+20 `tool_call` events per reply (longer replies are counted in
+`turn_end.tool_calls`). The backends also cap each account at 20,000 events
+per 24 h and answer `202` with `dropped`; the app treats any `202` as
+delivered and never retries it. Automatic and "Continue" turns both
 report `continued: true`.
 
 ## Tool output kept for continuity

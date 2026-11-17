@@ -337,6 +337,7 @@ export const en = {
       telemetry:
         "To fix bugs, the app sends technical usage data linked to your account to your platform (never your conversations or your files).",
       telemetryDetails: "More details",
+      telemetryDetailsLabel: "More details about the technical data that is sent",
     },
   },
   voices: {

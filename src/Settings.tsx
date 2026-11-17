@@ -377,7 +377,12 @@ export function Settings({
           </dl>
           <div className="about-telemetry">
             <p className="hint">{t.settings.about.telemetry}</p>
-            <CommunityLink href={TELEMETRY_DOCS_URL} icon={<IconExternal />} label={t.settings.about.telemetryDetails} />
+            <CommunityLink
+              href={TELEMETRY_DOCS_URL}
+              icon={<IconExternal />}
+              label={t.settings.about.telemetryDetails}
+              ariaLabel={t.settings.about.telemetryDetailsLabel}
+            />
           </div>
           {update && (
             <div className="about-update">
@@ -400,11 +405,23 @@ export function Settings({
 /// R22: an Account-section link to the public repository. The href is real
 /// (hover and assistive tech show the target) but the click never navigates
 /// the window: it goes to the system browser through the core.
-function CommunityLink({ href, icon, label }: { href: string; icon: ReactNode; label: string }) {
+function CommunityLink({
+  href,
+  icon,
+  label,
+  ariaLabel,
+}: {
+  href: string;
+  icon: ReactNode;
+  label: string;
+  /// A fuller accessible name when the visible label is short.
+  ariaLabel?: string;
+}) {
   return (
     <a
       className="btn btn-ghost btn-sm about-link"
       href={href}
+      aria-label={ariaLabel}
       onClick={(event) => {
         event.preventDefault();
         openExternal(href);

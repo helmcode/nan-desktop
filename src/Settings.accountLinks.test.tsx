@@ -144,7 +144,9 @@ describe.each([
   it("links the details to the public telemetry docs, opened outside the window", async () => {
     renderAccount(locale);
     const section = screen.getByRole("region", { name: strings.settings.about.title });
-    const details = screen.getByRole("link", { name: strings.settings.about.telemetryDetails });
+    const details = screen.getByRole("link", { name: strings.settings.about.telemetryDetailsLabel });
+    // The visible text stays short; the accessible name says what it is about.
+    expect(details.textContent).toBe(strings.settings.about.telemetryDetails);
     expect(section.contains(details)).toBe(true);
     expect(details.getAttribute("href")).toBe(TELEMETRY_DOCS_URL);
     expect(details.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
@@ -166,6 +168,8 @@ describe("telemetry notice copy", () => {
       "To fix bugs, the app sends technical usage data linked to your account to your platform (never your conversations or your files).",
     );
     expect(es.settings.about.telemetryDetails).toBe("Más detalles");
+    expect(es.settings.about.telemetryDetailsLabel).toBe("Más detalles sobre los datos técnicos que se envían");
+    expect(en.settings.about.telemetryDetailsLabel).toBe("More details about the technical data that is sent");
     expect(en.settings.about.telemetryDetails).toBe("More details");
     expect(TELEMETRY_DOCS_URL).toBe(
       "https://github.com/helmcode/nan-desktop/blob/main/SECURITY.md#telemetry-what-the-app-sends",
@@ -176,6 +180,8 @@ describe("telemetry notice copy", () => {
       en.settings.about.telemetry,
       es.settings.about.telemetryDetails,
       en.settings.about.telemetryDetails,
+      es.settings.about.telemetryDetailsLabel,
+      en.settings.about.telemetryDetailsLabel,
     ]) {
       expect(s).not.toContain(String.fromCharCode(0x2014));
     }

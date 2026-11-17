@@ -637,7 +637,7 @@ impl Queue {
         // fragment and that event would be lost too.
         let (mut items, dirty) = read_lines(&dir.join(QUEUE_FILE));
         let crash_path = dir.join(CRASH_FILE);
-        let (crashes, _) = read_lines(&crash_path);
+        let (crashes, crash_dirty) = read_lines(&crash_path);
         let merged = !crashes.is_empty();
         items.extend(crashes);
         let mut queue = Queue {
@@ -649,7 +649,9 @@ impl Queue {
         if dirty || merged || queue.items.len() != before {
             queue.rewrite();
         }
-        if merged {
+        // Merged, or only a fragment left by a write cut short: either way
+        // the crash file has nothing more to give.
+        if merged || crash_dirty {
             let _ = std::fs::remove_file(crash_path);
         }
         queue
@@ -739,7 +741,13 @@ impl Queue {
 /// The well-formed records of a JSONL file, and whether the file needs a
 /// rewrite (a line was dropped, or the last line has no newline).
 fn read_lines(path: &Path) -> (Vec<Queued>, bool) {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), false),
+        // Unreadable (e.g. not UTF-8): reset it rather than keep appending
+        // to a file that can never be read back.
+        Err(_) => return (Vec::new(), true),
+    };
     let mut lines = 0;
     let items: Vec<Queued> = text
         .lines()
@@ -2012,6 +2020,54 @@ mod tests {
             .collect::<String>();
         std::fs::write(tmp.path().join(QUEUE_FILE), text).unwrap();
         assert_eq!(Queue::open(tmp.path(), unix_now()).items(), &[good]);
+    }
+
+    #[test]
+    fn a_fragment_only_crash_file_is_removed() {
+        let tmp = TempDir::new().unwrap();
+        let crash = serde_json::to_string(&queued(None, None, unix_now())).unwrap();
+        std::fs::write(tmp.path().join(CRASH_FILE), &crash[..crash.len() / 2]).unwrap();
+        let queue = Queue::open(tmp.path(), unix_now());
+        assert_eq!(queue.len(), 0);
+        assert!(!tmp.path().join(CRASH_FILE).exists());
+    }
+
+    #[test]
+    fn an_unreadable_queue_file_is_reset() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(QUEUE_FILE), [0xff, 0xfe, b'{', b'\n']).unwrap();
+        let event = queued(Some("nan"), None, unix_now());
+        {
+            let mut queue = Queue::open(tmp.path(), unix_now());
+            assert_eq!(queue.len(), 0);
+            queue.push(event.clone());
+        }
+        assert_eq!(Queue::open(tmp.path(), unix_now()).items(), &[event]);
+    }
+
+    #[test]
+    fn every_event_round_trips_through_the_queue_file() {
+        let tmp = TempDir::new().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let records: Vec<Queued> = every_event()
+            .into_iter()
+            .map(|spec| Queued {
+                profile: Some("nan".into()),
+                realm: Some("realm-a".into()),
+                at: unix_now(),
+                event: stamp(spec, &session, SystemTime::now()),
+            })
+            .collect();
+        {
+            let mut queue = Queue::open(tmp.path(), unix_now());
+            for record in &records {
+                queue.push(record.clone());
+            }
+        }
+        assert_eq!(
+            Queue::open(tmp.path(), unix_now()).items(),
+            records.as_slice()
+        );
     }
 
     #[test]
