@@ -143,7 +143,9 @@ describe("PdfPreview (continuous scroll)", () => {
     vi.stubGlobal("IntersectionObserver", FakeObserver);
     render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
     await screen.findByRole("group", { name: "PDF document, 13 pages" });
-    expect(observers).toHaveLength(13);
+    // Each page box creates its observer in a passive effect, which can run
+    // after findByRole resolved: wait for them (same assertion).
+    await waitFor(() => expect(observers).toHaveLength(13));
     expect(observers[0].options?.rootMargin).toMatch(/px/);
     expect(pdf.render).not.toHaveBeenCalled();
 
@@ -198,8 +200,12 @@ describe("PdfPreview (continuous scroll)", () => {
       return 1;
     });
     scrolled = 2600; // page 6 top at -100, page 7 at 400 (= the 40% line)
-    fireEvent.scroll(area);
-    await waitFor(() => expect(label.textContent).toBe("Page 7 of 13"));
+    // The scroll listener is attached in a passive effect that can run after
+    // findByRole resolved: scroll until it is listening (same assertion).
+    await waitFor(() => {
+      fireEvent.scroll(area);
+      expect(label.textContent).toBe("Page 7 of 13");
+    });
     unmount();
 
     pdf.numPages = 1;
@@ -275,6 +281,8 @@ describe("PdfPreview (continuous scroll)", () => {
     });
     render(wrap(<PdfPreview bytes={new Uint8Array([1])} />));
     await screen.findByRole("group", { name: "PDF document, 2 pages" });
+    // The page observers are created in passive effects (see above).
+    await waitFor(() => expect(observers).toHaveLength(2));
     const box2 = document.querySelector('.preview-pdf-page[data-page="2"]') as HTMLElement;
     expect(box2.style.aspectRatio).toBe(String(600 / 800));
     await act(async () => {
