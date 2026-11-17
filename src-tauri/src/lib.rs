@@ -30,6 +30,8 @@ mod links;
 mod memory;
 // Preview pane backends (S21): granted-file reads + platform page fetch.
 mod preview;
+// Child processes: every spawn hides its console window on Windows.
+mod process;
 mod profile;
 // R20-D: sandboxed preview of the websites write_website built.
 mod site_preview;

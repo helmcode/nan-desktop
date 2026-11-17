@@ -346,7 +346,7 @@ fn file_tool_definitions(run_command: bool) -> Vec<serde_json::Value> {
     if run_command {
         defs.push(serde_json::json!({ "type": "function", "function": {
             "name": "run_command",
-            "description": "Run a shell command inside a workspace folder (30 s limit, output capped at 64 KiB). Use it for what the file tools cannot do, including generating binary files such as PDFs, charts or spreadsheets with tools installed on the user's computer (for example converting an HTML or Markdown file you wrote into a PDF).",
+            "description": "Run a shell command inside a workspace folder (120 s limit, output capped at 64 KiB). Use it for what the file tools cannot do, including generating binary files such as PDFs, charts or spreadsheets with tools installed on the user's computer (for example converting an HTML or Markdown file you wrote into a PDF).",
             "parameters": { "type": "object", "properties": {
                 "cmd": { "type": "string", "description": "The command line." },
                 "cwd": { "type": "string", "description": "Absolute folder inside a workspace folder to run it in. It may be a new folder: it is created first." }

@@ -18,7 +18,7 @@
 //!    fail closed. A declined approval discards the proposal.
 //!
 //! Caps (spec S7): read/write ≤ 2 MiB, list depth ≤ 3 / 500 entries,
-//! command output ≤ 64 KiB, command timeout 30 s, binary files refused.
+//! command output ≤ 64 KiB, command timeout 120 s, binary files refused.
 //! `run_command` is ON by default since round 2 (S15), switchable with
 //! `tools_set_run_command_enabled`; it asks in `ask` mode and runs without
 //! a prompt only when its cwd sits in an `allow`-mode grant.
@@ -74,7 +74,11 @@ pub const MAX_LIST_DEPTH: usize = 3;
 /// Maximum captured bytes per stream for `run_command`.
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Hard timeout for `run_command` (process is killed after this).
-pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// 120 s (was 30 s): real tasks download dependencies, build projects or
+/// convert documents; at 30 s those were killed and the model wasted rounds
+/// retrying them in smaller pieces.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Bounded wait for the pipe-drain reader threads after the process (group)
 /// is gone. A grandchild that outlives the shell can hold the pipes open;
@@ -1921,7 +1925,8 @@ pub fn run_captured(cmd: &str, cwd: &Path, timeout: Duration) -> Result<CmdOutpu
     let (program, args): (&str, Vec<String>) = ("sh", vec!["-c".into(), cmd.to_string()]);
     #[cfg(windows)]
     let (program, args): (&str, Vec<String>) = ("cmd", vec!["/C".into(), cmd.to_string()]);
-    let mut command = std::process::Command::new(program);
+    // Hidden on Windows: no console window flashes per command.
+    let mut command = crate::process::hidden_command(program);
     command
         .args(&args)
         .current_dir(cwd)
@@ -3039,7 +3044,7 @@ pub(crate) async fn run_model_action(
         let state = app.state::<ToolsState>();
         approve_proposal(&dir, &state, &approver, &proposal).await?;
     }
-    // Execution may run a command for up to 30 s: keep it off the runtime.
+    // Execution may run a command for up to 120 s: keep it off the runtime.
     let exec_app = app.clone();
     let proposal_id = proposal.id.clone();
     off_main_thread(move || {
@@ -4473,6 +4478,13 @@ mod tests {
     }
 
     // -------------------------------------------------- B3 run_command --
+
+    #[test]
+    fn command_timeout_leaves_room_for_downloads_and_builds() {
+        // 30 s killed real installs/builds and the model burned rounds
+        // retrying them; 120 s fits them while still bounding a hang.
+        assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(120));
+    }
 
     #[cfg(unix)]
     #[test]

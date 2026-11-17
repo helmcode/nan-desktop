@@ -223,7 +223,7 @@ fn recycle_windows(path: &Path) -> Result<(), Rejection> {
         "Add-Type -AssemblyName Microsoft.VisualBasic; \
          [Microsoft.VisualBasic.FileIO.FileSystem]::{method}($env:HELMCODE_TRASH_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')"
     );
-    let status = std::process::Command::new("powershell")
+    let status = crate::process::hidden_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .env("HELMCODE_TRASH_PATH", plain)
         .stdin(std::process::Stdio::null())

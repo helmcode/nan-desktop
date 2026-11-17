@@ -605,7 +605,7 @@ test surface was removed together with the demo panel.
 | read/write size | 2 MiB per file |
 | binary detection | NUL byte in first 8 KiB → refused ("binary file") |
 | list_files | depth ≤ 3, 500 entries max (summary notes truncation) |
-| run_command output | 64 KiB per stream, 30 s timeout then kill |
+| run_command output | 64 KiB per stream, 120 s timeout then kill (no console window on Windows) |
 | proposal lifetime | 5 min TTL, single-use |
 
 ### run_command — EXPERIMENTAL, OFF by default
