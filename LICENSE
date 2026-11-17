@@ -24,8 +24,8 @@ Copyright (c) 2026 Helmcode S.L. All rights reserved.
       discussion, with attribution.
 
 4. What you may NOT do: redistribute binaries or source outside the GitHub
-   repository and its official releases; remove or alter branding, license
-   notices or telemetry-free guarantees; point modified builds at third-party
+   repository and its official releases; remove or alter branding or license
+   notices; point modified builds at third-party
    inference endpoints (the product intentionally supports only the two owned
    services); or use the source to build a competing product.
 

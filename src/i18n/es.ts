@@ -335,10 +335,6 @@ export const es: Strings = {
       signOut: "Cerrar sesión",
       starRepo: "Dar una estrella en GitHub",
       reportIssue: "Reportar una incidencia",
-      telemetry:
-        "Para corregir errores, la app envía a tu plataforma datos técnicos de uso asociados a tu cuenta (nunca tus conversaciones ni tus archivos).",
-      telemetryDetails: "Más detalles",
-      telemetryDetailsLabel: "Más detalles sobre los datos técnicos que se envían",
     },
   },
   voices: {

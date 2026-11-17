@@ -12,8 +12,8 @@ import { DEFAULT_GRANT_MODE, type GrantMode } from "./core";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { VOICE_UI } from "./flags";
 import { LOCALES, useI18n } from "./i18n";
-import { REPORT_ISSUE_URL, REPOSITORY_URL, TELEMETRY_DOCS_URL } from "./communityLinks";
-import { IconArrowLeft, IconCheck, IconComputer, IconExternal, IconFolder, IconIssue, IconPlus, IconStar, IconWarning } from "./icons";
+import { REPORT_ISSUE_URL, REPOSITORY_URL } from "./communityLinks";
+import { IconArrowLeft, IconCheck, IconComputer, IconFolder, IconIssue, IconPlus, IconStar, IconWarning } from "./icons";
 import { openExternal } from "./Markdown";
 import type { AppInfo, MemoryMode, MemorySettingsView, ProfileView, ToolsSettingsView } from "./types";
 import { foldersStillAsking, type Workspace } from "./workspace";
@@ -375,15 +375,6 @@ export function Settings({
               <dd className="mono">{version || "-"}</dd>
             </div>
           </dl>
-          <div className="about-telemetry">
-            <p className="hint">{t.settings.about.telemetry}</p>
-            <CommunityLink
-              href={TELEMETRY_DOCS_URL}
-              icon={<IconExternal />}
-              label={t.settings.about.telemetryDetails}
-              ariaLabel={t.settings.about.telemetryDetailsLabel}
-            />
-          </div>
           {update && (
             <div className="about-update">
               <UpdateAction version={update.version} onUpdate={update.onUpdate} busy={update.busy} />
@@ -405,23 +396,11 @@ export function Settings({
 /// R22: an Account-section link to the public repository. The href is real
 /// (hover and assistive tech show the target) but the click never navigates
 /// the window: it goes to the system browser through the core.
-function CommunityLink({
-  href,
-  icon,
-  label,
-  ariaLabel,
-}: {
-  href: string;
-  icon: ReactNode;
-  label: string;
-  /// A fuller accessible name when the visible label is short.
-  ariaLabel?: string;
-}) {
+function CommunityLink({ href, icon, label }: { href: string; icon: ReactNode; label: string }) {
   return (
     <a
       className="btn btn-ghost btn-sm about-link"
       href={href}
-      aria-label={ariaLabel}
       onClick={(event) => {
         event.preventDefault();
         openExternal(href);
