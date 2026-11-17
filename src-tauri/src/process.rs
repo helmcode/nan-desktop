@@ -149,6 +149,36 @@ pub fn stop_conversation_commands(conversation_id: i64) -> usize {
     pids.len()
 }
 
+/// Ends the commands running for a conversation when dropped while armed:
+/// held by the chat stream task, so an aborted task (Stop, a new send, a
+/// realm switch) does not leave its command running until the timeout.
+pub struct StopCommandsOnDrop {
+    conversation_id: i64,
+    armed: bool,
+}
+
+impl StopCommandsOnDrop {
+    pub fn new(conversation_id: i64) -> Self {
+        Self {
+            conversation_id,
+            armed: true,
+        }
+    }
+
+    /// The task finished normally: nothing to stop.
+    pub fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StopCommandsOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            stop_conversation_commands(self.conversation_id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +189,40 @@ mod tests {
             windows_tree_kill_args(4242),
             ["/PID", "4242", "/T", "/F"].map(String::from)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_aborted_stream_task_ends_its_running_command() {
+        // The stream task holds the guard; dropping it armed (task aborted)
+        // ends the command running for its conversation at once.
+        use std::os::unix::process::CommandExt;
+        let runner = std::thread::spawn(|| {
+            let _scope = ConversationScope::enter(Some(4040));
+            let mut child = hidden_command("sh")
+                .args(["-c", "sleep 60"])
+                .process_group(0)
+                .spawn()
+                .expect("spawn");
+            let _running = register_running(child.id());
+            child.wait().expect("wait")
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while running_for(4040).is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        StopCommandsOnDrop::new(4041).disarm();
+        drop(StopCommandsOnDrop::new(4041));
+        assert_eq!(
+            running_for(4040).len(),
+            1,
+            "another conversation is untouched"
+        );
+        let started = std::time::Instant::now();
+        drop(StopCommandsOnDrop::new(4040));
+        let status = runner.join().expect("join");
+        assert!(!status.success(), "killed");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
