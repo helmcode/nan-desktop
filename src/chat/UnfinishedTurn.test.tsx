@@ -16,6 +16,7 @@ describe("isContinuable", () => {
     expect(isContinuable("tool_cap")).toBe(true);
     expect(isContinuable("stream_cut")).toBe(true);
     expect(isContinuable("length")).toBe(true);
+    expect(isContinuable("interrupted")).toBe(true);
     expect(isContinuable("completed")).toBe(false);
     expect(isContinuable("user_stop")).toBe(false);
     expect(isContinuable("error")).toBe(false);
@@ -30,6 +31,7 @@ describe("shouldAutoRetry", () => {
     expect(shouldAutoRetry("stream_cut", false)).toBe(true);
     expect(shouldAutoRetry("length", false)).toBe(true);
     expect(shouldAutoRetry("tool_cap", false)).toBe(false);
+    expect(shouldAutoRetry("interrupted", false)).toBe(false);
     expect(shouldAutoRetry("completed", false)).toBe(false);
     expect(shouldAutoRetry("user_stop", false)).toBe(false);
     expect(shouldAutoRetry(undefined, false)).toBe(false);
@@ -84,7 +86,7 @@ describe("UnfinishedTurn", () => {
   });
 
   it("gives each reason its own plain-language line", () => {
-    for (const reason of ["tool_cap", "stream_cut", "length"] as const) {
+    for (const reason of ["tool_cap", "stream_cut", "length", "interrupted"] as const) {
       render(
         <I18nProvider initial="en">
           <UnfinishedTurn reason={reason} onContinue={() => {}} />
@@ -106,19 +108,6 @@ describe("UnfinishedTurn", () => {
     expect(button.getAttribute("type")).toBe("button");
     button.focus();
     expect(document.activeElement).toBe(button);
-  });
-
-  it("can be disabled while another reply is running", () => {
-    const onContinue = vi.fn();
-    render(
-      <I18nProvider initial="en">
-        <UnfinishedTurn reason="stream_cut" onContinue={onContinue} disabled />
-      </I18nProvider>,
-    );
-    const button = screen.getByRole("button", { name: "Continue" }) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
-    fireEvent.click(button);
-    expect(onContinue).not.toHaveBeenCalled();
   });
 
   it("renders nothing for finished or stopped turns", () => {

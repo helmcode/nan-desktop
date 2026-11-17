@@ -237,6 +237,18 @@ describe("automatic continuation of a cut or too-long reply", () => {
     expect(continuations()).toHaveLength(0);
   });
 
+  it("never resumes by itself after a failure partway through", async () => {
+    rows = [row(1, "user", "go")];
+    resetTauri(handlers());
+    renderApp("es");
+    await screen.findByText("go");
+    await endTurn("interrupted", "Hice la mitad.");
+    expect(await screen.findByText(/Algo falló a mitad de la tarea\./)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continuar" })).toBeTruthy();
+    await wait(5000);
+    expect(continuations()).toHaveLength(0);
+  });
+
   it("never resumes an older reply just because the chat was opened", async () => {
     rows = [row(1, "user", "go"), row(2, "assistant", "Cut earlier.", "stream_cut")];
     resetTauri(handlers());
