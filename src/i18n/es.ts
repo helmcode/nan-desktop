@@ -145,6 +145,11 @@ export const es: Strings = {
     },
     continueTurn: "Continuar",
     continuePrompt: "Continúa con la tarea donde lo dejaste.",
+    autoRetrying: {
+      stream_cut: "Se cortó la conexión. Retomando en un momento…",
+      length: "La respuesta era muy larga. Sigo en un momento…",
+    },
+    cancelAutoRetry: "Cancelar",
     thinking: "Pensando…",
     searching: "Buscando en internet…",
     working: "Trabajando…",

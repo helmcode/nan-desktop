@@ -7,7 +7,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { I18nProvider } from "../i18n";
 import { en } from "../i18n/en";
 import { es } from "../i18n/es";
-import { isContinuable, UnfinishedTurn } from "./UnfinishedTurn";
+import { isContinuable, shouldAutoRetry, UnfinishedTurn } from "./UnfinishedTurn";
 
 afterEach(cleanup);
 
@@ -25,7 +25,46 @@ describe("isContinuable", () => {
   });
 });
 
+describe("shouldAutoRetry", () => {
+  it("resumes a cut or too-long reply once, never the step cap", () => {
+    expect(shouldAutoRetry("stream_cut", false)).toBe(true);
+    expect(shouldAutoRetry("length", false)).toBe(true);
+    expect(shouldAutoRetry("tool_cap", false)).toBe(false);
+    expect(shouldAutoRetry("completed", false)).toBe(false);
+    expect(shouldAutoRetry("user_stop", false)).toBe(false);
+    expect(shouldAutoRetry(undefined, false)).toBe(false);
+  });
+
+  it("never resumes the automatic continuation itself (no loop)", () => {
+    expect(shouldAutoRetry("stream_cut", true)).toBe(false);
+    expect(shouldAutoRetry("length", true)).toBe(false);
+  });
+});
+
 describe("UnfinishedTurn", () => {
+  it("while resuming by itself, says so and offers Cancel instead of Continue", () => {
+    const onCancel = vi.fn();
+    render(
+      <I18nProvider initial="es">
+        <UnfinishedTurn reason="stream_cut" onContinue={() => {}} autoRetrying onCancelAutoRetry={onCancel} />
+      </I18nProvider>,
+    );
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain(es.chat.autoRetrying.stream_cut);
+    expect(screen.queryByRole("button", { name: "Continuar" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancelar" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("never shows the resuming line for the step cap", () => {
+    render(
+      <I18nProvider initial="en">
+        <UnfinishedTurn reason="tool_cap" onContinue={() => {}} autoRetrying onCancelAutoRetry={() => {}} />
+      </I18nProvider>,
+    );
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+  });
+
   it("says it stopped, why, and continues on click", () => {
     const onContinue = vi.fn();
     render(
@@ -33,12 +72,13 @@ describe("UnfinishedTurn", () => {
         <UnfinishedTurn reason="tool_cap" onContinue={onContinue} />
       </I18nProvider>,
     );
-    const note = screen.getByRole("note");
+    const note = screen.getByRole("status");
     expect(note.textContent).toContain("Me he detenido antes de terminar.");
     expect(note.textContent).toContain(es.chat.unfinishedReason.tool_cap);
     const button = screen.getByRole("button", { name: "Continuar" });
-    // The button is described by the notice (screen readers hear why).
-    expect(button.getAttribute("aria-describedby")).toBe(note.id);
+    // The notice is announced (status) and describes the button.
+    const text = note.querySelector("p") as HTMLParagraphElement;
+    expect(button.getAttribute("aria-describedby")).toBe(text.id);
     fireEvent.click(button);
     expect(onContinue).toHaveBeenCalledTimes(1);
   });
@@ -50,7 +90,7 @@ describe("UnfinishedTurn", () => {
           <UnfinishedTurn reason={reason} onContinue={() => {}} />
         </I18nProvider>,
       );
-      expect(screen.getByRole("note").textContent).toContain(en.chat.unfinishedReason[reason]);
+      expect(screen.getByRole("status").textContent).toContain(en.chat.unfinishedReason[reason]);
       cleanup();
     }
   });
@@ -94,7 +134,14 @@ describe("UnfinishedTurn", () => {
   });
 
   it("uses plain words, no technical terms", () => {
-    const copy = [es.chat.unfinished, ...Object.values(es.chat.unfinishedReason), es.chat.continueTurn, es.chat.continuePrompt];
+    const copy = [
+      es.chat.unfinished,
+      ...Object.values(es.chat.unfinishedReason),
+      ...Object.values(es.chat.autoRetrying),
+      es.chat.continueTurn,
+      es.chat.continuePrompt,
+      es.chat.cancelAutoRetry,
+    ];
     for (const line of copy) {
       expect(line).not.toMatch(/token|stream|tool|cap|length|error|API|ronda/i);
     }

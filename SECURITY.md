@@ -172,6 +172,34 @@ OS accounts for real separation), and conversations that a previous version
 already synced to another account's memory cannot be recalled from the
 device.
 
+## Tool output kept for continuity
+
+To let the assistant continue a long task without redoing it, each reply
+keeps its tool exchange on the device (`messages.tool_trace` in the realm's
+`chat.db`): the tool calls and their results, which may include content of
+files the user let the assistant read (for example a `.env`). The window is
+bounded:
+
+- each result is truncated to 4,000 characters and a reply keeps at most
+  32,000 characters of its newest rounds;
+- only the **2 newest assistant replies of each conversation** keep a trace;
+  older traces are deleted when a turn ends or is stopped, and for every
+  conversation each time the store is opened;
+- traces never leave the device: they are not sent to the renderer, not
+  part of memory sync, and only replayed to the same inference API that
+  produced them, marked as earlier data, not instructions;
+- deleting the conversation deletes them.
+
+## Command limits
+
+`run_command` children run without a console window (also on Windows) and
+are bounded: 120 s per command, after which the **whole process tree** is
+killed (Unix: the process group; Windows: `taskkill /T /F`); pressing Stop
+ends the tree of the command running for that conversation at once. One
+reply can run at most 60 tool rounds, so the worst case for a single reply
+is 60 commands of 120 s each (about 2 hours) before the hard cap; every
+command in `ask` mode still needs the user's approval.
+
 ## Supported versions
 
 | Version | Supported |
