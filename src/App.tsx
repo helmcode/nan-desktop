@@ -137,6 +137,7 @@ import {
 } from "./skills/skills";
 import { useWorkspace } from "./workspace";
 import { TurnIndicator, useTurnStarts } from "./chat/TurnIndicator";
+import { isContinuable, UnfinishedTurn } from "./chat/UnfinishedTurn";
 
 // The preview pane and its renderers load on first use (S21).
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
@@ -167,6 +168,10 @@ interface ChatDelta {
 }
 interface ChatIdPayload {
   conversation_id: number;
+  // Why the turn ended (`chat://done`: completed / tool_cap / stream_cut /
+  // length; `chat://stopped`: user_stop). The stored reply carries it too
+  // (`end_reason`), which is what the transcript renders from.
+  reason?: string;
 }
 interface ChatError {
   conversation_id: number;
@@ -1792,7 +1797,8 @@ function ChatShell({
 
   // `override` sends a fixed text (round 15: "Save as skill") without
   // touching what the user is typing; the result says whether it went out.
-  const send = useCallback(async (override?: string): Promise<boolean> => {
+  // `continuation` marks the "Continue" button of an unfinished turn.
+  const send = useCallback(async (override?: string, continuation = false): Promise<boolean> => {
     const text = (override ?? composer).trim();
     if (!text || streamingActive) return false;
     setSessionExpired(false);
@@ -1829,7 +1835,14 @@ function ChatShell({
       // away mid-reply never hides it; the refresh after `chat_send` swaps
       // in the core's stored title and ordering.
       setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(text)));
-      await sendChat({ conversationId: id, model, content: text, grantIds, ...(skillId ? { skillId } : {}) });
+      await sendChat({
+        conversationId: id,
+        model,
+        content: text,
+        grantIds,
+        ...(skillId ? { skillId } : {}),
+        ...(continuation ? { continuation: true } : {}),
+      });
       void refreshConversations();
       return true;
     } catch (err) {
@@ -2043,6 +2056,13 @@ function ChatShell({
     }
   }, [streamingActive, send, t, openSkills, messages]);
 
+  // Turn continuity: resume a reply that stopped before finishing (the
+  // composer text, if any, is left untouched).
+  const continueTurn = useCallback((): void => {
+    if (streamingActive) return;
+    void send(t.chat.continuePrompt, true);
+  }, [streamingActive, send, t]);
+
   const onSkillSaved = useCallback((saved: Skill): void => {
     setSkills((prev) => upsertSkill(prev, saved));
     setSkillsLoadError(false);
@@ -2174,9 +2194,13 @@ function ChatShell({
     }
     const visible = stripToolMarkup(m.content);
     const files = messageFiles(visible, fileRoots, m.artifacts);
+    // Only the latest reply offers to continue, and not while a reply runs.
+    const offerContinue =
+      !streamingActive && isContinuable(m.end_reason) && messages[messages.length - 1]?.id === m.id;
     // A row that was only tool markup has nothing to show (S16).
     if (
       visible.trim().length === 0 &&
+      !offerContinue &&
       !m.partial &&
       (m.sources ?? []).length === 0 &&
       files.chips.length === 0 &&
@@ -2204,6 +2228,7 @@ function ChatShell({
             {t.chat.interrupted}
           </p>
         )}
+        {offerContinue && <UnfinishedTurn reason={m.end_reason} onContinue={continueTurn} />}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
         <FileChips paths={files.chips} onOpen={openFilePreview} onShare={artifactsOn ? openShare : undefined} />
         {VOICE_UI && visible.trim().length > 0 && (

@@ -94,6 +94,9 @@ export type ChatSendArgs = {
   /// the boundary: the core reads the skill from its own store and adds it
   /// to this reply's context. Omitted when no skill is on.
   skillId?: string;
+  /// A "Continue" click on an unfinished turn. The content is a normal
+  /// user message; the flag only reaches the core's turn summary.
+  continuation?: boolean;
 };
 
 export function sendChat(args: ChatSendArgs): Promise<void> {

@@ -57,6 +57,10 @@ export interface ChatMessageRow {
   // Image edits: the message whose image the edit started from (null for
   // every other row). Optional: older cores did not send it.
   parent_message_id?: number | null;
+  // Why this reply's turn ended: "completed", "tool_cap", "stream_cut",
+  // "length" or "user_stop" (null for older replies and crash leftovers).
+  // Optional: older cores did not send it.
+  end_reason?: string | null;
 }
 
 /// A local file picked for an image edit, staged by the core.

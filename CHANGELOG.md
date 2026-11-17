@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased - El asistente termina lo que empieza
+
+### Fixes
+- Las tareas largas ya no se quedan a medias en silencio: el asistente puede dar hasta 60 pasos por respuesta (antes 24) y, cuando le quedan pocos, cierra lo que esta haciendo en lugar de cortarse a mitad.
+- Si una respuesta se detiene antes de terminar (demasiados pasos, conexion cortada o respuesta demasiado larga), aparece "Me he detenido antes de terminar." con el motivo y un boton Continuar. Ya no hace falta escribir "sigue" una y otra vez.
+- Al continuar, el asistente recuerda lo que hizo en las ultimas respuestas (archivos leidos, comandos ejecutados) y no vuelve a comprobarlo todo. Ese registro se queda solo en este equipo y no se sincroniza con tu cuenta.
+- Una conexion cortada a mitad de respuesta conserva el texto recibido en lugar de borrarlo.
+- Los comandos pueden durar hasta 2 minutos (antes 30 segundos): descargas e instalaciones ya no se cortan.
+- Windows: los comandos ya no abren una ventana de consola que roba el foco.
+
 ## 0.2.12 - 2026-11-16 - Todo se ve como debe
 
 ### New

@@ -86,8 +86,9 @@ through `open_external`, https-only).
 Silent degradation: no session, offline, 404 (endpoint not deployed yet),
 5xx or a malformed body all yield "no results" — the model is told to answer
 without the search and the user sees nothing unusual. A server that rejects
-the `tools` field (400) is retried once without tools. At most 6 tool rounds
-per reply; the last round offers no tools.
+the `tools` field (400) is retried once without tools. At most 60 tool rounds
+per reply (`MAX_TOOL_ROUNDS`); the last round offers no tools and a turn
+that reaches it ends as `tool_cap` (see "Turn continuity" below).
 
 ### Conversation memory (P1-6)
 
@@ -149,8 +150,8 @@ composer (Enter sends)                       ┌─ chat://delta {conversation_i
 │ 5. persist assistant reply as it streams (T4b): in_progress row +
 │    per-chunk delta flush; finalized on done/stop, deleted on error
 └────────────────────────────────────────────────────────────────────┘
-   │                                        └─ chat://done {conversation_id}
-   ▼                                        └─ chat://stopped {conversation_id} (T4b)
+   │                                        └─ chat://done {conversation_id, reason}
+   ▼                                        └─ chat://stopped {conversation_id, reason} (T4b)
                                             └─ chat://error {conversation_id, kind}
 React state (drafts per conversation) → react-markdown + highlight + sanitize
 ```
@@ -160,6 +161,35 @@ React state (drafts per conversation) → react-markdown + highlight + sanitize
   `ChatState`: conversation → generation counter + `JoinHandle`; a finishing
   task only removes its own entry). Different conversations may stream in
   parallel.
+- **Turn continuity** (`src-tauri/src/turn.rs`). Every turn ends with an
+  explicit reason, sent as `reason` in `chat://done` / `chat://stopped` and
+  stored on the reply (`messages.end_reason`): `completed`, `tool_cap` (the
+  60-round cap was reached), `stream_cut` (the stream ended without
+  `[DONE]` and without a `finish_reason`, or broke mid-body: the text that
+  arrived is kept; a cut before anything arrived is still a `network`
+  error), `length` (`finish_reason: "length"`), `user_stop`; `error` exists
+  for the turn summary only (an errored reply is not kept). Cut or
+  truncated rounds never run their tool calls. In the last 3 tool rounds
+  the last tool result carries a note telling the model how many steps are
+  left, so it wraps up cleanly. For `tool_cap`, `stream_cut` and `length`
+  the UI shows "Me he detenido antes de terminar." with a plain reason and
+  a **Continuar** button under the latest reply; it sends the user message
+  "Continúa con la tarea donde lo dejaste." with `chat_send(...,
+  continuation: true)` (the flag only reaches the turn summary).
+  Each reply also stores its tool exchange (`messages.tool_trace`: the
+  assistant `tool_calls` + `tool` result messages; results truncated to 4k
+  chars, oversized arguments compacted as valid JSON, newest rounds within
+  32k chars). The two most recent assistant turns replay it before their
+  reply in the next request, within a 32k-char total budget (older rounds
+  dropped first, never half a round), so a continuation keeps the model's
+  own work. The trace is device-local: `messages_list` never serializes it
+  and memory sync never exports it (a remote overwrite keeps it on replies
+  still present). If the server rejects the first request with 400 and
+  tools, the retry also drops the replayed traces. Every turn is
+  summarized once in `turn::TurnTracker` → `TurnSummary {reason,
+  error_kind, rounds, tool_calls, duration_ms, model, continued}` →
+  `turn::report_turn` (a no-op hook for telemetry); an aborted stream task
+  reports `user_stop` from `Drop`.
 - **Error kinds** (`chat://error`): `missing_key`, `unauthorized` (401 → the
   UI shows the "Tu sesión ha caducado" banner with a "Volver a entrar"
   action), `rate_limited` (429), `server` (other non-2xx), `network`
@@ -169,7 +199,8 @@ React state (drafts per conversation) → react-markdown + highlight + sanitize
   the app data dir): tables
   `conversations(id, title, profile_id, created_at, updated_at, remote_id,
   synced_at)`, `messages(id, conversation_id, role, content, model,
-  media_path, created_at, status, sources)` and `memory_tombstones`
+  media_path, created_at, status, sources, artifacts, parent_message_id,
+  end_reason, tool_trace)` and `memory_tombstones`
   (`status`: `complete` default, `in_progress` while streaming — T4b;
   `sources`: JSON citation list from web search; `remote_id`/`synced_at`/
   tombstones: memory sync). The
