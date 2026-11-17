@@ -792,6 +792,11 @@ pub struct DeltaPayload {
 pub struct DonePayload {
     pub conversation_id: i64,
     pub reason: TurnEndReason,
+    /// For `interrupted`: the failure that interrupted the turn (the UI
+    /// asks the user to wait a moment after `rate_limited`). Omitted
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<ErrorKind>,
 }
 
 /// `chat://error` — classified failure; nothing assistant-side persisted.
@@ -1110,6 +1115,7 @@ pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result
         DonePayload {
             conversation_id,
             reason: TurnEndReason::UserStop,
+            error_kind: None,
         },
     );
     Ok(())
@@ -1446,6 +1452,7 @@ async fn run_chat_stream(
                         DonePayload {
                             conversation_id,
                             reason,
+                            error_kind: kept_error,
                         },
                     );
                     tracker.finish(reason, kept_error);
@@ -3349,7 +3356,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(DonePayload {
                 conversation_id: conv,
-                reason
+                reason,
+                error_kind: None,
             })
             .expect("json")["reason"],
             "tool_cap"
@@ -3398,10 +3406,25 @@ mod tests {
         let payload = DonePayload {
             conversation_id: 7,
             reason: TurnEndReason::ToolCap,
+            error_kind: None,
         };
         assert_eq!(
             serde_json::to_value(payload).expect("serialize"),
-            serde_json::json!({ "conversation_id": 7, "reason": "tool_cap" })
+            serde_json::json!({ "conversation_id": 7, "reason": "tool_cap" }),
+            "no error_kind key unless interrupted"
+        );
+        let busy = DonePayload {
+            conversation_id: 7,
+            reason: TurnEndReason::Interrupted,
+            error_kind: Some(ErrorKind::RateLimited),
+        };
+        assert_eq!(
+            serde_json::to_value(busy).expect("serialize"),
+            serde_json::json!({
+                "conversation_id": 7,
+                "reason": "interrupted",
+                "error_kind": "rate_limited"
+            })
         );
     }
 

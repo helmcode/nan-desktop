@@ -204,6 +204,41 @@ describe("automatic continuation of a cut or too-long reply", () => {
     expect(screen.queryByText(/en un momento/)).toBeNull();
   });
 
+  it("moves focus to the composer when it resumes while Cancel had focus", async () => {
+    rows = [row(1, "user", "go")];
+    resetTauri(handlers());
+    renderApp();
+    await screen.findByText("go");
+    await endTurn("stream_cut");
+    const cancel = await screen.findByRole("button", { name: "Cancel" });
+    cancel.focus();
+    expect(document.activeElement).toBe(cancel);
+    await wait(2100);
+    await waitFor(() => expect(continuations()).toHaveLength(1));
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message" }));
+  });
+
+  it("asks to wait a moment after a busy interruption, and forgets it after a normal end", async () => {
+    rows = [row(1, "user", "go")];
+    resetTauri(handlers());
+    renderApp("es");
+    await screen.findByText("go");
+    rows = [...rows, row(2, "assistant", "Mitad.", "interrupted")];
+    await act(async () =>
+      emit("chat://done", { conversation_id: 8, reason: "interrupted", error_kind: "rate_limited" }),
+    );
+    expect(await screen.findByText(/Hay mucha demanda ahora mismo\./)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continuar" })).toBeTruthy();
+    await wait(5000);
+    expect(continuations()).toHaveLength(0);
+
+    // Another interrupted turn without a busy kind: the generic line.
+    rows = [...rows, row(3, "user", "sigue"), row(4, "assistant", "Otra mitad.", "interrupted")];
+    await act(async () => emit("chat://done", { conversation_id: 8, reason: "interrupted", error_kind: "server" }));
+    expect(await screen.findByText(/Algo falló a mitad de la tarea\./)).toBeTruthy();
+    expect(screen.queryByText(/Hay mucha demanda/)).toBeNull();
+  });
+
   it("Cancel keeps the manual button and sends nothing", async () => {
     rows = [row(1, "user", "go")];
     resetTauri(handlers());

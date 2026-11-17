@@ -124,7 +124,9 @@ impl Drop for RunningCommand {
     }
 }
 
-/// The pids of the commands running for a conversation.
+/// The pids of the commands running for a conversation (tests observe
+/// the registry through it).
+#[cfg(test)]
 pub fn running_for(conversation_id: i64) -> Vec<u32> {
     RUNNING
         .lock()
@@ -142,11 +144,21 @@ pub fn running_for(conversation_id: i64) -> Vec<u32> {
 /// conversation (the waiting `run_command` then returns at once instead of
 /// running on, invisibly, until its timeout). Returns how many were ended.
 pub fn stop_conversation_commands(conversation_id: i64) -> usize {
-    let pids = running_for(conversation_id);
-    for pid in &pids {
+    // Killed while holding the registry lock: a command still registered
+    // has not finished `run_captured` (its guard unregisters under this
+    // same lock), which narrows the window for signalling a reused pid.
+    let Ok(running) = RUNNING.lock() else {
+        return 0;
+    };
+    let mut ended = 0;
+    for (_, pid) in running
+        .iter()
+        .filter(|(conversation, _)| *conversation == conversation_id)
+    {
         kill_tree(*pid);
+        ended += 1;
     }
-    pids.len()
+    ended
 }
 
 /// Ends the commands running for a conversation when dropped while armed:
@@ -227,21 +239,26 @@ mod tests {
 
     #[test]
     fn running_commands_are_tracked_per_conversation_scope() {
-        let outside = register_running(1);
+        // Fake pids above i32::MAX: no real process can have them and
+        // kill_tree ignores them on Unix, so a stray stop can never signal
+        // a real process group.
+        const FAKE: [u32; 4] = [4_000_000_001, 4_000_000_011, 4_000_000_012, 4_000_000_013];
+        assert!(FAKE.iter().all(|pid| i32::try_from(*pid).is_err()));
+        let outside = register_running(FAKE[0]);
         assert!(running_for(901).is_empty(), "no scope: not tracked");
         {
             let _scope = ConversationScope::enter(Some(901));
-            let first = register_running(11);
-            let _second = register_running(12);
-            assert_eq!(running_for(901), vec![11, 12]);
+            let first = register_running(FAKE[1]);
+            let _second = register_running(FAKE[2]);
+            assert_eq!(running_for(901), vec![FAKE[1], FAKE[2]]);
             assert!(running_for(902).is_empty());
             drop(first);
-            assert_eq!(running_for(901), vec![12]);
+            assert_eq!(running_for(901), vec![FAKE[2]]);
         }
         assert!(running_for(901).is_empty(), "guards unregister on drop");
         drop(outside);
         let _scope = ConversationScope::enter(Some(903));
-        drop(register_running(13));
+        drop(register_running(FAKE[3]));
         assert!(running_for(903).is_empty());
     }
 
