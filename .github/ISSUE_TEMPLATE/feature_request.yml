@@ -45,7 +45,7 @@ body:
     id: constraints
     attributes:
       label: Constraints acknowledgment
-      description: The app supports only the NaN community and Helmcode enterprise platforms, with zero telemetry.
+      description: The app supports only the NaN community and Helmcode enterprise platforms, with no third-party services.
       options:
-        - label: My proposal respects the locked endpoints and zero-telemetry policy
+        - label: My proposal respects the locked endpoints and the no-user-content telemetry policy
           required: true

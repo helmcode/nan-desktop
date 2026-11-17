@@ -19,7 +19,7 @@ Closes #
 - [ ] `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` green (`--manifest-path src-tauri/Cargo.toml`)
 - [ ] Relevant `node test/*-check.mjs` green
 - [ ] No secrets committed; credentials still never cross to the renderer
-- [ ] Zero telemetry preserved; no new network endpoints
+- [ ] No new network endpoints or third parties; telemetry carries no user content
 - [ ] UI copy added in both English and Spanish (if any)
 - [ ] Docs updated when behavior changed
 - [ ] Conventional Commit title; ~400 changed lines or less where practical

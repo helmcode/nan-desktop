@@ -38,9 +38,14 @@ through the same private channel; we route them to the right team.
 
 ## Security model (what we promise)
 
-- **Zero telemetry.** The app makes network calls ONLY to
-  `api.nan.builders` / `cloud-api.nan.builders` and `api.helmcode.com`
+- **Locked endpoints, no third parties.** The app makes network calls ONLY
+  to the two platforms' own hosts: `api.nan.builders` /
+  `cloud-api.nan.builders` and `api.helmcode.com` / `cloud-api.helmcode.com`
   (mock overrides exist solely in debug builds).
+- **Telemetry is technical metadata only** (always on, see
+  [Telemetry](#telemetry-what-the-app-sends)): it goes to the same platform
+  hosts, never to a third party, and never carries conversation content,
+  files, paths or anything the user writes.
 - **Credentials live in an encrypted vault**, read only by the Rust core. They
   never enter the web renderer process and are never logged (see
   [Credential storage](#credential-storage) below).
@@ -171,6 +176,58 @@ app data folder directly (the realms are not encrypted at rest; use separate
 OS accounts for real separation), and conversations that a previous version
 already synced to another account's memory cannot be recalled from the
 device.
+
+## Telemetry (what the app sends)
+
+Owner decision (2026-11-17): the app sends technical usage and error data
+to fix bugs and understand usage. It is **always on** and has no setting.
+Implementation: `src-tauri/src/telemetry.rs`.
+
+**Where.** `POST {platform}/api/desktop/telemetry` on the signed-in
+profile's own compiled-in platform (`cloud-api.nan.builders` or
+`cloud-api.helmcode.com`), authenticated with the login session JWT, exactly
+like the conversation memory sync. The JWT never leaves the Rust core; the
+renderer never talks to the network for telemetry. Events are tagged with
+the profile (and signed-in user) they were produced under and only ever go
+to that profile's platform: nothing crosses from one tenant to the other.
+Install-level events recorded while nobody is signed in (`app_start` on the
+login screen, a crash there) carry no tenant data and go with the next
+flush of the active profile.
+
+**Every request** carries: `install_id` (random uuid generated once per
+install, stored in the app data dir), `app_version`, `os`
+(`macos` / `windows` / `linux`), `os_version` (e.g. `15.1`,
+`ubuntu 22.04`, `10.0.22631`), `arch` (`aarch64`, `x86_64`). **Every
+event** carries: a random event `id`, its `name`, a client timestamp `ts`
+and a `session_id` (random uuid per app launch).
+
+**The complete event list** (props are built only from enums, counters,
+durations and fixed lists; tests pin every builder):
+
+| Event | Props |
+|---|---|
+| `app_start` | none |
+| `turn_end` | `reason` (`completed`, `tool_cap`, `stream_cut`, `length`, `user_stop`, `error`), `error_kind` (classified kind or null), `rounds`, `tool_calls`, `duration_ms`, `model` (only ids from the app's built-in model list, else `other`), `continued` (bool) |
+| `tool_call` | `tool` (only names from the app's fixed tool list, else `unknown`), `outcome` (`ok`, `error`, `timeout`, `denied`), `duration_ms` |
+| `error_shown` | `surface` (`chat`, `images`, `sign_in`, `memory`), `kind` (the classified error kind, e.g. `rate_limited`, `network`) |
+| `crash` | `source` (`rust_panic`, `renderer`), `location` (Rust: `file:line` of the panic in the app's source, build-machine prefixes removed; renderer: the error name such as `TypeError`) |
+
+**Never sent:** message text, prompts, replies, file names or contents,
+paths, URLs, command lines, search queries, emails, error or panic
+messages, stack traces. Tool arguments and results are inspected only to
+classify the outcome and are then discarded.
+
+**Delivery.** A bounded queue on disk (`telemetry/queue.jsonl`, at most
+1000 events, oldest dropped, events older than 30 days pruned) is flushed
+in batches of up to 100 events every 60 s, as soon as 50 are queued, and
+best-effort on exit (3 s budget). Network errors, 408, 429 and 5xx back off
+exponentially (60 s up to 15 min); a 400/413 drops that batch; 401/403/404
+keep the events queued and stop sending for that profile until the app
+restarts. Without a session, events only wait in the queue. A Rust panic
+writes its `crash` event synchronously to `telemetry/crash.jsonl` before
+the process ends; the next launch sends it. Renderer crashes are accepted
+through one IPC command that takes only an error name (validated in Rust,
+at most 20 per launch).
 
 ## Supported versions
 
