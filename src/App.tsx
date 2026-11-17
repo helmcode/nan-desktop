@@ -34,7 +34,7 @@ import { LanguageScreen } from "./components/LanguageScreen";
 import { SaveImageButton, type SaveImageResult } from "./components/SaveImageButton";
 import { Toast, type ToastNotice } from "./components/Toast";
 import { UpdateBanner } from "./components/UpdateBanner";
-import { startUpdateSchedule } from "./updateSchedule";
+import { useAppUpdates, type AppUpdates } from "./useAppUpdates";
 import { UserMenu, type SettingsPane, type SettingsSection } from "./components/UserMenu";
 import {
   DEFAULT_IMAGE_SIZE,
@@ -53,8 +53,6 @@ import {
   storedVoice,
 } from "./copy";
 import {
-  checkForUpdate,
-  installUpdate,
   onApprovalRequest,
   onApprovalResolved,
   onNativeDecision,
@@ -62,7 +60,6 @@ import {
   sendChat,
   DEFAULT_GRANT_MODE,
   type GrantMode,
-  type UpdateInfo,
 } from "./core";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { isTopLayer, useEscapeLayer } from "./escapeLayers";
@@ -710,10 +707,13 @@ function ChatShell({
   overview,
   busy,
   onSignOut,
+  updates,
 }: {
   overview: ProfileOverview;
   busy: boolean;
   onSignOut: () => void;
+  /** The app window's one update state (useAppUpdates), signed in or not. */
+  updates: AppUpdates;
 }) {
   const t = useT();
   // Privacy fix: per-conversation renderer storage is scoped to the realm.
@@ -743,22 +743,11 @@ function ChatShell({
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [inlineError, setInlineError] = useState("");
-  // One install at a time, shared by the banner and the user menu: the busy
-  // state lives here so the two surfaces cannot start a second install.
-  const [installing, setInstalling] = useState(false);
-  const startInstall = useCallback(async (): Promise<void> => {
-    if (installing) return;
-    setInstalling(true);
-    try {
-      await installUpdate();
-    } finally {
-      setInstalling(false);
-    }
-  }, [installing]);
-
-  // Round 14/S1: the newer version the updater found. ONE check feeds the
-  // banner and the user menu, so a dismissed banner never hides the update.
-  const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
+  // Round 14/S1: the newer version the updater found. ONE check (owned by
+  // the app window, before sign-in) feeds the banner, the user menu and
+  // Settings, so a dismissed banner never hides the update; one install at a
+  // time across all of them.
+  const { available: availableUpdate, installing, startInstall } = updates;
 
   // Inline approval cards (S14) and per-conversation preview pane (S21).
   const [approvals, dispatchApproval] = useReducer(approvalsReducer, [] as ApprovalCardState[]);
@@ -1067,26 +1056,9 @@ function ChatShell({
     };
   }, []);
 
-  // Auto-update (round 7): a silent check on a schedule (R20-E below). The
-  // result is kept here (round 14/S1) so the user menu can offer "Update"
-  // after the banner is dismissed; the banner is given this same check and
-  // the same install flow, so there is one update path, not two.
-  // R20-E: the shell owns the ONE schedule (startup, every 2 hours, and on
-  // coming back after 2 hours away; never more than once per 30 minutes);
-  // the banner shows its result.
-  const [updateCheckSeq, setUpdateCheckSeq] = useState(0);
-  // A failed check (dev build, offline, no release feed yet, a wake-up
-  // before the network) is silent and changes nothing: the banner and the
-  // menu keep what the last good check found, and a dismissed banner stays
-  // dismissed. It rejects so the schedule can retry once back online.
-  const runUpdateCheck = useCallback(async (): Promise<UpdateInfo | null> => {
-    const found = await checkForUpdate();
-    setAvailableUpdate(found);
-    setUpdateCheckSeq((n) => n + 1);
-    return found;
-  }, []);
-
-  useEffect(() => startUpdateSchedule({ run: runUpdateCheck }), [runUpdateCheck]);
+  // Auto-update (round 7): the window-level schedule lives in
+  // useAppUpdates (it runs before and without a session); the shell only
+  // shows its result.
 
   // Team library (S4): one sync now, then again when the previous round is
   // due, and whenever the Skills view opens. ETag-conditional, so a quiet
@@ -2565,9 +2537,11 @@ function ChatShell({
             </header>
             <UpdateBanner
               update={availableUpdate}
-              checkSeq={updateCheckSeq}
+              checkSeq={updates.checkSeq}
               install={startInstall}
               externalBusy={installing}
+              dismissedSeq={updates.dismissedSeq}
+              onDismiss={updates.dismiss}
             />
 
             <div className="messages" ref={messagesRef}>
@@ -2888,8 +2862,30 @@ function ChatShell({
 // App state machine
 // ---------------------------------------------------------------------------
 
+/// Updates before sign-in: the banner over the loading, sign-in and error
+/// screens (fixed at the top, above the centered card). The chat shell shows
+/// the same state in its own place.
+function PreloginUpdateBanner({ updates }: { updates: AppUpdates }) {
+  return (
+    <div className="update-banner-host">
+      <UpdateBanner
+        update={updates.available}
+        checkSeq={updates.checkSeq}
+        install={updates.startInstall}
+        externalBusy={updates.installing}
+        dismissedSeq={updates.dismissedSeq}
+        onDismiss={updates.dismiss}
+      />
+    </div>
+  );
+}
+
 function App() {
   const { t, firstRun } = useI18n();
+  // Updates never depend on a session: the schedule starts with the window,
+  // before the sign-in state resolves (an expired session still learns about
+  // a new version on the sign-in screen).
+  const updates = useAppUpdates();
   const [screen, setScreen] = useState<Screen>("loading");
   const [overview, setOverview] = useState<ProfileOverview | null>(null);
   const [pickerError, setPickerError] = useState(false);
@@ -2999,13 +2995,22 @@ function App() {
     }
   }, [overview, refreshOverview]);
 
+  // Every screen before the chat shows the update banner on top of it (the
+  // banner keeps its place, and its state, across these screens).
+  const withUpdates = (node: ReactNode): ReactNode => (
+    <>
+      <PreloginUpdateBanner updates={updates} />
+      {node}
+    </>
+  );
+
   // S19: the language comes first, before any tenant choice.
   if (firstRun) {
-    return <LanguageScreen />;
+    return withUpdates(<LanguageScreen />);
   }
 
   if (screen === "loading") {
-    return (
+    return withUpdates(
       <CenterScreen>
         <BrandHero />
         <p className="status-line" role="status">
@@ -3017,7 +3022,7 @@ function App() {
   }
 
   if (screen === "error") {
-    return (
+    return withUpdates(
       <CenterScreen>
         <BrandHero />
         <h1>{t.app.errorTitle}</h1>
@@ -3033,7 +3038,7 @@ function App() {
 
   if (screen === "authorizing" && authProfileId) {
     const profile = overview?.profiles.find((p) => p.id === authProfileId);
-    return (
+    return withUpdates(
       <Authorizing
         profileName={profileTitle(t, authProfileId, profile?.name ?? authProfileId)}
         userCode={userCode}
@@ -3047,7 +3052,7 @@ function App() {
   }
 
   if (screen === "picker" && overview) {
-    return (
+    return withUpdates(
       <ProfilePicker
         overview={overview}
         busy={busy}
@@ -3069,6 +3074,7 @@ function App() {
       overview={overview}
       busy={busy}
       onSignOut={() => void signOut()}
+      updates={updates}
     />
   );
 }

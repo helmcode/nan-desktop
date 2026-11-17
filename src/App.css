@@ -3820,3 +3820,28 @@ button:disabled {
   border: 0;
   background: #fff;
 }
+
+/* Updates before sign-in: the banner floats at the top of the loading,
+   sign-in and error screens, above the centered card. Only the banner
+   takes clicks; the empty host never covers the screen below. */
+.update-banner-host {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.update-banner-host:empty {
+  display: none;
+}
+
+.update-banner-host > .update-banner {
+  width: min(40rem, calc(100% - 2rem));
+  margin: 0.75rem 1rem 0;
+  pointer-events: auto;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}

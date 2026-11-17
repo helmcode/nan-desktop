@@ -1,9 +1,10 @@
 // Round 7: non-invasive "new version available" banner at the top of the chat.
 //
-// - R20-E: the shell owns the one update schedule (`updateSchedule.ts`:
-//   startup, every 2 hours, and when the window comes back after more than
-//   2 hours away) and hands the banner the result (`update` + `checkSeq`).
-//   The banner never checks by itself.
+// - R20-E: the app window owns the one update schedule (`useAppUpdates.ts`
+//   over `updateSchedule.ts`: startup, every 2 hours, and when the window
+//   comes back after more than 2 hours away), signed in or not, and hands
+//   the banner the result (`update` + `checkSeq`). The banner never checks
+//   by itself.
 // - Never installs by itself: only the user's click on "Update" downloads,
 //   verifies, installs and relaunches.
 // - The close button hides the banner until the next check.
@@ -20,6 +21,8 @@ export function UpdateBanner({
   checkSeq,
   install = installUpdate,
   externalBusy = false,
+  dismissedSeq: dismissedSeqProp,
+  onDismiss,
 }: {
   /** The shell's last good check result (null: up to date). */
   update: UpdateInfo | null;
@@ -28,13 +31,19 @@ export function UpdateBanner({
   checkSeq: number;
   install?: () => Promise<void>;
   externalBusy?: boolean;
+  /** Controlled dismiss: the app keeps it so a banner closed on the sign-in
+   *  screen stays closed in the chat for the same check. Omitted: local. */
+  dismissedSeq?: number | null;
+  onDismiss?: (seq: number) => void;
 }) {
   const t = useT();
   // Dismiss hides the banner for the check it was showing; a later check
   // (a new `checkSeq`) shows it again. Derived, not re-set from an effect:
   // an effect could run after a dismiss made right as a check landed and
   // bring the banner back.
-  const [dismissedSeq, setDismissedSeq] = useState<number | null>(null);
+  const [localDismissedSeq, setLocalDismissedSeq] = useState<number | null>(null);
+  const controlled = onDismiss !== undefined;
+  const dismissedSeq = controlled ? (dismissedSeqProp ?? null) : localDismissedSeq;
   const visible = dismissedSeq !== checkSeq;
   const [phase, setPhase] = useState<Phase>("idle");
 
@@ -87,7 +96,8 @@ export function UpdateBanner({
           // Inert while installing: the banner is the only place that says
           // what is happening (C3).
           if (busy) return;
-          setDismissedSeq(checkSeq);
+          if (controlled) onDismiss(checkSeq);
+          else setLocalDismissedSeq(checkSeq);
         }}
       >
         <IconX size={12} />
