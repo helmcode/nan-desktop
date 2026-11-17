@@ -14,7 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { folderName } from "../copy";
-import { isTopLayer, useEscapeLayer } from "../escapeLayers";
+import { useEscape } from "../escapeLayers";
 import { useT, type Strings } from "../i18n";
 import { IconCopy, IconExternal, IconFile, IconShare, IconWarning, IconX } from "../icons";
 import { openExternal } from "../Markdown";
@@ -98,17 +98,10 @@ export async function copyLink(url: string): Promise<boolean> {
 
 /** The modal shell shared by the form, the success and the paywall views. */
 function useModalEscape(onClose: () => void): void {
-  const layer = useEscapeLayer(true);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape" || e.isComposing) return;
-      if (!isTopLayer(layer)) return;
-      e.preventDefault();
-      onClose();
-    };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [layer, onClose]);
+  useEscape(true, (e) => {
+    e.preventDefault();
+    onClose();
+  });
 }
 
 type Success = { url: string; scope: ShareScope };
