@@ -9,7 +9,7 @@
 // the stack, which makes "only the innermost thing closes" explicit instead of
 // incidental.
 
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 
 let counter = 0;
 const stack: number[] = [];
@@ -49,17 +49,48 @@ export function layerCount(): number {
  * Registers one layer while `active` is true and removes it on close or
  * unmount. The id is stable for the component's lifetime, so the surface's
  * Escape handler can capture it.
+ *
+ * Registered in a LAYOUT effect: the layer exists from the commit that shows
+ * the surface. A passive effect left a window (after paint, before the effect
+ * ran) where an Escape reached the surface behind it instead (seen as a CI
+ * flake: Escape on a just-opened team skill left Settings).
  */
 export function useEscapeLayer(active: boolean): number {
   const idRef = useRef<number | null>(null);
   if (idRef.current === null) idRef.current = allocate();
   const id = idRef.current;
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!active) return;
     push(id);
     return () => remove(id);
   }, [active, id]);
   return id;
+}
+
+/**
+ * The whole Escape contract of an inner surface: while `active`, a layer and
+ * a window capture-phase listener, both registered at commit (layout effect),
+ * that call `onEscape` only for a real Escape (not an IME composition) when
+ * this surface is the innermost open one. `onEscape` decides whether to
+ * consume the key (`preventDefault`) and what to close; the latest
+ * `onEscape` is always used.
+ */
+export function useEscape(active: boolean, onEscape: (e: KeyboardEvent) => void): void {
+  const layer = useEscapeLayer(active);
+  const handlerRef = useRef(onEscape);
+  useLayoutEffect(() => {
+    handlerRef.current = onEscape;
+  });
+  useLayoutEffect(() => {
+    if (!active) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (!isTopLayer(layer)) return;
+      handlerRef.current(e);
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [active, layer]);
 }
 
 /** Test-only: forget every registered layer, whatever is still mounted. */

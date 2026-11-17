@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { accountInitial } from "../copy";
-import { isTopLayer, useEscapeLayer } from "../escapeLayers";
+import { useEscape } from "../escapeLayers";
 import { LOCALES, useI18n } from "../i18n";
 import {
   IconCheck,
@@ -63,33 +63,28 @@ export function UserMenu({
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const layer = useEscapeLayer(open);
+  // Round 14 review (F1/F2): an Escape that cancels an IME composition is
+  // not a dismissal, and with several surfaces open only the innermost one
+  // consumes the key (the skills form, say, keeps its draft). Round 14 (B1):
+  // when it is the innermost surface the menu consumes Escape. The capture
+  // phase runs before the Settings surface's own Escape handler, whose first
+  // line checks `defaultPrevented`.
+  useEscape(open, (e) => {
+    e.preventDefault();
+    setOpen(false);
+    triggerRef.current?.focus();
+  });
 
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      // Round 14 review (F1/F2): an Escape that cancels an IME composition is
-      // not a dismissal, and with several surfaces open only the innermost one
-      // consumes the key (the skills form, say, keeps its draft).
-      if (e.key !== "Escape" || e.isComposing) return;
-      if (!isTopLayer(layer)) return;
-      // Round 14 (B1): when it is the innermost surface the menu consumes
-      // Escape. The capture phase runs before the Settings surface's own
-      // Escape handler, whose first line checks `defaultPrevented`.
-      e.preventDefault();
-      setOpen(false);
-      triggerRef.current?.focus();
-    };
     window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey, { capture: true });
     return () => {
       window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey, { capture: true });
     };
-  }, [open, layer]);
+  }, [open]);
 
   const go = (section: SettingsTarget): void => {
     setOpen(false);

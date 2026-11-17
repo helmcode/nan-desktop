@@ -18,7 +18,7 @@
 //!    fail closed. A declined approval discards the proposal.
 //!
 //! Caps (spec S7): read/write ≤ 2 MiB, list depth ≤ 3 / 500 entries,
-//! command output ≤ 64 KiB, command timeout 30 s, binary files refused.
+//! command output ≤ 64 KiB, command timeout 120 s, binary files refused.
 //! `run_command` is ON by default since round 2 (S15), switchable with
 //! `tools_set_run_command_enabled`; it asks in `ask` mode and runs without
 //! a prompt only when its cwd sits in an `allow`-mode grant.
@@ -74,7 +74,11 @@ pub const MAX_LIST_DEPTH: usize = 3;
 /// Maximum captured bytes per stream for `run_command`.
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Hard timeout for `run_command` (process is killed after this).
-pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// 120 s (was 30 s): real tasks download dependencies, build projects or
+/// convert documents; at 30 s those were killed and the model wasted rounds
+/// retrying them in smaller pieces.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Bounded wait for the pipe-drain reader threads after the process (group)
 /// is gone. A grandchild that outlives the shell can hold the pipes open;
@@ -1921,7 +1925,8 @@ pub fn run_captured(cmd: &str, cwd: &Path, timeout: Duration) -> Result<CmdOutpu
     let (program, args): (&str, Vec<String>) = ("sh", vec!["-c".into(), cmd.to_string()]);
     #[cfg(windows)]
     let (program, args): (&str, Vec<String>) = ("cmd", vec!["/C".into(), cmd.to_string()]);
-    let mut command = std::process::Command::new(program);
+    // Hidden on Windows: no console window flashes per command.
+    let mut command = crate::process::hidden_command(program);
     command
         .args(&args)
         .current_dir(cwd)
@@ -1938,6 +1943,8 @@ pub fn run_captured(cmd: &str, cwd: &Path, timeout: Duration) -> Result<CmdOutpu
     let mut child = command
         .spawn()
         .map_err(|err| io_rejection("cannot spawn command", err))?;
+    // Stop for this conversation can end it (see `process::ConversationScope`).
+    let _running = crate::process::register_running(child.id());
 
     // Reader threads drain the pipes (streaming chunks through a channel,
     // discarding beyond the cap) so the child never blocks on a full pipe;
@@ -2042,20 +2049,15 @@ pub fn run_captured(cmd: &str, cwd: &Path, timeout: Duration) -> Result<CmdOutpu
     })
 }
 
-/// Kill the command and reap it. Unix: SIGKILL the whole process GROUP —
-/// the child owns that group (`process_group(0)`), so forked children die
-/// with it and release the pipes; a plain `child.kill()` would leave them
-/// holding the pipes and block the drain threads.
+/// Kill the command's whole process tree and reap it
+/// ([`crate::process::kill_tree`]). Unix: SIGKILL the process GROUP the
+/// child leads (`process_group(0)`), so forked children die with it and
+/// release the pipes; a plain `child.kill()` would leave them holding the
+/// pipes and block the drain threads. Windows: `child.kill()` alone only
+/// ends `cmd.exe` and its programs would keep running invisibly (no
+/// console window), so the tree is ended first.
 fn kill_command(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let pgid = child.id() as i32;
-        // SAFETY: kill(2) with a negative pid signals the process group we
-        // created with process_group(0); SIGKILL cannot be caught.
-        unsafe {
-            libc::kill(-pgid, libc::SIGKILL);
-        }
-    }
+    crate::process::kill_tree(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -2104,6 +2106,8 @@ pub fn execute(
             }),
         },
     )?;
+    // Commands this action spawns belong to its conversation: Stop ends them.
+    let _scope = crate::process::ConversationScope::enter(claimed.conversation_id);
     match execute_proposal_with(dir, &claimed, &session_grants(state, &claimed)) {
         Ok(outcome) => {
             audit_event(
@@ -3039,7 +3043,7 @@ pub(crate) async fn run_model_action(
         let state = app.state::<ToolsState>();
         approve_proposal(&dir, &state, &approver, &proposal).await?;
     }
-    // Execution may run a command for up to 30 s: keep it off the runtime.
+    // Execution may run a command for up to 120 s: keep it off the runtime.
     let exec_app = app.clone();
     let proposal_id = proposal.id.clone();
     off_main_thread(move || {
@@ -4474,6 +4478,13 @@ mod tests {
 
     // -------------------------------------------------- B3 run_command --
 
+    #[test]
+    fn command_timeout_leaves_room_for_downloads_and_builds() {
+        // 30 s killed real installs/builds and the model burned rounds
+        // retrying them; 120 s fits them while still bounding a hang.
+        assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(120));
+    }
+
     #[cfg(unix)]
     #[test]
     fn run_command_returns_despite_grandchild_holding_pipes() {
@@ -4517,6 +4528,77 @@ mod tests {
             "group kill closes the pipes: {:?}",
             started.elapsed()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_ends_the_running_command_of_its_conversation_now() {
+        // A command waits on its 120 s timeout; Stop for its conversation
+        // must end the process tree at once.
+        let (folder, _guard) = tempdir();
+        let started = Instant::now();
+        let runner = std::thread::spawn(move || {
+            let _scope = crate::process::ConversationScope::enter(Some(777));
+            run_captured("sleep 60; echo late", &folder, COMMAND_TIMEOUT)
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::process::running_for(777).is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            crate::process::stop_conversation_commands(888),
+            0,
+            "other chat"
+        );
+        assert_eq!(crate::process::stop_conversation_commands(777), 1);
+        let out = runner.join().expect("join").expect("run");
+        assert_eq!(out.stdout, "", "ended before echo ran");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(crate::process::running_for(777).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_command_timeout_kills_grandchildren_on_windows() {
+        // cmd /C ping: ping.exe is a CHILD of cmd.exe. Killing only cmd.exe
+        // would leave ping running invisibly (no console window).
+        fn pings_alive() -> usize {
+            let out = crate::process::hidden_command("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "@(Get-CimInstance Win32_Process -Filter \"Name='PING.EXE'\" | \
+                     Where-Object { $_.CommandLine -like '*127.0.0.42*' }).Count",
+                ])
+                .output()
+                .expect("powershell");
+            assert!(out.status.success(), "powershell failed: {out:?}");
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("unparseable count: {text:?}"))
+        }
+        let (folder, guard) = tempdir();
+        let runner = std::thread::spawn(move || {
+            let _guard = guard;
+            run_captured("ping -n 300 127.0.0.42", &folder, Duration::from_secs(8))
+        });
+        // Non-vacuous: the grandchild really runs before the timeout.
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut seen = 0;
+        while seen == 0 && Instant::now() < deadline {
+            seen = pings_alive();
+        }
+        assert!(seen > 0, "ping.exe was running before the timeout");
+        let out = runner.join().expect("join").expect("run");
+        assert!(out.timed_out);
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(pings_alive(), 0, "no ping.exe survives the timeout");
     }
 
     // ------------------------------------------------------- B4 audit --

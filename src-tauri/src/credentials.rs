@@ -348,7 +348,7 @@ fn code_sign_fingerprint() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         let exe = std::env::current_exe().ok()?;
-        let output = std::process::Command::new("/usr/bin/codesign")
+        let output = crate::process::hidden_command("/usr/bin/codesign")
             .arg("-d")
             .arg("--verbose=4")
             .arg(&exe)

@@ -30,6 +30,8 @@ mod links;
 mod memory;
 // Preview pane backends (S21): granted-file reads + platform page fetch.
 mod preview;
+// Child processes: every spawn hides its console window on Windows.
+mod process;
 mod profile;
 // R20-D: sandboxed preview of the websites write_website built.
 mod site_preview;
@@ -50,6 +52,8 @@ mod tool_markup;
 // (auto, inline card or native dialog) / execute tool actions.
 mod tools;
 mod tts;
+// Turn continuity: end reasons, step budget, tool-trace replay, summary.
+mod turn;
 // Auto-update (round 7): silent check, install only on the user's click.
 mod updater;
 // Built-in web search the model can call (proxied by the platform API).

@@ -3,7 +3,7 @@
 // (inside active grants only); web pages go through the platform fetch
 // wrapper, with a branded open-in-browser card as the fallback.
 
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   fetchWebPreview,
@@ -199,8 +199,10 @@ export default function PreviewPane({
   // surface. A surface opened after it (a row menu, a dialog) sits above it
   // and takes Escape first; a key another handler already consumed
   // (defaultPrevented) or an IME composition never closes the pane.
+  // Registered at commit (layout effect), like its layer: no window where an
+  // Escape pressed right after the pane opened reaches another surface.
   const layer = useEscapeLayer(true);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.isComposing || e.defaultPrevented) return;
       if (!isTopLayer(layer)) return;

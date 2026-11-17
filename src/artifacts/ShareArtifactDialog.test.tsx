@@ -421,7 +421,9 @@ describe("ShareArtifactDialog: success", () => {
     const field = screen.getByLabelText("Link") as HTMLInputElement;
     expect(field.value).toBe(URL_OK);
     expect(field.readOnly).toBe(true);
-    expect(document.activeElement).toBe(field);
+    // Focus lands in a passive effect after the success view commits, which
+    // can run after findByText resolved: wait for it (same assertion).
+    await waitFor(() => expect(document.activeElement).toBe(field));
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Copy" }));
     });

@@ -62,7 +62,7 @@ import {
   type GrantMode,
 } from "./core";
 import { ModeSwitch } from "./components/ModeSwitch";
-import { isTopLayer, useEscapeLayer } from "./escapeLayers";
+import { useEscape } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
 import { useI18n, useT, type Strings } from "./i18n";
 import {
@@ -137,6 +137,7 @@ import {
 } from "./skills/skills";
 import { useWorkspace } from "./workspace";
 import { TurnIndicator, useTurnStarts } from "./chat/TurnIndicator";
+import { AUTO_RETRY_DELAY_MS, isContinuable, shouldAutoRetry, UnfinishedTurn } from "./chat/UnfinishedTurn";
 
 // The preview pane and its renderers load on first use (S21).
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
@@ -167,6 +168,12 @@ interface ChatDelta {
 }
 interface ChatIdPayload {
   conversation_id: number;
+  // Why the turn ended (`chat://done`: completed / tool_cap / stream_cut /
+  // length / interrupted; `chat://stopped`: user_stop). The stored reply
+  // carries it too (`end_reason`), which is what the transcript renders from.
+  reason?: string;
+  // For `interrupted`: the failure kind (`rate_limited` asks to wait).
+  error_kind?: string;
 }
 interface ChatError {
   conversation_id: number;
@@ -506,7 +513,13 @@ function ConversationMenu({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const layer = useEscapeLayer(open);
+  // Round 14 review (F1/F2): only the innermost open surface consumes Escape,
+  // never during an IME composition (see escapeLayers.useEscape).
+  useEscape(open, (e) => {
+    e.preventDefault();
+    setOpen(false);
+    triggerRef.current?.focus();
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -514,20 +527,11 @@ function ConversationMenu({
     const onDown = (e: MouseEvent) => {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.isComposing) return;
-      if (!isTopLayer(layer)) return;
-      e.preventDefault();
-      setOpen(false);
-      triggerRef.current?.focus();
-    };
     window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey, { capture: true });
     return () => {
       window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey, { capture: true });
     };
-  }, [open, layer]);
+  }, [open]);
 
   /** Up/Down move between the items, Home/End jump, Tab closes. */
   const onMenuKey = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
@@ -624,25 +628,17 @@ function ComputerWideDialog({
   const t = useT();
   const [mode, setMode] = useState<GrantMode>(DEFAULT_GRANT_MODE);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  const layer = useEscapeLayer(true);
   // Focus once on open; re-renders of the shell must not steal focus back.
   useEffect(() => {
     cancelRef.current?.focus();
   }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // Round 14 review (F1/F2): an Escape that cancels an IME composition is
-      // not a dismissal, and only the innermost open surface consumes the key.
-      if (e.key !== "Escape" || e.isComposing) return;
-      if (!isTopLayer(layer)) return;
-      // Round 14 (B1/B2): an open dialog is the innermost surface and
-      // consumes Escape, so the surface behind it stays where it is.
-      e.preventDefault();
-      onCancel();
-    };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [layer, onCancel]);
+  // Round 14 (B1/B2) + review (F1/F2): an open dialog is the innermost
+  // surface and consumes Escape (not an IME composition), so the surface
+  // behind it stays where it is.
+  useEscape(true, (e) => {
+    e.preventDefault();
+    onCancel();
+  });
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
@@ -743,6 +739,15 @@ function ChatShell({
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [inlineError, setInlineError] = useState("");
+  // Turn continuity: the conversation whose cut / too-long reply is about
+  // to be resumed automatically (once, cancellable; see UnfinishedTurn).
+  const [autoRetryConvId, setAutoRetryConvId] = useState<number | null>(null);
+  // Conversations whose running turn IS that automatic continuation: if it
+  // stops the same way, the manual notice is shown instead (never a loop).
+  const autoRetryTurnsRef = useRef<Set<number>>(new Set());
+  // Conversations whose last turn was interrupted because the service was
+  // busy (rate limited): the notice asks to wait a moment. Session-only.
+  const [busyInterrupted, setBusyInterrupted] = useState<ReadonlySet<number>>(new Set());
   // Round 14/S1: the newer version the updater found. ONE check (owned by
   // the app window, before sign-in) feeds the banner, the user menu and
   // Settings, so a dismissed banner never hides the update; one install at a
@@ -1174,7 +1179,19 @@ function ChatShell({
         if (parsed) distilledDraftsRef.current.set(parsed.conversationId, parsed.draft);
       }),
       listen<ChatIdPayload>("chat://done", (event) => {
-        finish(event.payload.conversation_id);
+        const { conversation_id: id, reason, error_kind } = event.payload;
+        const wasAutoRetry = autoRetryTurnsRef.current.delete(id);
+        const busy = reason === "interrupted" && error_kind === "rate_limited";
+        setBusyInterrupted((prev) => {
+          if (busy === prev.has(id)) return prev;
+          const next = new Set(prev);
+          if (busy) next.add(id);
+          else next.delete(id);
+          return next;
+        });
+        // Only the conversation on screen resumes by itself.
+        if (shouldAutoRetry(reason, wasAutoRetry) && activeConvRef.current === id) setAutoRetryConvId(id);
+        finish(id);
         void syncMemory();
       }),
       // The user pressed Stop: what arrived stays persisted.
@@ -1185,10 +1202,12 @@ function ChatShell({
         const id = event.payload.conversation_id;
         awaitingSkillRef.current.delete(id);
         distilledDraftsRef.current.delete(id);
+        autoRetryTurnsRef.current.delete(id);
         finish(id);
       }),
       listen<ChatError>("chat://error", (event) => {
         const { conversation_id, kind } = event.payload;
+        autoRetryTurnsRef.current.delete(conversation_id);
         markStreaming(conversation_id, false);
         clearDraft(conversation_id);
         declaredOutputsRef.current.delete(conversation_id);
@@ -1792,9 +1811,12 @@ function ChatShell({
 
   // `override` sends a fixed text (round 15: "Save as skill") without
   // touching what the user is typing; the result says whether it went out.
-  const send = useCallback(async (override?: string): Promise<boolean> => {
+  // `continuation` marks the "Continue" button of an unfinished turn.
+  const send = useCallback(async (override?: string, continuation = false): Promise<boolean> => {
     const text = (override ?? composer).trim();
     if (!text || streamingActive) return false;
+    // Any send replaces a pending automatic continuation.
+    setAutoRetryConvId(null);
     setSessionExpired(false);
     setInlineError("");
     let conversationId: number | null = null;
@@ -1829,7 +1851,14 @@ function ChatShell({
       // away mid-reply never hides it; the refresh after `chat_send` swaps
       // in the core's stored title and ordering.
       setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(text)));
-      await sendChat({ conversationId: id, model, content: text, grantIds, ...(skillId ? { skillId } : {}) });
+      await sendChat({
+        conversationId: id,
+        model,
+        content: text,
+        grantIds,
+        ...(skillId ? { skillId } : {}),
+        ...(continuation ? { continuation: true } : {}),
+      });
       void refreshConversations();
       return true;
     } catch (err) {
@@ -2043,6 +2072,47 @@ function ChatShell({
     }
   }, [streamingActive, send, t, openSkills, messages]);
 
+  // Turn continuity: resume a reply that stopped before finishing (the
+  // composer text, if any, is left untouched).
+  const continueTurn = useCallback((): void => {
+    if (streamingActive) return;
+    void send(t.chat.continuePrompt, true);
+    // The button goes away with the click: keep focus in the composer.
+    composerRef.current?.focus();
+  }, [streamingActive, send, t]);
+
+  const cancelAutoRetry = useCallback((): void => {
+    setAutoRetryConvId(null);
+    composerRef.current?.focus();
+  }, []);
+
+  // The automatic continuation: after a short pause, once, only for the
+  // conversation still on screen and only while nothing else runs there.
+  const sendRef = useRef(send);
+  useEffect(() => {
+    sendRef.current = send;
+  }, [send]);
+  useEffect(() => {
+    if (autoRetryConvId === null) return;
+    if (autoRetryConvId !== activeConvId) {
+      setAutoRetryConvId(null);
+      return;
+    }
+    if (streamingActive) return;
+    const id = autoRetryConvId;
+    const timer = window.setTimeout(() => {
+      // Its Cancel button goes away: keep focus in the composer.
+      if (document.activeElement instanceof HTMLElement && document.activeElement.closest(".unfinished-turn")) {
+        composerRef.current?.focus();
+      }
+      autoRetryTurnsRef.current.add(id);
+      void sendRef.current(t.chat.continuePrompt, true).then((sent) => {
+        if (!sent) autoRetryTurnsRef.current.delete(id);
+      });
+    }, AUTO_RETRY_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [autoRetryConvId, activeConvId, streamingActive, t]);
+
   const onSkillSaved = useCallback((saved: Skill): void => {
     setSkills((prev) => upsertSkill(prev, saved));
     setSkillsLoadError(false);
@@ -2174,9 +2244,13 @@ function ChatShell({
     }
     const visible = stripToolMarkup(m.content);
     const files = messageFiles(visible, fileRoots, m.artifacts);
+    // Only the latest reply offers to continue, and not while a reply runs.
+    const offerContinue =
+      !streamingActive && isContinuable(m.end_reason) && messages[messages.length - 1]?.id === m.id;
     // A row that was only tool markup has nothing to show (S16).
     if (
       visible.trim().length === 0 &&
+      !offerContinue &&
       !m.partial &&
       (m.sources ?? []).length === 0 &&
       files.chips.length === 0 &&
@@ -2203,6 +2277,15 @@ function ChatShell({
           <p className="partial-note" role="note">
             {t.chat.interrupted}
           </p>
+        )}
+        {offerContinue && (
+          <UnfinishedTurn
+            reason={m.end_reason}
+            onContinue={continueTurn}
+            autoRetrying={autoRetryConvId === m.conversation_id}
+            onCancelAutoRetry={cancelAutoRetry}
+            busy={busyInterrupted.has(m.conversation_id)}
+          />
         )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
         <FileChips paths={files.chips} onOpen={openFilePreview} onShare={artifactsOn ? openShare : undefined} />
