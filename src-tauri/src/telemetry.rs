@@ -1225,6 +1225,7 @@ mod tests {
             TurnEndReason::ToolCap,
             TurnEndReason::StreamCut,
             TurnEndReason::Length,
+            TurnEndReason::Interrupted,
             TurnEndReason::UserStop,
             TurnEndReason::Error,
         ] {
@@ -1287,7 +1288,15 @@ mod tests {
         match (name, key) {
             ("turn_end", "reason") => matches!(
                 s,
-                Some("completed" | "tool_cap" | "stream_cut" | "length" | "user_stop" | "error")
+                Some(
+                    "completed"
+                        | "tool_cap"
+                        | "stream_cut"
+                        | "length"
+                        | "interrupted"
+                        | "user_stop"
+                        | "error"
+                )
             ),
             ("turn_end", "error_kind") => value.is_null() || s.is_some_and(valid_name),
             ("turn_end", "rounds" | "tool_calls" | "duration_ms")
@@ -1396,6 +1405,16 @@ mod tests {
         assert_eq!(event.props["error_kind"], "rate_limited");
         assert_eq!(event.props["rounds"], 60);
         assert_eq!(event.props["continued"], true);
+    }
+
+    #[test]
+    fn an_interrupted_turn_reports_its_real_error_kind() {
+        let mut s = summary("glm5.3");
+        s.reason = TurnEndReason::Interrupted;
+        s.error_kind = Some(crate::chat::ErrorKind::Server);
+        let event = turn_end(&s);
+        assert_eq!(event.props["reason"], "interrupted");
+        assert_eq!(event.props["error_kind"], "server");
     }
 
     #[test]

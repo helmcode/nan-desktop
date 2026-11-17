@@ -207,7 +207,7 @@ durations and fixed lists; tests pin every builder):
 | Event | Props |
 |---|---|
 | `app_start` | none |
-| `turn_end` | `reason` (`completed`, `tool_cap`, `stream_cut`, `length`, `user_stop`, `error`), `error_kind` (classified kind or null), `rounds`, `tool_calls`, `duration_ms`, `model` (only ids from the app's built-in model list, else `other`), `continued` (bool) |
+| `turn_end` | `reason` (`completed`, `tool_cap`, `stream_cut`, `length`, `interrupted`, `user_stop`, `error`), `error_kind` (the classified kind for `error` and `interrupted`, else null), `rounds`, `tool_calls`, `duration_ms`, `model` (only ids from the app's built-in model list, else `other`), `continued` (bool) |
 | `tool_call` | `tool` (only names from the app's fixed tool list, else `unknown`), `outcome` (`ok`, `error`, `timeout`, `denied`), `duration_ms` |
 | `error_shown` | `surface` (`chat`, `images`, `sign_in`, `memory`), `kind` (the classified error kind, e.g. `rate_limited`, `network`) |
 | `crash` | `source` (`rust_panic`, `renderer`), `location` (Rust: `file:line` of the panic in the app's source, build-machine prefixes removed; renderer: the error name such as `TypeError`) |
