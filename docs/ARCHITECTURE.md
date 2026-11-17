@@ -4,7 +4,7 @@
 > desktop app, written as each feature landed. Section titles keep the
 > internal milestone ids they shipped under (`T4`, `T8`, `P1-6`, ...) and
 > cite spec rules as `S1`..`S19` (for example S4 = "credentials never enter
-> the renderer", S8 = "zero telemetry", S2/S12 = "locked endpoints"); the
+> the renderer", S8 = "no third parties; telemetry is technical metadata only", S2/S12 = "locked endpoints"); the
 > rules themselves are summarized in [CONTRIBUTING.md](../CONTRIBUTING.md#ground-rules-read-first).
 > For a user-level overview start with the [README](../README.md).
 >
@@ -125,6 +125,63 @@ together with the chosen mode. Commands: `memory_settings_get`,
 `memory_set_mode`, `memory_sync` (always `Ok`; returns whether the list
 changed).
 
+## Telemetry (S8)
+
+Always on (owner decision 2026-11-17), metadata only. The user-facing
+contract (events, fields, what is never sent, delivery rules) lives in
+[SECURITY.md](../SECURITY.md#telemetry-what-the-app-sends); this is the
+implementation map (`src-tauri/src/telemetry.rs`):
+
+- **Builders** (`app_start`, `turn_end`, `tool_call`, `error_shown`,
+  `crash_rust`, `crash_renderer`) are the only way to make an event. Props
+  come from enums (`TurnEndReason`, `ToolOutcome`, `Surface`, the
+  `ErrorKind` enums via their serde spelling), counters, durations and two
+  fixed lists (`TOOL_NAMES`, the `chat-models.json` allowlist). A test
+  enumerates every builder against the backend validation rules
+  (`^[a-z][a-z0-9_]{0,63}$` names/keys, flat props, strings <= 128) and
+  another feeds paths, URLs, keys, emails and message text through every
+  input and asserts none of it reaches the wire.
+- **Hook points:** `turn::report_turn` (`turn_end`), the tool loop in
+  `chat::run_chat_stream` (`tool_call`, outcome classified from the result
+  JSON shape: `ok:false` + `declined` = `denied`, other `ok:false` =
+  `error`, `timed_out:true` = `timeout`), every classified error emitter
+  (`chat://error`, `images://error` for generation and edits,
+  `device://error`) and the memory sync's silent fallback (`error_shown`),
+  the panic hook and `telemetry_renderer_crash` (`crash`), `setup`
+  (`app_start`).
+- **Tagging:** each event stores the profile id and the bound user's realm
+  hash it was produced under; `Queued::belongs_to` only lets a profile's
+  flush pick its own events (install-level untagged events: active profile
+  only).
+- **Transport:** `flush_profile` posts batches (<= 100 events, body <= 256
+  KiB) with the profile's session JWT to `device_flow::platform_base` +
+  `/api/desktop/telemetry`; `classify_status` maps 2xx = sent, 400/413 and
+  other 4xx = drop, 401/403/404 = stop for the session, 408/429/5xx/network
+  = retry with exponential back-off (any 2xx, including the per-account
+  cap's `202 {"dropped": n}`, is delivered). Volume guards: `DailyCap`
+  (5000 events per UTC day, counted in memory and saved to
+  `telemetry/daily.json` at each flush and on exit) and
+  `TOOL_CALL_EVENTS_PER_TURN` (20, `should_report_tool_call`). A 429/5xx
+  `Retry-After` (seconds) lengthens the back-off, bounded to 15 min. A
+  profile with nothing queued is skipped before its session is read from
+  the vault. A background task flushes 15 s after
+  launch, then every 60 s or when 50 events are queued; `RunEvent::Exit`
+  runs a 3 s best-effort flush.
+- **Crash capture:** the panic hook reads only `PanicHookInfo::location()`
+  (never the payload) and appends to `telemetry/crash.jsonl` without taking
+  a lock (release builds abort right after); `Queue::open` merges it on the
+  next launch. The renderer's `logCrash` (`src/ErrorBoundary.tsx`) calls
+  `reportRendererCrash(name)` (`src/core.ts`), which sends only the error
+  name; the core re-checks it against `RENDERER_ERROR_NAMES` (standard
+  error classes + `typeof` fallbacks, else `Error`) and caps it at 20 per
+  launch with a saturating counter (`take_bounded`).
+- **Disk robustness:** `Queue::open` re-validates every record
+  (`catalogue_keys`, `valid_ts`, no control characters) and rewrites the
+  file when a line was dropped or the last line has no newline, so a write
+  cut short never swallows the next append. OS versions come from pure,
+  platform-independent parsers (`parse_windows_ver`: first
+  `d+.d+.d+(.d+)?` in `ver` output in any language; `parse_os_release`).
+
 ## T4 chat MVP (S3)
 
 After sign-in the app is a full chat client: streaming SSE replies, markdown
@@ -219,7 +276,8 @@ React state (drafts per conversation) → react-markdown + highlight + sanitize
 
   Every turn is summarized once in `turn::TurnTracker` → `TurnSummary
   {reason, error_kind, rounds, tool_calls, duration_ms, model, continued}`
-  → `turn::report_turn` (a no-op hook for telemetry); an aborted stream task
+  → `turn::report_turn`, which records one `turn_end` telemetry event (see
+  [Telemetry](#telemetry-s8)); an aborted stream task
   reports `user_stop` from `Drop`, and its `process::StopCommandsOnDrop`
   ends the command its tool call was running.
 - **Error kinds** (`chat://error`): `missing_key`, `unauthorized` (401 → the

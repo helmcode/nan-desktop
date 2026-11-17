@@ -67,7 +67,7 @@
 //! [`edits_url`]) lives in `image_edit.rs`; it reuses this module's base,
 //! save path, registry and events.
 //!
-//! Zero telemetry (S8): the only hosts contacted are the conversation
+//! Locked endpoints (S8): the only hosts contacted are the conversation
 //! profile's own platform base (a compiled-in constant, S2) and, for the
 //! `url` reply shape, the presigned storage URL that base returned; in debug
 //! builds the `NAN_DESKTOP_MOCK_IMAGES` environment variable may point it at
@@ -853,6 +853,10 @@ async fn run_image_generation(
     let _ = window.emit("images://started", ImagesStartedPayload { conversation_id });
 
     let emit_error = |kind: ImageErrorKind| {
+        crate::telemetry::record(
+            Some(&profile_id),
+            crate::telemetry::error_shown(crate::telemetry::Surface::Images, &kind),
+        );
         release_image(&state, conversation_id, generation);
         let _ = window.emit(
             "images://error",

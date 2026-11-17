@@ -18,10 +18,13 @@
 //
 // Logging stays local (console, which the core's webview log captures):
 // message, stack, component stack and a timestamp, with anything that looks
-// like a credential redacted. Zero telemetry.
+// like a credential redacted. The only thing that leaves the renderer is the
+// error NAME (`TypeError`, ...), handed to the core's crash telemetry
+// (`reportRendererCrash`); never the message, stack or component stack.
 
 import { Component, Fragment, type ErrorInfo, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { reportRendererCrash } from "./core";
 import { STRINGS } from "./i18n";
 import { DEFAULT_LOCALE, storedLocale } from "./i18n/locale";
 import type { Strings } from "./i18n/en";
@@ -98,6 +101,7 @@ export function logCrash(
   } catch {
     // A console that throws must not turn a crash into a second crash.
   }
+  reportRendererCrash(name);
   return report;
 }
 

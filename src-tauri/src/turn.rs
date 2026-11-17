@@ -497,7 +497,7 @@ pub fn history_messages(rows: &[ChatMessageRow], replay_traces: bool) -> Vec<ser
 }
 
 // ---------------------------------------------------------------------------
-// Turn summary (the telemetry hook point)
+// Turn summary (reported to telemetry)
 // ---------------------------------------------------------------------------
 
 /// What one finished turn looked like. Built in exactly one place
@@ -505,6 +505,8 @@ pub fn history_messages(rows: &[ChatMessageRow], replay_traces: bool) -> Vec<ser
 /// to [`report_turn`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnSummary {
+    /// The profile the turn ran under (telemetry goes to its platform only).
+    pub profile_id: String,
     pub reason: TurnEndReason,
     /// The classified failure when `reason` is [`TurnEndReason::Error`].
     pub error_kind: Option<ErrorKind>,
@@ -524,6 +526,7 @@ pub struct TurnSummary {
 #[derive(Debug)]
 pub struct TurnTracker {
     started: Instant,
+    profile_id: String,
     model: String,
     continued: bool,
     pub rounds: usize,
@@ -532,9 +535,10 @@ pub struct TurnTracker {
 }
 
 impl TurnTracker {
-    pub fn start(model: &str, continued: bool) -> Self {
+    pub fn start(profile_id: &str, model: &str, continued: bool) -> Self {
         Self {
             started: Instant::now(),
+            profile_id: profile_id.to_string(),
             model: model.to_string(),
             continued,
             rounds: 0,
@@ -545,6 +549,7 @@ impl TurnTracker {
 
     fn summary(&self, reason: TurnEndReason, error_kind: Option<ErrorKind>) -> TurnSummary {
         TurnSummary {
+            profile_id: self.profile_id.clone(),
             reason,
             error_kind,
             rounds: self.rounds,
@@ -572,12 +577,15 @@ impl Drop for TurnTracker {
     }
 }
 
-/// Hook for turn telemetry: every finished turn passes through here exactly
-/// once. Intentionally a no-op for now (telemetry lands separately).
+/// Turn telemetry: every finished turn passes through here exactly once and
+/// becomes one `turn_end` event (metadata only, see `telemetry::turn_end`).
 pub fn report_turn(summary: &TurnSummary) {
     #[cfg(test)]
     tests::REPORTED.with(|reported| reported.borrow_mut().push(summary.clone()));
-    let _ = summary;
+    crate::telemetry::record(
+        Some(&summary.profile_id),
+        crate::telemetry::turn_end(summary),
+    );
 }
 
 #[cfg(test)]
@@ -1084,7 +1092,7 @@ mod tests {
     #[test]
     fn a_finished_turn_is_reported_once_with_its_counts() {
         take_reported();
-        let mut tracker = TurnTracker::start("deepseek-v4-flash", true);
+        let mut tracker = TurnTracker::start("nan", "deepseek-v4-flash", true);
         tracker.rounds = 3;
         tracker.tool_calls = 5;
         let summary = tracker.finish(TurnEndReason::ToolCap, None);
@@ -1099,7 +1107,7 @@ mod tests {
     #[test]
     fn an_aborted_turn_reports_a_user_stop() {
         take_reported();
-        let mut tracker = TurnTracker::start("m", false);
+        let mut tracker = TurnTracker::start("nan", "m", false);
         tracker.rounds = 1;
         drop(tracker);
         let reported = take_reported();
@@ -1112,7 +1120,7 @@ mod tests {
     #[test]
     fn an_error_turn_carries_its_kind() {
         take_reported();
-        let summary = TurnTracker::start("m", false)
+        let summary = TurnTracker::start("nan", "m", false)
             .finish(TurnEndReason::Error, Some(ErrorKind::RateLimited));
         assert_eq!(summary.error_kind, Some(ErrorKind::RateLimited));
         assert_eq!(take_reported().len(), 1);

@@ -13,6 +13,9 @@
 - Windows: los comandos ya no abren una ventana de consola que roba el foco.
 - El registro de herramientas que se guarda en el equipo se limita a las 2 ultimas respuestas de cada conversacion.
 
+### Changed
+- Para corregir errores y entender el uso, la app envia datos tecnicos (inicio de la app, como termino una respuesta, que herramienta se uso y si funciono, que tipo de error se mostro y donde fallo la app) a la API de tu propia plataforma, sin terceros. Nunca envia tus conversaciones, archivos, rutas, enlaces, comandos ni nada que escribas. Siempre esta activo; el detalle completo esta en SECURITY.md.
+
 ## 0.2.12 - 2026-11-16 - Todo se ve como debe
 
 ### New

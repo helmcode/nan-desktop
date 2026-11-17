@@ -39,8 +39,8 @@
 //! most recent turns replay it (bounded) so "Continuar" resumes the work
 //! instead of starting over. A stream that ends without `[DONE]` or with
 //! `finish_reason: "length"` keeps its text and ends as `stream_cut` /
-//! `length`. Every turn is summarized once in `turn::TurnTracker` (the hook
-//! point for telemetry).
+//! `length`. Every turn is summarized once in `turn::TurnTracker` and
+//! reported as one `turn_end` telemetry event (metadata only).
 //!
 //! Tool calls arrive as OpenAI `delta.tool_calls` OR, when the server-side
 //! tool parser is missing for the served model, as markup inside the
@@ -70,8 +70,8 @@
 //! active streams keyed by conversation id, with a generation counter so a
 //! finishing task only removes its own entry).
 //!
-//! Zero telemetry (S8): the only host contacted is the profile's own
-//! inference base — a compiled-in constant (S2); in debug builds the
+//! Locked endpoints (S8): the only host this module contacts is the profile's
+//! own inference base — a compiled-in constant (S2); in debug builds the
 //! `NAN_DESKTOP_MOCK_INFERENCE` environment variable may point it at a local
 //! mock (`test/mock-chat.mjs`), exactly like the device-flow platform mock.
 //! Release builds ignore the variable entirely (S12).
@@ -560,6 +560,9 @@ pub fn outcome_for_model(result: Result<tools::ToolOutcome, tools::Rejection>) -
             }
             if let Some(code) = outcome.exit_code {
                 value["exit_code"] = code.into();
+            }
+            if outcome.timed_out {
+                value["timed_out"] = true.into();
             }
             if !outcome.produced.is_empty() {
                 // Where the work landed: the model must report these paths.
@@ -1137,12 +1140,16 @@ async fn run_chat_stream(
 ) {
     let state = app.state::<ChatState>();
     // The one place a turn is summarized (an abort reports `user_stop`).
-    let mut tracker = TurnTracker::start(&model, continued);
+    let mut tracker = TurnTracker::start(&profile_id, &model, continued);
     // An aborted task (Stop, a new send, a realm switch) ends the command
     // its tool call was running instead of leaving it to its timeout.
     let commands = crate::process::StopCommandsOnDrop::new(conversation_id);
 
     let emit_error = |kind: ErrorKind| {
+        crate::telemetry::record(
+            Some(&profile_id),
+            crate::telemetry::error_shown(crate::telemetry::Surface::Chat, &kind),
+        );
         let _ = window.emit(
             "chat://error",
             ChatErrorPayload {
@@ -1346,6 +1353,7 @@ async fn run_chat_stream(
         }));
         let mut results: Vec<String> = Vec::with_capacity(round_out.tool_calls.len());
         for call in &round_out.tool_calls {
+            let tool_started = std::time::Instant::now();
             let (content, produced, declared) = run_tool_call(
                 &app,
                 &window,
@@ -1357,6 +1365,18 @@ async fn run_chat_stream(
             )
             .await;
             tracker.tool_calls += 1;
+            // Metadata only: registry name, outcome class, duration. Capped
+            // per turn (the rest is counted in `turn_end.tool_calls`).
+            if crate::telemetry::should_report_tool_call(tracker.tool_calls) {
+                crate::telemetry::record(
+                    Some(&profile_id),
+                    crate::telemetry::tool_call(
+                        &call.name,
+                        crate::telemetry::tool_outcome_from_result(&content),
+                        u64::try_from(tool_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    ),
+                );
+            }
             if merge_artifacts(&mut artifacts, produced) {
                 // Persisted as they appear: a stopped reply keeps its chips.
                 let _ = chat_store::set_message_artifacts(&conn, row, &artifacts);

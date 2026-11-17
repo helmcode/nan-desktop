@@ -4,7 +4,7 @@
 [![Latest release](https://img.shields.io/github/v/release/helmcode/nan-desktop)](https://github.com/helmcode/nan-desktop/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
 ![License](https://img.shields.io/badge/license-proprietary%20(source--available)-red)
-![Telemetry](https://img.shields.io/badge/telemetry-none-success)
+![Telemetry](https://img.shields.io/badge/telemetry-technical%20only%2C%20no%20content-informational)
 
 Native desktop app for two AI inference platforms that share one product:
 
@@ -14,8 +14,17 @@ Native desktop app for two AI inference platforms that share one product:
   self-service inference platform for companies.
 
 You need an account on one of them to use the app. Built with Tauri v2
-(Rust core) + React 19 + Vite. No Docker, no external runtime, **zero
-telemetry**: the app only talks to the two platforms' own APIs.
+(Rust core) + React 19 + Vite. No Docker, no external runtime, and **no
+third parties**: the app only talks to the two platforms' own APIs.
+
+**Telemetry (always on, technical only).** To fix bugs and understand how
+the app is used, it sends technical usage and error data (app start, how a
+reply ended, which built-in tool ran and whether it worked, which kind of
+error was shown, where a crash happened) to the signed-in platform's own API.
+It never sends your conversations, prompts, files, file names, paths, URLs,
+commands, searches, emails or anything you write. It cannot be turned off.
+The exact events and fields are listed in
+[SECURITY.md](SECURITY.md#telemetry-what-the-app-sends).
 
 **Source-available, community-built.** The source is public so the
 community can review, audit and contribute to it; the product is

@@ -21,9 +21,15 @@ them are rejected regardless of quality.
    encrypted vault at runtime. Never commit, hardcode, log or paste them
    (not in issues either). `.env` files are ignored and must stay ignored.
    If you leak a secret, rotate it first and tell us immediately.
-2. **Zero telemetry (S8).** The app sends nothing anywhere except calls to
-   the two inference platforms. PRs that add analytics, tracking, crash
-   reporting or "phone home" behavior of any kind will be rejected.
+2. **No third parties, no user content in telemetry (S8).** The app talks
+   only to the two platforms' own APIs. The built-in telemetry
+   (`src-tauri/src/telemetry.rs`, documented in
+   [SECURITY.md](SECURITY.md#telemetry-what-the-app-sends)) sends technical
+   metadata to those same APIs and nothing else. PRs that add third-party
+   analytics, tracking or crash reporting, or that put any user content
+   (text, prompts, file names, paths, URLs, commands, queries, emails,
+   error messages) into a telemetry event, will be rejected. New events
+   use props from fixed sets only and extend the builder tests.
 3. **Locked endpoints (S2/S12).** The app talks to exactly two services
    (NaN community and Helmcode enterprise). Do not add user-configurable
    base URLs or generic OpenAI-compatible support.
@@ -193,7 +199,7 @@ The PR template asks you to confirm:
 - [ ] cargo fmt --check / clippy -D warnings / cargo test green (--manifest-path src-tauri/Cargo.toml)
 - [ ] Relevant node test/*-check.mjs green
 - [ ] No secrets committed; credentials still never cross to the renderer
-- [ ] Zero telemetry preserved; no new network endpoints
+- [ ] No new network endpoints or third parties; telemetry carries no user content
 - [ ] UI copy added in both English and Spanish (if any)
 - [ ] Docs updated when behavior changed
 - [ ] Conventional Commit title; ~400 changed lines or less where practical

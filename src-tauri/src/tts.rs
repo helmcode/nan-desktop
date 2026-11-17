@@ -28,7 +28,7 @@
 //! with only the wav decoder, so no mp3 decoder dependency is pulled in and
 //! an unexpected non-WAV reply fails as `decode` instead of playing noise.
 //!
-//! Zero telemetry (S8): the only host contacted is the profile's own
+//! Locked endpoints (S8): the only host contacted is the profile's own
 //! inference base — a compiled-in constant (S2); in debug builds the
 //! `NAN_DESKTOP_MOCK_INFERENCE` environment variable may point it at a
 //! local mock (`test/mock-voice.mjs`), exactly like the chat surface.

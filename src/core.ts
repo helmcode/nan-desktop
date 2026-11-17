@@ -290,3 +290,47 @@ export function base64ToBytes(base64: string): Uint8Array {
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
+
+// ---------------------------------------------------------------------------
+// Crash telemetry - src-tauri/src/telemetry.rs
+// ---------------------------------------------------------------------------
+
+/// The only shape of an error the renderer may report: its NAME, from a
+/// fixed list (standard error classes + the `typeof` of a non-Error
+/// rejection). Mirrors `RENDERER_ERROR_NAMES` in the core, which validates
+/// again and owns everything else (no message, no stack).
+const ERROR_NAMES: ReadonlySet<string> = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+  "AbortError",
+  "DOMException",
+  "string",
+  "number",
+  "bigint",
+  "boolean",
+  "symbol",
+  "undefined",
+  "object",
+  "function",
+]);
+
+export function crashName(raw: unknown): string {
+  return typeof raw === "string" && ERROR_NAMES.has(raw) ? raw : "Error";
+}
+
+/// Report a renderer crash by error name only. Fire-and-forget: it never
+/// throws and never rejects (a failing report must not become a second
+/// unhandled rejection).
+export function reportRendererCrash(name: unknown): void {
+  try {
+    void invoke("telemetry_renderer_crash", { name: crashName(name) }).catch(() => undefined);
+  } catch {
+    // No IPC (tests, a torn-down window): nothing to do.
+  }
+}
