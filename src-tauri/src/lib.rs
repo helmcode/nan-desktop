@@ -8,9 +8,11 @@
 // fingerprint, so an item created by another signature is deleted (never
 // read) and macOS never asks for the login keychain password.
 //
-// Zero telemetry (S8): the app only talks to the two locked tenants' own
+// Locked endpoints (S8): the app only talks to the two locked tenants' own
 // URLs (plus the debug-only mock overrides documented in `device_flow` and
-// `chat`).
+// `chat`). That includes telemetry (`telemetry`): technical usage and error
+// metadata (never conversation content, files, paths or anything the user
+// writes) goes only to the signed-in profile's own platform API.
 
 // Shared artifacts (F1): snapshot upload of a granted file + link list/revoke.
 mod artifacts;
@@ -45,6 +47,9 @@ mod skills_team;
 // Incremental SSE parser shared by the streaming chat surface.
 mod sse;
 mod stt;
+// Technical usage/error telemetry to the profile's own platform (always on,
+// metadata only; see the module doc for the exact events).
+mod telemetry;
 // Tool-call markup leaked into content (DSML): streaming filter + parser
 // that turns it into real tool calls and keeps it out of the UI (S16).
 mod tool_markup;
@@ -263,6 +268,10 @@ pub fn run() {
                 // Per-user realms: credential lookups resolve the bound
                 // user from profiles.json under this root.
                 realm::init(&dir);
+                // Telemetry: install id, queue (+ last launch's crash),
+                // panic hook, `app_start`; then the background flusher.
+                telemetry::init(&dir, &app.package_info().version.to_string());
+                telemetry::spawn_flusher();
                 // Round 6: best-effort cleanup of generated images no
                 // conversation references any more (background, never fails
                 // startup).
@@ -333,11 +342,18 @@ pub fn run() {
             preview::preview_reveal_location,
             preview::web_preview_fetch,
             links::open_external,
+            telemetry::telemetry_renderer_crash,
             updater::update_check,
             updater::update_install
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Best-effort telemetry flush on the way out (bounded).
+            if let tauri::RunEvent::Exit = event {
+                telemetry::flush_on_exit();
+            }
+        });
 }
 #[cfg(test)]
 mod tests {

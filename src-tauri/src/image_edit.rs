@@ -857,6 +857,10 @@ async fn run_image_edit(app: AppHandle, window: Window, job: EditJob) {
         images::ImagesStartedPayload { conversation_id },
     );
     let emit_error = |kind: EditErrorKind| {
+        crate::telemetry::record(
+            Some(&job.profile_id),
+            crate::telemetry::error_shown(crate::telemetry::Surface::Images, &kind),
+        );
         images::release_image(&state, conversation_id, job.generation);
         let _ = window.emit(
             "images://error",

@@ -6,7 +6,7 @@
 //! is sent from the Rust core as multipart (`model=whisper`, `file=<bytes>`
 //! with the recording's MIME type). The reply `{text: "…"}` crosses the IPC
 //! boundary as a plain string. The audio bytes and the key never touch the
-//! renderer, are never persisted, and are never logged (zero telemetry, S8:
+//! renderer, are never persisted, and are never logged (locked endpoints, S8:
 //! the only host contacted is the profile's compiled-in inference base —
 //! debug builds may redirect it to `test/mock-voice.mjs` exactly like chat).
 //!

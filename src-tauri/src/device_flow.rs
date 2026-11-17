@@ -32,7 +32,7 @@
 //! `rate_limited` / `server` / `protocol` (malformed payloads and local
 //! failures such as credential-storage or browser-open errors).
 //!
-//! Zero telemetry (S8): the only host contacted is the profile's own
+//! Locked endpoints (S8): the only host contacted is the profile's own
 //! platform base (a compiled-in constant; see [`platform_base`]).
 
 use std::sync::Mutex;
@@ -445,6 +445,10 @@ fn credential_error(_err: crate::credentials::CredError) -> ErrorKind {
 /// The managed login task: start → open browser → poll → store → emit.
 async fn run_device_login(app: AppHandle, window: Window, profile_id: String) {
     let emit_error = |kind: ErrorKind| {
+        crate::telemetry::record(
+            Some(&profile_id),
+            crate::telemetry::error_shown(crate::telemetry::Surface::SignIn, &kind),
+        );
         let _ = window.emit("device://error", ErrorPayload { kind });
     };
 

@@ -631,6 +631,12 @@ async fn run_sync(app: &AppHandle, state: &MemoryState, profile_id: &str) -> boo
             changed
         }
         Err(MemoryError::Unavailable) => {
+            // Never shown (silent fallback to local), but counted: one event
+            // per profile per app session (later syncs return early above).
+            crate::telemetry::record(
+                Some(profile_id),
+                crate::telemetry::error_shown(crate::telemetry::Surface::Memory, &"unavailable"),
+            );
             state.mark_unavailable(profile_id);
             false
         }
