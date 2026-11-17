@@ -25,8 +25,8 @@ describe("renderer crash telemetry", () => {
     expect(sent).not.toMatch(/alice|secret|sk-abc|cannot read/);
   });
 
-  it("collapses anything that is not a plain identifier to Error", () => {
-    for (const bad of ["", "Type Error", "a/b", "1x", "x".repeat(65), 42, null, "Error: msg"]) {
+  it("collapses any name outside the allowlist to Error", () => {
+    for (const bad of ["", "Type Error", "a/b", "1x", "x".repeat(65), 42, null, "Error: msg", "AliceProjectError"]) {
       expect(crashName(bad)).toBe("Error");
     }
     expect(crashName("RangeError")).toBe("RangeError");

@@ -295,13 +295,33 @@ export function base64ToBytes(base64: string): Uint8Array {
 // Crash telemetry - src-tauri/src/telemetry.rs
 // ---------------------------------------------------------------------------
 
-/// The only shape of an error the renderer may report: its NAME
-/// (`TypeError`, ...). Mirrors `renderer_error_name` in the core, which
-/// validates again and owns everything else (no message, no stack).
-const ERROR_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+/// The only shape of an error the renderer may report: its NAME, from a
+/// fixed list (standard error classes + the `typeof` of a non-Error
+/// rejection). Mirrors `RENDERER_ERROR_NAMES` in the core, which validates
+/// again and owns everything else (no message, no stack).
+const ERROR_NAMES: ReadonlySet<string> = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+  "AbortError",
+  "DOMException",
+  "string",
+  "number",
+  "bigint",
+  "boolean",
+  "symbol",
+  "undefined",
+  "object",
+  "function",
+]);
 
 export function crashName(raw: unknown): string {
-  return typeof raw === "string" && ERROR_NAME.test(raw) ? raw : "Error";
+  return typeof raw === "string" && ERROR_NAMES.has(raw) ? raw : "Error";
 }
 
 /// Report a renderer crash by error name only. Fire-and-forget: it never

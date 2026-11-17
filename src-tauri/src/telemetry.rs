@@ -139,7 +139,10 @@ pub fn valid_props(props: &Map<String, Value>) -> bool {
         && props.iter().all(|(key, value)| {
             valid_name(key)
                 && match value {
-                    Value::String(text) => text.chars().count() <= MAX_PROP_STRING_CHARS,
+                    Value::String(text) => {
+                        text.chars().count() <= MAX_PROP_STRING_CHARS
+                            && !text.chars().any(char::is_control)
+                    }
                     Value::Number(_) | Value::Bool(_) | Value::Null => true,
                     Value::Array(_) | Value::Object(_) => false,
                 }
@@ -373,18 +376,39 @@ pub fn crash_rust(file: &str, line: u32) -> EventSpec {
     )
 }
 
-/// A renderer error NAME (`TypeError`, ...): `^[A-Za-z][A-Za-z0-9_]{0,63}$`,
-/// anything else becomes `Error`.
+/// The renderer error names that may be reported: the standard JS error
+/// classes plus the `typeof` of a non-Error rejection. A custom `name` (which
+/// code can set to anything) is never forwarded.
+pub const RENDERER_ERROR_NAMES: &[&str] = &[
+    "Error",
+    "TypeError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "EvalError",
+    "URIError",
+    "AggregateError",
+    "AbortError",
+    "DOMException",
+    // `typeof` fallbacks (ErrorBoundary.tsx `describe`).
+    "string",
+    "number",
+    "bigint",
+    "boolean",
+    "symbol",
+    "undefined",
+    "object",
+    "function",
+];
+
+/// A renderer error NAME from [`RENDERER_ERROR_NAMES`]; anything else
+/// becomes `Error`.
 pub fn renderer_error_name(raw: &str) -> String {
-    let mut chars = raw.chars();
-    let ok = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-        && raw.len() <= 64
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if ok {
-        raw.to_string()
-    } else {
-        "Error".to_string()
-    }
+    RENDERER_ERROR_NAMES
+        .iter()
+        .find(|known| **known == raw)
+        .unwrap_or(&"Error")
+        .to_string()
 }
 
 /// `crash` from the renderer: the error name only.
@@ -393,6 +417,47 @@ pub fn crash_renderer(name: &str) -> EventSpec {
         "crash",
         serde_json::json!({ "source": "renderer", "location": renderer_error_name(name) }),
     )
+}
+
+/// The props each catalogue event may carry (`None` = not an event this app
+/// emits). Records read back from disk must match it.
+pub fn catalogue_keys(name: &str) -> Option<&'static [&'static str]> {
+    Some(match name {
+        "app_start" => &[],
+        "turn_end" => &[
+            "reason",
+            "error_kind",
+            "rounds",
+            "tool_calls",
+            "duration_ms",
+            "model",
+            "continued",
+        ],
+        "tool_call" => &["tool", "outcome", "duration_ms"],
+        "error_shown" => &["surface", "kind"],
+        "crash" => &["source", "location"],
+        _ => return None,
+    })
+}
+
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ`, the exact shape [`rfc3339`] writes.
+pub fn valid_ts(ts: &str) -> bool {
+    let b = ts.as_bytes();
+    b.len() == 24
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            10 => *c == b'T',
+            13 | 16 => *c == b':',
+            19 => *c == b'.',
+            23 => *c == b'Z',
+            _ => c.is_ascii_digit(),
+        })
+}
+
+/// `n`-th tool call of a turn (1-based): only the first
+/// [`TOOL_CALL_EVENTS_PER_TURN`] become `tool_call` events.
+pub fn should_report_tool_call(n: usize) -> bool {
+    n <= TOOL_CALL_EVENTS_PER_TURN
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +506,13 @@ impl Queued {
     fn is_well_formed(&self) -> bool {
         valid_name(&self.event.name)
             && valid_props(&self.event.props)
+            && catalogue_keys(&self.event.name).is_some_and(|keys| {
+                self.event
+                    .props
+                    .keys()
+                    .all(|key| keys.contains(&key.as_str()))
+            })
+            && valid_ts(&self.event.ts)
             && is_uuid(&self.event.id)
             && is_uuid(&self.event.session_id)
             && self
@@ -559,9 +631,13 @@ impl Queue {
     /// panic left behind, prune old events and trim to the cap.
     pub fn open(dir: &Path, now_unix: u64) -> Self {
         let _ = std::fs::create_dir_all(dir);
-        let mut items = read_lines(&dir.join(QUEUE_FILE));
+        // `dirty`: a line was dropped (malformed, or a fragment left by a
+        // write cut short) or the file does not end with a newline. The
+        // file is rewritten, or the next append would glue onto the
+        // fragment and that event would be lost too.
+        let (mut items, dirty) = read_lines(&dir.join(QUEUE_FILE));
         let crash_path = dir.join(CRASH_FILE);
-        let crashes = read_lines(&crash_path);
+        let (crashes, _) = read_lines(&crash_path);
         let merged = !crashes.is_empty();
         items.extend(crashes);
         let mut queue = Queue {
@@ -570,7 +646,7 @@ impl Queue {
         };
         let before = queue.items.len();
         queue.prune(now_unix);
-        if merged || queue.items.len() != before {
+        if dirty || merged || queue.items.len() != before {
             queue.rewrite();
         }
         if merged {
@@ -629,6 +705,13 @@ impl Queue {
             .collect()
     }
 
+    /// Whether anything is queued that `profile`/`realm` may send.
+    pub fn has_for(&self, profile: &str, realm: &str, active: bool) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.belongs_to(profile, realm, active))
+    }
+
     /// Remove events by id (sent, or dropped as unacceptable).
     pub fn remove(&mut self, ids: &HashSet<String>) {
         let before = self.items.len();
@@ -653,13 +736,20 @@ impl Queue {
     }
 }
 
-fn read_lines(path: &Path) -> Vec<Queued> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
+/// The well-formed records of a JSONL file, and whether the file needs a
+/// rewrite (a line was dropped, or the last line has no newline).
+fn read_lines(path: &Path) -> (Vec<Queued>, bool) {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines = 0;
+    let items: Vec<Queued> = text
         .lines()
+        .filter(|line| !line.trim().is_empty())
+        .inspect(|_| lines += 1)
         .filter_map(|line| serde_json::from_str::<Queued>(line).ok())
         .filter(Queued::is_well_formed)
-        .collect()
+        .collect();
+    let dirty = items.len() != lines || (!text.is_empty() && !text.ends_with('\n'));
+    (items, dirty)
 }
 
 /// The persisted install id (uuid v4), created on first use. A missing,
@@ -705,17 +795,46 @@ pub fn classify_status(status: u16) -> Disposition {
     }
 }
 
+/// `Retry-After` in delta-seconds (an HTTP-date is ignored), bounded to
+/// [`BACKOFF_MAX`].
+pub fn parse_retry_after(value: &str) -> Option<Duration> {
+    let secs: u64 = value.trim().parse().ok()?;
+    Some(Duration::from_secs(secs).min(BACKOFF_MAX))
+}
+
+/// The outcome of one POST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attempt {
+    pub disposition: Disposition,
+    /// The server's `Retry-After` on a retryable reply (bounded).
+    pub retry_after: Option<Duration>,
+}
+
 /// POST one batch. The body is never logged.
 pub async fn post_batch(
     client: &reqwest::Client,
     base: &str,
     token: &str,
     body: &Value,
-) -> Disposition {
+) -> Attempt {
     let url = format!("{}{API_PATH}", base.trim_end_matches('/'));
     match client.post(url).bearer_auth(token).json(body).send().await {
-        Ok(response) => classify_status(response.status().as_u16()),
-        Err(_) => Disposition::Retry,
+        Ok(response) => {
+            let disposition = classify_status(response.status().as_u16());
+            let retry_after = (disposition == Disposition::Retry)
+                .then(|| response.headers().get(reqwest::header::RETRY_AFTER))
+                .flatten()
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_retry_after);
+            Attempt {
+                disposition,
+                retry_after,
+            }
+        }
+        Err(_) => Attempt {
+            disposition: Disposition::Retry,
+            retry_after: None,
+        },
     }
 }
 
@@ -732,14 +851,14 @@ pub fn fit_batch(meta: &Meta, mut events: Vec<Event>) -> (Value, Vec<Event>) {
 }
 
 /// Send everything `profile` may send, batch by batch, until the queue has
-/// nothing left for it or an attempt fails. Returns the last disposition
+/// nothing left for it or an attempt fails. Returns the last attempt
 /// (`None` when there was nothing to send).
 pub async fn flush_profile(
     queue: &Mutex<Queue>,
     meta: &Meta,
     client: &reqwest::Client,
     target: &FlushTarget,
-) -> Option<Disposition> {
+) -> Option<Attempt> {
     let mut last = None;
     loop {
         let batch = match queue.lock() {
@@ -750,13 +869,15 @@ pub async fn flush_profile(
             return last;
         }
         let (body, batch) = fit_batch(meta, batch);
-        let outcome = post_batch(client, &target.base, &target.token, &body).await;
-        last = Some(outcome);
-        match outcome {
+        let attempt = post_batch(client, &target.base, &target.token, &body).await;
+        last = Some(attempt);
+        match attempt.disposition {
             Disposition::Sent | Disposition::Drop => {
                 let ids: HashSet<String> = batch.into_iter().map(|e| e.id).collect();
-                if let Ok(mut queue) = queue.lock() {
-                    queue.remove(&ids);
+                match queue.lock() {
+                    Ok(mut queue) => queue.remove(&ids),
+                    // Never resend what was just delivered.
+                    Err(_) => return last,
                 }
             }
             Disposition::Retry | Disposition::Block => return last,
@@ -821,12 +942,15 @@ impl Backoff {
         self.until.get(profile).is_none_or(|(at, _)| now >= *at)
     }
 
-    fn fail(&mut self, profile: &str, now: Instant) {
+    /// Back off after a retryable failure; a server `Retry-After` (already
+    /// bounded) lengthens the wait, never shortens it.
+    fn fail(&mut self, profile: &str, now: Instant, retry_after: Option<Duration>) {
         let next = self
             .until
             .get(profile)
             .map(|(_, delay)| (*delay * 2).min(BACKOFF_MAX))
-            .unwrap_or(FLUSH_INTERVAL);
+            .unwrap_or(FLUSH_INTERVAL)
+            .max(retry_after.unwrap_or_default().min(BACKOFF_MAX));
         self.until.insert(profile.to_string(), (now + next, next));
     }
 
@@ -943,13 +1067,9 @@ pub fn record(profile: Option<&str>, spec: EventSpec) {
     };
     let now = SystemTime::now();
     let admitted = match runtime.daily.lock() {
-        Ok(mut daily) => {
-            let admitted = daily.admit(&rfc3339(now)[..10]);
-            if admitted {
-                daily.save(&runtime.dir);
-            }
-            admitted
-        }
+        // In memory only: persisted by each flush and on exit (no file
+        // write per event).
+        Ok(mut daily) => daily.admit(&rfc3339(now)[..10]),
         Err(_) => false,
     };
     if !admitted {
@@ -1021,6 +1141,9 @@ async fn flush_all() {
         return;
     };
     let _guard = runtime.flushing.lock().await;
+    if let Ok(daily) = runtime.daily.lock() {
+        daily.save(&runtime.dir);
+    }
     let store = read_store(&runtime.root);
     let active = store.as_ref().and_then(|s| s.active_profile.clone());
     let meta = runtime.meta();
@@ -1046,6 +1169,16 @@ async fn flush_all() {
         else {
             continue;
         };
+        let is_active = active.as_deref() == Some(id.as_str());
+        // Nothing to send: do not even read the credential vault.
+        let queued = runtime
+            .queue
+            .lock()
+            .map(|queue| queue.has_for(&id, &realm, is_active))
+            .unwrap_or(false);
+        if !queued {
+            continue;
+        }
         let (Some(base), Some(token)) = (
             crate::device_flow::platform_base(&id),
             crate::chat::read_session_token(&id),
@@ -1053,19 +1186,22 @@ async fn flush_all() {
             continue;
         };
         let target = FlushTarget {
-            active: active.as_deref() == Some(id.as_str()),
+            active: is_active,
             profile: id.clone(),
             realm,
             base,
             token,
         };
-        match flush_profile(&runtime.queue, &meta, client, &target).await {
-            Some(Disposition::Retry) => {
+        match flush_profile(&runtime.queue, &meta, client, &target)
+            .await
+            .map(|attempt| (attempt.disposition, attempt.retry_after))
+        {
+            Some((Disposition::Retry, retry_after)) => {
                 if let Ok(mut backoff) = runtime.backoff.lock() {
-                    backoff.fail(&id, Instant::now());
+                    backoff.fail(&id, Instant::now(), retry_after);
                 }
             }
-            Some(Disposition::Block) => {
+            Some((Disposition::Block, _)) => {
                 if let Ok(mut blocked) = runtime.blocked.lock() {
                     blocked.insert(id);
                 }
@@ -1107,8 +1243,12 @@ pub fn spawn_flusher() {
 
 /// Best-effort flush when the app exits, bounded by [`EXIT_FLUSH_TIMEOUT`].
 pub fn flush_on_exit() {
-    if RUNTIME.get().is_none() {
+    let Some(runtime) = RUNTIME.get() else {
         return;
+    };
+    // Saved first: the flush below may time out waiting for a running one.
+    if let Ok(daily) = runtime.daily.lock() {
+        daily.save(&runtime.dir);
     }
     tauri::async_runtime::block_on(async {
         let _ = tokio::time::timeout(EXIT_FLUSH_TIMEOUT, flush_all()).await;
@@ -1124,32 +1264,71 @@ fn detect_os_version() -> String {
         .unwrap_or_default();
     #[cfg(target_os = "linux")]
     let raw = std::fs::read_to_string("/etc/os-release")
-        .ok()
-        .map(|text| {
-            let field = |key: &str| {
-                text.lines()
-                    .find_map(|line| line.strip_prefix(&format!("{key}=")))
-                    .map(|v| v.trim_matches('"').to_string())
-                    .unwrap_or_default()
-            };
-            format!("{} {}", field("ID"), field("VERSION_ID"))
-        })
+        .map(|text| parse_os_release(&text))
         .unwrap_or_default();
     #[cfg(windows)]
     let raw = crate::process::hidden_command("cmd")
         .args(["/C", "ver"])
         .output()
-        .ok()
-        .and_then(|out| {
-            let text = String::from_utf8_lossy(&out.stdout).to_string();
-            let start = text.find("Version ")? + "Version ".len();
-            let rest = &text[start..];
-            Some(rest[..rest.find(']').unwrap_or(rest.len())].to_string())
-        })
+        .map(|out| parse_windows_ver(&String::from_utf8_lossy(&out.stdout)))
         .unwrap_or_default();
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     let raw = String::new();
     sanitize_os_version(&raw)
+}
+
+/// `/etc/os-release` -> `"<ID> <VERSION_ID>"` (just `"<ID>"` for rolling
+/// distros without a VERSION_ID, e.g. Arch). Platform-independent so it is
+/// tested on every OS.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub fn parse_os_release(text: &str) -> String {
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("{key}=")))
+            .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+            .unwrap_or_default()
+    };
+    let joined = format!("{} {}", field("ID"), field("VERSION_ID"));
+    sanitize_os_version(&joined)
+}
+
+/// The numeric version in `cmd /C ver` output, whatever the language
+/// ("Version", "Versión", a lossy U+FFFD form...): the first
+/// `\d+.\d+.\d+(.\d+)?`. Empty when there is none.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub fn parse_windows_ver(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let boundary = i == 0 || !(chars[i - 1].is_ascii_digit() || chars[i - 1] == '.');
+        if chars[i].is_ascii_digit() && boundary {
+            let mut groups: Vec<String> = vec![String::new()];
+            let mut j = i;
+            while j < chars.len() && groups.len() <= 4 {
+                let c = chars[j];
+                if c.is_ascii_digit() {
+                    if let Some(group) = groups.last_mut() {
+                        group.push(c);
+                    }
+                } else if c == '.'
+                    && chars.get(j + 1).is_some_and(char::is_ascii_digit)
+                    && groups.len() < 4
+                {
+                    groups.push(String::new());
+                } else {
+                    break;
+                }
+                j += 1;
+            }
+            if groups.len() >= 3 {
+                return groups.join(".");
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    String::new()
 }
 
 /// `<key>K</key><string>V</string>` -> `V` (enough for SystemVersion.plist).
@@ -1165,8 +1344,23 @@ fn plist_string(plist: &str, key: &str) -> Option<String> {
 // Renderer IPC
 // ---------------------------------------------------------------------------
 
+/// Count one more against `cap`, saturating: `false` (and no change) once
+/// the cap is reached, so the counter can never wrap around.
+pub fn take_bounded(counter: &AtomicU32, cap: u32) -> bool {
+    let mut current = counter.load(Ordering::SeqCst);
+    loop {
+        if current >= cap {
+            return false;
+        }
+        match counter.compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 /// The renderer's uncaught error / unhandled rejection: ONLY an error name
-/// (validated to `^[A-Za-z][A-Za-z0-9_]{0,63}$`, otherwise `Error`); the
+/// (one of [`RENDERER_ERROR_NAMES`], otherwise `Error`); the
 /// renderer cannot add any other property. At most
 /// [`RENDERER_CRASH_CAP`] per app session.
 #[tauri::command]
@@ -1174,7 +1368,8 @@ pub fn telemetry_renderer_crash(name: String) {
     let Some(runtime) = RUNTIME.get() else {
         return;
     };
-    if runtime.renderer_crashes.fetch_add(1, Ordering::SeqCst) >= RENDERER_CRASH_CAP {
+    let admitted = take_bounded(&runtime.renderer_crashes, RENDERER_CRASH_CAP);
+    if !admitted {
         return;
     }
     record(None, crash_renderer(&name));
@@ -1321,22 +1516,7 @@ mod tests {
     }
 
     fn expected_keys(name: &str) -> &'static [&'static str] {
-        match name {
-            "app_start" => &[],
-            "turn_end" => &[
-                "reason",
-                "error_kind",
-                "rounds",
-                "tool_calls",
-                "duration_ms",
-                "model",
-                "continued",
-            ],
-            "tool_call" => &["tool", "outcome", "duration_ms"],
-            "error_shown" => &["surface", "kind"],
-            "crash" => &["source", "location"],
-            other => panic!("event {other} is not in the catalogue"),
-        }
+        catalogue_keys(name).unwrap_or_else(|| panic!("event {name} is not in the catalogue"))
     }
 
     #[test]
@@ -1479,8 +1659,12 @@ mod tests {
 
     #[test]
     fn renderer_error_names_are_constrained() {
+        for known in RENDERER_ERROR_NAMES {
+            assert_eq!(renderer_error_name(known), *known);
+        }
         assert_eq!(renderer_error_name("TypeError"), "TypeError");
         assert_eq!(renderer_error_name("object"), "object");
+        // A custom error class name could carry anything: never forwarded.
         for bad in [
             "",
             "1abc",
@@ -1488,6 +1672,8 @@ mod tests {
             "a/b",
             "x".repeat(65).as_str(),
             "Error: secret",
+            "AliceSecretProjectError",
+            "typeerror",
         ] {
             assert_eq!(renderer_error_name(bad), "Error", "{bad}");
         }
@@ -1557,6 +1743,109 @@ mod tests {
     }
 
     #[test]
+    fn windows_ver_output_parses_in_any_language() {
+        let cases = [
+            (
+                "\r\nMicrosoft Windows [Version 10.0.22631.4317]\r\n",
+                "10.0.22631.4317",
+            ),
+            (
+                "\r\nMicrosoft Windows [Versión 10.0.19045.5131]\r\n",
+                "10.0.19045.5131",
+            ),
+            (
+                "Microsoft Windows [Versi\u{FFFD}n 10.0.19045.5131]",
+                "10.0.19045.5131",
+            ),
+            (
+                "Microsoft Windows [Version 10.0.26100.2314]",
+                "10.0.26100.2314",
+            ), // de-DE
+            ("Microsoft Windows [Wersja 10.0.22631]", "10.0.22631"),
+            ("Windows 11 build 10.0.22631.4317.9", "10.0.22631.4317"),
+            ("garbage 1.2 and 3", ""),
+            ("", ""),
+        ];
+        for (text, want) in cases {
+            assert_eq!(parse_windows_ver(text), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn os_release_parses_with_and_without_version_id() {
+        let ubuntu = "NAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nID=ubuntu\n";
+        assert_eq!(parse_os_release(ubuntu), "ubuntu 22.04");
+        assert_eq!(
+            parse_os_release("NAME=\"Arch Linux\"\nID=arch\nBUILD_ID=rolling\n"),
+            "arch"
+        );
+        assert_eq!(
+            parse_os_release("ID='fedora'\nVERSION_ID=41\n"),
+            "fedora 41"
+        );
+        assert_eq!(parse_os_release(""), "");
+    }
+
+    #[test]
+    fn retry_after_is_read_in_seconds_and_bounded() {
+        assert_eq!(parse_retry_after("120"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_retry_after(" 999999 "), Some(BACKOFF_MAX));
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        let mut backoff = Backoff::default();
+        let now = Instant::now();
+        backoff.fail("nan", now, Some(Duration::from_secs(600)));
+        assert_eq!(
+            backoff.until["nan"].1,
+            Duration::from_secs(600),
+            "server hint wins"
+        );
+        backoff.reset("nan");
+        backoff.fail("nan", now, Some(Duration::from_secs(1)));
+        assert_eq!(
+            backoff.until["nan"].1, FLUSH_INTERVAL,
+            "never shorter than our own"
+        );
+    }
+
+    #[test]
+    fn the_renderer_crash_counter_saturates() {
+        let counter = AtomicU32::new(0);
+        for _ in 0..RENDERER_CRASH_CAP {
+            assert!(take_bounded(&counter, RENDERER_CRASH_CAP));
+        }
+        for _ in 0..1000 {
+            assert!(!take_bounded(&counter, RENDERER_CRASH_CAP));
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            RENDERER_CRASH_CAP,
+            "never wraps"
+        );
+        let full = AtomicU32::new(u32::MAX);
+        assert!(!take_bounded(&full, RENDERER_CRASH_CAP));
+    }
+
+    #[test]
+    fn only_the_first_tool_calls_of_a_turn_are_reported() {
+        assert!(should_report_tool_call(1));
+        assert!(should_report_tool_call(TOOL_CALL_EVENTS_PER_TURN));
+        assert!(!should_report_tool_call(TOOL_CALL_EVENTS_PER_TURN + 1));
+    }
+
+    #[test]
+    fn timestamps_on_disk_must_have_the_written_shape() {
+        assert!(valid_ts(&rfc3339(SystemTime::now())));
+        for bad in [
+            "",
+            "2026-11-17",
+            "2026-11-17T00:00:00Z",
+            "2026-11-17T00:00:00.000Z\0",
+        ] {
+            assert!(!valid_ts(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn status_codes_map_to_the_documented_dispositions() {
         // Any 2xx is delivered, including the backends' 202 with
         // `dropped` (per-account cap): never retried.
@@ -1577,12 +1866,12 @@ mod tests {
         let mut backoff = Backoff::default();
         let now = Instant::now();
         assert!(backoff.ready("nan", now));
-        backoff.fail("nan", now);
+        backoff.fail("nan", now, None);
         assert!(!backoff.ready("nan", now));
         assert!(backoff.ready("helmcode", now), "per profile");
         assert!(backoff.ready("nan", now + FLUSH_INTERVAL));
         for _ in 0..20 {
-            backoff.fail("nan", now);
+            backoff.fail("nan", now, None);
         }
         assert_eq!(backoff.until["nan"].1, BACKOFF_MAX);
         backoff.reset("nan");
@@ -1677,6 +1966,55 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_last_line_is_repaired_so_the_next_event_survives() {
+        let tmp = TempDir::new().unwrap();
+        let first = queued(Some("nan"), None, unix_now());
+        let line = serde_json::to_string(&first).unwrap();
+        // A valid line, then a write cut short (no trailing newline).
+        std::fs::write(
+            tmp.path().join(QUEUE_FILE),
+            format!("{line}\n{}", &line[..line.len() / 2]),
+        )
+        .unwrap();
+        let second = queued(Some("nan"), None, unix_now());
+        {
+            let mut queue = Queue::open(tmp.path(), unix_now());
+            assert_eq!(queue.items(), std::slice::from_ref(&first));
+            queue.push(second.clone());
+        }
+        let reopened = Queue::open(tmp.path(), unix_now());
+        assert_eq!(reopened.items(), &[first, second]);
+    }
+
+    #[test]
+    fn records_outside_the_catalogue_or_with_bad_values_are_dropped_on_load() {
+        let tmp = TempDir::new().unwrap();
+        let mut extra_key = queued(Some("nan"), None, unix_now());
+        extra_key
+            .event
+            .props
+            .insert("message".into(), "hola".into());
+        let mut unknown = queued(Some("nan"), None, unix_now());
+        unknown.event.name = "page_view".into();
+        let mut bad_ts = queued(Some("nan"), None, unix_now());
+        bad_ts.event.ts = "yesterday".into();
+        let mut nul = queued(Some("nan"), None, unix_now());
+        nul.event = stamp(
+            crash_renderer("TypeError"),
+            &uuid::Uuid::new_v4().to_string(),
+            SystemTime::now(),
+        );
+        nul.event.props.insert("location".into(), "a\u{0}b".into());
+        let good = queued(Some("nan"), None, unix_now());
+        let text = [extra_key, unknown, bad_ts, nul, good.clone()]
+            .iter()
+            .map(|q| serde_json::to_string(q).unwrap() + "\n")
+            .collect::<String>();
+        std::fs::write(tmp.path().join(QUEUE_FILE), text).unwrap();
+        assert_eq!(Queue::open(tmp.path(), unix_now()).items(), &[good]);
+    }
+
+    #[test]
     fn the_install_id_is_stable_and_a_valid_uuid() {
         let tmp = TempDir::new().unwrap();
         let first = load_install_id(tmp.path());
@@ -1752,7 +2090,7 @@ mod tests {
                 // still delivered (removed from the queue, never retried).
                 let body = r#"{"accepted":0,"duplicates":0,"dropped":3}"#;
                 let reply = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\nretry-after: 120\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 std::io::Write::write_all(&mut stream, reply.as_bytes()).expect("write");
@@ -1792,7 +2130,8 @@ mod tests {
         let (base, server) = mock_server(vec![202, 202]);
         let meta = Meta::new(&uuid::Uuid::new_v4().to_string(), "0.2.13", "15.1");
         let last =
-            tauri::async_runtime::block_on(flush_profile(&queue, &meta, &client(), &target(&base)));
+            tauri::async_runtime::block_on(flush_profile(&queue, &meta, &client(), &target(&base)))
+                .map(|a| a.disposition);
         assert_eq!(last, Some(Disposition::Sent));
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
@@ -1847,7 +2186,13 @@ mod tests {
                 &target(&base),
             ));
             server.join().unwrap();
-            assert_eq!(last, Some(want), "{status}");
+            assert_eq!(last.map(|a| a.disposition), Some(want), "{status}");
+            let hint = last.and_then(|a| a.retry_after);
+            if want == Disposition::Retry {
+                assert_eq!(hint, Some(Duration::from_secs(120)), "Retry-After honored");
+            } else {
+                assert_eq!(hint, None, "{status}");
+            }
             assert_eq!(queue.lock().unwrap().len(), left, "{status}");
         }
     }
@@ -1868,7 +2213,8 @@ mod tests {
             &Meta::new("id", "1.0.0", ""),
             &client(),
             &target(&format!("http://127.0.0.1:{port}")),
-        ));
+        ))
+        .map(|a| a.disposition);
         assert_eq!(last, Some(Disposition::Retry));
         assert_eq!(queue.lock().unwrap().len(), 1);
     }
@@ -1882,7 +2228,8 @@ mod tests {
             &Meta::new("id", "1.0.0", ""),
             &client(),
             &target("http://127.0.0.1:9"),
-        ));
+        ))
+        .map(|a| a.disposition);
         assert_eq!(last, None);
     }
 }

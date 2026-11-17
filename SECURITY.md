@@ -190,9 +190,11 @@ like the conversation memory sync. The JWT never leaves the Rust core; the
 renderer never talks to the network for telemetry. Events are tagged with
 the profile (and signed-in user) they were produced under and only ever go
 to that profile's platform: nothing crosses from one tenant to the other.
-Install-level events recorded while nobody is signed in (`app_start` on the
-login screen, a crash there) carry no tenant data and go with the next
-flush of the active profile.
+Events recorded on a profile before any user signed in to it (for example a
+sign-in error on the login screen) are sent with that profile's next
+signed-in user. Install-level events recorded while no profile is active
+(`app_start` on the login screen, a crash there) carry no tenant data and go
+with the next flush of the active profile.
 
 **Every request** carries: `install_id` (random uuid generated once per
 install, stored in the app data dir), `app_version`, `os`
@@ -210,7 +212,7 @@ durations and fixed lists; tests pin every builder):
 | `turn_end` | `reason` (`completed`, `tool_cap`, `stream_cut`, `length`, `interrupted`, `user_stop`, `error`), `error_kind` (the classified kind for `error` and `interrupted`, else null), `rounds`, `tool_calls`, `duration_ms`, `model` (only ids from the app's built-in model list, else `other`), `continued` (bool) |
 | `tool_call` | `tool` (only names from the app's fixed tool list, else `unknown`), `outcome` (`ok`, `error`, `timeout`, `denied`), `duration_ms` |
 | `error_shown` | `surface` (`chat`, `images`, `sign_in`, `memory`), `kind` (the classified error kind, e.g. `rate_limited`, `network`) |
-| `crash` | `source` (`rust_panic`, `renderer`), `location` (Rust: `file:line` of the panic in the app's source, build-machine prefixes removed; renderer: the error name such as `TypeError`) |
+| `crash` | `source` (`rust_panic`, `renderer`), `location` (Rust: `file:line` where the panic happened, the app's or a library's source file, build-machine path prefixes removed; renderer: the error name, only standard error classes such as `TypeError` or the `typeof` of a non-Error rejection, anything else is sent as `Error`) |
 
 **Never sent:** message text, prompts, replies, file names or contents,
 paths, URLs, command lines, search queries, emails, error or panic
@@ -221,16 +223,20 @@ classify the outcome and are then discarded.
 1000 events, oldest dropped, events older than 30 days pruned) is flushed
 in batches of up to 100 events every 60 s, as soon as 50 are queued, and
 best-effort on exit (3 s budget). Network errors, 408, 429 and 5xx back off
-exponentially (60 s up to 15 min); a 400/413 drops that batch; 401/403/404
+exponentially (60 s up to 15 min, longer when the server sends a
+`Retry-After`, bounded to 15 min); a 400/413 drops that batch; 401/403/404
 keep the events queued and stop sending for that profile until the app
 restarts. Without a session, events only wait in the queue. A Rust panic
 writes its `crash` event synchronously to `telemetry/crash.jsonl` before
 the process ends; the next launch sends it. Renderer crashes are accepted
-through one IPC command that takes only an error name (validated in Rust,
-at most 20 per launch).
+through one IPC command that takes only an error name (checked in Rust
+against a fixed list of standard error names, at most 20 per launch).
+Records read back from the queue file are re-validated (known event names
+and props only, timestamp shape, no control characters) and a damaged file
+is repaired on launch.
 
 **Volume guards.** At most 5000 events are recorded per UTC day on an
-install (the backends also cap each account at 20,000 per 24 h and answer
+install (counted in memory, saved at each flush and on exit) (the backends also cap each account at 20,000 per 24 h and answer
 `202` with `dropped`; the app treats any `202` as delivered and never
 retries it), and at most 20 `tool_call` events per reply (longer replies are
 counted in `turn_end.tool_calls`). Automatic and "Continue" turns both

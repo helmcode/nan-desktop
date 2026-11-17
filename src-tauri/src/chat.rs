@@ -1361,7 +1361,7 @@ async fn run_chat_stream(
             tracker.tool_calls += 1;
             // Metadata only: registry name, outcome class, duration. Capped
             // per turn (the rest is counted in `turn_end.tool_calls`).
-            if tracker.tool_calls <= crate::telemetry::TOOL_CALL_EVENTS_PER_TURN {
+            if crate::telemetry::should_report_tool_call(tracker.tool_calls) {
                 crate::telemetry::record(
                     Some(&profile_id),
                     crate::telemetry::tool_call(

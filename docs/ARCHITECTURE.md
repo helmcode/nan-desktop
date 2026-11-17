@@ -159,8 +159,12 @@ implementation map (`src-tauri/src/telemetry.rs`):
   other 4xx = drop, 401/403/404 = stop for the session, 408/429/5xx/network
   = retry with exponential back-off (any 2xx, including the per-account
   cap's `202 {"dropped": n}`, is delivered). Volume guards: `DailyCap`
-  (5000 events per UTC day, persisted in `telemetry/daily.json`) and
-  `TOOL_CALL_EVENTS_PER_TURN` (20). A background task flushes 15 s after
+  (5000 events per UTC day, counted in memory and saved to
+  `telemetry/daily.json` at each flush and on exit) and
+  `TOOL_CALL_EVENTS_PER_TURN` (20, `should_report_tool_call`). A 429/5xx
+  `Retry-After` (seconds) lengthens the back-off, bounded to 15 min. A
+  profile with nothing queued is skipped before its session is read from
+  the vault. A background task flushes 15 s after
   launch, then every 60 s or when 50 events are queued; `RunEvent::Exit`
   runs a 3 s best-effort flush.
 - **Crash capture:** the panic hook reads only `PanicHookInfo::location()`
@@ -168,8 +172,15 @@ implementation map (`src-tauri/src/telemetry.rs`):
   a lock (release builds abort right after); `Queue::open` merges it on the
   next launch. The renderer's `logCrash` (`src/ErrorBoundary.tsx`) calls
   `reportRendererCrash(name)` (`src/core.ts`), which sends only the error
-  name; the core re-validates it (`^[A-Za-z][A-Za-z0-9_]{0,63}$`, else
-  `Error`) and caps it at 20 per launch.
+  name; the core re-checks it against `RENDERER_ERROR_NAMES` (standard
+  error classes + `typeof` fallbacks, else `Error`) and caps it at 20 per
+  launch with a saturating counter (`take_bounded`).
+- **Disk robustness:** `Queue::open` re-validates every record
+  (`catalogue_keys`, `valid_ts`, no control characters) and rewrites the
+  file when a line was dropped or the last line has no newline, so a write
+  cut short never swallows the next append. OS versions come from pure,
+  platform-independent parsers (`parse_windows_ver`: first
+  `d+.d+.d+(.d+)?` in `ver` output in any language; `parse_os_release`).
 
 ## T4 chat MVP (S3)
 
