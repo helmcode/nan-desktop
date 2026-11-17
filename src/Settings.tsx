@@ -375,6 +375,7 @@ export function Settings({
               <dd className="mono">{version || "-"}</dd>
             </div>
           </dl>
+          <p className="hint about-telemetry">{t.settings.about.telemetry}</p>
           {update && (
             <div className="about-update">
               <UpdateAction version={update.version} onUpdate={update.onUpdate} busy={update.busy} />

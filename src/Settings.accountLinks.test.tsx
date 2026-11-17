@@ -126,3 +126,33 @@ describe("community link copy", () => {
     }
   });
 });
+
+// Telemetry is always on (owner decision): the Account section says so in
+// one plain line, with no toggle anywhere.
+describe.each([
+  ["en", en],
+  ["es", es],
+] as const)("Account telemetry notice (%s)", (locale, strings) => {
+  it("states what is sent inside the Account section, without a switch", () => {
+    renderAccount(locale);
+    const section = screen.getByRole("region", { name: strings.settings.about.title });
+    const notice = screen.getByText(strings.settings.about.telemetry);
+    expect(section.contains(notice)).toBe(true);
+    expect(section.querySelector('input[type="checkbox"], [role="switch"]')).toBeNull();
+  });
+});
+
+describe("telemetry notice copy", () => {
+  it("uses the agreed wording and the copy rules", () => {
+    expect(es.settings.about.telemetry).toBe(
+      "Para corregir errores, la app envía datos técnicos de uso (nunca tus conversaciones ni tus archivos).",
+    );
+    expect(en.settings.about.telemetry).toBe(
+      "To fix bugs, the app sends technical usage data (never your conversations or your files).",
+    );
+    expect(es.settings.about.telemetry.toLowerCase()).not.toMatch(/\b(telemetr\w*|tracking|bug|data)\b/);
+    for (const s of [es.settings.about.telemetry, en.settings.about.telemetry]) {
+      expect(s).not.toContain(String.fromCharCode(0x2014));
+    }
+  });
+});

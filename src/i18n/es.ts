@@ -328,6 +328,8 @@ export const es: Strings = {
       signOut: "Cerrar sesión",
       starRepo: "Dar una estrella en GitHub",
       reportIssue: "Reportar una incidencia",
+      telemetry:
+        "Para corregir errores, la app envía datos técnicos de uso (nunca tus conversaciones ni tus archivos).",
     },
   },
   voices: {

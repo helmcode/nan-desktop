@@ -2,8 +2,9 @@
 // boundary, React unmounts the WHOLE tree on any uncaught render or effect
 // error and the window goes blank until restart (round 4: the post-PDF
 // freeze). `resetKey` clears the failure when the region shows something
-// else (another conversation, another preview target). Zero telemetry:
-// the error is not reported anywhere.
+// else (another conversation, another preview target). The error is logged
+// by the root's `onCaughtError` (ErrorBoundary.tsx `logCrash`), which only
+// reports its NAME to the core's crash telemetry.
 
 import { Component, type ReactNode } from "react";
 
