@@ -1069,10 +1069,15 @@ pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result
     if !abort_stream(&state, conversation_id)? {
         return Ok(());
     }
+    // A command the aborted turn was running keeps going on its blocking
+    // thread: end its process tree now instead of at its timeout.
+    crate::process::stop_conversation_commands(conversation_id);
     let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
     chat_store::finalize_in_progress(&conn, conversation_id, "user_stop")
         .map_err(|err| err.to_string())?;
+    // Retention: raw tool output only for the replies that can be replayed.
+    let _ = chat_store::prune_tool_traces(&conn, Some(conversation_id));
     chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
     let _ = window.emit(
         "chat://stopped",
@@ -1401,7 +1406,11 @@ async fn run_chat_stream(
                         chat_store::set_message_sources(&conn, row, &sources)
                     }
                 })
-                .and_then(|_| chat_store::touch_conversation(&conn, conversation_id));
+                .and_then(|_| chat_store::touch_conversation(&conn, conversation_id))
+                // Retention: raw tool output only for the replies that can
+                // be replayed.
+                .and_then(|_| chat_store::prune_tool_traces(&conn, Some(conversation_id)))
+                .map(|_| ());
             match persisted {
                 Ok(()) => {
                     let _ = window.emit(

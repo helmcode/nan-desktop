@@ -137,7 +137,7 @@ import {
 } from "./skills/skills";
 import { useWorkspace } from "./workspace";
 import { TurnIndicator, useTurnStarts } from "./chat/TurnIndicator";
-import { isContinuable, UnfinishedTurn } from "./chat/UnfinishedTurn";
+import { AUTO_RETRY_DELAY_MS, isContinuable, shouldAutoRetry, UnfinishedTurn } from "./chat/UnfinishedTurn";
 
 // The preview pane and its renderers load on first use (S21).
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
@@ -748,6 +748,12 @@ function ChatShell({
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [inlineError, setInlineError] = useState("");
+  // Turn continuity: the conversation whose cut / too-long reply is about
+  // to be resumed automatically (once, cancellable; see UnfinishedTurn).
+  const [autoRetryConvId, setAutoRetryConvId] = useState<number | null>(null);
+  // Conversations whose running turn IS that automatic continuation: if it
+  // stops the same way, the manual notice is shown instead (never a loop).
+  const autoRetryTurnsRef = useRef<Set<number>>(new Set());
   // Round 14/S1: the newer version the updater found. ONE check (owned by
   // the app window, before sign-in) feeds the banner, the user menu and
   // Settings, so a dismissed banner never hides the update; one install at a
@@ -1179,7 +1185,11 @@ function ChatShell({
         if (parsed) distilledDraftsRef.current.set(parsed.conversationId, parsed.draft);
       }),
       listen<ChatIdPayload>("chat://done", (event) => {
-        finish(event.payload.conversation_id);
+        const { conversation_id: id, reason } = event.payload;
+        const wasAutoRetry = autoRetryTurnsRef.current.delete(id);
+        // Only the conversation on screen resumes by itself.
+        if (shouldAutoRetry(reason, wasAutoRetry) && activeConvRef.current === id) setAutoRetryConvId(id);
+        finish(id);
         void syncMemory();
       }),
       // The user pressed Stop: what arrived stays persisted.
@@ -1190,10 +1200,12 @@ function ChatShell({
         const id = event.payload.conversation_id;
         awaitingSkillRef.current.delete(id);
         distilledDraftsRef.current.delete(id);
+        autoRetryTurnsRef.current.delete(id);
         finish(id);
       }),
       listen<ChatError>("chat://error", (event) => {
         const { conversation_id, kind } = event.payload;
+        autoRetryTurnsRef.current.delete(conversation_id);
         markStreaming(conversation_id, false);
         clearDraft(conversation_id);
         declaredOutputsRef.current.delete(conversation_id);
@@ -1801,6 +1813,8 @@ function ChatShell({
   const send = useCallback(async (override?: string, continuation = false): Promise<boolean> => {
     const text = (override ?? composer).trim();
     if (!text || streamingActive) return false;
+    // Any send replaces a pending automatic continuation.
+    setAutoRetryConvId(null);
     setSessionExpired(false);
     setInlineError("");
     let conversationId: number | null = null;
@@ -2061,7 +2075,37 @@ function ChatShell({
   const continueTurn = useCallback((): void => {
     if (streamingActive) return;
     void send(t.chat.continuePrompt, true);
+    // The button goes away with the click: keep focus in the composer.
+    composerRef.current?.focus();
   }, [streamingActive, send, t]);
+
+  const cancelAutoRetry = useCallback((): void => {
+    setAutoRetryConvId(null);
+    composerRef.current?.focus();
+  }, []);
+
+  // The automatic continuation: after a short pause, once, only for the
+  // conversation still on screen and only while nothing else runs there.
+  const sendRef = useRef(send);
+  useEffect(() => {
+    sendRef.current = send;
+  }, [send]);
+  useEffect(() => {
+    if (autoRetryConvId === null) return;
+    if (autoRetryConvId !== activeConvId) {
+      setAutoRetryConvId(null);
+      return;
+    }
+    if (streamingActive) return;
+    const id = autoRetryConvId;
+    const timer = window.setTimeout(() => {
+      autoRetryTurnsRef.current.add(id);
+      void sendRef.current(t.chat.continuePrompt, true).then((sent) => {
+        if (!sent) autoRetryTurnsRef.current.delete(id);
+      });
+    }, AUTO_RETRY_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [autoRetryConvId, activeConvId, streamingActive, t]);
 
   const onSkillSaved = useCallback((saved: Skill): void => {
     setSkills((prev) => upsertSkill(prev, saved));
@@ -2228,7 +2272,14 @@ function ChatShell({
             {t.chat.interrupted}
           </p>
         )}
-        {offerContinue && <UnfinishedTurn reason={m.end_reason} onContinue={continueTurn} />}
+        {offerContinue && (
+          <UnfinishedTurn
+            reason={m.end_reason}
+            onContinue={continueTurn}
+            autoRetrying={autoRetryConvId === m.conversation_id}
+            onCancelAutoRetry={cancelAutoRetry}
+          />
+        )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
         <FileChips paths={files.chips} onOpen={openFilePreview} onShare={artifactsOn ? openShare : undefined} />
         {VOICE_UI && visible.trim().length > 0 && (

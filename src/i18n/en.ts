@@ -145,6 +145,11 @@ export const en = {
     },
     continueTurn: "Continue",
     continuePrompt: "Continue the task where you left off.",
+    autoRetrying: {
+      stream_cut: "The connection dropped. Resuming in a moment…",
+      length: "The reply was very long. Continuing in a moment…",
+    },
+    cancelAutoRetry: "Cancel",
     thinking: "Thinking…",
     searching: "Searching the web…",
     working: "Working…",
