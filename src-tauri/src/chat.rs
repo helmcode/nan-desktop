@@ -824,9 +824,14 @@ pub(crate) fn abort_all_streams(state: &ChatState) -> usize {
         return 0;
     };
     let mut aborted = 0;
-    for (_, (_, handle)) in guard.drain() {
+    for (key, (_, handle)) in guard.drain() {
         if let Some(handle) = handle {
             handle.abort();
+        }
+        // The previous user's running command ends now, deterministically
+        // (the task's StopCommandsOnDrop would also do it once dropped).
+        if let Ok(conversation_id) = key.parse::<i64>() {
+            crate::process::stop_conversation_commands(conversation_id);
         }
         aborted += 1;
     }
@@ -2051,6 +2056,35 @@ mod tests {
         assert_eq!(abort_all_streams(&state), 2);
         assert!(!abort_stream(&state, 1).expect("abort"), "registry emptied");
         assert_eq!(abort_all_streams(&state), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_realm_switch_ends_the_running_commands_of_every_stream() {
+        use std::os::unix::process::CommandExt;
+        let state = ChatState::default();
+        let generation = reserve_stream(&state, 6061).expect("reserve");
+        attach_stream(&state, 6061, generation, spawn_pending_task()).expect("attach");
+        let runner = std::thread::spawn(|| {
+            let _scope = crate::process::ConversationScope::enter(Some(6061));
+            let mut child = crate::process::hidden_command("sh")
+                .args(["-c", "sleep 60"])
+                .process_group(0)
+                .spawn()
+                .expect("spawn");
+            let _running = crate::process::register_running(child.id());
+            child.wait().expect("wait")
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::process::running_for(6061).is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(crate::process::running_for(6061).len(), 1);
+        let started = std::time::Instant::now();
+        assert_eq!(abort_all_streams(&state), 1);
+        let status = runner.join().expect("join");
+        assert!(!status.success(), "the command was killed");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
