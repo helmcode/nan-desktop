@@ -60,6 +60,11 @@ pub const STATUS_COMPLETE: &str = "complete";
 /// died mid-stream — a crash leftover flagged `partial` by `messages_list`).
 pub const STATUS_IN_PROGRESS: &str = "in_progress";
 
+/// How many of a conversation's newest assistant replies keep their tool
+/// trace (raw tool output, possibly sensitive file content). Older traces
+/// are deleted: only these are ever replayed (`turn::REPLAY_TURNS`).
+pub const TRACE_KEEP_TURNS: usize = 2;
+
 /// SQLite file name inside the app data dir.
 pub const DB_FILE: &str = "chat.db";
 
@@ -186,6 +191,32 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_remote_id
              ON conversations(remote_id);",
+    )?;
+    // Retention: databases written before pruning existed (or a crash
+    // between finalize and prune) lose the traces no turn will replay.
+    prune_tool_traces(conn, None)?;
+    Ok(())
+}
+
+/// Delete the tool trace of every assistant reply except the
+/// [`TRACE_KEEP_TURNS`] newest of its conversation (`conversation_id`), or
+/// of every conversation (`None`). Returns how many traces were deleted.
+pub fn prune_tool_traces(
+    conn: &Connection,
+    conversation_id: Option<i64>,
+) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "UPDATE messages SET tool_trace = NULL
+         WHERE tool_trace IS NOT NULL
+           AND (?1 IS NULL OR conversation_id = ?1)
+           AND id NOT IN (
+               SELECT newest.id FROM messages AS newest
+               WHERE newest.conversation_id = messages.conversation_id
+                 AND newest.role = 'assistant'
+               ORDER BY newest.id DESC
+               LIMIT ?2
+           )",
+        rusqlite::params![conversation_id, TRACE_KEEP_TURNS as i64],
     )
 }
 
@@ -2453,6 +2484,52 @@ mod tests {
         assert_eq!(
             list_messages(&conn, conv).expect("list")[1].tool_trace,
             None
+        );
+    }
+
+    #[test]
+    fn only_the_newest_replies_keep_their_tool_trace() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let other = insert_conversation(&conn, "nan", "other").expect("insert");
+        let other_reply = insert_message(&conn, other, "assistant", "x", None).expect("o");
+        set_message_tool_trace(&conn, other_reply, Some("[]")).expect("trace");
+        let mut replies = Vec::new();
+        for turn in 0..3 {
+            insert_message(&conn, conv, "user", &format!("turn {turn}"), None).expect("user");
+            let reply = insert_message(&conn, conv, "assistant", "r", None).expect("reply");
+            set_message_tool_trace(&conn, reply, Some(r#"[{"role":"tool","content":".env"}]"#))
+                .expect("trace");
+            replies.push(reply);
+        }
+        assert_eq!(prune_tool_traces(&conn, Some(conv)).expect("prune"), 1);
+        let traces: Vec<Option<String>> = list_messages(&conn, conv)
+            .expect("list")
+            .into_iter()
+            .filter(|m| m.role == "assistant")
+            .map(|m| m.tool_trace)
+            .collect();
+        assert_eq!(traces[0], None, "the oldest trace is deleted");
+        assert!(
+            traces[1].is_some() && traces[2].is_some(),
+            "the 2 newest stay"
+        );
+        assert!(
+            list_messages(&conn, other).expect("list")[0]
+                .tool_trace
+                .is_some(),
+            "other conversations are untouched"
+        );
+
+        // Opening the store prunes every conversation (older databases).
+        set_message_tool_trace(&conn, replies[0], Some("[]")).expect("re-add");
+        drop(conn);
+        let conn = open_temp_db(&dir);
+        assert_eq!(
+            list_messages(&conn, conv).expect("list")[1].tool_trace,
+            None,
+            "pruned on open"
         );
     }
 
