@@ -16,6 +16,7 @@ use std::process::Command;
 
 /// Win32 process creation flag: the child gets no console window.
 /// <https://learn.microsoft.com/windows/win32/procthread/process-creation-flags>
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// A `std::process::Command` that never opens a console window on Windows.

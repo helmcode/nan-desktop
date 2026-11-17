@@ -52,6 +52,8 @@ mod tool_markup;
 // (auto, inline card or native dialog) / execute tool actions.
 mod tools;
 mod tts;
+// Turn continuity: end reasons, step budget, tool-trace replay, summary.
+mod turn;
 // Auto-update (round 7): silent check, install only on the user's click.
 mod updater;
 // Built-in web search the model can call (proxied by the platform API).

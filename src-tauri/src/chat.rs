@@ -9,9 +9,13 @@
 //! events:
 //!
 //! - `chat://delta` `{conversation_id, delta}` — one assistant text delta
-//! - `chat://done`  `{conversation_id}` — stream finished cleanly
+//! - `chat://done`  `{conversation_id, reason}` — the turn ended and the
+//!   reply is persisted; `reason` is `completed`, `tool_cap`, `stream_cut`
+//!   or `length` (see `turn::TurnEndReason`; the last three are unfinished
+//!   work the UI offers to continue)
 //! - `chat://error` `{conversation_id, kind}` — classified failure
-//! - `chat://stopped` `{conversation_id}` — the user stopped the stream (T4b)
+//! - `chat://stopped` `{conversation_id, reason}` — the user stopped the
+//!   stream (T4b); `reason` is always `user_stop`
 //! - `chat://activity` `{conversation_id, activity}` — `searching` /
 //!   `working` while a tool runs, `null` when the model writes again
 //!
@@ -22,9 +26,19 @@
 //! tools subsystem, approved per the grant's mode (no prompt in `allow`
 //! mode, an inline card in `ask` mode, a native dialog for computer-wide;
 //! see `tools::approval_route`) — and the results are fed back until the
-//! model answers in text (at most [`MAX_TOOL_ROUNDS`] rounds). A server
-//! that rejects `tools` (400) is retried once without them. Web sources are
+//! model answers in text (at most [`MAX_TOOL_ROUNDS`] rounds; the model is
+//! told when few remain and a capped turn ends as `tool_cap`). A server
+//! that rejects `tools` (400) is retried once without them (and, on the
+//! first round, without the replayed tool traces). Web sources are
 //! persisted with the reply and rendered as citation chips.
+//!
+//! Turn continuity (`turn.rs`): every turn ends with an explicit reason,
+//! stored on the reply; each reply keeps its tool exchange locally and the
+//! most recent turns replay it (bounded) so "Continuar" resumes the work
+//! instead of starting over. A stream that ends without `[DONE]` or with
+//! `finish_reason: "length"` keeps its text and ends as `stream_cut` /
+//! `length`. Every turn is summarized once in `turn::TurnTracker` (the hook
+//! point for telemetry).
 //!
 //! Tool calls arrive as OpenAI `delta.tool_calls` OR, when the server-side
 //! tool parser is missing for the served model, as markup inside the
@@ -44,8 +58,10 @@
 //! that row before the task waits for the next one — a crash/kill mid-stream
 //! leaves the partial reply in the DB (flagged `partial` by `messages_list`).
 //! A clean finish finalizes the row in place; a deliberate stop finalizes it
-//! too (the text that arrived stays, no failed marker); a classified error
-//! deletes it (the partial text is dropped by design, unchanged from T4).
+//! too (the text that arrived stays, no failed marker); a cut stream keeps
+//! its text too (`stream_cut`), unless nothing at all arrived; a classified
+//! error deletes it (the partial text is dropped by design, unchanged from
+//! T4).
 //!
 //! Cancel safety: one active stream per conversation. Sending again into the
 //! same conversation aborts the previous stream task (a `Mutex` over a map of
@@ -72,6 +88,7 @@ use crate::skills;
 use crate::skills_team;
 use crate::sse::{flush_sse_buffer, parse_sse_buffer};
 use crate::tool_markup::{self, MarkupFilter};
+use crate::turn::{self, RoundEnd, TurnEndReason, TurnTracker};
 use crate::{images, tools, web_search};
 
 /// Connect timeout for chat/model requests. No overall request timeout: a
@@ -162,7 +179,13 @@ pub fn extract_delta(data: &str) -> DeltaOutcome {
 /// result, fix it) chain more steps than that; at the cap the model was
 /// forced to answer without tools and could only narrate what it still
 /// meant to do — the "stall" the owner saw (narration, no action).
-pub const MAX_TOOL_ROUNDS: usize = 24;
+///
+/// Turn continuity: was 24. Real long tasks (scrape a site, build and fix a
+/// project) still hit 24 and users had to type "sigue" about ten times.
+/// 60 fits them while remaining a hard bound on runaway cost; near the cap
+/// the model is told how many steps are left (`turn::budget_note`) and a
+/// capped turn ends as `tool_cap`, which the UI offers to continue.
+pub const MAX_TOOL_ROUNDS: usize = 60;
 
 /// Longest tool output fed back to the model (chars). Keeps one big file
 /// read from flooding the context window.
@@ -275,12 +298,34 @@ pub fn merge_tool_calls(
 pub struct RoundParser {
     calls: ToolCallAccumulator,
     markup: MarkupFilter,
+    finish_reason: Option<String>,
+}
+
+/// The `choices[0].finish_reason` of one streaming payload, when set
+/// (`stop`, `tool_calls`, `length`, ...). Null / absent → `None`.
+pub fn extract_finish_reason(data: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    value
+        .get("choices")?
+        .get(0)?
+        .get("finish_reason")?
+        .as_str()
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
 }
 
 impl RoundParser {
+    /// The finish reason the stream reported, if any (the last one wins).
+    pub fn finish_reason(&self) -> Option<&str> {
+        self.finish_reason.as_deref()
+    }
+
     /// Absorb one SSE data payload; returns the text that may be shown now
     /// (possibly empty).
     pub fn absorb(&mut self, data: &str) -> String {
+        if let Some(reason) = extract_finish_reason(data) {
+            self.finish_reason = Some(reason);
+        }
         self.calls.absorb(data);
         match extract_delta(data) {
             DeltaOutcome::Delta(delta) => self.markup.push(&delta),
@@ -736,10 +781,12 @@ pub struct DeltaPayload {
     pub delta: String,
 }
 
-/// `chat://done` — the stream finished and the assistant message persisted.
+/// `chat://done` / `chat://stopped` — the turn ended and the assistant
+/// message persisted, with why it ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DonePayload {
     pub conversation_id: i64,
+    pub reason: TurnEndReason,
 }
 
 /// `chat://error` — classified failure; nothing assistant-side persisted.
@@ -926,6 +973,11 @@ pub(crate) fn session_token_from(
 /// it is read from the local skills store HERE (the renderer never sends
 /// skill text) and added to this reply's context as its own delimited
 /// block. It changes nothing else: same tools, same grants, same model.
+///
+/// `continuation` marks a "Continuar" click on an unfinished turn: the
+/// content is still a normal user message (the UI sends a fixed "continue
+/// where you left off" text, stored and shown like any message); the flag
+/// only travels to the turn summary.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn chat_send(
@@ -936,6 +988,7 @@ pub fn chat_send(
     content: String,
     grant_ids: Option<Vec<String>>,
     skill_id: Option<String>,
+    continuation: Option<bool>,
 ) -> Result<(), String> {
     if content.trim().is_empty() {
         return Err("message is empty".to_string());
@@ -996,6 +1049,7 @@ pub fn chat_send(
         model,
         skill,
         generation,
+        continuation.unwrap_or(false),
     ));
     attach_stream(&state, conversation_id, generation, handle)?;
     Ok(())
@@ -1014,9 +1068,16 @@ pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result
     }
     let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
-    chat_store::finalize_in_progress(&conn, conversation_id).map_err(|err| err.to_string())?;
+    chat_store::finalize_in_progress(&conn, conversation_id, "user_stop")
+        .map_err(|err| err.to_string())?;
     chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
-    let _ = window.emit("chat://stopped", DonePayload { conversation_id });
+    let _ = window.emit(
+        "chat://stopped",
+        DonePayload {
+            conversation_id,
+            reason: TurnEndReason::UserStop,
+        },
+    );
     Ok(())
 }
 
@@ -1035,8 +1096,11 @@ async fn run_chat_stream(
     model: String,
     skill: Option<skills::ActiveSkill>,
     generation: u64,
+    continued: bool,
 ) {
     let state = app.state::<ChatState>();
+    // The one place a turn is summarized (an abort reports `user_stop`).
+    let mut tracker = TurnTracker::start(&model, continued);
 
     let emit_error = |kind: ErrorKind| {
         let _ = window.emit(
@@ -1047,50 +1111,32 @@ async fn run_chat_stream(
             },
         );
     };
+    let fail_early = |tracker: TurnTracker, kind: ErrorKind| {
+        emit_error(kind);
+        tracker.finish(TurnEndReason::Error, Some(kind));
+        release_stream(&state, conversation_id, generation);
+    };
 
     // ---- credentials + endpoint (Rust core only, S4) ---------------------
     let key = match read_profile_key(&profile_id) {
         Ok(key) => key,
-        Err(kind) => {
-            emit_error(kind);
-            release_stream(&state, conversation_id, generation);
-            return;
-        }
+        Err(kind) => return fail_early(tracker, kind),
     };
     let Some(base) = inference_base(&profile_id) else {
-        emit_error(ErrorKind::Protocol);
-        release_stream(&state, conversation_id, generation);
-        return;
+        return fail_early(tracker, ErrorKind::Protocol);
     };
 
     // ---- history + request body ------------------------------------------
     let conn = match chat_store::open_db(&dir) {
         Ok(conn) => conn,
-        Err(_) => {
-            emit_error(ErrorKind::Protocol);
-            release_stream(&state, conversation_id, generation);
-            return;
-        }
+        Err(_) => return fail_early(tracker, ErrorKind::Protocol),
     };
-    let history: Vec<serde_json::Value> = match chat_store::list_messages(&conn, conversation_id) {
-        // Older replies may hold leaked tool markup (pre-S16): never
-        // feed it back, the model would imitate it.
-        Ok(rows) => rows
-            .iter()
-            .map(|row| {
-                let content = if row.role == "assistant" {
-                    tool_markup::sanitize_for_ui(&row.content)
-                } else {
-                    row.content.clone()
-                };
-                serde_json::json!({ "role": row.role, "content": content })
-            })
-            .collect(),
-        Err(_) => {
-            emit_error(ErrorKind::Protocol);
-            release_stream(&state, conversation_id, generation);
-            return;
-        }
+    // Older replies may hold leaked tool markup (pre-S16): never feed it
+    // back, the model would imitate it (sanitized in `history_messages`).
+    // The most recent turns replay their tool exchange (device-local).
+    let rows = match chat_store::list_messages(&conn, conversation_id) {
+        Ok(rows) => rows,
+        Err(_) => return fail_early(tracker, ErrorKind::Protocol),
     };
 
     // ---- tools offered this reply ------------------------------------------
@@ -1098,7 +1144,11 @@ async fn run_chat_stream(
     // platform cannot serve it). File tools only exist when the user picked
     // a workspace; the system message tells the model where it may work.
     let workspace = tools::workspace_for(&app, &profile_id, conversation_id);
-    let mut messages = compose_messages(workspace.as_ref(), skill.as_ref(), history);
+    let mut messages = compose_messages(
+        workspace.as_ref(),
+        skill.as_ref(),
+        turn::history_messages(&rows, true),
+    );
     let mut offered_tools = tool_definitions(workspace.as_ref());
 
     let client = match reqwest::Client::builder()
@@ -1106,11 +1156,7 @@ async fn run_chat_stream(
         .build()
     {
         Ok(client) => client,
-        Err(_) => {
-            emit_error(ErrorKind::Protocol);
-            release_stream(&state, conversation_id, generation);
-            return;
-        }
+        Err(_) => return fail_early(tracker, ErrorKind::Protocol),
     };
 
     // ---- model ↔ tool rounds -------------------------------------------------
@@ -1124,10 +1170,14 @@ async fn run_chat_stream(
     let mut sources: Vec<WebSource> = Vec::new();
     let mut artifacts: Vec<chat_store::Artifact> = Vec::new();
     let mut failed: Option<ErrorKind> = None;
+    let mut ended: Option<TurnEndReason> = None;
+    // This turn's tool exchange (device-local, replayed by later turns).
+    let mut trace: Vec<serde_json::Value> = Vec::new();
 
     for round in 0..=MAX_TOOL_ROUNDS {
         // The last round offers no tools: the model must answer in text.
-        let mut offer_tools = round < MAX_TOOL_ROUNDS && !offered_tools.is_empty();
+        let final_round = round == MAX_TOOL_ROUNDS;
+        let mut offer_tools = !final_round && !offered_tools.is_empty();
         let no_tools: &[serde_json::Value] = &[];
         let body = request_body(
             &model,
@@ -1138,6 +1188,7 @@ async fn run_chat_stream(
                 no_tools
             },
         );
+        tracker.rounds += 1;
         let mut response = match post_completion(&client, &base, &key, &body).await {
             Ok(response) => response,
             Err(err) => {
@@ -1149,9 +1200,18 @@ async fn run_chat_stream(
         if status == 400 && offer_tools {
             // Silent degradation: a model/server without tool-calling
             // support rejects the `tools` field. Retry once without any
-            // tools and never offer them again in this reply.
+            // tools and never offer them again in this reply. On the first
+            // round the replayed tool traces may be what it rejects: drop
+            // them too (plain history).
             offered_tools.clear();
             offer_tools = false;
+            if round == 0 {
+                messages = compose_messages(
+                    workspace.as_ref(),
+                    skill.as_ref(),
+                    turn::history_messages(&rows, false),
+                );
+            }
             response =
                 match post_completion(&client, &base, &key, &request_body(&model, &messages, &[]))
                     .await
@@ -1201,7 +1261,13 @@ async fn run_chat_stream(
                 break;
             }
         };
-        if round_out.tool_calls.is_empty() || !offer_tools {
+        if let Some(reason) = turn::turn_end_after_round(
+            round_out.end,
+            !round_out.tool_calls.is_empty(),
+            offer_tools,
+            final_round,
+        ) {
+            ended = Some(reason);
             break;
         }
 
@@ -1227,6 +1293,7 @@ async fn run_chat_stream(
             "content": round_text,
             "tool_calls": requested,
         }));
+        let mut results: Vec<String> = Vec::with_capacity(round_out.tool_calls.len());
         for call in &round_out.tool_calls {
             let (content, produced, declared) = run_tool_call(
                 &app,
@@ -1238,6 +1305,7 @@ async fn run_chat_stream(
                 &mut sources,
             )
             .await;
+            tracker.tool_calls += 1;
             if merge_artifacts(&mut artifacts, produced) {
                 // Persisted as they appear: a stopped reply keeps its chips.
                 let _ = chat_store::set_message_artifacts(&conn, row, &artifacts);
@@ -1252,6 +1320,25 @@ async fn run_chat_stream(
                 "tool_call_id": call.id,
                 "content": content,
             }));
+            results.push(content);
+        }
+        // The round is complete (every call has its result): keep it for
+        // the next turns. Written per round so a stopped turn keeps the
+        // rounds that finished; only the newest rounds within the replay
+        // budget are stored.
+        trace.extend(turn::trace_round(&round_out.tool_calls, &results));
+        trace = turn::tail_rounds(&trace, turn::REPLAY_BUDGET_CHARS).0;
+        if let Ok(json) = serde_json::to_string(&trace) {
+            let _ = chat_store::set_message_tool_trace(&conn, row, Some(&json));
+        }
+        // Near the cap, tell the model how many steps are left so it wraps
+        // up cleanly instead of stopping mid-action (live request only, not
+        // stored in the trace).
+        if let Some(note) = turn::budget_note(round + 1, MAX_TOOL_ROUNDS)
+            && let Some(last) = messages.last_mut()
+            && let Some(content) = last.get("content").and_then(|c| c.as_str())
+        {
+            last["content"] = serde_json::Value::String(format!("{content}\n\n{note}"));
         }
         let _ = window.emit(
             "chat://activity",
@@ -1260,6 +1347,13 @@ async fn run_chat_stream(
                 activity: None,
             },
         );
+    }
+
+    // A cut before anything arrived is a plain network failure (nothing to
+    // keep or continue).
+    if ended == Some(TurnEndReason::StreamCut) && accumulated.trim().is_empty() && trace.is_empty()
+    {
+        failed = Some(ErrorKind::Network);
     }
 
     // ---- persist + notify --------------------------------------------------
@@ -1271,14 +1365,18 @@ async fn run_chat_stream(
                 let _ = chat_store::delete_message(&conn, row);
             }
             emit_error(kind);
+            tracker.finish(TurnEndReason::Error, Some(kind));
         }
         (None, Some(row)) => {
-            // Clean finish: finalize the in-progress row in place with the
-            // final accumulated text and its web sources (citation chips).
-            // Defense in depth (S16): the stream filter already removed any
-            // tool markup; sanitize once more before the final write.
+            // The turn ended (finished, capped, cut or truncated): finalize
+            // the in-progress row in place with the final accumulated text,
+            // its web sources (citation chips) and why it ended. Defense in
+            // depth (S16): the stream filter already removed any tool
+            // markup; sanitize once more before the final write.
+            let reason = ended.unwrap_or(TurnEndReason::Completed);
             let final_text = tool_markup::sanitize_for_ui(&accumulated);
             let persisted = chat_store::finalize_message(&conn, row, &final_text)
+                .and_then(|_| chat_store::set_message_end_reason(&conn, row, reason.as_str()))
                 .and_then(|_| {
                     if sources.is_empty() {
                         Ok(())
@@ -1289,12 +1387,25 @@ async fn run_chat_stream(
                 .and_then(|_| chat_store::touch_conversation(&conn, conversation_id));
             match persisted {
                 Ok(()) => {
-                    let _ = window.emit("chat://done", DonePayload { conversation_id });
+                    let _ = window.emit(
+                        "chat://done",
+                        DonePayload {
+                            conversation_id,
+                            reason,
+                        },
+                    );
+                    tracker.finish(reason, None);
                 }
-                Err(_) => emit_error(ErrorKind::Protocol),
+                Err(_) => {
+                    emit_error(ErrorKind::Protocol);
+                    tracker.finish(TurnEndReason::Error, Some(ErrorKind::Protocol));
+                }
             }
         }
-        (None, None) => emit_error(ErrorKind::Protocol),
+        (None, None) => {
+            emit_error(ErrorKind::Protocol);
+            tracker.finish(TurnEndReason::Error, Some(ErrorKind::Protocol));
+        }
     }
     release_stream(&state, conversation_id, generation);
 }
@@ -1357,10 +1468,15 @@ struct RoundOutput {
     /// This round's text only (sent back with its tool calls).
     text: String,
     tool_calls: Vec<ToolCall>,
+    /// How the stream ended (clean, truncated by length, or cut).
+    end: RoundEnd,
 }
 
 /// Stream one SSE reply: emit and persist text deltas into `row` (T4b:
-/// flushed per network chunk), collect tool calls. Opens its own store
+/// flushed per network chunk), collect tool calls and how the stream ended.
+/// A transport failure mid-body is a cut, not an error: the text received
+/// so far stays (the caller decides what a cut with nothing received
+/// means). Opens its own store
 /// connection: a `&Connection` (not `Sync`) must not live across awaits of
 /// a spawned task.
 async fn stream_round(
@@ -1400,7 +1516,10 @@ async fn stream_round(
     };
 
     while let Some(item) = stream.next().await {
-        let bytes = item.map_err(|err| classify_transport(err.is_timeout()))?;
+        let Ok(bytes) = item else {
+            // Connection reset / read error mid-body: the stream was cut.
+            break;
+        };
         byte_buffer.extend_from_slice(&bytes);
         sse_buffer.push_str(&decode_incremental(&mut byte_buffer));
         let mut pending_flush = false;
@@ -1435,6 +1554,7 @@ async fn stream_round(
             }
         }
     }
+    let finish_reason = parser.finish_reason().map(str::to_string);
     let (tail, tool_calls) = parser.finish();
     if !tail.is_empty() {
         push_delta(tail, &mut text, &mut *accumulated);
@@ -1442,7 +1562,12 @@ async fn stream_round(
     // Persist the final round text (the tail, and anything the in-loop
     // flush did not cover).
     chat_store::update_message_content(&conn, row, accumulated).map_err(|_| ErrorKind::Protocol)?;
-    Ok(RoundOutput { text, tool_calls })
+    let end = turn::round_end(finished, finish_reason.as_deref());
+    Ok(RoundOutput {
+        text,
+        tool_calls,
+        end,
+    })
 }
 
 /// Add newly produced artifacts (deduplicated by path, first kind wins).
@@ -2953,7 +3078,46 @@ mod tests {
 
     #[test]
     fn tool_round_budget_fits_real_multi_step_tasks() {
-        assert_eq!(MAX_TOOL_ROUNDS, 24, "6 rounds stalled real tasks");
+        // 6 stalled real tasks; 24 still made users type "sigue" ~10 times
+        // on long scraping/build tasks. Still a hard bound (runaway cost).
+        assert_eq!(MAX_TOOL_ROUNDS, 60);
+        const { assert!(MAX_TOOL_ROUNDS > turn::BUDGET_WARNING_ROUNDS) };
+    }
+
+    #[test]
+    fn the_parser_reports_the_streams_finish_reason() {
+        let mut parser = RoundParser::default();
+        assert_eq!(parser.finish_reason(), None);
+        parser.absorb(&content_chunk("hola"));
+        assert_eq!(parser.finish_reason(), None, "a content delta has none");
+        parser.absorb(r#"{"choices":[{"delta":{},"finish_reason":null}]}"#);
+        assert_eq!(parser.finish_reason(), None, "null is not a reason");
+        parser.absorb(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#);
+        assert_eq!(parser.finish_reason(), Some("length"));
+        // A later usage-only chunk does not erase it.
+        parser.absorb(r#"{"choices":[],"usage":{"total_tokens":3}}"#);
+        assert_eq!(parser.finish_reason(), Some("length"));
+        assert_eq!(
+            turn::round_end(true, parser.finish_reason()),
+            RoundEnd::Length
+        );
+        assert_eq!(extract_finish_reason("[DONE]"), None);
+        assert_eq!(
+            extract_finish_reason(r#"{"choices":[{"finish_reason":"tool_calls"}]}"#).as_deref(),
+            Some("tool_calls")
+        );
+    }
+
+    #[test]
+    fn done_payloads_carry_the_end_reason() {
+        let payload = DonePayload {
+            conversation_id: 7,
+            reason: TurnEndReason::ToolCap,
+        };
+        assert_eq!(
+            serde_json::to_value(payload).expect("serialize"),
+            serde_json::json!({ "conversation_id": 7, "reason": "tool_cap" })
+        );
     }
 
     #[test]

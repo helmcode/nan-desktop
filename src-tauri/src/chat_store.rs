@@ -26,6 +26,17 @@
 //! `in_progress` rows are flagged `partial: true` by the list functions and
 //! their content is overwritten per network chunk, so a crash mid-stream
 //! leaves the partial reply queryable.
+//!
+//! Turn continuity: every assistant reply records WHY its turn ended
+//! (`end_reason`: `completed`, `tool_cap`, `stream_cut`, `length`,
+//! `user_stop`; NULL for rows written before this existed and for crash
+//! leftovers) so the UI can offer to continue after a reload, and the tool
+//! exchange of the turn (`tool_trace`: the OpenAI-shaped assistant
+//! `tool_calls` and `tool` result messages, results already truncated) so
+//! the next turn can replay it. Both are device-local: they never reach
+//! the renderer as trace text (`tool_trace` is not serialized) nor the
+//! account (memory sync exports text rows only and keeps both columns of
+//! replies still present when a remote copy overwrites the rows).
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -106,6 +117,15 @@ pub struct ChatMessageRow {
     /// (an image row or a tool reply carrying an image artifact). `None` for
     /// every other row, and for edits made only from picked local files.
     pub parent_message_id: Option<i64>,
+    /// Why this assistant reply's turn ended (`completed`, `tool_cap`,
+    /// `stream_cut`, `length`, `user_stop`). `None` for user rows, older
+    /// replies and crash leftovers.
+    pub end_reason: Option<String>,
+    /// The turn's tool exchange as a JSON array of OpenAI messages, replayed
+    /// to the model on the next turns. Device-local and never sent to the
+    /// renderer (it carries raw tool output; S16).
+    #[serde(skip)]
+    pub tool_trace: Option<String>,
 }
 
 /// What a produced artifact is: a file inside the user's folders (opened in
@@ -159,6 +179,8 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "messages", "sources", "TEXT")?;
     ensure_column(conn, "messages", "artifacts", "TEXT")?;
     ensure_column(conn, "messages", "parent_message_id", "INTEGER")?;
+    ensure_column(conn, "messages", "end_reason", "TEXT")?;
+    ensure_column(conn, "messages", "tool_trace", "TEXT")?;
     ensure_column(conn, "conversations", "remote_id", "TEXT")?;
     ensure_column(conn, "conversations", "synced_at", "TEXT")?;
     conn.execute_batch(
@@ -748,16 +770,51 @@ pub fn finalize_message(
 }
 
 /// Complete every in-progress row of a conversation — the stop path (T4b):
-/// whatever text arrived stays, with no failed marker. Returns the number
-/// of rows completed (0 when there was nothing in progress).
+/// whatever text arrived stays, with no failed marker, and the rows record
+/// `end_reason` (the stop reason). Returns the number of rows completed (0
+/// when there was nothing in progress).
 pub fn finalize_in_progress(
     conn: &Connection,
     conversation_id: i64,
+    end_reason: &str,
 ) -> Result<usize, rusqlite::Error> {
     conn.execute(
-        "UPDATE messages SET status = ?1 WHERE conversation_id = ?2 AND status = ?3",
-        rusqlite::params![STATUS_COMPLETE, conversation_id, STATUS_IN_PROGRESS],
+        "UPDATE messages SET status = ?1, end_reason = ?4 WHERE conversation_id = ?2 AND status = ?3",
+        rusqlite::params![
+            STATUS_COMPLETE,
+            conversation_id,
+            STATUS_IN_PROGRESS,
+            end_reason
+        ],
     )
+}
+
+/// Record why an assistant reply's turn ended.
+pub fn set_message_end_reason(
+    conn: &Connection,
+    message_id: i64,
+    end_reason: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE messages SET end_reason = ?1 WHERE id = ?2",
+        rusqlite::params![end_reason, message_id],
+    )?;
+    Ok(())
+}
+
+/// Store the turn's tool exchange (a JSON array). `None` clears it.
+/// Written after every complete tool round, so a stopped turn keeps the
+/// rounds that finished.
+pub fn set_message_tool_trace(
+    conn: &Connection,
+    message_id: i64,
+    trace: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE messages SET tool_trace = ?1 WHERE id = ?2",
+        rusqlite::params![trace, message_id],
+    )?;
+    Ok(())
 }
 
 /// Remove one message row — the stream error path (T4b): the partial text
@@ -841,7 +898,7 @@ pub fn list_conversations(
 }
 
 /// Column list read by [`map_message_row`] (order matters).
-const MESSAGE_COLUMNS: &str = "id, conversation_id, role, content, model, media_path, created_at, status, sources, artifacts, parent_message_id";
+const MESSAGE_COLUMNS: &str = "id, conversation_id, role, content, model, media_path, created_at, status, sources, artifacts, parent_message_id, end_reason, tool_trace";
 
 fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::Error> {
     let status: String = row.get(7)?;
@@ -860,6 +917,8 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default(),
         parent_message_id: row.get(10)?,
+        end_reason: row.get(11)?,
+        tool_trace: row.get(12)?,
     })
 }
 
@@ -1069,6 +1128,17 @@ pub fn export_messages(
         .collect())
 }
 
+/// Device-local columns of a text row, kept across a remote overwrite when
+/// the same message (role, content, instant) is still in the remote copy.
+struct KeptLocal {
+    role: String,
+    content: String,
+    created_at: String,
+    artifacts: Option<String>,
+    end_reason: Option<String>,
+    tool_trace: Option<String>,
+}
+
 /// Insert (`local_id: None`) or overwrite a conversation with the remote
 /// copy: title, timestamps and all TEXT messages are replaced; local image
 /// rows are kept (they never travel). The row is marked synced at the
@@ -1088,25 +1158,30 @@ pub fn write_remote_conversation(
     // Artifacts (produced files / generated images) are device-local paths
     // that never travel to the account; remember them per text row so the
     // overwrite below does not silently drop the chips/inline images of
-    // replies that are still present in the remote copy (round 4).
-    let mut kept_artifacts: Vec<(String, String, String, String)> = Vec::new();
+    // replies that are still present in the remote copy (round 4). The
+    // turn end reason and the tool trace are device-local too and kept the
+    // same way.
+    let mut kept_local: Vec<KeptLocal> = Vec::new();
     let id = match local_id {
         Some(id) => {
             {
                 let mut stmt = tx.prepare(
-                    "SELECT role, content, created_at, artifacts FROM messages
-                     WHERE conversation_id = ?1 AND media_path IS NULL AND artifacts IS NOT NULL",
+                    "SELECT role, content, created_at, artifacts, end_reason, tool_trace FROM messages
+                     WHERE conversation_id = ?1 AND media_path IS NULL
+                       AND (artifacts IS NOT NULL OR end_reason IS NOT NULL OR tool_trace IS NOT NULL)",
                 )?;
                 let rows = stmt.query_map([id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        normalize_timestamp(&row.get::<_, String>(2)?),
-                        row.get::<_, String>(3)?,
-                    ))
+                    Ok(KeptLocal {
+                        role: row.get(0)?,
+                        content: row.get(1)?,
+                        created_at: normalize_timestamp(&row.get::<_, String>(2)?),
+                        artifacts: row.get(3)?,
+                        end_reason: row.get(4)?,
+                        tool_trace: row.get(5)?,
+                    })
                 })?;
                 for row in rows {
-                    kept_artifacts.push(row?);
+                    kept_local.push(row?);
                 }
             }
             tx.execute(
@@ -1135,15 +1210,19 @@ pub fn write_remote_conversation(
             serde_json::to_string(&message.sources).ok()
         };
         let created = normalize_timestamp(&message.created_at);
-        let matched = kept_artifacts
-            .iter()
-            .position(|(role, content, created_at, _)| {
-                *role == message.role && *content == message.content && *created_at == created
-            });
-        let artifacts: Option<String> = matched.map(|index| kept_artifacts.swap_remove(index).3);
+        let matched = kept_local.iter().position(|kept| {
+            kept.role == message.role
+                && kept.content == message.content
+                && kept.created_at == created
+        });
+        let kept = matched.map(|index| kept_local.swap_remove(index));
+        let (artifacts, end_reason, tool_trace) = match kept {
+            Some(kept) => (kept.artifacts, kept.end_reason, kept.tool_trace),
+            None => (None, None, None),
+        };
         tx.execute(
-            "INSERT INTO messages (conversation_id, role, content, model, created_at, status, sources, artifacts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO messages (conversation_id, role, content, model, created_at, status, sources, artifacts, end_reason, tool_trace)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 id,
                 message.role,
@@ -1152,7 +1231,9 @@ pub fn write_remote_conversation(
                 message.created_at,
                 STATUS_COMPLETE,
                 sources,
-                artifacts
+                artifacts,
+                end_reason,
+                tool_trace
             ],
         )?;
     }
@@ -1761,16 +1842,21 @@ mod tests {
         let conv = insert_conversation(&conn, "nan", "t").expect("insert");
         let row = stream_partial_text(&conn, conv, &["kept text"]);
 
-        let finalized = finalize_in_progress(&conn, conv).expect("finalize");
+        let finalized = finalize_in_progress(&conn, conv, "user_stop").expect("finalize");
         assert_eq!(finalized, 1, "exactly the one in-progress row completed");
 
         let messages = list_messages(&conn, conv).expect("list");
         assert_eq!(messages[0].id, row);
         assert_eq!(messages[0].content, "kept text", "stop keeps what arrived");
         assert!(!messages[0].partial, "a deliberate stop is not a failure");
+        assert_eq!(
+            messages[0].end_reason.as_deref(),
+            Some("user_stop"),
+            "the stop is recorded as the turn's end reason"
+        );
 
         // Stopping again (idle conversation) changes nothing.
-        let again = finalize_in_progress(&conn, conv).expect("finalize again");
+        let again = finalize_in_progress(&conn, conv, "user_stop").expect("finalize again");
         assert_eq!(again, 0);
         let messages = list_messages(&conn, conv).expect("list");
         assert_eq!(messages[0].content, "kept text");
@@ -2338,6 +2424,112 @@ mod tests {
         let messages = list_messages(&conn, conv).expect("list");
         assert_eq!(messages.len(), 1);
         assert!(messages[0].artifacts.is_empty());
+    }
+
+    #[test]
+    fn end_reason_and_tool_trace_roundtrip_and_the_trace_never_reaches_the_ui() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let user = insert_message(&conn, conv, "user", "build it", None).expect("user");
+        let reply = insert_in_progress_assistant(&conn, conv, Some("m")).expect("reply");
+        let trace = r#"[{"role":"tool","tool_call_id":"c1","content":"SECRET_OUTPUT"}]"#;
+        set_message_tool_trace(&conn, reply, Some(trace)).expect("trace");
+        finalize_message(&conn, reply, "done so far").expect("finalize");
+        set_message_end_reason(&conn, reply, "tool_cap").expect("reason");
+
+        let messages = list_messages(&conn, conv).expect("list");
+        assert_eq!(messages[0].id, user);
+        assert_eq!(messages[0].end_reason, None, "user rows carry no reason");
+        assert_eq!(messages[1].end_reason.as_deref(), Some("tool_cap"));
+        assert_eq!(messages[1].tool_trace.as_deref(), Some(trace));
+
+        let json = serde_json::to_string(&messages).expect("serialize");
+        assert!(json.contains("\"end_reason\":\"tool_cap\""));
+        assert!(!json.contains("tool_trace"), "no trace field over IPC");
+        assert!(!json.contains("SECRET_OUTPUT"), "no tool output over IPC");
+
+        set_message_tool_trace(&conn, reply, None).expect("clear");
+        assert_eq!(
+            list_messages(&conn, conv).expect("list")[1].tool_trace,
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_schema_without_turn_columns_is_migrated() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = Connection::open(dir.path().join("legacy.db")).expect("open");
+        // A database from before turn continuity: no end_reason/tool_trace.
+        conn.execute_batch(
+            "CREATE TABLE conversations (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 title TEXT NOT NULL DEFAULT '',
+                 profile_id TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                 role TEXT NOT NULL,
+                 content TEXT NOT NULL,
+                 model TEXT,
+                 media_path TEXT,
+                 created_at TEXT NOT NULL,
+                 status TEXT NOT NULL DEFAULT 'complete'
+             );
+             INSERT INTO conversations (title, profile_id, created_at, updated_at)
+                 VALUES ('old', 'nan', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             INSERT INTO messages (conversation_id, role, content, created_at)
+                 VALUES (1, 'assistant', 'old reply', '2026-01-01T00:00:00.000Z');",
+        )
+        .expect("legacy schema");
+        ensure_schema(&conn).expect("migrate");
+        ensure_schema(&conn).expect("migrating twice is a no-op");
+
+        let messages = list_messages(&conn, 1).expect("list");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "old reply");
+        assert_eq!(messages[0].end_reason, None);
+        assert_eq!(messages[0].tool_trace, None);
+        set_message_end_reason(&conn, messages[0].id, "completed").expect("new column writable");
+    }
+
+    #[test]
+    fn memory_sync_never_exports_and_never_drops_the_local_turn_columns() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        insert_message(&conn, conv, "user", "scrape it", None).expect("user");
+        let reply = insert_message(&conn, conv, "assistant", "half way", Some("m")).expect("reply");
+        let trace = r#"[{"role":"tool","tool_call_id":"c1","content":"LOCAL_ONLY"}]"#;
+        set_message_tool_trace(&conn, reply, Some(trace)).expect("trace");
+        set_message_end_reason(&conn, reply, "tool_cap").expect("reason");
+
+        let remote = export_messages(&conn, conv).expect("export");
+        let uploaded = serde_json::to_string(&remote).expect("serialize export");
+        assert!(!uploaded.contains("LOCAL_ONLY"), "traces never travel");
+        assert!(!uploaded.contains("tool_cap"), "end reasons never travel");
+
+        write_remote_conversation(
+            &conn,
+            Some(conv),
+            "nan",
+            "rid-turn",
+            "t",
+            "2026-10-01T00:00:00.000Z",
+            "2099-01-01T00:00:00.000Z",
+            &remote,
+        )
+        .expect("overwrite");
+        let messages = list_messages(&conn, conv).expect("list");
+        let kept = messages
+            .iter()
+            .find(|m| m.content == "half way")
+            .expect("reply");
+        assert_eq!(kept.end_reason.as_deref(), Some("tool_cap"));
+        assert_eq!(kept.tool_trace.as_deref(), Some(trace));
     }
 
     #[test]
