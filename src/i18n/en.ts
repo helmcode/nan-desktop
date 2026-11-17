@@ -142,6 +142,7 @@ export const en = {
       tool_cap: "The task had many steps, so I paused here.",
       stream_cut: "The connection dropped while I was replying.",
       length: "The reply was too long for a single message.",
+      interrupted: "Something failed partway through the task.",
     },
     continueTurn: "Continue",
     continuePrompt: "Continue the task where you left off.",

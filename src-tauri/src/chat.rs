@@ -10,9 +10,9 @@
 //!
 //! - `chat://delta` `{conversation_id, delta}` — one assistant text delta
 //! - `chat://done`  `{conversation_id, reason}` — the turn ended and the
-//!   reply is persisted; `reason` is `completed`, `tool_cap`, `stream_cut`
-//!   or `length` (see `turn::TurnEndReason`; the last three are unfinished
-//!   work the UI offers to continue)
+//!   reply is persisted; `reason` is `completed`, `tool_cap`, `stream_cut`,
+//!   `length` or `interrupted` (see `turn::TurnEndReason`; all but
+//!   `completed` are unfinished work the UI offers to continue)
 //! - `chat://error` `{conversation_id, kind}` — classified failure
 //! - `chat://stopped` `{conversation_id, reason}` — the user stopped the
 //!   stream (T4b); `reason` is always `user_stop`
@@ -27,9 +27,11 @@
 //! mode, an inline card in `ask` mode, a native dialog for computer-wide;
 //! see `tools::approval_route`) — and the results are fed back until the
 //! model answers in text (at most [`MAX_TOOL_ROUNDS`] rounds; the model is
-//! told when few remain and a capped turn ends as `tool_cap`). A server
-//! that rejects `tools` (400) is retried once without them (and, on the
-//! first round, without the replayed tool traces). Web sources are
+//! told when few remain and a capped turn ends as `tool_cap`). A 400 is
+//! retried per `turn::retry_after_400` (round 0: without the replayed tool
+//! traces first, then without tools; later rounds: without tools). A
+//! failure after a completed tool round keeps the reply as `interrupted`.
+//! Web sources are
 //! persisted with the reply and rendered as citation chips.
 //!
 //! Turn continuity (`turn.rs`): every turn ends with an explicit reason,
@@ -834,6 +836,16 @@ pub(crate) fn abort_all_streams(state: &ChatState) -> usize {
     aborted
 }
 
+/// Whether a stream is registered for `conversation_id` (a send now would
+/// supersede it).
+fn has_active_stream(state: &ChatState, conversation_id: i64) -> bool {
+    state
+        .0
+        .lock()
+        .map(|guard| guard.contains_key(&conversation_id.to_string()))
+        .unwrap_or(false)
+}
+
 /// Atomically abort the previous stream for `conversation_id` (if any) and
 /// reserve the next generation. No handle yet — `attach_stream` adds it.
 fn reserve_stream(state: &ChatState, conversation_id: i64) -> Result<u64, String> {
@@ -1042,7 +1054,16 @@ pub fn chat_send(
     // Cancel-safe: reserve (aborting the previous stream for this
     // conversation) before spawning, then attach the handle to the reserved
     // generation so a superseded task is aborted instead of orphaned.
+    let superseding = has_active_stream(&state, conversation_id);
     let generation = reserve_stream(&state, conversation_id)?;
+    if superseding {
+        // The replaced turn ends like a Stop: its reply keeps what arrived
+        // and records `user_stop` (its task reports the same from Drop), and
+        // a command it was running is ended.
+        crate::process::stop_conversation_commands(conversation_id);
+        let _ = chat_store::finalize_in_progress(&conn, conversation_id, "user_stop");
+        let _ = chat_store::prune_tool_traces(&conn, Some(conversation_id));
+    }
     let handle = tauri::async_runtime::spawn(run_chat_stream(
         app.clone(),
         window,
@@ -1109,6 +1130,9 @@ async fn run_chat_stream(
     let state = app.state::<ChatState>();
     // The one place a turn is summarized (an abort reports `user_stop`).
     let mut tracker = TurnTracker::start(&profile_id, &model, continued);
+    // An aborted task (Stop, a new send, a realm switch) ends the command
+    // its tool call was running instead of leaving it to its timeout.
+    let commands = crate::process::StopCommandsOnDrop::new(conversation_id);
 
     let emit_error = |kind: ErrorKind| {
         crate::telemetry::record(
@@ -1145,23 +1169,24 @@ async fn run_chat_stream(
     };
     // Older replies may hold leaked tool markup (pre-S16): never feed it
     // back, the model would imitate it (sanitized in `history_messages`).
-    // The most recent turns replay their tool exchange (device-local).
+    // The most recent turns replay their tool exchange (device-local); the
+    // plain history is the fallback for a server that rejects it.
     let rows = match chat_store::list_messages(&conn, conversation_id) {
         Ok(rows) => rows,
         Err(_) => return fail_early(tracker, ErrorKind::Protocol),
     };
+    let traced_history = turn::history_messages(&rows, true);
+    let plain_history = turn::history_messages(&rows, false);
+    let replayed_traces = traced_history.len() != plain_history.len();
 
     // ---- tools offered this reply ------------------------------------------
     // Web search is always offered (provider-invisible, silent when the
     // platform cannot serve it). File tools only exist when the user picked
     // a workspace; the system message tells the model where it may work.
     let workspace = tools::workspace_for(&app, &profile_id, conversation_id);
-    let mut messages = compose_messages(
-        workspace.as_ref(),
-        skill.as_ref(),
-        turn::history_messages(&rows, true),
-    );
+    let mut messages = compose_messages(workspace.as_ref(), skill.as_ref(), traced_history);
     let mut offered_tools = tool_definitions(workspace.as_ref());
+    let mut traces_dropped = !replayed_traces;
 
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
@@ -1186,60 +1211,67 @@ async fn run_chat_stream(
     // This turn's tool exchange (device-local, replayed by later turns).
     let mut trace: Vec<serde_json::Value> = Vec::new();
 
-    for round in 0..=MAX_TOOL_ROUNDS {
+    'rounds: for round in 0..=MAX_TOOL_ROUNDS {
         // The last round offers no tools: the model must answer in text.
         let final_round = round == MAX_TOOL_ROUNDS;
         let mut offer_tools = !final_round && !offered_tools.is_empty();
-        let no_tools: &[serde_json::Value] = &[];
-        let body = request_body(
-            &model,
-            &messages,
-            if offer_tools {
+        tracker.rounds += 1;
+        // A 400 is retried (see `turn::retry_after_400`): first without the
+        // replayed traces (round 0), then without tools (a server without
+        // tool calling rejects `tools`; never offered again this reply).
+        let response = loop {
+            let no_tools: &[serde_json::Value] = &[];
+            let tools_now = if offer_tools {
                 offered_tools.as_slice()
             } else {
                 no_tools
-            },
-        );
-        tracker.rounds += 1;
-        let mut response = match post_completion(&client, &base, &key, &body).await {
-            Ok(response) => response,
-            Err(err) => {
-                failed = Some(err);
-                break;
+            };
+            let response = match post_completion(
+                &client,
+                &base,
+                &key,
+                &request_body(&model, &messages, tools_now),
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    failed = Some(err);
+                    break 'rounds;
+                }
+            };
+            let status = response.status().as_u16();
+            if status != 400 {
+                if !(200..300).contains(&status) {
+                    failed = Some(classify_chat_status(status));
+                    break 'rounds;
+                }
+                break response;
+            }
+            match turn::retry_after_400(round, offer_tools, traces_dropped, replayed_traces) {
+                turn::Retry400::WithoutTraces => {
+                    traces_dropped = true;
+                    messages =
+                        compose_messages(workspace.as_ref(), skill.as_ref(), plain_history.clone());
+                }
+                turn::Retry400::WithoutTools => {
+                    offered_tools.clear();
+                    offer_tools = false;
+                    if round == 0 && !traces_dropped {
+                        traces_dropped = true;
+                        messages = compose_messages(
+                            workspace.as_ref(),
+                            skill.as_ref(),
+                            plain_history.clone(),
+                        );
+                    }
+                }
+                turn::Retry400::GiveUp => {
+                    failed = Some(classify_chat_status(status));
+                    break 'rounds;
+                }
             }
         };
-        let mut status = response.status().as_u16();
-        if status == 400 && offer_tools {
-            // Silent degradation: a model/server without tool-calling
-            // support rejects the `tools` field. Retry once without any
-            // tools and never offer them again in this reply. On the first
-            // round the replayed tool traces may be what it rejects: drop
-            // them too (plain history).
-            offered_tools.clear();
-            offer_tools = false;
-            if round == 0 {
-                messages = compose_messages(
-                    workspace.as_ref(),
-                    skill.as_ref(),
-                    turn::history_messages(&rows, false),
-                );
-            }
-            response =
-                match post_completion(&client, &base, &key, &request_body(&model, &messages, &[]))
-                    .await
-                {
-                    Ok(response) => response,
-                    Err(err) => {
-                        failed = Some(err);
-                        break;
-                    }
-                };
-            status = response.status().as_u16();
-        }
-        if !(200..300).contains(&status) {
-            failed = Some(classify_chat_status(status));
-            break;
-        }
         let row = match row_id {
             Some(row) => row,
             None => {
@@ -1257,7 +1289,7 @@ async fn run_chat_stream(
             }
         };
 
-        let round_out = match stream_round(
+        let mut round_out = match stream_round(
             &window,
             &dir,
             conversation_id,
@@ -1282,6 +1314,9 @@ async fn run_chat_stream(
             ended = Some(reason);
             break;
         }
+        // Ids the app synthesized must not repeat across rounds or turns
+        // (the trace replays them).
+        turn::uniquify_call_ids(&mut round_out.tool_calls, row, round);
 
         // ---- run the requested tools, feed results back -------------------
         let round_text = if round_out.text.is_empty() {
@@ -1350,21 +1385,15 @@ async fn run_chat_stream(
         // The round is complete (every call has its result): keep it for
         // the next turns. Written per round so a stopped turn keeps the
         // rounds that finished; only the newest rounds within the replay
-        // budget are stored.
-        trace.extend(turn::trace_round(&round_out.tool_calls, &results));
-        trace = turn::tail_rounds(&trace, turn::REPLAY_BUDGET_CHARS).0;
+        // budget are stored, and an oversized round never erases them.
+        trace = turn::trace_after_round(&trace, turn::trace_round(&round_out.tool_calls, &results));
         if let Ok(json) = serde_json::to_string(&trace) {
             let _ = chat_store::set_message_tool_trace(&conn, row, Some(&json));
         }
         // Near the cap, tell the model how many steps are left so it wraps
         // up cleanly instead of stopping mid-action (live request only, not
         // stored in the trace).
-        if let Some(note) = turn::budget_note(round + 1, MAX_TOOL_ROUNDS)
-            && let Some(last) = messages.last_mut()
-            && let Some(content) = last.get("content").and_then(|c| c.as_str())
-        {
-            last["content"] = serde_json::Value::String(format!("{content}\n\n{note}"));
-        }
+        turn::apply_budget_note(&mut messages, round + 1, MAX_TOOL_ROUNDS);
         let _ = window.emit(
             "chat://activity",
             ActivityPayload {
@@ -1374,11 +1403,22 @@ async fn run_chat_stream(
         );
     }
 
-    // A cut before anything arrived is a plain network failure (nothing to
-    // keep or continue).
-    if ended == Some(TurnEndReason::StreamCut) && accumulated.trim().is_empty() && trace.is_empty()
+    // A failure after tool work was done keeps the reply and lets the user
+    // continue (`interrupted`); a cut before anything arrived is a plain
+    // network failure (nothing to keep or continue).
+    let mut kept_error: Option<ErrorKind> = None;
+    if let Some(kind) = failed
+        && row_id.is_some()
+        && turn::keeps_reply_on_error(kind, !trace.is_empty())
     {
-        failed = Some(ErrorKind::Network);
+        failed = None;
+        kept_error = Some(kind);
+        ended = Some(TurnEndReason::Interrupted);
+    }
+    if failed.is_none()
+        && let Some(kind) = turn::cut_outcome(ended, &accumulated, trace.is_empty())
+    {
+        failed = Some(kind);
     }
 
     // ---- persist + notify --------------------------------------------------
@@ -1393,28 +1433,8 @@ async fn run_chat_stream(
             tracker.finish(TurnEndReason::Error, Some(kind));
         }
         (None, Some(row)) => {
-            // The turn ended (finished, capped, cut or truncated): finalize
-            // the in-progress row in place with the final accumulated text,
-            // its web sources (citation chips) and why it ended. Defense in
-            // depth (S16): the stream filter already removed any tool
-            // markup; sanitize once more before the final write.
             let reason = ended.unwrap_or(TurnEndReason::Completed);
-            let final_text = tool_markup::sanitize_for_ui(&accumulated);
-            let persisted = chat_store::finalize_message(&conn, row, &final_text)
-                .and_then(|_| chat_store::set_message_end_reason(&conn, row, reason.as_str()))
-                .and_then(|_| {
-                    if sources.is_empty() {
-                        Ok(())
-                    } else {
-                        chat_store::set_message_sources(&conn, row, &sources)
-                    }
-                })
-                .and_then(|_| chat_store::touch_conversation(&conn, conversation_id))
-                // Retention: raw tool output only for the replies that can
-                // be replayed.
-                .and_then(|_| chat_store::prune_tool_traces(&conn, Some(conversation_id)))
-                .map(|_| ());
-            match persisted {
+            match persist_turn_end(&conn, conversation_id, row, &accumulated, &sources, reason) {
                 Ok(()) => {
                     let _ = window.emit(
                         "chat://done",
@@ -1423,7 +1443,7 @@ async fn run_chat_stream(
                             reason,
                         },
                     );
-                    tracker.finish(reason, None);
+                    tracker.finish(reason, kept_error);
                 }
                 Err(_) => {
                     emit_error(ErrorKind::Protocol);
@@ -1436,7 +1456,32 @@ async fn run_chat_stream(
             tracker.finish(TurnEndReason::Error, Some(ErrorKind::Protocol));
         }
     }
+    commands.disarm();
     release_stream(&state, conversation_id, generation);
+}
+
+/// Finalize a turn's in-progress row in place: the final text (sanitized
+/// once more, S16 defense in depth: the stream filter already removed any
+/// tool markup), why the turn ended, its web sources (citation chips);
+/// then touch the conversation and prune old tool traces (retention: raw
+/// tool output only for the replies that can be replayed).
+pub(crate) fn persist_turn_end(
+    conn: &rusqlite::Connection,
+    conversation_id: i64,
+    row: i64,
+    accumulated: &str,
+    sources: &[WebSource],
+    reason: TurnEndReason,
+) -> Result<(), rusqlite::Error> {
+    let final_text = tool_markup::sanitize_for_ui(accumulated);
+    chat_store::finalize_message(conn, row, &final_text)?;
+    chat_store::set_message_end_reason(conn, row, reason.as_str())?;
+    if !sources.is_empty() {
+        chat_store::set_message_sources(conn, row, sources)?;
+    }
+    chat_store::touch_conversation(conn, conversation_id)?;
+    chat_store::prune_tool_traces(conn, Some(conversation_id))?;
+    Ok(())
 }
 
 /// `chat://output` (round 17): a file a tool produced, with the role that
@@ -1501,13 +1546,8 @@ struct RoundOutput {
     end: RoundEnd,
 }
 
-/// Stream one SSE reply: emit and persist text deltas into `row` (T4b:
-/// flushed per network chunk), collect tool calls and how the stream ended.
-/// A transport failure mid-body is a cut, not an error: the text received
-/// so far stays (the caller decides what a cut with nothing received
-/// means). Opens its own store
-/// connection: a `&Connection` (not `Sync`) must not live across awaits of
-/// a spawned task.
+/// Stream one SSE reply into `row`, forwarding text deltas as
+/// `chat://delta` (see [`consume_round`]).
 async fn stream_round(
     window: &Window,
     dir: &std::path::Path,
@@ -1516,25 +1556,7 @@ async fn stream_round(
     response: reqwest::Response,
     accumulated: &mut String,
 ) -> Result<RoundOutput, ErrorKind> {
-    use futures_util::StreamExt;
-
-    let conn = chat_store::open_db(dir).map_err(|_| ErrorKind::Protocol)?;
-    let mut stream = response.bytes_stream();
-    let mut byte_buffer: Vec<u8> = Vec::new();
-    let mut sse_buffer = String::new();
-    let mut parser = RoundParser::default();
-    let mut text = String::new();
-    let mut finished = false;
-
-    // Text of a later round is separated from the earlier rounds' text.
-    let push_delta = |delta: String, text: &mut String, accumulated: &mut String| {
-        let delta = if text.is_empty() && !accumulated.is_empty() && !accumulated.ends_with('\n') {
-            format!("\n\n{delta}")
-        } else {
-            delta
-        };
-        text.push_str(&delta);
-        accumulated.push_str(&delta);
+    consume_round(response.bytes_stream(), dir, row, accumulated, |delta| {
         let _ = window.emit(
             "chat://delta",
             DeltaPayload {
@@ -1542,6 +1564,48 @@ async fn stream_round(
                 delta,
             },
         );
+    })
+    .await
+}
+
+/// Consume one SSE byte stream: emit and persist text deltas into `row`
+/// (T4b: flushed per network chunk), collect tool calls and how the stream
+/// ended. A transport failure mid-body is a cut, not an error: the text
+/// received so far stays (the caller decides what a cut with nothing
+/// received means). Opens its own store connection: a `&Connection` (not
+/// `Sync`) must not live across awaits of a spawned task. Generic over the
+/// byte stream so it is testable without a network.
+async fn consume_round<S, B, E>(
+    stream: S,
+    dir: &std::path::Path,
+    row: i64,
+    accumulated: &mut String,
+    mut emit: impl FnMut(String),
+) -> Result<RoundOutput, ErrorKind>
+where
+    S: futures_util::Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+{
+    use futures_util::StreamExt;
+
+    let conn = chat_store::open_db(dir).map_err(|_| ErrorKind::Protocol)?;
+    let mut stream = std::pin::pin!(stream);
+    let mut byte_buffer: Vec<u8> = Vec::new();
+    let mut sse_buffer = String::new();
+    let mut parser = RoundParser::default();
+    let mut text = String::new();
+    let mut finished = false;
+
+    // Text of a later round is separated from the earlier rounds' text.
+    let mut push_delta = |delta: String, text: &mut String, accumulated: &mut String| {
+        let delta = if text.is_empty() && !accumulated.is_empty() && !accumulated.ends_with('\n') {
+            format!("\n\n{delta}")
+        } else {
+            delta
+        };
+        text.push_str(&delta);
+        accumulated.push_str(&delta);
+        emit(delta);
     };
 
     while let Some(item) = stream.next().await {
@@ -1549,7 +1613,7 @@ async fn stream_round(
             // Connection reset / read error mid-body: the stream was cut.
             break;
         };
-        byte_buffer.extend_from_slice(&bytes);
+        byte_buffer.extend_from_slice(bytes.as_ref());
         sse_buffer.push_str(&decode_incremental(&mut byte_buffer));
         let mut pending_flush = false;
         for data in parse_sse_buffer(&mut sse_buffer) {
@@ -3135,6 +3199,164 @@ mod tests {
             extract_finish_reason(r#"{"choices":[{"finish_reason":"tool_calls"}]}"#).as_deref(),
             Some("tool_calls")
         );
+    }
+
+    // ---- turn wiring (consume_round / persist_turn_end) -------------------
+
+    fn turn_db() -> (tempfile::TempDir, rusqlite::Connection, i64, i64) {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let conn = chat_store::open_db(dir.path()).expect("db");
+        let conv = chat_store::insert_conversation(&conn, "nan", "t").expect("conv");
+        chat_store::insert_message(&conn, conv, "user", "go", None).expect("user");
+        let row = chat_store::insert_in_progress_assistant(&conn, conv, Some("m")).expect("row");
+        (dir, conn, conv, row)
+    }
+
+    fn sse(data: &str) -> Result<Vec<u8>, &'static str> {
+        Ok(format!("data: {data}\n\n").into_bytes())
+    }
+
+    #[test]
+    fn a_read_error_mid_body_is_a_cut_that_keeps_the_text() {
+        let (dir, conn, conv, row) = turn_db();
+        let chunks = vec![
+            sse(&content_chunk("Hola, ")),
+            sse(&content_chunk("mundo")),
+            Err("reset"),
+        ];
+        let mut accumulated = String::new();
+        let mut emitted = Vec::new();
+        let out = tauri::async_runtime::block_on(consume_round(
+            futures_util::stream::iter(chunks),
+            dir.path(),
+            row,
+            &mut accumulated,
+            |delta| emitted.push(delta),
+        ))
+        .expect("a cut is not an error");
+        assert_eq!(out.end, RoundEnd::Cut);
+        assert_eq!(out.text, "Hola, mundo");
+        assert_eq!(emitted.concat(), "Hola, mundo");
+        let rows = chat_store::list_messages(&conn, conv).expect("list");
+        assert_eq!(rows[1].content, "Hola, mundo", "persisted before the cut");
+        assert_eq!(
+            turn::turn_end_after_round(out.end, false, true, false),
+            Some(TurnEndReason::StreamCut)
+        );
+        assert_eq!(
+            turn::cut_outcome(Some(TurnEndReason::StreamCut), &accumulated, true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_clean_or_truncated_stream_is_classified_by_its_end() {
+        let (dir, _conn, _conv, row) = turn_db();
+        let clean = vec![sse(&content_chunk("ok")), sse("[DONE]")];
+        let mut accumulated = String::new();
+        let out = tauri::async_runtime::block_on(consume_round(
+            futures_util::stream::iter(clean),
+            dir.path(),
+            row,
+            &mut accumulated,
+            |_| {},
+        ))
+        .expect("round");
+        assert_eq!(out.end, RoundEnd::Clean);
+
+        let truncated = vec![
+            sse(&content_chunk("long")),
+            sse(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#),
+            sse("[DONE]"),
+        ];
+        let out = tauri::async_runtime::block_on(consume_round(
+            futures_util::stream::iter(truncated),
+            dir.path(),
+            row,
+            &mut accumulated,
+            |_| {},
+        ))
+        .expect("round");
+        assert_eq!(out.end, RoundEnd::Length);
+        assert_eq!(accumulated, "ok\n\nlong", "later rounds are separated");
+
+        // Ended without [DONE] or a finish reason, no error: still a cut.
+        let silent = vec![sse(&content_chunk("x"))];
+        let out = tauri::async_runtime::block_on(consume_round(
+            futures_util::stream::iter(silent),
+            dir.path(),
+            row,
+            &mut accumulated,
+            |_| {},
+        ))
+        .expect("round");
+        assert_eq!(out.end, RoundEnd::Cut);
+    }
+
+    #[test]
+    fn the_forced_final_round_persists_tool_cap_and_prunes_old_traces() {
+        let (_dir, conn, conv, row) = turn_db();
+        // The no-tools round after the cap ended cleanly: the turn is capped.
+        let reason =
+            turn::turn_end_after_round(RoundEnd::Clean, false, false, true).expect("the turn ends");
+        assert_eq!(reason, TurnEndReason::ToolCap);
+        chat_store::set_message_tool_trace(&conn, row, Some("[]")).expect("trace");
+        let sources = vec![WebSource {
+            title: "t".into(),
+            url: "https://example.com".into(),
+        }];
+        persist_turn_end(&conn, conv, row, "Hice 60 pasos.", &sources, reason).expect("persist");
+        let rows = chat_store::list_messages(&conn, conv).expect("list");
+        assert_eq!(rows[1].end_reason.as_deref(), Some("tool_cap"));
+        assert_eq!(rows[1].content, "Hice 60 pasos.");
+        assert!(!rows[1].partial);
+        assert_eq!(rows[1].sources, sources);
+        // The done payload is built from the same reason value.
+        assert_eq!(
+            serde_json::to_value(DonePayload {
+                conversation_id: conv,
+                reason
+            })
+            .expect("json")["reason"],
+            "tool_cap"
+        );
+    }
+
+    #[test]
+    fn a_stop_after_round_k_keeps_the_rounds_that_completed() {
+        let (_dir, conn, conv, row) = turn_db();
+        let mut trace: Vec<serde_json::Value> = Vec::new();
+        for round in 0..3 {
+            let mut calls = vec![ToolCall {
+                id: "markup_call_0".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }];
+            turn::uniquify_call_ids(&mut calls, row, round);
+            trace =
+                turn::trace_after_round(&trace, turn::trace_round(&calls, &[format!("r{round}")]));
+            let json = serde_json::to_string(&trace).expect("json");
+            chat_store::set_message_tool_trace(&conn, row, Some(&json)).expect("per round");
+        }
+        // Stop (the task is aborted mid round 4): the row is finalized.
+        chat_store::finalize_in_progress(&conn, conv, "user_stop").expect("stop");
+        let rows = chat_store::list_messages(&conn, conv).expect("list");
+        let stored: Vec<serde_json::Value> =
+            serde_json::from_str(rows[1].tool_trace.as_deref().expect("kept")).expect("json");
+        let ids: Vec<&str> = stored
+            .iter()
+            .filter_map(|m| m["tool_call_id"].as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                format!("markup_call_0_m{row}_r0"),
+                format!("markup_call_0_m{row}_r1"),
+                format!("markup_call_0_m{row}_r2")
+            ],
+            "rounds 1..k, with unique ids"
+        );
+        assert_eq!(rows[1].end_reason.as_deref(), Some("user_stop"));
     }
 
     #[test]

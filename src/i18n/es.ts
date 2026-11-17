@@ -142,6 +142,7 @@ export const es: Strings = {
       tool_cap: "La tarea tenía muchos pasos y he hecho una pausa aquí.",
       stream_cut: "Se cortó la conexión mientras respondía.",
       length: "La respuesta era demasiado larga para un solo mensaje.",
+      interrupted: "Algo falló a mitad de la tarea.",
     },
     continueTurn: "Continuar",
     continuePrompt: "Continúa con la tarea donde lo dejaste.",

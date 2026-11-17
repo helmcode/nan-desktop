@@ -10,14 +10,16 @@
 // (after AUTO_RETRY_DELAY_MS, cancellable): the user should not have to do
 // it. If that automatic continuation stops the same way, the manual notice
 // is shown instead (never a loop). The step cap (`tool_cap`) always waits
-// for the user: it bounds cost on purpose.
+// for the user: it bounds cost on purpose, and so does `interrupted` (a
+// request failed after tool work was done; retrying by itself could repeat
+// the same failure).
 
 import { useId } from "react";
 import { useT } from "../i18n";
 
-/** The end reasons the user can continue from (mirrors the core's
- * `TurnEndReason::is_continuable`). */
-export const CONTINUABLE_REASONS = ["tool_cap", "stream_cut", "length"] as const;
+/** The end reasons the user can continue from: every `TurnEndReason` of
+ * the core except `completed`, `user_stop` and `error`. */
+export const CONTINUABLE_REASONS = ["tool_cap", "stream_cut", "length", "interrupted"] as const;
 export type ContinuableReason = (typeof CONTINUABLE_REASONS)[number];
 
 /** The reasons resumed automatically once. */
@@ -31,23 +33,25 @@ export function isContinuable(reason: string | null | undefined): reason is Cont
   return (CONTINUABLE_REASONS as readonly string[]).includes(reason ?? "");
 }
 
+function isAutoRetryReason(reason: string): reason is AutoRetryReason {
+  return (AUTO_RETRY_REASONS as readonly string[]).includes(reason);
+}
+
 /** Whether a turn that just ended with `reason` is resumed automatically:
  * only a cut or a too-long reply, and never when that turn was itself the
  * automatic continuation. */
 export function shouldAutoRetry(reason: string | null | undefined, turnWasAutoRetry: boolean): boolean {
-  return !turnWasAutoRetry && (AUTO_RETRY_REASONS as readonly string[]).includes(reason ?? "");
+  return !turnWasAutoRetry && isAutoRetryReason(reason ?? "");
 }
 
 export function UnfinishedTurn({
   reason,
   onContinue,
-  disabled = false,
   autoRetrying = false,
   onCancelAutoRetry,
 }: {
   reason: string | null | undefined;
   onContinue: () => void;
-  disabled?: boolean;
   /** An automatic continuation is about to start (shows "resuming" and a
    * Cancel button instead of Continue). */
   autoRetrying?: boolean;
@@ -56,7 +60,7 @@ export function UnfinishedTurn({
   const t = useT();
   const noteId = useId();
   if (!isContinuable(reason)) return null;
-  if (autoRetrying && reason !== "tool_cap") {
+  if (autoRetrying && isAutoRetryReason(reason)) {
     return (
       <div className="unfinished-turn" role="status">
         <p className="unfinished-note" id={noteId}>
@@ -82,7 +86,6 @@ export function UnfinishedTurn({
         type="button"
         className="btn btn-primary btn-sm"
         onClick={onContinue}
-        disabled={disabled}
         aria-describedby={noteId}
       >
         {t.chat.continueTurn}
