@@ -201,7 +201,9 @@ describe("ApprovalCard: share_artifact", () => {
     expect(screen.getByText(deep).className).toBe("approval-target");
     // The share card's target wraps instead of the default one-line ellipsis.
     const shareCss = readFileSync("src/components/ApprovalShare.css", "utf8");
-    const rule = shareCss.slice(shareCss.indexOf(".approval-card-share .approval-target"));
+    const start = shareCss.indexOf(".approval-card-share .approval-target");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rule = shareCss.slice(start, shareCss.indexOf("}", start) + 1);
     expect(rule).toMatch(/white-space:\s*normal/);
     expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
     expect(rule).toMatch(/text-overflow:\s*clip/);

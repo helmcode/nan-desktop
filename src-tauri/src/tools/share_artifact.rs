@@ -446,13 +446,14 @@ fn link_from(
     };
     Ok(SharedLink {
         url: url.to_string(),
-        title: text("title").unwrap_or_else(|| {
+        // Shown on the link card: neutralized like the approval text.
+        title: display_safe(&text("title").unwrap_or_else(|| {
             if req.title.is_empty() {
                 filename.to_string()
             } else {
                 req.title.clone()
             }
-        }),
+        })),
         scope: req.audience.clone(),
         recipients: req.emails.clone(),
         expires_at: text("expires_at"),
@@ -558,15 +559,31 @@ pub(crate) struct ShareEnv<'a> {
 /// Whether `c` could rewrite how the approval text reads: a control
 /// character (newlines, tabs...), a line/paragraph separator, or an
 /// invisible format/bidi control (LRM/RLM, ALM, embeddings and overrides
-/// U+202A..U+202E, isolates U+2066..U+2069, zero-width, BOM).
+/// U+202A..U+202E, isolates U+2066..U+2069, zero-width, BOM, soft hyphen,
+/// interlinear annotations, tag characters, Hangul fillers, variation
+/// selectors).
 fn misleading_char(c: char) -> bool {
     c.is_control()
-        || matches!(c,
-            '\u{061C}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{2028}'..='\u{202E}'
-            | '\u{2060}'..='\u{2069}'
-            | '\u{FEFF}')
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{17B4}'
+                | '\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E0FFF}'
+        )
 }
 
 /// Text from a file name, a path or the model, made safe to show on the
@@ -574,10 +591,26 @@ fn misleading_char(c: char) -> bool {
 /// becomes U+FFFD, so a name like `x.pdf\n\nCon: solo tu organización`
 /// cannot fake a line, and a right-to-left override cannot flip `fdp.exe`
 /// into `exe.pdf`. Pure.
+/// Runs of other whitespace (including U+00A0 and U+3000) collapse to one
+/// space, so padding cannot push text out of view.
 pub fn display_safe(text: &str) -> String {
-    text.chars()
-        .map(|c| if misleading_char(c) { '\u{FFFD}' } else { c })
-        .collect()
+    let mut out = String::with_capacity(text.len());
+    let mut space = false;
+    for c in text.chars() {
+        if misleading_char(c) {
+            out.push('\u{FFFD}');
+            space = false;
+        } else if c.is_whitespace() {
+            if !space {
+                out.push(' ');
+            }
+            space = true;
+        } else {
+            out.push(c);
+            space = false;
+        }
+    }
+    out
 }
 
 /// Where a file is, for the approval: see [`ShareAsk::source`]. `canonical`
@@ -1566,6 +1599,23 @@ mod tests {
         server.join().expect("server");
         assert_eq!(err.code, "quota_exceeded");
 
+        // The server's title is neutralized for the link card too.
+        let (base, server) = crate::artifacts::tests::mock_server(
+            201,
+            serde_json::json!({ "url": LINK, "artifact": { "title": "Plan\u{202E}fdp" } })
+                .to_string(),
+        );
+        let link = block(share_in(
+            &store(&l, NAN, ApprovalMode::Ask),
+            &env(&l, NAN, &base),
+            &Fake::new(true),
+            &req,
+            &mut ShareTurn::default(),
+        ))
+        .expect("shared");
+        server.join().expect("server");
+        assert_eq!(link.title, "Plan\u{FFFD}fdp");
+
         let (base, server) =
             crate::artifacts::tests::mock_server(201, r#"{"url":"javascript:alert(1)"}"#.into());
         let err = block(share_in(
@@ -1836,6 +1886,33 @@ mod tests {
             "año ünïcode 文件",
             "ordinary text is kept"
         );
+        for hidden in [
+            '\u{00AD}',
+            '\u{034F}',
+            '\u{180E}',
+            '\u{FFF9}',
+            '\u{FFFA}',
+            '\u{FFFB}',
+            '\u{E0001}',
+            '\u{E007F}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{FE0F}',
+        ] {
+            assert_eq!(
+                display_safe(&format!("a{hidden}b")),
+                "a\u{FFFD}b",
+                "{:?}",
+                hidden
+            );
+        }
+        assert_eq!(
+            display_safe("a  \u{00A0}\u{3000} b"),
+            "a b",
+            "whitespace runs collapse"
+        );
+        assert_eq!(display_safe("plan     final.pdf"), "plan final.pdf");
     }
 
     #[test]
