@@ -78,5 +78,23 @@ strip = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# In-app browser screenshots (`src/browser/screenshot.rs`): each engine's
+# own snapshot API. All already in the dependency tree through wry; only the
+# features the snapshot needs are enabled here.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError", "NSValue"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSBitmapImageRep", "NSImage", "NSImageRep"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKSnapshotConfiguration", "WKWebView"] }
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2.0"
+cairo-rs = { version = "0.18", features = ["png"] }
+
 [dev-dependencies]
 tempfile = "3.27.0"

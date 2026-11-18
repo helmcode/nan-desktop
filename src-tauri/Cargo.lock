@@ -2670,11 +2670,17 @@ version = "0.2.13"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
+ "block2",
+ "cairo-rs",
  "futures-util",
  "getrandom 0.3.4",
  "icu_normalizer",
  "keyring",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
  "reqwest",
  "rodio",
  "rusqlite",
@@ -2689,6 +2695,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "webkit2gtk",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]

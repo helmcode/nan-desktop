@@ -419,6 +419,20 @@ pub fn tool_definitions(workspace: Option<&tools::Workspace>) -> Vec<serde_json:
     defs
 }
 
+/// Every tool offered for one reply with `model`: [`tool_definitions`]
+/// plus the in-app browser tools (`browser_screenshot` only for a model
+/// that can see images).
+pub fn offered_tool_definitions(
+    workspace: Option<&tools::Workspace>,
+    model: &str,
+) -> Vec<serde_json::Value> {
+    let mut defs = tool_definitions(workspace);
+    defs.extend(crate::browser::tools::tool_definitions(
+        crate::browser::tools::model_sees_images(model),
+    ));
+    defs
+}
+
 /// How the assistant must work with tools (round 3). The owner's session
 /// showed the model narrating intentions ("now I'll create…") several
 /// times without acting, and a final answer that never said where the
@@ -441,9 +455,10 @@ working folders; for any other place, ask the user to add that folder first.";
 /// workspace description when the user set one up.
 pub fn system_prompt(workspace: Option<&tools::Workspace>) -> String {
     let rules = format!(
-        "{ASSISTANT_RULES}\n\n{}\n\n{}",
+        "{ASSISTANT_RULES}\n\n{}\n\n{}\n\n{}",
         tools::save_skill::GUIDANCE,
-        tools::website::GUIDANCE
+        tools::website::GUIDANCE,
+        crate::browser::tools::GUIDANCE
     );
     match workspace {
         Some(workspace) => format!("{rules}\n\n{}", workspace_prompt(workspace)),
@@ -1196,7 +1211,7 @@ async fn run_chat_stream(
     // a workspace; the system message tells the model where it may work.
     let workspace = tools::workspace_for(&app, &profile_id, conversation_id);
     let mut messages = compose_messages(workspace.as_ref(), skill.as_ref(), traced_history);
-    let mut offered_tools = tool_definitions(workspace.as_ref());
+    let mut offered_tools = offered_tool_definitions(workspace.as_ref(), &model);
     let mut traces_dropped = !replayed_traces;
 
     let client = match reqwest::Client::builder()
@@ -1352,18 +1367,43 @@ async fn run_chat_stream(
             "tool_calls": requested,
         }));
         let mut results: Vec<String> = Vec::with_capacity(round_out.tool_calls.len());
+        // In-app browser screenshots, sent after the round's tool messages
+        // as user image parts (a tool message cannot carry an image).
+        let mut screenshots: Vec<String> = Vec::new();
         for call in &round_out.tool_calls {
             let tool_started = std::time::Instant::now();
-            let (content, produced, declared) = run_tool_call(
-                &app,
-                &window,
-                &dir,
-                &profile_id,
-                conversation_id,
-                call,
-                &mut sources,
-            )
-            .await;
+            let (content, produced, declared) =
+                if crate::browser::tools::is_browser_tool(&call.name) {
+                    let _ = window.emit(
+                        "chat://activity",
+                        ActivityPayload {
+                            conversation_id,
+                            activity: Some(activity_for_tool(&call.name)),
+                        },
+                    );
+                    let run = crate::browser::run_model_tool(
+                        &app,
+                        &profile_id,
+                        conversation_id,
+                        &model,
+                        &call.name,
+                        &call.arguments,
+                    )
+                    .await;
+                    screenshots.extend(run.image);
+                    (run.content, Vec::new(), Vec::new())
+                } else {
+                    run_tool_call(
+                        &app,
+                        &window,
+                        &dir,
+                        &profile_id,
+                        conversation_id,
+                        call,
+                        &mut sources,
+                    )
+                    .await
+                };
             tracker.tool_calls += 1;
             // Metadata only: registry name, outcome class, duration. Capped
             // per turn (the rest is counted in `turn_end.tool_calls`).
@@ -1392,6 +1432,11 @@ async fn run_chat_stream(
                 "content": content,
             }));
             results.push(content);
+        }
+        // Live request only (not in the stored trace: images stay out of
+        // the device-local replay).
+        for image in &screenshots {
+            messages.push(crate::browser::screenshot_message(image));
         }
         // The round is complete (every call has its result): keep it for
         // the next turns. Written per round so a stopped turn keeps the
@@ -1735,6 +1780,7 @@ pub fn activity_for_tool(name: &str) -> &'static str {
     match name {
         web_search::TOOL_NAME => "searching",
         images::TOOL_NAME => "generating_image",
+        name if crate::browser::tools::is_browser_tool(name) => "browsing",
         _ => "working",
     }
 }
@@ -2597,6 +2643,35 @@ mod tests {
     }
 
     #[test]
+    fn browser_tools_are_always_offered_and_screenshots_only_to_vision_models() {
+        let names = |model: &str| -> Vec<String> {
+            offered_tool_definitions(None, model)
+                .iter()
+                .map(|d| d["function"]["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let vision = names("deepseek-v4-flash");
+        let text_only = names("glm5.3");
+        for name in [
+            "web_search",
+            "browser_open",
+            "browser_read",
+            "browser_click",
+            "browser_type",
+        ] {
+            assert!(vision.contains(&name.to_string()), "{name}");
+            assert!(text_only.contains(&name.to_string()), "{name}");
+        }
+        assert!(vision.contains(&"browser_screenshot".to_string()));
+        assert!(!text_only.contains(&"browser_screenshot".to_string()));
+        // File tools still only with a workspace.
+        assert!(!text_only.contains(&"read_file".to_string()));
+        // Browser calls never reach the file-action mapper.
+        assert!(action_from_call("browser_open", r#"{"url":"https://e.com"}"#).is_err());
+        assert!(system_prompt(None).contains("In-app browser"));
+    }
+
+    #[test]
     fn move_and_delete_calls_map_onto_core_actions() {
         assert_eq!(
             action_from_call("move_path", r#"{"from":"/a/x","to":"/a/y"}"#),
@@ -3206,6 +3281,7 @@ mod tests {
     #[test]
     fn tool_activities_name_what_the_assistant_is_doing() {
         assert_eq!(activity_for_tool("web_search"), "searching");
+        assert_eq!(activity_for_tool("browser_click"), "browsing");
         assert_eq!(activity_for_tool("generate_image"), "generating_image");
         assert_eq!(activity_for_tool("run_command"), "working");
     }

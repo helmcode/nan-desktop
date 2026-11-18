@@ -16,6 +16,9 @@
 
 // Shared artifacts (F1): snapshot upload of a granted file + link list/revoke.
 mod artifacts;
+// In-app browser the assistant drives (computer use, phase 1): isolated
+// window, `browser_*` tools, approval policy.
+mod browser;
 mod chat;
 mod chat_store;
 mod conn_test;
@@ -233,6 +236,7 @@ pub fn run() {
         .manage(memory::MemoryState::default())
         .manage(updater::UpdaterState::default())
         .manage(site_preview::SiteRegistry::default())
+        .manage(browser::BrowserState::default())
         // R20-D: the sandboxed website preview frame. Serves ONLY bytes
         // preview_read_file already gated and registered (never the disk),
         // under the site CSP header (no network) + a sandbox directive.
@@ -344,7 +348,9 @@ pub fn run() {
             links::open_external,
             telemetry::telemetry_renderer_crash,
             updater::update_check,
-            updater::update_install
+            updater::update_install,
+            browser::browser_state,
+            browser::browser_control
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -408,6 +414,57 @@ mod tests {
             .bind("nan", profile::BoundUser::new("nan", "u-a", None))
             .unwrap();
         assert!(!overview_with(&store, none).relogin_pending);
+    }
+
+    /// The command names between `start` and the closing `]` of `text`.
+    fn names_after(text: &str, start: &str) -> std::collections::BTreeSet<String> {
+        let block = &text[text.find(start).expect("marker") + start.len()..];
+        let block = &block[..block.find(']').expect("end")];
+        block
+            .split(',')
+            .map(|item| {
+                item.trim()
+                    .trim_matches('"')
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn every_app_command_is_in_the_acl_manifest_and_granted_only_to_the_chat_window() {
+        // In-app browser isolation: build.rs declares the app commands, so
+        // Tauri checks each one against the capabilities. A command missing
+        // from the manifest or the capability is refused at runtime.
+        let lib = include_str!("lib.rs");
+        let handler = names_after(lib, concat!("generate_handler", "!["));
+        let manifest = names_after(include_str!("../build.rs"), "APP_COMMANDS: &[&str] = &[");
+        assert_eq!(
+            handler, manifest,
+            "build.rs APP_COMMANDS != generate_handler!"
+        );
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert_eq!(capability["windows"], serde_json::json!(["main"]));
+        let granted: std::collections::BTreeSet<String> = capability["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .filter_map(|p| p.strip_prefix("allow-"))
+            .map(|p| p.replace('-', "_"))
+            .collect();
+        assert_eq!(granted, handler, "capability allow-* != generate_handler!");
+        // No capability file may name the browser window or a remote URL.
+        for file in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/capabilities")).unwrap()
+        {
+            let text = std::fs::read_to_string(file.unwrap().path()).unwrap();
+            assert!(!text.contains(&format!("\"{}\"", browser::LABEL)));
+            assert!(!text.contains("\"remote\""));
+        }
     }
 
     #[test]

@@ -368,6 +368,8 @@ fn stop_realm_tasks(app: &AppHandle) {
         .reset_for_realm_switch();
     // The previous user's sandboxed site previews go with their realm.
     app.state::<crate::site_preview::SiteRegistry>().clear();
+    // The assistant's browser closes and forgets its site approvals.
+    crate::browser::reset_for_realm_switch(app);
     // A previous user's rejected session must not park the next user's
     // account memory for the rest of the run.
     let memory = app.state::<crate::memory::MemoryState>();

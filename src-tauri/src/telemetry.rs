@@ -177,6 +177,14 @@ pub const TOOL_NAMES: &[&str] = &[
     "move_path",
     "delete_path",
     "run_command",
+    crate::browser::tools::OPEN,
+    crate::browser::tools::READ,
+    crate::browser::tools::CLICK,
+    crate::browser::tools::TYPE,
+    crate::browser::tools::SCROLL,
+    crate::browser::tools::BACK,
+    crate::browser::tools::SCREENSHOT,
+    crate::browser::tools::WAIT,
 ];
 
 /// The registry name for `name`, or `unknown`.
@@ -246,15 +254,17 @@ pub fn tool_outcome_from_result(content: &str) -> ToolOutcome {
     let Ok(Value::Object(map)) = serde_json::from_str::<Value>(content) else {
         return ToolOutcome::Ok;
     };
+    // A timeout is a timeout whether or not the tool also failed (a
+    // browser action that timed out reports `ok: false`).
+    if map.get("timed_out") == Some(&Value::Bool(true)) {
+        return ToolOutcome::Timeout;
+    }
     if map.get("ok") == Some(&Value::Bool(false)) {
         return if map.get("error").and_then(Value::as_str) == Some("declined") {
             ToolOutcome::Denied
         } else {
             ToolOutcome::Error
         };
-    }
-    if map.get("timed_out") == Some(&Value::Bool(true)) {
-        return ToolOutcome::Timeout;
     }
     ToolOutcome::Ok
 }

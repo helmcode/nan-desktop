@@ -3384,6 +3384,57 @@ pub(crate) fn workspace_for(
     workspace_for_conversation_in(&dir, &state, profile_id, conversation_id)
 }
 
+/// In-app browser allow mode: true when the conversation sees at least one
+/// working folder and EVERY folder it sees is in `allow` mode (the user
+/// already chose "do it without asking" for this work). Pure.
+pub fn store_allows_without_asking(store: &GrantsStore, profile_id: &str) -> bool {
+    let grants = store.grants_for(profile_id);
+    !grants.is_empty() && grants.iter().all(|grant| grant.mode == ApprovalMode::Allow)
+}
+
+/// [`store_allows_without_asking`] for one conversation's effective store
+/// (its folder selection). Any failure reads as "ask".
+pub(crate) fn conversation_allows_without_asking(
+    app: &AppHandle,
+    profile_id: &str,
+    conversation_id: i64,
+) -> bool {
+    let Ok(dir) = data_dir(app) else {
+        return false;
+    };
+    let state = app.state::<ToolsState>();
+    grants::load_or_seed(&dir)
+        .ok()
+        .and_then(|store| effective_store(&store, &state, profile_id, Some(conversation_id)).ok())
+        .is_some_and(|store| store_allows_without_asking(&store, profile_id))
+}
+
+/// Audit an in-app browser approval (the site's host only: never a URL
+/// path, a page or what was typed). Best-effort.
+pub(crate) fn audit_browser(
+    app: &AppHandle,
+    profile_id: &str,
+    action: &str,
+    granted: bool,
+    host: &str,
+) {
+    let Ok(dir) = data_dir(app) else {
+        return;
+    };
+    let _ = audit_event(
+        &dir,
+        AuditEntry {
+            ts: audit::timestamp_now_rfc3339(),
+            event: if granted { "approve" } else { "deny" }.into(),
+            action: action.into(),
+            outcome: "ok".into(),
+            grant_id: None,
+            profile_id: Some(profile_id.to_string()),
+            detail: Some(format!("host {host}")),
+        },
+    );
+}
+
 // --------------------------------------------------------------- tests --
 
 #[cfg(test)]
@@ -4840,6 +4891,39 @@ mod tests {
         )
         .expect_err("policy rewrite refused");
         assert_eq!(err.kind, "scope");
+    }
+
+    #[test]
+    fn the_browser_runs_without_asking_only_when_every_folder_allows() {
+        let base = tempfile::tempdir().unwrap();
+        let (a, b) = (base.path().join("a"), base.path().join("b"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let mut store = grants::default_store();
+        assert!(
+            !store_allows_without_asking(&store, "nan"),
+            "no folder: ask"
+        );
+        let ga = store
+            .add_grant("ga".into(), "nan", a, "t".into())
+            .unwrap()
+            .id;
+        let gb = store
+            .add_grant("gb".into(), "nan", b, "t".into())
+            .unwrap()
+            .id;
+        assert!(!store_allows_without_asking(&store, "nan"), "default ask");
+        store.set_mode(&ga, ApprovalMode::Allow).unwrap();
+        assert!(
+            !store_allows_without_asking(&store, "nan"),
+            "one still asks"
+        );
+        store.set_mode(&gb, ApprovalMode::Allow).unwrap();
+        assert!(store_allows_without_asking(&store, "nan"));
+        assert!(
+            !store_allows_without_asking(&store, "helmcode"),
+            "per profile"
+        );
     }
 
     #[test]
