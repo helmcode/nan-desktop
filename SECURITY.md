@@ -280,17 +280,28 @@ can stop the assistant from the browser bar in the chat window.
   `browser_state` or `plugin:event|listen` gets "not allowed on window
   browser"; a `lib.rs` test keeps the command list, the manifest and the
   capability identical.
-- **Navigation guard on every navigation** (`url_policy::navigation_allowed`):
-  `http`/`https` only (plus `about:blank`), never `file:`, `data:`,
-  `javascript:`, custom schemes or the app's own origins (`tauri://`,
-  `ipc://`, `asset://`, `nan-site://`, and every `localhost` /
-  `*.localhost` host, which Tauri treats as the app itself). Addresses with
-  `user:password@` are refused.
+- **Navigation guard** (`url_policy::navigation_allowed`) on every
+  top-level navigation the engine reports (on Windows, WebView2 does not
+  report sub-frame navigations to it): `http`/`https` only (plus
+  `about:blank`), never `file:`, `data:`, `javascript:`, custom schemes or
+  the app's own origins (`tauri://`, `ipc://`, `asset://`, `nan-site://`,
+  and every `localhost` / `*.localhost` host, which Tauri treats as the app
+  itself). Addresses with `user:password@` are refused. A frame that did
+  load an app origin would still reach no command: the window has no
+  capability at all (above).
+- **First document is `about:blank`.** The window is created on
+  `about:blank` and then navigated, so no page chooses the origin of the
+  window's first document.
+- **Every page permission is refused** (microphone, camera, location,
+  notifications...), on every platform (`on_permission_request` ->
+  `Deny`). Without it WKWebView would grant media capture silently.
 - **Separate, private data store.** The webview is incognito
   (macOS non-persistent `WKWebsiteDataStore`, WebView2 InPrivate, WebKitGTK
   ephemeral context): no cookies, storage or cache shared with the app UI,
   nothing written to disk, everything gone when the window closes. A
-  sign-in made in the browser lasts until the window closes.
+  sign-in made in the browser lasts until the window closes, and it is
+  shared by every conversation that uses the browser meanwhile (one
+  window, one session): close the browser to end it.
 - **No downloads.** Every download is cancelled; the chat window shows a
   notice and the assistant is told, so it can ask the user to download the
   file from their own browser. Nothing is saved or opened.
@@ -311,34 +322,56 @@ with JSON literals, and return JSON. A read returns the title, address,
 visible text from the current scroll position (at most 12,000 characters)
 and up to 120 numbered interactive elements. Element numbers are tied to
 that read: after a navigation or another read they are refused as stale.
-Each script has an 8 s timeout and a navigation 20 s.
+Field values are only shown for fields the assistant typed itself (never
+what the user or the page filled in). Each script has an 8 s timeout and a
+navigation 20 s; one action runs at a time, and a conversation never
+waits behind another conversation's pending card (it is told the browser
+is busy).
+
+**Final address check.** Page content reaches the model only after the
+site rule ran on the page's FINAL address: after a redirect, a link or a
+script that moved the page to another site (or to the local network), that
+site needs its own approval first; if the user declines, the model gets no
+content, only "the page navigated to <host>, which the user did not
+allow".
 
 **Approval policy.**
 - **Per site, per conversation.** The first action on a site (host, `www.`
   ignored, subdomains separate) asks with an inline card; a yes covers that
   site for the rest of the conversation (until the app restarts or the
   account changes). When EVERY working folder of the conversation is in
-  "allow" mode, public sites run without asking; the chat still shows a
-  "Using <host>" line for each new site. A pending card brings the chat
+  "allow" mode, public sites run without asking; this is re-evaluated on
+  every action and never remembered, so switching a folder back to "ask"
+  takes effect at once. The chat still shows a "Using <host>" line for each
+  new site. A pending card brings the chat
   window to the front; the browser opens beside the chat without taking
   the focus.
-- **Local network always asks** (loopback, RFC 1918, link-local, CGNAT,
-  IPv6 ULA, single-label and `.local`/`.lan`/`.internal` names), in every
-  mode. DNS answers are not inspected: a public name that resolves to a
+- **Local network asks in every mode** (once per conversation): loopback,
+  RFC 1918, link-local, CGNAT, 198.18.0.0/15, IPv6 ULA and site-local,
+  IPv4-mapped/compatible, NAT64 and 6to4 addresses, single-label and
+  `.local`/`.lan`/`.internal` names. DNS answers are not inspected: a public name that resolves to a
   private address is treated as public.
 - **Secrets are never typed by the assistant**, in any mode: password,
   verification-code and card fields (by type, `autocomplete` and
   name/label) are refused, and the page script refuses password fields a
   second time. The assistant asks the user to fill them in themselves.
 - **Sign-ins and payments ask every time**, even in allow mode: submitting
-  a form that has a password or card field, or pressing a control whose
-  label reads like a payment or purchase.
+  a form that has a password or card field, pressing a control whose label
+  reads like a payment or purchase, or pressing a sign-in control on a page
+  that shows a password field.
+- **Time of check vs time of use.** The policy checks an element, then a
+  second script acts on it; a hostile page can swap the element in
+  between (the element registry lives in the page). The click script
+  re-reads the element's label and refuses the click as stale when it
+  changed, which closes the honest-page cases; a hostile page can still
+  defeat it, which is why the policy is friction, not isolation.
 - Every answer to a browser card is written to the tools audit log with
   the host only.
 
 **Prompt injection.** Everything a page shows is untrusted. Reads are
-wrapped in a header that says so, between markers carrying a random nonce
-the page cannot forge; the system prompt tells the model never to follow
+wrapped in a header that says so, between markers with a random nonce that
+is never sent to the page, and page text can never contain `<<<` (it is
+neutralized after cleaning), so no page can open or close a marker; the system prompt tells the model never to follow
 instructions from pages and never to copy private data into them unless
 asked. The page facts that drive the policy (field types, labels) come
 from the page itself: they add friction for honest sites, they do not make
@@ -347,8 +380,10 @@ a hostile site safe. Isolation does that.
 **Screenshots** (`browser_screenshot`, offered only to models that can see
 images) are taken by the engine itself (WKWebView snapshot, WebView2
 `CapturePreview`, WebKitGTK snapshot) and show only the browser page,
-never the rest of the screen. They are sent to the profile's own inference
-API for that reply only and are not stored in the conversation.
+never the rest of the screen. Only the newest screenshot is sent with a
+request (earlier ones become a text stub), only to the profile's own
+inference API, and none is stored in the conversation or its tool trace.
+At most 4 MiB; Linux snapshots are scaled to 1280 px wide.
 
 **Known limitations.** Clicks and typing are synthetic DOM events: a few
 sites that only accept real input may ignore them (the user can do that

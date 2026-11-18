@@ -1810,11 +1810,11 @@ function ChatShell({
   }, []);
 
   // Stop: abort the stream; what already arrived stays persisted.
-  const stopGenerating = useCallback(async (): Promise<void> => {
-    const conversationId = activeConvRef.current;
-    if (conversationId === null) return;
-    // Hold the queue first: if the turn ends on its own before the stop
-    // reaches the core (no chat://stopped), nothing goes out by itself.
+  // Stop a conversation's reply: the composer's Stop and the browser bar's
+  // Stop share this one path. The queue is held FIRST: if the turn ends on
+  // its own before the stop reaches the core (no chat://stopped), nothing
+  // goes out by itself.
+  const stopConversation = useCallback(async (conversationId: number): Promise<void> => {
     setQueues((prev) => hold(prev, conversationId, "stopped"));
     try {
       await invoke("chat_stop", { conversationId });
@@ -1823,15 +1823,11 @@ function ChatShell({
     }
   }, []);
 
-  // In-app browser: the bar's state, and its "stop the assistant" button
-  // (stops the reply that drives the browser, whatever conversation it is).
-  const stopBrowserAgent = useCallback(async (conversationId: number): Promise<void> => {
-    try {
-      await invoke("chat_stop", { conversationId });
-    } catch (err) {
-      setInlineError(`cmd:${String(err)}`);
-    }
-  }, []);
+  const stopGenerating = useCallback(async (): Promise<void> => {
+    const conversationId = activeConvRef.current;
+    if (conversationId === null) return;
+    await stopConversation(conversationId);
+  }, [stopConversation]);
 
   const cancelImage = useCallback(async (): Promise<void> => {
     const conversationId = activeConvRef.current;
@@ -2864,7 +2860,7 @@ function ChatShell({
               activeConversationId={activeConvId}
               downloadBlocked={browser.downloadBlocked}
               onDismissDownload={browser.dismissDownload}
-              onStopAssistant={(id) => void stopBrowserAgent(id)}
+              onStopAssistant={(id) => void stopConversation(id)}
             />
             <footer className="composer">
               {activeSkill && (

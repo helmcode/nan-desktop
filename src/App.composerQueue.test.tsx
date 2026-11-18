@@ -41,6 +41,7 @@ let conversations: ConversationView[];
 let rows: ChatMessageRow[];
 let otherRows: ChatMessageRow[];
 let failSend: boolean;
+let browserView: Record<string, unknown> | null;
 
 function handlers() {
   return {
@@ -57,6 +58,8 @@ function handlers() {
     },
     chat_stop: () => undefined,
     tts_stop: () => undefined,
+    browser_state: () => browserView,
+    browser_set_language: () => undefined,
   };
 }
 
@@ -106,6 +109,7 @@ beforeEach(() => {
   rows = [row(1, "user", "hola")];
   otherRows = [];
   failSend = false;
+  browserView = null;
 });
 
 afterEach(cleanup);
@@ -337,6 +341,26 @@ describe("composer queue while a reply runs", () => {
       fireEvent.click(screen.getByRole("button", { name: "Detener" }));
     });
     // The reply finished just before the stop reached the core: no stopped event.
+    await endTurn("completed");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(sent()).toEqual(["primera"]);
+    expect(within(queueRegion() as HTMLElement).getByText(/Has detenido la respuesta\./)).toBeTruthy();
+  });
+
+  it("the browser bar's Stop holds the queue too, even if the turn ends first", async () => {
+    // The reply of conversation 8 is driving the assistant's browser.
+    browserView = { open: true, url: "https://example.com/", title: "E", loading: false, agent_conversation: 8 };
+    await startStreaming();
+    await type("segunda");
+    await pressEnter();
+    const bar = await screen.findByRole("region", { name: "Navegador del asistente" });
+    await act(async () => {
+      fireEvent.click(within(bar).getByRole("button", { name: /Parar al asistente/ }));
+    });
+    expect(invokedWith("chat_stop")).toEqual([{ conversationId: 8 }]);
+    // The reply finished just before the stop reached the core.
     await endTurn("completed");
     await act(async () => {
       await new Promise((r) => setTimeout(r, 20));

@@ -960,9 +960,16 @@ a navigation start clears the core's nonce, so stale ids fail cleanly and
 the model is told to read again.
 
 Gates per call (`run_call`): parse, then the site gate (approved for the
-conversation? allow mode? local network?), then for clicks and typing a
+conversation? allow mode, re-evaluated every time? local network?), then for clicks and typing a
 `describe` of the target element feeds the typing gate (secret fields are
 refused) and the submit gate (sign-ins and payments ask every time).
+Every page read goes through `read_checked`, which re-runs the site gate
+on the page's FINAL address (after redirects or page-initiated
+navigation) before any content reaches the model. Clicks pass the label
+`describe` saw and the click script refuses when it changed.
+`browser_wait` waits a number of milliseconds (capped at 10,000) or polls a
+CSS selector every 250 ms for up to 10 s. Only the newest screenshot is
+kept in the live request (`attach_screenshots`).
 Approvals reuse the inline approval broker (`tools::AppApprover`), with
 the actions `browser_site`, `browser_local_site`, `browser_login` and
 `browser_payment`.
