@@ -55,6 +55,8 @@ import {
 } from "./copy";
 import {
   onApprovalRequest,
+  onBrowserSiteUsed,
+  browserHost,
   onApprovalResolved,
   onNativeDecision,
   respondToApproval,
@@ -1282,6 +1284,17 @@ function ChatShell({
       onApprovalResolved((resolved) => {
         dispatchApproval({ type: "resolved", id: resolved.approval_id, granted: resolved.granted });
       }),
+      // In-app browser allow mode: a one-line "Using <host>" per new site.
+      onBrowserSiteUsed((used) => {
+        dispatchApproval({
+          type: "notice",
+          id: `site-used:${used.conversation_id}:${used.host}`,
+          conversationId: used.conversation_id,
+          action: "browser_site_used",
+          target: used.host,
+          anchorIndex: activeConvRef.current === used.conversation_id ? messageCountRef.current : null,
+        });
+      }),
     ];
     return () => {
       unlistens.forEach((promise) => {
@@ -1668,6 +1681,8 @@ function ChatShell({
   const activeDraft = activeConvId !== null ? drafts.get(activeConvId) : undefined;
   const visibleDraft = activeDraft !== undefined ? stripToolMarkup(activeDraft, { streaming: true }) : undefined;
   const activeActivity = activeConvId !== null ? activities.get(activeConvId) : undefined;
+  const browser = useBrowserView();
+  const browsingHost = browserHost(browser.view.url);
   const imageGeneratingActive = activeConvId !== null && imageGeneratingIds.has(activeConvId);
   const composerBusy = streamingActive || imageGeneratingActive;
 
@@ -1810,7 +1825,6 @@ function ChatShell({
 
   // In-app browser: the bar's state, and its "stop the assistant" button
   // (stops the reply that drives the browser, whatever conversation it is).
-  const browser = useBrowserView();
   const stopBrowserAgent = useCallback(async (conversationId: number): Promise<void> => {
     try {
       await invoke("chat_stop", { conversationId });
@@ -2805,7 +2819,9 @@ function ChatShell({
                           activeActivity === "searching"
                             ? t.chat.searching
                             : activeActivity === "browsing"
-                              ? t.chat.browsing
+                              ? browsingHost
+                                ? t.chat.browsingOn(browsingHost)
+                                : t.chat.browsing
                               : activeActivity === "generating_image"
                                 ? t.chat.generatingImage
                                 : activeActivity
@@ -2845,6 +2861,7 @@ function ChatShell({
 
             <BrowserBar
               view={browser.view}
+              activeConversationId={activeConvId}
               downloadBlocked={browser.downloadBlocked}
               onDismissDownload={browser.dismissDownload}
               onStopAssistant={(id) => void stopBrowserAgent(id)}

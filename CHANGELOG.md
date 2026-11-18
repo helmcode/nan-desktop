@@ -8,6 +8,7 @@
 - Antes de usar cada web, el asistente pide permiso una vez por conversacion (si todas tus carpetas estan en "Permitir sin preguntar", las webs publicas no preguntan). Las direcciones de tu red local preguntan siempre.
 - El asistente nunca escribe contrasenas, codigos de verificacion ni datos de tarjeta: te pide que lo hagas tu en la ventana. Enviar un inicio de sesion o pulsar un boton de pago o compra pide permiso cada vez.
 - Con modelos que ven imagenes, el asistente puede hacer una captura de la pagina.
+- La ventana del navegador se abre al lado del chat sin quitarle el foco, y cuando el asistente pide permiso el chat pasa al frente. Cerrar el navegador detiene al asistente. Si una pagina intenta descargar un archivo, se bloquea y el asistente te dice que lo descargues desde tu navegador habitual.
 
 ### Security
 - El navegador del asistente no puede llamar a ningun comando de la app, usa un almacen de datos privado que se borra al cerrarlo, bloquea las descargas y solo abre paginas http/https. Los comandos de la app ahora solo se aceptan desde la ventana del chat.

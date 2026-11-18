@@ -3974,6 +3974,12 @@ button:disabled {
   border-radius: var(--radius-sm);
   background-color: var(--bg);
   color: var(--text);
+  border: 1px solid transparent;
+  outline: none;
+}
+
+.browser-bar-address:focus-visible {
+  border-color: var(--border-strong);
 }
 
 .browser-bar-loading {
@@ -3992,4 +3998,20 @@ button:disabled {
 
 .browser-bar-notice {
   color: var(--warn);
+}
+
+.approval-detail {
+  color: var(--text-2);
+  font-size: 0.82rem;
+}
+
+@media (max-width: 900px) {
+  .browser-bar-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
 }

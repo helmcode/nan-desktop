@@ -291,13 +291,17 @@ can stop the assistant from the browser bar in the chat window.
   ephemeral context): no cookies, storage or cache shared with the app UI,
   nothing written to disk, everything gone when the window closes. A
   sign-in made in the browser lasts until the window closes.
-- **No downloads.** Every download is cancelled and the chat window shows
-  a notice; nothing is saved or opened.
+- **No downloads.** Every download is cancelled; the chat window shows a
+  notice and the assistant is told, so it can ask the user to download the
+  file from their own browser. Nothing is saved or opened.
 - **No new windows.** Popups and `target=_blank` links open in the same
   window, under the same navigation guard.
 - **No app data.** The browser has no access to the vault, sessions,
   realms or files: the tools only read the page and act inside it, and
   never grant file or command access.
+- **Closing means stop.** When the user closes the browser (bar or window
+  button), the reply driving it stops and the browser tools refuse until
+  the user sends their next message.
 - **Realm switch.** Signing in or out closes the browser and forgets every
   site approval.
 
@@ -314,7 +318,10 @@ Each script has an 8 s timeout and a navigation 20 s.
   ignored, subdomains separate) asks with an inline card; a yes covers that
   site for the rest of the conversation (until the app restarts or the
   account changes). When EVERY working folder of the conversation is in
-  "allow" mode, public sites run without asking.
+  "allow" mode, public sites run without asking; the chat still shows a
+  "Using <host>" line for each new site. A pending card brings the chat
+  window to the front; the browser opens beside the chat without taking
+  the focus.
 - **Local network always asks** (loopback, RFC 1918, link-local, CGNAT,
   IPv6 ULA, single-label and `.local`/`.lan`/`.internal` names), in every
   mode. DNS answers are not inspected: a public name that resolves to a

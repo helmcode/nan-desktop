@@ -11,6 +11,7 @@ import {
   BROWSER_DOWNLOAD_BLOCKED_EVENT,
   BROWSER_STATE_EVENT,
   CLOSED_BROWSER,
+  browserHost,
   displayAddress,
   normalizeBrowserView,
   type BrowserView,
@@ -28,11 +29,12 @@ const open: BrowserView = {
 };
 
 /// The bar wired exactly like App.tsx does it.
-function Harness({ onStop }: { onStop: (id: number) => void }) {
+function Harness({ onStop, active = 7 }: { onStop: (id: number) => void; active?: number | null }) {
   const browser = useBrowserView();
   return (
     <BrowserBar
       view={browser.view}
+      activeConversationId={active}
       downloadBlocked={browser.downloadBlocked}
       onDismissDownload={browser.dismissDownload}
       onStopAssistant={onStop}
@@ -41,7 +43,11 @@ function Harness({ onStop }: { onStop: (id: number) => void }) {
 }
 
 async function mount(initial: BrowserView, locale: "en" | "es" = "en") {
-  resetTauri({ browser_state: () => initial, browser_control: () => undefined });
+  resetTauri({
+    browser_state: () => initial,
+    browser_control: () => undefined,
+    browser_set_language: () => undefined,
+  });
   const onStop = vi.fn();
   render(
     <I18nProvider initial={locale}>
@@ -51,6 +57,14 @@ async function mount(initial: BrowserView, locale: "en" | "es" = "en") {
   await act(async () => {});
   return onStop;
 }
+
+describe("browserHost", () => {
+  it("names the host for the turn indicator", () => {
+    expect(browserHost("https://shop.example.com/a")).toBe("shop.example.com");
+    expect(browserHost("about:blank")).toBeNull();
+    expect(browserHost(null)).toBeNull();
+  });
+});
 
 describe("displayAddress", () => {
   it("shows host and path only, never other schemes or credentials", () => {
@@ -85,10 +99,17 @@ describe("BrowserBar", () => {
   it("shows the read-only address and the user's own controls", async () => {
     await mount(open);
     expect(screen.getByRole("region", { name: "Assistant browser" })).toBeTruthy();
-    const address = screen.getByLabelText("Page address");
-    expect(address.tagName).toBe("OUTPUT");
-    expect(address.textContent).toContain("www.example.com/products/shoes");
-    expect(screen.getByText("You can use the browser yourself too.")).toBeTruthy();
+    const address = screen.getByLabelText("Page address") as HTMLInputElement;
+    // Read-only, and not a live region (navigations are not announced).
+    expect(address.tagName).toBe("INPUT");
+    expect(address.readOnly).toBe(true);
+    expect(address.getAttribute("aria-live")).toBeNull();
+    expect(address.closest("[aria-live]")).toBeNull();
+    expect(address.value).toBe("www.example.com/products/shoes");
+    // Idle: no second status line.
+    expect(document.querySelector(".browser-bar-status")).toBeNull();
+    // The window language reaches the core (window title).
+    expect(invokedWith("browser_set_language")).toEqual([{ language: "en" }]);
     // No stop button while no reply drives the browser.
     expect(screen.queryByRole("button", { name: /Stop the assistant/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
@@ -112,6 +133,8 @@ describe("BrowserBar", () => {
     expect(screen.getByText(/Cargando/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Parar al asistente/ }));
     expect(onStop).toHaveBeenCalledWith(7);
+    await act(async () => emit(BROWSER_STATE_EVENT, { ...open, agent_conversation: 3 }));
+    expect(screen.getByRole("button", { name: /Parar al asistente \(otra conversación\)/ })).toBeTruthy();
     await act(async () => emit(BROWSER_STATE_EVENT, CLOSED_BROWSER));
     expect(screen.queryByRole("region", { name: "Navegador del asistente" })).toBeNull();
   });
@@ -119,7 +142,7 @@ describe("BrowserBar", () => {
   it("tells the user a download was blocked until dismissed", async () => {
     await mount(open);
     await act(async () => emit(BROWSER_DOWNLOAD_BLOCKED_EVENT, null));
-    expect(screen.getByText(/A download was blocked/)).toBeTruthy();
+    expect(screen.getByText(/A download was blocked/).textContent).toContain("download it from your usual browser");
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByText(/A download was blocked/)).toBeNull();
   });
@@ -130,6 +153,7 @@ describe("BrowserBar", () => {
       browser_control: () => {
         throw new Error("the browser is closed");
       },
+      browser_set_language: () => undefined,
     });
     render(
       <I18nProvider initial="en">
@@ -141,5 +165,8 @@ describe("BrowserBar", () => {
       fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     });
     expect(screen.getByRole("alert").textContent).toBe("That did not work. Try again.");
+    // The alert clears on the next browser change.
+    await act(async () => emit(BROWSER_STATE_EVENT, { ...open, url: "https://example.com/next" }));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

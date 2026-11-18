@@ -393,6 +393,36 @@ export function onBrowserState(handler: (view: BrowserView) => void): Promise<Un
   return listen<unknown>(BROWSER_STATE_EVENT, (event) => handler(normalizeBrowserView(event.payload)));
 }
 
+/// Event the core emits when, in allow mode, the assistant starts using a
+/// new site without asking (the chat shows a one-line notice).
+export const BROWSER_SITE_USED_EVENT = "browser://site-used";
+
+export interface BrowserSiteUsed {
+  conversation_id: number;
+  host: string;
+}
+
+export function onBrowserSiteUsed(handler: (used: BrowserSiteUsed) => void): Promise<UnlistenFn> {
+  return listen<BrowserSiteUsed>(BROWSER_SITE_USED_EVENT, (event) => handler(event.payload));
+}
+
+/// The chat window's language, for the browser window title.
+export function setBrowserLanguage(language: string): Promise<void> {
+  return invoke("browser_set_language", { language });
+}
+
+/// The host of the page the browser shows (for "Using the browser on
+/// <host>…"), or null.
+export function browserHost(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.host : null;
+  } catch {
+    return null;
+  }
+}
+
 export function onBrowserDownloadBlocked(handler: () => void): Promise<UnlistenFn> {
   return listen(BROWSER_DOWNLOAD_BLOCKED_EVENT, () => handler());
 }

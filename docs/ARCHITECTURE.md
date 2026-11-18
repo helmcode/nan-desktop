@@ -927,7 +927,13 @@ surface on WKWebView, WebView2 and WebKitGTK alike. The chat window shows a
 read-only address, back / forward / reload, show window, stop the assistant
 (`chat_stop` of the conversation driving it) and close. It follows the
 `browser://state` event and reads `browser_state` once on mount; its
-buttons call `browser_control`.
+buttons call `browser_control`; `browser_set_language` gives the core the
+UI language for the window title. The browser window opens beside the chat
+(right, else left, else system placement) without taking the focus, and a
+pending browser card brings the chat window forward. Closing the window
+(bar or window button) stops the reply driving it and the tools refuse
+(`user_closed_browser`) until the user's next message; a blocked download
+is attached to the next tool result (`download_blocked`).
 
 ### Modules (`src-tauri/src/browser/`)
 
@@ -945,9 +951,10 @@ buttons call `browser_control`.
 Every acting tool returns the page AFTER the action (`browser_open`,
 `browser_click`, `browser_type` with `submit`, `browser_scroll`,
 `browser_back`), so the model rarely needs a separate `browser_read`.
-One action runs at a time (a `tokio::Mutex` driver lock); `AgentGuard`
-marks the conversation as driving the browser for the bar and clears it on
-drop, also when the reply is stopped mid-action. Element ids belong to the
+One action runs at a time (a `tokio::Mutex` driver lock). The first
+browser call of a reply marks its conversation as driving the browser; a
+`ReplyGuard` held by `run_chat_stream` clears it when the reply ends,
+however it ends (no per-call flicker in the bar). Element ids belong to the
 read that listed them (a random nonce stored in the page and in the core);
 a navigation start clears the core's nonce, so stale ids fail cleanly and
 the model is told to read again.

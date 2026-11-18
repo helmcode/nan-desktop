@@ -1,9 +1,9 @@
 // In-app browser bar (computer use, phase 1). The assistant's browser is a
 // separate native window; this bar in the chat window shows what it is on
 // (read-only address), gives the user back / forward / reload, brings the
-// window to the front, stops the assistant's reply and closes the browser.
-// The core owns the browser: this component only renders its state and
-// forwards the user's clicks.
+// window to the front, stops the assistant's reply and closes the browser
+// (closing also stops the reply driving it). The core owns the browser:
+// this component only renders its state and forwards the user's clicks.
 
 import { useEffect, useState } from "react";
 import {
@@ -13,14 +13,17 @@ import {
   getBrowserState,
   onBrowserDownloadBlocked,
   onBrowserState,
+  setBrowserLanguage,
   type BrowserControl,
   type BrowserView,
 } from "../core";
-import { useT } from "../i18n";
-import { IconArrowLeft, IconExternal, IconGlobe, IconStop, IconX } from "../icons";
+import { useI18n, useT } from "../i18n";
+import { IconArrowLeft, IconExternal, IconGlobe, IconReload, IconStop, IconX } from "../icons";
 
-/// Keeps the browser state in sync with the core (initial read + events).
+/// Keeps the browser state in sync with the core (initial read + events)
+/// and tells the core the UI language (the browser window title).
 export function useBrowserView(): { view: BrowserView; downloadBlocked: boolean; dismissDownload: () => void } {
+  const { locale } = useI18n();
   const [view, setView] = useState<BrowserView>(CLOSED_BROWSER);
   const [downloadBlocked, setDownloadBlocked] = useState(false);
   useEffect(() => {
@@ -42,6 +45,9 @@ export function useBrowserView(): { view: BrowserView; downloadBlocked: boolean;
       unlisteners.forEach((un) => un());
     };
   }, []);
+  useEffect(() => {
+    setBrowserLanguage(locale).catch(() => {});
+  }, [locale]);
   // A blocked download notice goes away once the browser closes.
   useEffect(() => {
     if (!view.open) setDownloadBlocked(false);
@@ -51,11 +57,15 @@ export function useBrowserView(): { view: BrowserView; downloadBlocked: boolean;
 
 export function BrowserBar({
   view,
+  activeConversationId,
   downloadBlocked,
   onDismissDownload,
   onStopAssistant,
 }: {
   view: BrowserView;
+  /// The conversation on screen (the Stop button says when the driving
+  /// reply belongs to another one).
+  activeConversationId: number | null;
   downloadBlocked: boolean;
   onDismissDownload: () => void;
   /// Stop the reply that is driving the browser (`chat_stop`).
@@ -63,6 +73,10 @@ export function BrowserBar({
 }) {
   const t = useT();
   const [failed, setFailed] = useState(false);
+  // A failed control's alert goes away on the next browser change.
+  useEffect(() => {
+    setFailed(false);
+  }, [view]);
   if (!view.open) return null;
 
   const run = (action: BrowserControl) => {
@@ -71,6 +85,7 @@ export function BrowserBar({
   };
   const address = displayAddress(view.url);
   const agent = view.agent_conversation;
+  const stopLabel = agent !== null && agent !== activeConversationId ? t.browser.stopOther : t.browser.stop;
 
   return (
     <section className="browser-bar" role="region" aria-label={t.browser.region}>
@@ -91,21 +106,26 @@ export function BrowserBar({
           >
             <IconArrowLeft size={14} />
           </button>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => run("reload")}>
-            {t.browser.reload}
+          <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={() => run("reload")} aria-label={t.browser.reload} title={t.browser.reload}>
+            <IconReload size={14} />
           </button>
         </div>
-        <output className="browser-bar-address" aria-label={t.browser.address} title={view.url ?? undefined}>
-          {address || t.browser.noPage}
-          {view.loading && <span className="browser-bar-loading"> · {t.browser.loading}</span>}
-        </output>
+        {/* Read-only and NOT a live region: navigations are not announced. */}
+        <input
+          className="browser-bar-address"
+          readOnly
+          value={address || t.browser.noPage}
+          aria-label={t.browser.address}
+          title={view.url ?? undefined}
+        />
+        {view.loading && <span className="browser-bar-loading">{t.browser.loading}</span>}
         <div className="browser-bar-actions">
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => run("show")}>
-            <IconExternal size={13} /> {t.browser.show}
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => run("show")} aria-label={t.browser.show} title={t.browser.show}>
+            <IconExternal size={13} /> <span className="browser-bar-label">{t.browser.show}</span>
           </button>
           {agent !== null && (
             <button type="button" className="btn btn-sm btn-warn-solid" onClick={() => onStopAssistant(agent)}>
-              <IconStop size={13} /> {t.browser.stop}
+              <IconStop size={13} /> {stopLabel}
             </button>
           )}
           <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={() => run("close")} aria-label={t.browser.close} title={t.browser.close}>
@@ -113,9 +133,7 @@ export function BrowserBar({
           </button>
         </div>
       </div>
-      <p className="browser-bar-status" role="status">
-        {agent !== null ? t.browser.agentActive : t.browser.userTurn}
-      </p>
+      {agent !== null && <p className="browser-bar-status">{t.browser.agentActive}</p>}
       {downloadBlocked && (
         <p className="browser-bar-notice" role="status">
           {t.browser.downloadBlocked}

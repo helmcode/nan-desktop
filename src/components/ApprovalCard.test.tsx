@@ -121,17 +121,34 @@ describe("ApprovalCard (S14)", () => {
     expect(screen.getByRole("button", { name: "Permitir" })).toBeTruthy();
   });
 
-  it("names browser approvals in plain words and flags payments", () => {
+  it("names browser approvals in plain words, with one detail line", () => {
     renderCard({ action: "browser_site", target: "example.com" });
     expect(screen.getByText("Use this website in the browser")).toBeTruthy();
     expect(screen.getByText("example.com")).toBeTruthy();
+    expect(screen.getByText("You will see what it does and can stop it.")).toBeTruthy();
     cleanup();
     renderCard({ action: "browser_payment", target: "shop.example" });
     expect(screen.getByText("Pay or buy on this website")).toBeTruthy();
+    expect(screen.getByText("Check the browser window before allowing it.")).toBeTruthy();
     expect(screen.getByRole("group").className).toContain("danger");
     cleanup();
     renderCard({ action: "browser_login", target: "mail.example" });
-    expect(screen.getByText("Send a sign-in")).toBeTruthy();
+    expect(screen.getByText("Sign in to your account")).toBeTruthy();
     expect(screen.getByRole("group").className).not.toContain("danger");
+    cleanup();
+    // Local network: neutral style, plain-words copy.
+    renderCard({ action: "browser_local_site", target: "192.168.1.1" });
+    expect(screen.getByText("Open an address on your local network (router, NAS…)")).toBeTruthy();
+    expect(screen.getByRole("group").className).not.toContain("danger");
+    cleanup();
+    // File actions get no detail line.
+    renderCard();
+    expect(document.querySelector(".approval-detail")).toBeNull();
+  });
+
+  it("renders an allow-mode notice as a plain line with no buttons", () => {
+    renderCard({ action: "browser_site_used", target: "example.com", status: "granted", notice: true });
+    expect(screen.getByRole("status").textContent).toBe("Usingexample.com");
+    expect(screen.queryByRole("button")).toBeNull();
   });
 });

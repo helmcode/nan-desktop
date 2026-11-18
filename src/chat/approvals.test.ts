@@ -130,4 +130,20 @@ describe("placeCards", () => {
     expect(placed.after.size).toBe(0);
     expect(placed.tail).toEqual([]);
   });
+
+  it("adds an in-app browser notice once, already resolved", () => {
+    const notice = {
+      type: "notice" as const,
+      id: "site-used:4:example.com",
+      conversationId: 4,
+      action: "browser_site_used",
+      target: "example.com",
+      anchorIndex: 2,
+    };
+    const once = approvalsReducer([], notice);
+    expect(once).toHaveLength(1);
+    expect(once[0]).toMatchObject({ status: "granted", notice: true, conversationId: 4, target: "example.com" });
+    expect(isOpen(once[0])).toBe(false);
+    expect(approvalsReducer(once, notice)).toBe(once);
+  });
 });
