@@ -70,6 +70,7 @@ const APP_COMMANDS: &[&str] = &[
     "update_install",
     "browser_state",
     "browser_control",
+    "browser_set_language",
 ];
 
 fn main() {

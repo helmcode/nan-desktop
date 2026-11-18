@@ -350,7 +350,8 @@ pub fn run() {
             updater::update_check,
             updater::update_install,
             browser::browser_state,
-            browser::browser_control
+            browser::browser_control,
+            browser::browser_set_language
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

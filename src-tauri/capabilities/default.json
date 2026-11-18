@@ -67,6 +67,7 @@
     "allow-update-check",
     "allow-update-install",
     "allow-browser-state",
-    "allow-browser-control"
+    "allow-browser-control",
+    "allow-browser-set-language"
   ]
 }

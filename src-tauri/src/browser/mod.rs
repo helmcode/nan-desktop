@@ -85,6 +85,41 @@ struct Inner {
     view: BrowserView,
     /// Bumped on every navigation start (to detect that a click navigated).
     load_seq: u64,
+    /// The user closed the window: browser tools refuse until the user
+    /// sends their next message (closing means "stop").
+    closed_by_user: bool,
+    /// The window is being closed by the app itself (realm switch), not by
+    /// the user.
+    closing_by_app: bool,
+    /// A download was refused since the last tool result.
+    download_blocked: bool,
+    /// UI language for the window title (`es` / `en`).
+    lang: Lang,
+}
+
+/// The window-title language, set by the chat window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Lang {
+    #[default]
+    Es,
+    En,
+}
+
+impl Lang {
+    pub fn parse(raw: &str) -> Self {
+        if raw.trim().to_ascii_lowercase().starts_with("en") {
+            Self::En
+        } else {
+            Self::Es
+        }
+    }
+
+    fn window_title(self) -> &'static str {
+        match self {
+            Self::Es => "Navegador del asistente",
+            Self::En => "Assistant browser",
+        }
+    }
 }
 
 /// Rust-core browser state.
@@ -157,20 +192,76 @@ impl BrowserState {
         self.with(|inner| inner.view.title = Some(title.to_string()));
     }
 
-    fn set_open(&self, open: bool) {
-        self.with(|inner| {
-            inner.view.open = open;
-            if !open {
-                inner.view.url = None;
-                inner.view.title = None;
-                inner.view.loading = false;
-                inner.snap = None;
-            }
-        });
+    fn opened(&self) {
+        self.with(|inner| inner.view.open = true);
     }
 
-    fn set_agent(&self, conversation_id: Option<i64>) {
-        self.with(|inner| inner.view.agent_conversation = conversation_id);
+    /// A reply started driving the browser (kept for the whole reply).
+    fn set_agent(&self, conversation_id: i64) -> bool {
+        self.with(|inner| {
+            let changed = inner.view.agent_conversation != Some(conversation_id);
+            inner.view.agent_conversation = Some(conversation_id);
+            changed
+        })
+    }
+
+    /// The reply of `conversation_id` ended: it no longer drives the
+    /// browser. Returns whether anything changed.
+    fn clear_agent(&self, conversation_id: i64) -> bool {
+        self.with(|inner| {
+            if inner.view.agent_conversation == Some(conversation_id) {
+                inner.view.agent_conversation = None;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    /// The window was destroyed. Returns the conversation that was driving
+    /// it when the USER closed it (its reply must stop), and records the
+    /// close so browser tools refuse until the user's next message.
+    fn closed(&self) -> Option<i64> {
+        self.with(|inner| {
+            let by_user = !std::mem::take(&mut inner.closing_by_app);
+            inner.view.open = false;
+            inner.view.url = None;
+            inner.view.title = None;
+            inner.view.loading = false;
+            inner.snap = None;
+            inner.download_blocked = false;
+            if by_user {
+                inner.closed_by_user = true;
+                inner.view.agent_conversation.take()
+            } else {
+                None
+            }
+        })
+    }
+
+    fn closed_by_user(&self) -> bool {
+        self.with(|inner| inner.closed_by_user)
+    }
+
+    /// The user sent a new message: the browser may be used again.
+    pub fn user_message(&self) {
+        self.with(|inner| inner.closed_by_user = false);
+    }
+
+    fn note_download_blocked(&self) {
+        self.with(|inner| inner.download_blocked = true);
+    }
+
+    fn take_download_blocked(&self) -> bool {
+        self.with(|inner| std::mem::take(&mut inner.download_blocked))
+    }
+
+    fn lang(&self) -> Lang {
+        self.with(|inner| inner.lang)
+    }
+
+    fn set_lang(&self, lang: Lang) {
+        self.with(|inner| inner.lang = lang);
     }
 
     /// A realm switch (login / sign-out): forget every approval and the
@@ -180,6 +271,8 @@ impl BrowserState {
             inner.sites.clear();
             inner.snap = None;
             inner.view = BrowserView::default();
+            inner.closed_by_user = false;
+            inner.download_blocked = false;
         });
     }
 }
@@ -193,6 +286,8 @@ fn emit_state(app: &AppHandle) {
 /// every login / sign-out, with the other realm-switch resets).
 pub fn reset_for_realm_switch(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(LABEL) {
+        app.state::<BrowserState>()
+            .with(|inner| inner.closing_by_app = true);
         let _ = window.destroy();
     }
     app.state::<BrowserState>().reset();
@@ -201,34 +296,113 @@ pub fn reset_for_realm_switch(app: &AppHandle) {
 
 // -------------------------------------------------------------- window --
 
-const WINDOW_TITLE: &str = "Navegador del asistente";
-
-fn window_title(page_title: &str) -> String {
+fn window_title(page_title: &str, lang: Lang) -> String {
     let page_title: String = page_title.chars().take(80).collect();
     let page_title = page_title.trim();
     if page_title.is_empty() {
-        WINDOW_TITLE.to_string()
+        lang.window_title().to_string()
     } else {
-        format!("{page_title} · {WINDOW_TITLE}")
+        format!("{page_title} · {}", lang.window_title())
     }
 }
 
-/// Open the browser window on `url`, or navigate the open one.
+/// Browser window size (logical px).
+const WINDOW_SIZE: (f64, f64) = (1100.0, 820.0);
+const GAP: f64 = 8.0;
+
+/// A rectangle in logical px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// Where to put the browser so the chat (and its approval cards) stays
+/// visible: right of the chat window, else left of it, else `None` (the
+/// system places it). Pure.
+pub fn beside(main: Rect, screen: Rect, size: (f64, f64)) -> Option<(f64, f64)> {
+    let (w, h) = size;
+    let y = main
+        .y
+        .max(screen.y)
+        .min((screen.y + screen.h - h).max(screen.y));
+    let right = main.x + main.w + GAP;
+    if right + w <= screen.x + screen.w {
+        return Some((right, y));
+    }
+    let left = main.x - GAP - w;
+    if left >= screen.x {
+        return Some((left, y));
+    }
+    None
+}
+
+fn placement(app: &AppHandle) -> Option<(f64, f64)> {
+    let main = app.get_webview_window(MAIN_LABEL)?;
+    let scale = main.scale_factor().ok()?;
+    let pos = main.outer_position().ok()?.to_logical::<f64>(scale);
+    let size = main.outer_size().ok()?.to_logical::<f64>(scale);
+    let monitor = main.current_monitor().ok()??;
+    let mpos = monitor.work_area().position.to_logical::<f64>(scale);
+    let msize = monitor.work_area().size.to_logical::<f64>(scale);
+    beside(
+        Rect {
+            x: pos.x,
+            y: pos.y,
+            w: size.width,
+            h: size.height,
+        },
+        Rect {
+            x: mpos.x,
+            y: mpos.y,
+            w: msize.width,
+            h: msize.height,
+        },
+        WINDOW_SIZE,
+    )
+}
+
+/// Bring the chat window forward (an approval card is waiting there).
+fn focus_main(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
+        let _ = main.unminimize();
+        let _ = main.show();
+        let _ = main.set_focus();
+        let _ = main.request_user_attention(Some(tauri::UserAttentionType::Informational));
+    }
+}
+
+/// Open the browser window on `url`, or navigate the open one. A new
+/// window opens beside the chat without taking the focus; an open one is
+/// only brought back when it was hidden or minimized.
 fn ensure_window(app: &AppHandle, url: tauri::Url) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window(LABEL) {
         window.navigate(url).map_err(|err| err.to_string())?;
-        let _ = window.unminimize();
-        let _ = window.show();
+        if window.is_minimized().unwrap_or(false) {
+            let _ = window.unminimize();
+        }
+        if !window.is_visible().unwrap_or(true) {
+            let _ = window.show();
+        }
         return Ok(window);
     }
     let popup_app = app.clone();
     let load_app = app.clone();
     let title_app = app.clone();
     let download_app = app.clone();
-    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url))
-        .title(WINDOW_TITLE)
-        .inner_size(1100.0, 820.0)
+    let lang = app.state::<BrowserState>().lang();
+    let mut builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url))
+        .title(lang.window_title())
+        .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
         .min_inner_size(480.0, 360.0)
+        // The chat keeps the focus: approval cards appear there.
+        .focused(false);
+    if let Some((x, y)) = placement(app) {
+        builder = builder.position(x, y);
+    }
+    let window = builder
         // Own, non-persistent data store: nothing shared with the app UI,
         // nothing left on disk.
         .incognito(true)
@@ -246,6 +420,7 @@ fn ensure_window(app: &AppHandle, url: tauri::Url) -> Result<WebviewWindow, Stri
         // Downloads are refused (no file ever reaches the disk).
         .on_download(move |_webview, event| {
             if matches!(event, tauri::webview::DownloadEvent::Requested { .. }) {
+                download_app.state::<BrowserState>().note_download_blocked();
                 let _ = download_app.emit_to(MAIN_LABEL, DOWNLOAD_BLOCKED_EVENT, ());
             }
             false
@@ -258,8 +433,9 @@ fn ensure_window(app: &AppHandle, url: tauri::Url) -> Result<WebviewWindow, Stri
             emit_state(&load_app);
         })
         .on_document_title_changed(move |window, title| {
-            title_app.state::<BrowserState>().set_title(&title);
-            let _ = window.set_title(&window_title(&title));
+            let state = title_app.state::<BrowserState>();
+            state.set_title(&title);
+            let _ = window.set_title(&window_title(&title, state.lang()));
             emit_state(&title_app);
         })
         .build()
@@ -267,11 +443,14 @@ fn ensure_window(app: &AppHandle, url: tauri::Url) -> Result<WebviewWindow, Stri
     let close_app = app.clone();
     window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            close_app.state::<BrowserState>().set_open(false);
+            // Closing the browser means "stop": the reply driving it ends.
+            if let Some(conversation_id) = close_app.state::<BrowserState>().closed() {
+                let _ = crate::chat::stop_reply(&close_app, conversation_id);
+            }
             emit_state(&close_app);
         }
     });
-    app.state::<BrowserState>().set_open(true);
+    app.state::<BrowserState>().opened();
     emit_state(app);
     Ok(window)
 }
@@ -390,25 +569,49 @@ impl ToolRun {
     }
 }
 
-/// Marks the conversation as driving the browser for the bar; cleared on
-/// drop (also when the reply is stopped mid-action).
-struct AgentGuard<'a> {
-    app: &'a AppHandle,
+/// Held by a whole reply (`chat::run_chat_stream`): once that reply used
+/// the browser, the bar shows it as driving until the reply ends, however
+/// it ends (completed, error, Stop, a new message, a realm switch).
+pub struct ReplyGuard {
+    app: AppHandle,
+    conversation_id: i64,
 }
 
-impl<'a> AgentGuard<'a> {
-    fn new(app: &'a AppHandle, conversation_id: i64) -> Self {
-        app.state::<BrowserState>().set_agent(Some(conversation_id));
-        emit_state(app);
-        Self { app }
+impl ReplyGuard {
+    pub fn new(app: &AppHandle, conversation_id: i64) -> Self {
+        Self {
+            app: app.clone(),
+            conversation_id,
+        }
     }
 }
 
-impl Drop for AgentGuard<'_> {
+impl Drop for ReplyGuard {
     fn drop(&mut self) {
-        self.app.state::<BrowserState>().set_agent(None);
-        emit_state(self.app);
+        if self
+            .app
+            .state::<BrowserState>()
+            .clear_agent(self.conversation_id)
+        {
+            emit_state(&self.app);
+        }
     }
+}
+
+/// The user sent a new message: a browser they closed may be used again.
+pub fn user_message_sent(app: &AppHandle) {
+    app.state::<BrowserState>().user_message();
+}
+
+/// `browser://site-used` (to the chat window): in allow mode, the
+/// assistant started using a new site without a card; the chat shows a
+/// one-line notice.
+pub const SITE_USED_EVENT: &str = "browser://site-used";
+
+#[derive(Debug, Clone, Serialize)]
+struct SiteUsed {
+    conversation_id: i64,
+    host: String,
 }
 
 /// Everything one action needs about who is asking.
@@ -435,36 +638,15 @@ impl Ask {
         }
     }
 
-    /// Spanish copy (the native dialog wording; the card localizes from
-    /// `action`).
-    fn copy(self, host: &str) -> (String, String, String) {
+    /// A short English summary for the request's title/text/summary
+    /// fields (the card itself is localized by the renderer from `action`
+    /// and shows the host).
+    fn summary(self, host: &str) -> String {
         match self {
-            Self::Site { private: false } => (
-                "¿Dejar que el asistente use esta web?".into(),
-                format!(
-                    "El asistente quiere abrir y usar {host} en el navegador. Verás todo lo que hace y puedes pararlo en cualquier momento."
-                ),
-                format!("Usar {host} en el navegador"),
-            ),
-            Self::Site { private: true } => (
-                "¿Dejar que el asistente entre en tu red local?".into(),
-                format!(
-                    "{host} es una dirección de tu red local o de este equipo (por ejemplo, el router o un servidor tuyo). Permítelo solo si lo esperabas."
-                ),
-                format!("Usar {host} (red local) en el navegador"),
-            ),
-            Self::Sensitive(Sensitive::Login) => (
-                "¿Enviar este inicio de sesión?".into(),
-                format!("El asistente quiere enviar un formulario de acceso en {host}."),
-                format!("Enviar un inicio de sesión en {host}"),
-            ),
-            Self::Sensitive(Sensitive::Payment) => (
-                "¿Confirmar este pago o compra?".into(),
-                format!(
-                    "El asistente quiere pulsar un botón de pago o compra en {host}. Revisa la ventana del navegador antes de permitirlo."
-                ),
-                format!("Pagar o comprar en {host}"),
-            ),
+            Self::Site { private: false } => format!("Use {host} in the browser"),
+            Self::Site { private: true } => format!("Open {host} (local network) in the browser"),
+            Self::Sensitive(Sensitive::Login) => format!("Sign in on {host}"),
+            Self::Sensitive(Sensitive::Payment) => format!("Pay or buy on {host}"),
         }
     }
 }
@@ -473,13 +655,13 @@ impl Ask {
 /// only).
 async fn ask_user(caller: &Caller<'_>, ask: Ask, host: &str) -> bool {
     use crate::tools::Approver;
-    let (title, text, summary) = ask.copy(host);
+    let summary = ask.summary(host);
     let request = crate::tools::ApprovalRequest {
         approval_id: String::new(),
         conversation_id: Some(caller.conversation_id),
         action: ask.action().to_string(),
-        title,
-        text,
+        title: summary.clone(),
+        text: summary.clone(),
         summary,
         path: Some(host.to_string()),
         dest_path: None,
@@ -491,6 +673,9 @@ async fn ask_user(caller: &Caller<'_>, ask: Ask, host: &str) -> bool {
     let approver = crate::tools::AppApprover {
         app: caller.app.clone(),
     };
+    // The card is in the chat window: never leave it hidden behind the
+    // browser.
+    focus_main(caller.app);
     let granted = approver.inline(request).await;
     crate::tools::audit_browser(caller.app, caller.profile_id, ask.action(), granted, host);
     granted
@@ -508,6 +693,18 @@ async fn gate_site(caller: &Caller<'_>, parsed: &url_policy::ParsedUrl) -> bool 
         );
     match policy::site_gate(approved, allow_mode, parsed.private) {
         Gate::Run => {
+            if !approved {
+                // Allow mode: no card, but the chat still says which site
+                // the assistant is now using.
+                let _ = caller.app.emit_to(
+                    MAIN_LABEL,
+                    SITE_USED_EVENT,
+                    SiteUsed {
+                        conversation_id: caller.conversation_id,
+                        host: parsed.host.clone(),
+                    },
+                );
+            }
             state.approve_site(caller.conversation_id, &parsed.site);
             true
         }
@@ -588,17 +785,51 @@ pub(crate) async fn run_model_tool(
         ));
     }
     let state = app.state::<BrowserState>();
+    if state.closed_by_user() {
+        return ToolRun::text(user_closed_error());
+    }
     let _driver = state.driver.lock().await;
-    let _agent = AgentGuard::new(app, conversation_id);
+    if state.set_agent(conversation_id) {
+        emit_state(app);
+    }
     let caller = Caller {
         app,
         profile_id,
         conversation_id,
     };
-    match run_call(&caller, call).await {
+    let mut run = match run_call(&caller, call).await {
         Ok(run) => run,
         Err(content) => ToolRun::text(content),
+    };
+    if state.take_download_blocked() {
+        run.content = with_download_note(&run.content);
     }
+    run
+}
+
+/// The user closed the browser window: stop using it.
+fn user_closed_error() -> String {
+    tools::error(
+        "user_closed_browser",
+        "The user closed the browser window. Do not open it again unless they ask you to. \
+         Tell them briefly what is left to do in the browser and how they can do it themselves.",
+    )
+}
+
+/// Add the blocked-download note to a tool result (pure).
+pub fn with_download_note(content: &str) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(content).unwrap_or_else(|_| serde_json::json!({ "ok": true }));
+    if let Some(map) = value.as_object_mut() {
+        map.insert("download_blocked".into(), true.into());
+        map.insert(
+            "download_note".into(),
+            "The page tried to download a file and it was blocked: this browser does not download files. \
+             Tell the user to download it from their own browser if they need it."
+                .into(),
+        );
+    }
+    value.to_string()
 }
 
 async fn run_call(caller: &Caller<'_>, call: BrowserCall) -> Result<ToolRun, String> {
@@ -798,10 +1029,23 @@ pub fn browser_control(app: AppHandle, action: String) -> Result<(), String> {
             window.show().map_err(|err| err.to_string())?;
             return window.set_focus().map_err(|err| err.to_string());
         }
+        // Closing is the user's "stop": the window's Destroyed handler
+        // stops the reply that was driving it.
         "close" => return window.destroy().map_err(|err| err.to_string()),
         _ => return Err("unknown browser action".into()),
     };
     window.eval(script).map_err(|err| err.to_string())
+}
+
+/// The chat window's language, for the browser window title.
+#[tauri::command]
+pub fn browser_set_language(app: AppHandle, language: String) {
+    let state = app.state::<BrowserState>();
+    state.set_lang(Lang::parse(&language));
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let title = state.view().title.unwrap_or_default();
+        let _ = window.set_title(&window_title(&title, state.lang()));
+    }
 }
 
 #[cfg(test)]
@@ -835,20 +1079,111 @@ mod tests {
     }
 
     #[test]
-    fn closing_clears_what_the_bar_shows() {
+    fn a_user_close_stops_the_driving_reply_and_blocks_until_the_next_message() {
         let state = BrowserState::default();
-        state.set_open(true);
+        state.opened();
         state.page_load("https://e.com", false);
         state.set_title("E");
-        state.set_open(false);
+        assert!(state.set_agent(4));
+        assert_eq!(state.closed(), Some(4), "the driving reply must stop");
         assert_eq!(state.view(), BrowserView::default());
+        assert!(state.closed_by_user());
+        state.user_message();
+        assert!(!state.closed_by_user());
+        // A close by the app itself (realm switch) is not the user's.
+        state.opened();
+        state.set_agent(5);
+        state.with(|inner| inner.closing_by_app = true);
+        assert_eq!(state.closed(), None);
+        assert!(!state.closed_by_user());
+        let closed: serde_json::Value = serde_json::from_str(&user_closed_error()).unwrap();
+        assert_eq!(closed["error"], "user_closed_browser");
+        assert!(
+            closed["message"]
+                .as_str()
+                .unwrap()
+                .contains("Do not open it again")
+        );
     }
 
     #[test]
-    fn the_window_title_always_names_the_assistant_browser() {
-        assert_eq!(window_title("  "), WINDOW_TITLE);
-        assert_eq!(window_title("Shop"), format!("Shop · {WINDOW_TITLE}"));
-        assert!(window_title(&"x".repeat(500)).chars().count() < 120);
+    fn the_agent_drives_for_the_whole_reply_not_per_tool_call() {
+        let state = BrowserState::default();
+        assert!(state.set_agent(1));
+        assert!(
+            !state.set_agent(1),
+            "later calls of the same reply change nothing"
+        );
+        assert!(
+            !state.clear_agent(2),
+            "another reply's end does not clear it"
+        );
+        assert_eq!(state.view().agent_conversation, Some(1));
+        assert!(state.clear_agent(1));
+        assert_eq!(state.view().agent_conversation, None);
+    }
+
+    #[test]
+    fn a_blocked_download_is_reported_once_with_the_next_tool_result() {
+        let state = BrowserState::default();
+        assert!(!state.take_download_blocked());
+        state.note_download_blocked();
+        assert!(state.take_download_blocked());
+        assert!(!state.take_download_blocked(), "reported once");
+        let noted: serde_json::Value =
+            serde_json::from_str(&with_download_note(&tools::ok_page("Clicked.", None))).unwrap();
+        assert_eq!(noted["ok"], true);
+        assert_eq!(noted["download_blocked"], true);
+        assert!(
+            noted["download_note"]
+                .as_str()
+                .unwrap()
+                .contains("their own browser")
+        );
+    }
+
+    #[test]
+    fn the_window_title_is_localized_and_names_the_assistant_browser() {
+        assert_eq!(window_title("  ", Lang::Es), "Navegador del asistente");
+        assert_eq!(window_title("Shop", Lang::En), "Shop · Assistant browser");
+        assert!(window_title(&"x".repeat(500), Lang::Es).chars().count() < 120);
+        assert_eq!(Lang::parse("en-US"), Lang::En);
+        assert_eq!(Lang::parse("es"), Lang::Es);
+        assert_eq!(Lang::parse("??"), Lang::Es);
+    }
+
+    #[test]
+    fn the_browser_opens_beside_the_chat_when_there_is_room() {
+        let screen = Rect {
+            x: 0.0,
+            y: 25.0,
+            w: 3000.0,
+            h: 1200.0,
+        };
+        let main = Rect {
+            x: 100.0,
+            y: 100.0,
+            w: 1180.0,
+            h: 780.0,
+        };
+        assert_eq!(beside(main, screen, WINDOW_SIZE), Some((1288.0, 100.0)));
+        // No room on the right: on the left.
+        let right_main = Rect { x: 1800.0, ..main };
+        assert_eq!(
+            beside(right_main, screen, WINDOW_SIZE),
+            Some((692.0, 100.0))
+        );
+        // A small screen: let the system place it.
+        let small = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1440.0,
+            h: 900.0,
+        };
+        assert_eq!(beside(main, small, WINDOW_SIZE), None);
+        // Kept on screen vertically.
+        let low = Rect { y: 900.0, ..main };
+        assert_eq!(beside(low, screen, WINDOW_SIZE).unwrap().1, 405.0);
     }
 
     #[test]
@@ -859,10 +1194,7 @@ mod tests {
             Ask::Sensitive(Sensitive::Login),
             Ask::Sensitive(Sensitive::Payment),
         ] {
-            let (title, text, summary) = ask.copy("example.com");
-            assert!(!title.is_empty());
-            assert!(text.contains("example.com") || title.contains("red local"));
-            assert!(summary.contains("example.com"));
+            assert!(ask.summary("example.com").contains("example.com"));
             assert!(ask.action().starts_with("browser_"));
         }
     }

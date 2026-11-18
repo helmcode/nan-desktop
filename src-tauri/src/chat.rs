@@ -1033,6 +1033,11 @@ pub fn chat_send(
     if content.trim().is_empty() {
         return Err("message is empty".to_string());
     }
+    // A new message from the user (not a "continue"): a browser they
+    // closed may be used again.
+    if continuation != Some(true) {
+        crate::browser::user_message_sent(&app);
+    }
     // Privacy fix: the active user's realm only.
     let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
@@ -1110,7 +1115,14 @@ pub fn chat_send(
 /// no interrupted marker. Emits `chat://stopped` when a stream was actually
 /// stopped; stopping an idle conversation is a no-op.
 #[tauri::command]
-pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result<(), String> {
+pub fn chat_stop(app: AppHandle, conversation_id: i64) -> Result<(), String> {
+    stop_reply(&app, conversation_id)
+}
+
+/// Stop a conversation's running reply (the Stop button, or the user
+/// closing the in-app browser that reply was driving). What already
+/// arrived stays persisted.
+pub(crate) fn stop_reply(app: &AppHandle, conversation_id: i64) -> Result<(), String> {
     let state = app.state::<ChatState>();
     if !abort_stream(&state, conversation_id)? {
         return Ok(());
@@ -1118,14 +1130,15 @@ pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result
     // A command the aborted turn was running keeps going on its blocking
     // thread: end its process tree now instead of at its timeout.
     crate::process::stop_conversation_commands(conversation_id);
-    let dir = crate::realm::active_dir(&app)?;
+    let dir = crate::realm::active_dir(app)?;
     let conn = chat_store::open_db(&dir)?;
     chat_store::finalize_in_progress(&conn, conversation_id, "user_stop")
         .map_err(|err| err.to_string())?;
     // Retention: raw tool output only for the replies that can be replayed.
     let _ = chat_store::prune_tool_traces(&conn, Some(conversation_id));
     chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
-    let _ = window.emit(
+    let _ = app.emit_to(
+        "main",
         "chat://stopped",
         DonePayload {
             conversation_id,
@@ -1159,6 +1172,9 @@ async fn run_chat_stream(
     // An aborted task (Stop, a new send, a realm switch) ends the command
     // its tool call was running instead of leaving it to its timeout.
     let commands = crate::process::StopCommandsOnDrop::new(conversation_id);
+    // Once this reply uses the in-app browser, the bar shows it driving
+    // until the reply ends, however it ends.
+    let _browser_reply = crate::browser::ReplyGuard::new(&app, conversation_id);
 
     let emit_error = |kind: ErrorKind| {
         crate::telemetry::record(
