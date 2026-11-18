@@ -168,7 +168,10 @@ stand-ins only. A text-only turn whose history has an image whose
 description is still being requested waits for it up to 5 s
 (`attachments::DescribingGuard`, `pending_descriptions`, `wait_until`). `chat::request_body` strips any remaining non-text part
 for non-vision models (tool-trace replay, retries, future tools), so the
-platform's 400 "text-only model" cannot happen. The selected model in the
+platform's 400 "text-only model" cannot happen. A 400 from a vision model while the
+request carries image parts is retried once with the text stand-ins
+instead (`chat::rebase_messages` keeps the reply's own tool rounds), before
+the usual 400 retries (without traces, then without tools). The selected model in the
 picker never changes; the reply row stores the model that actually
 answered. No notice is shown: the reply has no model label to annotate
 and the switch is invisible by design.

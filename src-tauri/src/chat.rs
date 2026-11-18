@@ -1385,17 +1385,8 @@ async fn run_chat_stream(
         } else {
             None
         };
-    let mut traced_history = turn::history_messages(&rows, true, image_url);
-    let mut plain_history = turn::history_messages(&rows, false, image_url);
-    // Attached content is data, never instructions (said once, up front).
-    if rows.iter().any(|row| !row.attachments.is_empty()) {
-        let note = serde_json::json!({
-            "role": "system",
-            "content": crate::attachments::UNTRUSTED_NOTE,
-        });
-        traced_history.insert(0, note.clone());
-        plain_history.insert(0, note);
-    }
+    let traced_history = request_history(&rows, true, image_url);
+    let mut plain_history = request_history(&rows, false, image_url);
     let replayed_traces = traced_history.len() != plain_history.len();
 
     // ---- tools offered this reply ------------------------------------------
@@ -1404,8 +1395,13 @@ async fn run_chat_stream(
     // a workspace; the system message tells the model where it may work.
     let workspace = tools::workspace_for(&app, &profile_id, conversation_id);
     let mut messages = compose_messages(workspace.as_ref(), skill.as_ref(), traced_history);
+    // Where the history ends and this reply's own tool rounds begin.
+    let mut prefix_len = messages.len();
     let mut offered_tools = tool_definitions(workspace.as_ref());
     let mut traces_dropped = !replayed_traces;
+    // A vision model rejected an image itself (400): retried once with the
+    // text stand-ins instead of the image parts.
+    let mut images_dropped = false;
 
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
@@ -1467,11 +1463,26 @@ async fn run_chat_stream(
                 }
                 break response;
             }
+            if !images_dropped && crate::attachments::has_media_parts(&messages) {
+                images_dropped = true;
+                plain_history = request_history(&rows, false, None);
+                let history = if traces_dropped {
+                    plain_history.clone()
+                } else {
+                    request_history(&rows, true, None)
+                };
+                let prefix = compose_messages(workspace.as_ref(), skill.as_ref(), history);
+                let new_len = prefix.len();
+                messages = rebase_messages(&messages, prefix_len, prefix);
+                prefix_len = new_len;
+                continue;
+            }
             match turn::retry_after_400(round, offer_tools, traces_dropped, replayed_traces) {
                 turn::Retry400::WithoutTraces => {
                     traces_dropped = true;
                     messages =
                         compose_messages(workspace.as_ref(), skill.as_ref(), plain_history.clone());
+                    prefix_len = messages.len();
                 }
                 turn::Retry400::WithoutTools => {
                     offered_tools.clear();
@@ -1483,6 +1494,7 @@ async fn run_chat_stream(
                             skill.as_ref(),
                             plain_history.clone(),
                         );
+                        prefix_len = messages.len();
                     }
                 }
                 turn::Retry400::GiveUp => {
@@ -1678,6 +1690,36 @@ async fn run_chat_stream(
     }
     commands.disarm();
     release_stream(&state, conversation_id, generation);
+}
+
+/// The request history of a turn ([`turn::history_messages`]), preceded by
+/// the untrusted-content note when any message has attachments (attached
+/// content is data, never instructions).
+fn request_history(
+    rows: &[chat_store::ChatMessageRow],
+    replay_traces: bool,
+    image_url: Option<crate::attachments::ImageLoader<'_>>,
+) -> Vec<serde_json::Value> {
+    let mut history = turn::history_messages(rows, replay_traces, image_url);
+    if rows.iter().any(|row| !row.attachments.is_empty()) {
+        history.insert(
+            0,
+            serde_json::json!({ "role": "system", "content": crate::attachments::UNTRUSTED_NOTE }),
+        );
+    }
+    history
+}
+
+/// `messages` with its first `prefix_len` entries (system prompt, skill,
+/// history) replaced by `prefix`; this reply's own tool rounds are kept.
+pub fn rebase_messages(
+    messages: &[serde_json::Value],
+    prefix_len: usize,
+    prefix: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut out = prefix;
+    out.extend_from_slice(messages.get(prefix_len..).unwrap_or(&[]));
+    out
 }
 
 /// Overall timeout of one image-description side request.
@@ -2560,6 +2602,60 @@ mod tests {
         assert!(!parsed.is_vision("glm5.3"), "glm5.3 is text-only");
         assert!(parsed.is_vision("deepseek-v4-flash") && parsed.is_vision("glm5.3-flash"));
         assert_eq!(chat_models_config(), &parsed);
+    }
+
+    #[test]
+    fn an_image_rejected_by_a_vision_model_is_retried_as_its_stand_in() {
+        use crate::attachments::{AttachmentKind, AttachmentRecord};
+        let row = chat_store::ChatMessageRow {
+            id: 1,
+            conversation_id: 1,
+            role: "user".into(),
+            content: "what is it".into(),
+            model: None,
+            created_at: String::new(),
+            partial: false,
+            media_path: None,
+            sources: vec![],
+            artifacts: vec![],
+            parent_message_id: None,
+            end_reason: None,
+            tool_trace: None,
+            attachments: vec![AttachmentRecord {
+                id: "i".into(),
+                kind: AttachmentKind::Image,
+                name: "scan.png".into(),
+                size: 1,
+                path: Some("/x/i.jpg".into()),
+                text: None,
+                truncated: false,
+                description: Some("A receipt.".into()),
+            }],
+        };
+        let rows = vec![row];
+        let load = |_: &AttachmentRecord| Some("data:image/jpeg;base64,AA".to_string());
+        let with_images = compose_messages(None, None, request_history(&rows, true, Some(&load)));
+        let prefix_len = with_images.len();
+        assert!(crate::attachments::has_media_parts(&with_images));
+        assert_eq!(
+            with_images[1]["content"],
+            crate::attachments::UNTRUSTED_NOTE
+        );
+        // Later rounds of this reply (tool calls and results) are kept.
+        let mut live = with_images.clone();
+        live.push(serde_json::json!({"role":"assistant","content":null,"tool_calls":[]}));
+        live.push(serde_json::json!({"role":"tool","tool_call_id":"c1","content":"ok"}));
+        let prefix = compose_messages(None, None, request_history(&rows, true, None));
+        let retried = rebase_messages(&live, prefix_len, prefix);
+        assert!(!crate::attachments::has_media_parts(&retried));
+        assert_eq!(retried.len(), live.len());
+        assert!(
+            retried[2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("[Image: scan.png.")
+        );
+        assert_eq!(retried[4]["tool_call_id"], "c1");
     }
 
     #[test]
