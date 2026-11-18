@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { I18nProvider } from "../i18n";
 import type { ApprovalCardState } from "../chat/approvals";
 import { ApprovalCard } from "./ApprovalCard";
+import { readFileSync } from "node:fs";
 
 afterEach(cleanup);
 
@@ -158,5 +159,97 @@ describe("ApprovalCard (S14)", () => {
     cleanup();
     renderCard({ action: "write_file", target: "/Users/ana/a.txt" });
     expect(screen.queryByText(/visited web pages/)).toBeNull();
+  });
+});
+
+describe("ApprovalCard: share_artifact", () => {
+  const share = {
+    file_name: "informe.pdf",
+    source: "folder",
+    location: "~/clients/acme/informe.pdf",
+    title: "Informe Q3",
+    audience: "public",
+    recipients: [] as string[],
+    expires_days: 7,
+    notify: false,
+    risk: "public" as const,
+  };
+
+  it("names the file, who gets it, the expiry and the risk the Allow accepts", () => {
+    const onRespond = renderCard({ action: "share_artifact", target: share.location, share });
+    expect(screen.getByText("Share as a link")).toBeTruthy();
+    // The whole path, so a look-alike file elsewhere cannot pass for yours.
+    expect(screen.getByText("~/clients/acme/informe.pdf")).toBeTruthy();
+    // The model's title is labeled, never a bare statement.
+    expect(screen.getByText("Title: Informe Q3")).toBeTruthy();
+    expect(screen.getByText("Public: anyone with the link")).toBeTruthy();
+    expect(screen.getByText("Expires in 7 days")).toBeTruthy();
+    const risk = screen.getByRole("note");
+    expect(risk.textContent).toContain("Anyone with this link can open this file");
+    expect(risk.textContent).toContain("By allowing it, you accept this risk.");
+    fireEvent.click(screen.getByRole("button", { name: "Allow" }));
+    expect(onRespond).toHaveBeenCalledWith("act-1", true);
+  });
+
+  it("keeps the file name and the whole location visible (no truncation)", () => {
+    const deep = "~/clients/acme/contracts/2026/q4/legal/review/final/plan.pdf";
+    renderCard({ action: "share_artifact", target: deep, share: { ...share, file_name: "plan.pdf", location: deep } });
+    const card = screen.getByRole("group");
+    expect(card.className).toContain("approval-card-share");
+    const name = screen.getByText("plan.pdf");
+    expect(name.tagName).toBe("STRONG");
+    expect(screen.getByText(deep).className).toBe("approval-target");
+    // The share card's target wraps instead of the default one-line ellipsis.
+    const shareCss = readFileSync("src/components/ApprovalShare.css", "utf8");
+    const start = shareCss.indexOf(".approval-card-share .approval-target");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rule = shareCss.slice(start, shareCss.indexOf("}", start) + 1);
+    expect(rule).toMatch(/white-space:\s*normal/);
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule).toMatch(/text-overflow:\s*clip/);
+  });
+
+  it("labels a website built in this conversation", () => {
+    renderCard({
+      action: "share_artifact",
+      target: "website-calc.html",
+      share: { ...share, source: "website", location: "website-calc.html", file_name: "website-calc.html", title: "Calc" },
+    });
+    // Name on its own (bold) line, and the location under it.
+    expect(screen.getAllByText("website-calc.html").map((el) => el.tagName)).toEqual(["STRONG", "CODE"]);
+    expect(screen.getByText("The website built in this conversation")).toBeTruthy();
+  });
+
+  it("lists the recipients, the email notice and the community risk", () => {
+    renderCard({
+      action: "share_artifact",
+      target: "notas.md",
+      share: { ...share, file_name: "notas.md", title: "notas.md", audience: "emails", recipients: ["ana@acme.com", "bo@acme.com"], expires_days: 30, notify: true, risk: "external" },
+    });
+    expect(screen.getByText("With: ana@acme.com, bo@acme.com")).toBeTruthy();
+    expect(screen.getByText("They will get the link by email.")).toBeTruthy();
+    expect(screen.getByText("Expires in 30 days")).toBeTruthy();
+    expect(screen.getByRole("note").textContent).toContain("Only you and these people can open this file");
+  });
+
+  it("an organization share without expiry carries no risk copy (Spanish)", () => {
+    render(
+      <I18nProvider initial="es">
+        <ApprovalCard
+          card={{ ...base, action: "share_artifact", target: "informe.pdf", share: { ...share, audience: "org", expires_days: 0, risk: null } }}
+          onRespond={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    expect(screen.getByText("Compartir como enlace")).toBeTruthy();
+    expect(screen.getByText("Toda tu organización")).toBeTruthy();
+    expect(screen.getByText("Sin caducidad")).toBeTruthy();
+    expect(screen.queryByRole("note")).toBeNull();
+  });
+
+  it("collapses to the outcome with the file name once answered", () => {
+    renderCard({ action: "share_artifact", target: "informe.pdf", share, status: "granted" });
+    expect(screen.getByRole("status").textContent).toContain("Share as a link");
+    expect(screen.getByText("informe.pdf")).toBeTruthy();
   });
 });

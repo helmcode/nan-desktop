@@ -770,6 +770,36 @@ export const en = {
       generic: "The file could not be attached. Try again.",
     },
   },
+  // share_artifact: the assistant shares a file as a link from the chat.
+  shareTool: {
+    ask: "Share as a link",
+    fromWebsite: "The website built in this conversation",
+    fromConversation: "A file created in this conversation",
+    fromGenerated: "An image generated in the app",
+    titleLabel: (title: string) => `Title: ${title}`,
+    who: {
+      public: "Public: anyone with the link",
+      org: "Your whole organization",
+      emails: (list: string) => `With: ${list}`,
+    },
+    notify: "They will get the link by email.",
+    expires: (days: number) => (days === 0 ? "No expiry" : days === 1 ? "Expires in 1 day" : `Expires in ${days} days`),
+    allowIsAck: "By allowing it, you accept this risk.",
+    expired: "Expired",
+    region: "Links shared in this reply",
+    scope: {
+      public: "Public link",
+      org: "Organization",
+      emails: (n: number) => (n === 1 ? "1 person" : `${n} people`),
+    },
+    expiresOn: (date: string) => `Expires ${date}`,
+    copy: "Copy link",
+    copied: "Link copied",
+    copyFailed: "Could not copy the link. Select it and copy it by hand.",
+    open: "Open",
+    openLabel: (title: string) => `Open ${title} in the browser`,
+    copyLabel: (title: string) => `Copy the link to ${title}`,
+  },
 };
 
 export type Strings = typeof en;

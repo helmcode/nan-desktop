@@ -60,6 +60,26 @@ export interface ApprovalRequest {
   /// web in this task (in-app browser protection).
   after_browsing?: boolean;
   expires_in_secs: number;
+  /// `share_artifact` only: what the share does (built by the core).
+  share?: ShareAsk;
+}
+
+/// The share a `share_artifact` card asks about (`ShareAsk` in the core).
+export interface ShareAsk {
+  file_name: string;
+  /// Which file: `folder` (location = full path, home as ~), `website` or
+  /// `conversation` (written in this conversation; location = its name),
+  /// `generated` (an image the app made).
+  source: "folder" | "website" | "conversation" | "generated" | (string & {});
+  location: string;
+  title: string;
+  audience: "public" | "emails" | "org" | (string & {});
+  recipients: string[];
+  /// 0 = never (org only).
+  expires_days: number;
+  notify: boolean;
+  /// The risk the user's "Allow" accepts.
+  risk: "public" | "external" | null;
 }
 
 /// `tools://approval-resolved` payload (`ApprovalResolved` in the core).
@@ -105,6 +125,10 @@ export type ChatSendArgs = {
   /// Files attached in the composer: the staged id, plus the text the
   /// renderer extracted for a document. Omitted when there are none.
   attachments?: AttachmentInput[];
+  /// Shared links for this account (`/api/auth/me`): `on` offers the model
+  /// `share_artifact`; `paywall` only adds a one-line hint so it can explain
+  /// the plan lacks them. Omitted when off/unknown.
+  artifacts?: "on" | "paywall";
 };
 
 // ---------------------------------------------------------------------------

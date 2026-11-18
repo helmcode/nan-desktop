@@ -375,7 +375,7 @@ React state (drafts per conversation) → react-markdown + highlight + sanitize
   `conversations(id, title, profile_id, created_at, updated_at, remote_id,
   synced_at)`, `messages(id, conversation_id, role, content, model,
   media_path, created_at, status, sources, artifacts, parent_message_id,
-  end_reason, tool_trace)` and `memory_tombstones`
+  end_reason, tool_trace, attachments, shares)` and `memory_tombstones`
   (`status`: `complete` default, `in_progress` while streaming — T4b;
   `sources`: JSON citation list from web search; `remote_id`/`synced_at`/
   tombstones: memory sync). The
@@ -814,6 +814,43 @@ model**.
    right before use, so symlink swaps, grant revocations, or the
    run_command switch flipping in between all fail closed. "No permitir"
    consumes the proposal as a deny and tells the model not to retry.
+
+### share_artifact (share by talking)
+
+`src-tauri/src/tools/share_artifact.rs`. When the renderer's reading of
+`/api/auth/me` says shared links are on (`availability === "on"`),
+`chat_send` carries `artifacts: "on"` and the core offers the model a
+`share_artifact` tool (with `"paywall"`, community without the plan, no tool
+is offered: a one-line `PAYWALL_HINT` lets the model explain) (`org` audience on Helmcode only) plus its guidance
+in the system message. The capability is a UX gate, not a security
+boundary: the renderer already parses every `/me` shape for the manual
+Share, the server enforces the flag (404/403), and every share asks the
+user. Flow per call:
+
+1. Parse and validate the arguments (`path`, `title`, `audience`,
+   `emails`, `expires_days`, `notify`; unknown fields refused, so no
+   `risk_ack`, `secret_ack` or `member_ids` from the model).
+0. `share_artifact::gate`: refused when not offered, after a "no" in
+   this reply, or after 3 questions in this reply (`ShareTurn`).
+2. `artifacts::prepare_upload` over the conversation's effective grants
+   plus THIS conversation's temp folder (`share_store`; generated images
+   as `media`): the read,
+   cap, sniff and secret pre-scan. A refusal returns to the model with a
+   message; a credential, unsupported type or oversized file sends the user
+   to the manual Share.
+3. The risk acknowledgement is taken out of the prepared upload, the user
+   is asked (inline card with the file's full path or its
+   "this conversation" label (`location_of`), the labeled title, audience,
+   recipients, expiry and risk copy; the native dialog when a computer-wide grant governs the
+   file; never `Auto`), the decision is audited (scope-free, no path).
+4. Only after "Allow": `risk_ack` goes back in and
+   `artifacts::send_upload` posts the exact bytes read in step 2. The
+   link (https only) goes to the model and into the reply's `shares`
+   column, which the renderer shows as a card with "Copy link" and "Open".
+
+The website guidance also makes every "artifact" request (artifact,
+artefacto, app, dashboard, calculator, game...) a complete, interactive
+single-file web app built with `write_website`.
 
 The renderer can no longer propose or execute anything: the former
 `tools_propose` / `tools_execute` / `tools_deny` / `tools_audit_tail` IPC

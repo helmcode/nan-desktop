@@ -71,6 +71,36 @@ through the same private channel; we route them to the right team.
   allowlist in the Rust core (`src-tauri/src/artifacts.rs`). Helmcode links
   are limited to org members or the whole org; NaN links to NaN members, who
   must sign in to open them. A detected secret needs its own confirmation.
+- **A share the assistant starts always asks.** The `share_artifact` tool
+  (offered only when shared links are on for the account) lets the
+  assistant share a file by talking, through the same core checks as the
+  manual Share (grants, type sniffing, 8 MiB cap, secret pre-scan). It is
+  never automatic: every share shows an inline card (or the native dialog
+  when a computer-wide grant governs the file) naming the file by its FULL
+  path (home shown as `~`; a website or file written in this conversation
+  is labeled as such; a symlink is named by its real path and refused),
+  with control, line-separator and bidi/format characters in names, paths
+  and titles replaced by U+FFFD so nothing can fake a line or reorder the
+  text, the file name and the whole wrapped location always visible, the
+  model's title labeled as "Title:", who gets it
+  and the expiry, in every folder mode, including "allow without asking"
+  and after browsing. Share answers never feed the "always allow"
+  suggestion. Approval fatigue is capped: after the user declines a share,
+  the same reply cannot ask again, and one reply asks at most 3 times. For a public link or community recipients the card
+  carries the risk copy, and the core adds `risk_ack` to the upload only
+  after the user's "Allow"; neither the model (unknown arguments are
+  refused) nor the renderer (it can only answer a request the core
+  created) can set it. The tool never sets `secret_ack`: a file that looks
+  like it holds a credential is refused and the user is pointed to the
+  manual Share, where the secret warning lives. As in the manual flow, the
+  secret pre-scan only reads text formats (md, txt, csv, html, json...);
+  binary formats (PDF, images, docx, xlsx) are not scanned on the device.
+  Scope `members` stays manual-only. Files: the conversation's selected
+  folders, THIS conversation's temp folder (never another conversation's)
+  and images this app generated (shareable as in the manual flow). The created link is stored on
+  the reply in the local database (device-local, never synced to the
+  account) and is never logged or sent in telemetry (only the tool name).
+  Implementation: `src-tauri/src/tools/share_artifact.rs`.
 - **The assistant's browser is isolated and supervised.** Remote pages run
   in their own window with no access to any app or plugin command, a
   private non-persistent data store, no downloads, http/https only; the

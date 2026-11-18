@@ -170,6 +170,7 @@ pub const TOOL_NAMES: &[&str] = &[
     crate::images::TOOL_NAME,
     crate::tools::save_skill::TOOL_NAME,
     crate::tools::website::TOOL_NAME,
+    crate::tools::share_artifact::TOOL_NAME,
     "list_files",
     "read_file",
     "write_file",

@@ -625,6 +625,55 @@ describe("folder selection and allow-mode suggestion", () => {
     expect(JSON.parse(window.localStorage.getItem(NUDGE_SHOWN_STORAGE_KEY) ?? "[]")).toEqual([7]);
   });
 
+  it("share_artifact answers neither count nor reset (inline or native)", async () => {
+    window.localStorage.setItem(FOLDER_SELECTION_STORAGE_KEY, JSON.stringify({ "7": ["g1"] }));
+    resetTauri(chatHandlers([row(1, "user", "Tidy and share")]));
+    renderApp("en");
+    await screen.findByText("Tidy and share");
+    await waitFor(() => expect(chipLabel()).toBe("Proyecto"));
+    const suggestion = "You are approving many actions in Proyecto. Always allow in this folder?";
+    const folderYes = (n: number) => {
+      act(() => {
+        emit(APPROVAL_REQUEST_EVENT, approvalPayload({ approval_id: `pf-${n}`, path: `/Users/ana/Proyecto/f${n}.txt` }));
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `pf-${n}`, granted: true });
+      });
+    };
+    const share = {
+      file_name: "informe.pdf",
+      source: "folder",
+      location: "~/Proyecto/informe.pdf",
+      title: "Informe",
+      audience: "public",
+      recipients: [],
+      expires_days: 7,
+      notify: false,
+      risk: "public" as const,
+    };
+    folderYes(1);
+    folderYes(2);
+    // Inline share: a "no" must not reset, a "yes" must not count.
+    for (const [n, granted] of [[1, false], [2, true], [3, true]] as const) {
+      act(() => {
+        emit(
+          APPROVAL_REQUEST_EVENT,
+          approvalPayload({ approval_id: `ps-${n}`, action: "share_artifact", path: "/Users/ana/Proyecto/informe.pdf", share }),
+        );
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `ps-${n}`, granted });
+      });
+    }
+    // Native share decisions (computer-wide) are ignored too.
+    act(() => {
+      emit(APPROVAL_NATIVE_EVENT, { conversation_id: 7, action: "share_artifact", path: "/Users/ana/Proyecto/informe.pdf", granted: false });
+    });
+    expect(screen.queryByText(suggestion)).toBeNull();
+    folderYes(3);
+    expect(await screen.findByText(suggestion)).toBeTruthy();
+  });
+
   it("a denial resets the count", async () => {
     window.localStorage.setItem(FOLDER_SELECTION_STORAGE_KEY, JSON.stringify({ "7": ["g1"] }));
     resetTauri(chatHandlers([row(1, "user", "Tidy")]));
@@ -674,6 +723,57 @@ describe("in-app browser suggestion", () => {
       });
     });
   }
+
+  it("share_artifact answers neither count nor reset the browser suggestion (inline or native)", async () => {
+    resetTauri(chatHandlers([row(1, "user", "Find flights and share them")]));
+    renderApp("en");
+    await screen.findByText("Find flights and share them");
+    const share = {
+      file_name: "vuelos.html",
+      source: "website",
+      location: "vuelos.html",
+      title: "Vuelos",
+      audience: "public",
+      recipients: [],
+      expires_days: 7,
+      notify: false,
+      risk: "public" as const,
+    };
+    const site = (n: number) => {
+      act(() => {
+        emit(APPROVAL_REQUEST_EVENT, approvalPayload({ approval_id: `bs-${n}`, action: "browser_site", path: `site${n}.example` }));
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `bs-${n}`, granted: true });
+      });
+    };
+    site(1);
+    site(2);
+    // Even flagged as after-browsing, a share is not a browser approval.
+    for (const [n, granted] of [[1, false], [2, true]] as const) {
+      act(() => {
+        emit(
+          APPROVAL_REQUEST_EVENT,
+          approvalPayload({ approval_id: `sh-${n}`, action: "share_artifact", path: "/tmp/vuelos.html", after_browsing: true, share }),
+        );
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `sh-${n}`, granted });
+      });
+    }
+    act(() => {
+      emit(APPROVAL_NATIVE_EVENT, {
+        conversation_id: 7,
+        action: "share_artifact",
+        path: "/Users/ana/vuelos.html",
+        granted: false,
+        after_browsing: true,
+      });
+    });
+    expect(screen.queryByText(suggestion)).toBeNull();
+    site(3);
+    expect(await screen.findByText(suggestion)).toBeTruthy();
+  });
 
   it("offers to stop asking after three browser approvals; 'only this session' asks the core", async () => {
     resetTauri({ ...chatHandlers([row(1, "user", "Find flights")]), tools_browser_allow_for_session: () => undefined });

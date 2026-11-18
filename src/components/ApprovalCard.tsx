@@ -4,9 +4,22 @@
 
 import type { ReactNode } from "react";
 import type { ApprovalCardState } from "../chat/approvals";
+import type { ShareAsk } from "../core";
 import { isOpen } from "../chat/approvals";
 import { useT } from "../i18n";
-import { IconCheck, IconFile, IconFolder, IconGlobe, IconImage, IconMove, IconTerminal, IconTrash, IconX } from "../icons";
+import "./ApprovalShare.css";
+import {
+  IconCheck,
+  IconFile,
+  IconFolder,
+  IconGlobe,
+  IconImage,
+  IconMove,
+  IconShare,
+  IconTerminal,
+  IconTrash,
+  IconX,
+} from "../icons";
 
 // Action kinds are the core's ToolAction::kind() values.
 function actionIcon(action: string): ReactNode {
@@ -19,6 +32,8 @@ function actionIcon(action: string): ReactNode {
       return <IconMove size={16} />;
     case "save_image":
       return <IconImage size={16} />;
+    case "share_artifact":
+      return <IconShare size={16} />;
     case "write_website":
     case "browser_site":
     case "browser_site_used":
@@ -34,6 +49,46 @@ function actionIcon(action: string): ReactNode {
   }
 }
 
+/// What a share_artifact card asks: who gets the file, the expiry and, for
+/// a public link or community recipients, the risk the "Allow" accepts.
+function ShareDetails({ share }: { share: ShareAsk }) {
+  const t = useT();
+  const who =
+    share.audience === "public"
+      ? t.shareTool.who.public
+      : share.audience === "org"
+        ? t.shareTool.who.org
+        : t.shareTool.who.emails(share.recipients.join(", "));
+  const risk =
+    share.risk === "public"
+      ? t.artifacts.riskV1.public
+      : share.risk === "external"
+        ? t.artifacts.riskV1.community
+        : null;
+  return (
+    <>
+      {share.source !== "folder" && (
+        <span className="approval-detail">
+          {share.source === "website"
+            ? t.shareTool.fromWebsite
+            : share.source === "generated"
+              ? t.shareTool.fromGenerated
+              : t.shareTool.fromConversation}
+        </span>
+      )}
+      {share.title && <span className="approval-detail">{t.shareTool.titleLabel(share.title)}</span>}
+      <span className="approval-detail approval-share-who">{who}</span>
+      {share.notify && <span className="approval-detail">{t.shareTool.notify}</span>}
+      <span className="approval-detail">{t.shareTool.expires(share.expires_days)}</span>
+      {risk && (
+        <span className="approval-detail approval-share-risk" role="note">
+          {risk} {t.shareTool.allowIsAck}
+        </span>
+      )}
+    </>
+  );
+}
+
 export function ApprovalCard({
   card,
   onRespond,
@@ -42,7 +97,9 @@ export function ApprovalCard({
   onRespond: (id: string, granted: boolean) => void;
 }) {
   const t = useT();
-  const summary = t.approval.actions[card.action] ?? t.approval.actions.unknown;
+  const summary = card.share
+    ? t.shareTool.ask
+    : (t.approval.actions[card.action] ?? t.approval.actions.unknown);
   const danger = card.action === "delete_path" || card.action === "run_command" || card.action === "browser_payment";
   const detail = t.approval.details[card.action];
 
@@ -75,12 +132,17 @@ export function ApprovalCard({
 
   const sending = card.status === "sending";
   return (
-    <div className={`approval-card${danger ? " danger" : ""}`} role="group" aria-label={t.approval.region}>
+    <div
+      className={`approval-card${danger ? " danger" : ""}${card.share ? " approval-card-share" : ""}`}
+      role="group"
+      aria-label={t.approval.region}
+    >
       <span className="approval-icon" aria-hidden="true">
         {actionIcon(card.action)}
       </span>
       <div className="approval-text">
         <strong>{summary}</strong>
+        {card.share && <strong className="approval-share-file">{card.share.file_name}</strong>}
         <code className="approval-target" title={card.target}>
           {card.target}
         </code>
@@ -95,6 +157,7 @@ export function ApprovalCard({
           </span>
         )}
         {detail && <span className="approval-detail">{detail}</span>}
+        {card.share && <ShareDetails share={card.share} />}
         {card.afterBrowsing && <span className="approval-detail">{t.approval.afterBrowsing}</span>}
         {card.permanent && <span className="approval-permanent">{t.approval.permanent}</span>}
         {card.diffPreview && (

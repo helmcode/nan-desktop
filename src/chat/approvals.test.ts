@@ -20,6 +20,26 @@ const req = (approval_id: string, conversation_id: number | null = 1): ApprovalR
 });
 
 describe("cardFromRequest (real core payload)", () => {
+  it("carries a share_artifact request's details and names the file", () => {
+    const share = {
+      file_name: "website-calculadora.html",
+      source: "website",
+      location: "website-calculadora.html",
+      title: "Calculadora",
+      audience: "public",
+      recipients: [],
+      expires_days: 7,
+      notify: false,
+      risk: "public" as const,
+    };
+    const card = cardFromRequest(
+      { ...req("s"), action: "share_artifact", path: "/tmp/nan/1/website-calculadora.html", share },
+      3,
+    );
+    expect(card).toMatchObject({ id: "s", action: "share_artifact", target: "website-calculadora.html", share });
+    expect(cardFromRequest(req("d"), 0)).not.toHaveProperty("share");
+  });
+
   it("maps approval_id, path and the delete flags", () => {
     const card = cardFromRequest({ ...req("a"), permanent: true }, 2);
     expect(card).toMatchObject({

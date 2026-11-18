@@ -64,6 +64,19 @@ export interface ChatMessageRow {
   // Files attached to a user message (never the extracted text).
   // Optional: older cores did not send it.
   attachments?: MessageAttachment[];
+  // Links the reply's share_artifact calls created. Optional: older cores
+  // did not send it.
+  shares?: SharedLink[];
+}
+
+/// A link the assistant created with share_artifact (`SharedLink` in the core).
+export interface SharedLink {
+  url: string;
+  title: string;
+  scope: "public" | "emails" | "org" | (string & {});
+  recipients: string[];
+  /// RFC 3339; null when the server set none.
+  expires_at: string | null;
 }
 
 /// What a chat attachment is (`AttachmentKind` in the core).

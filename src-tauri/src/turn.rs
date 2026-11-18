@@ -1004,6 +1004,7 @@ mod tests {
             media_path: None,
             sources: vec![],
             artifacts: vec![],
+            shares: vec![],
             parent_message_id: None,
             end_reason: None,
             tool_trace: trace.map(|t| serde_json::Value::Array(t).to_string()),
