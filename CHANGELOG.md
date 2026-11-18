@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### New
+- Ya puedes escribir mientras el asistente responde. Si envias, el mensaje queda en cola encima del cuadro de texto ("Se enviara cuando termine la respuesta.") y sale solo al terminar, uno detras de otro. Cada mensaje en cola se puede editar o quitar. Si pulsas Detener o algo falla, la cola espera hasta que pulses "Enviar ahora". Un mensaje en cola tiene prioridad sobre la continuacion automatica de una respuesta cortada.
 - Navegador del asistente: el asistente puede abrir paginas web en una ventana de navegador de la app, leerlas, pulsar botones y escribir en formularios. Ves todo lo que hace, puedes usar la ventana tu tambien y pararlo desde la barra del navegador que aparece encima del chat (atras, adelante, recargar, ver ventana, parar, cerrar).
 - Antes de usar cada web, el asistente pide permiso una vez por conversacion (si todas tus carpetas estan en "Permitir sin preguntar", las webs publicas no preguntan). Las direcciones de tu red local preguntan siempre.
 - El asistente nunca escribe contrasenas, codigos de verificacion ni datos de tarjeta: te pide que lo hagas tu en la ventana. Enviar un inicio de sesion o pulsar un boton de pago o compra pide permiso cada vez.

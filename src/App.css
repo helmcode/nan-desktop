@@ -3908,6 +3908,34 @@ button:disabled {
 }
 
 .browser-bar-address {
+
+/* ---- composer queue (messages typed while a reply runs) --------------- */
+
+.queued {
+  max-width: 46rem;
+  margin: 0 auto 0.5rem;
+  padding: 0.5rem 0.6rem;
+  background-color: var(--surface-2);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+}
+
+.queued-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.queued-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.queued-text {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -3937,4 +3965,26 @@ button:disabled {
 
 .browser-bar-notice {
   color: var(--warn);
+
+  font-size: 0.9rem;
+}
+
+.queued-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.15rem;
+}
+
+.queued-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.35rem;
+}
+
+.queued-note {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 0.82rem;
 }

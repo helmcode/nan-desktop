@@ -139,6 +139,22 @@ import {
 import { useWorkspace } from "./workspace";
 import { TurnIndicator, useTurnStarts } from "./chat/TurnIndicator";
 import { AUTO_RETRY_DELAY_MS, isContinuable, shouldAutoRetry, UnfinishedTurn } from "./chat/UnfinishedTurn";
+import {
+  dropQueue,
+  EMPTY_QUEUES,
+  enqueue,
+  heldAfter,
+  hold,
+  nextToSend,
+  queueOf,
+  release,
+  removeQueued,
+  requeueFront,
+  takeQueued,
+  wantsFlush,
+  type Queues,
+} from "./chat/queue";
+import { QueuedMessages } from "./chat/QueuedMessages";
 
 // The preview pane and its renderers load on first use (S21).
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
@@ -749,6 +765,17 @@ function ChatShell({
   // Conversations whose last turn was interrupted because the service was
   // busy (rate limited): the notice asks to wait a moment. Session-only.
   const [busyInterrupted, setBusyInterrupted] = useState<ReadonlySet<number>>(new Set());
+  // Composer queue (chat/queue.ts): messages sent while a reply runs, per
+  // conversation, in memory for this session (the shell is keyed by realm,
+  // so sign-out and realm switches drop it).
+  const [queues, setQueues] = useState<Queues>(EMPTY_QUEUES);
+  const queuesRef = useRef(queues);
+  // Layout effect: the ref is current before any click handler can run, so
+  // Edit never takes a message the flush already took.
+  useLayoutEffect(() => {
+    queuesRef.current = queues;
+  }, [queues]);
+  const queueSeq = useRef(0);
   // Round 14/S1: the newer version the updater found. ONE check (owned by
   // the app window, before sign-in) feeds the banner, the user menu and
   // Settings, so a dismissed banner never hides the update; one install at a
@@ -1190,8 +1217,16 @@ function ChatShell({
           else next.delete(id);
           return next;
         });
-        // Only the conversation on screen resumes by itself.
-        if (shouldAutoRetry(reason, wasAutoRetry) && activeConvRef.current === id) setAutoRetryConvId(id);
+        // Only the conversation on screen resumes by itself, and never when
+        // the user already queued what comes next (the queue wins).
+        if (
+          shouldAutoRetry(reason, wasAutoRetry) &&
+          activeConvRef.current === id &&
+          queueOf(queuesRef.current, id).items.length === 0
+        )
+          setAutoRetryConvId(id);
+        const heldReason = heldAfter(reason, error_kind);
+        if (heldReason) setQueues((prev) => hold(prev, id, heldReason));
         finish(id);
         void syncMemory();
       }),
@@ -1204,6 +1239,8 @@ function ChatShell({
         awaitingSkillRef.current.delete(id);
         distilledDraftsRef.current.delete(id);
         autoRetryTurnsRef.current.delete(id);
+        // Stopped on purpose: queued messages wait for the user.
+        setQueues((prev) => hold(prev, id, "stopped"));
         finish(id);
       }),
       listen<ChatError>("chat://error", (event) => {
@@ -1213,6 +1250,9 @@ function ChatShell({
         clearDraft(conversation_id);
         declaredOutputsRef.current.delete(conversation_id);
         void settleSkillAfterError(conversation_id);
+        // Any failure holds the queue (the error stays on screen next to it;
+        // sending right away would likely fail the same way).
+        setQueues((prev) => hold(prev, conversation_id, "failed"));
         if (kind === "unauthorized") {
           setSessionExpired(true);
         } else if (activeConvRef.current === conversation_id) {
@@ -1535,6 +1575,7 @@ function ChatShell({
       }
       dispatchApproval({ type: "clearConversation", conversationId });
       dispatchNudge({ type: "clearConversation", conversationId });
+      setQueues((prev) => dropQueue(prev, conversationId));
       setSelections((prev) => {
         const next = { ...prev };
         delete next[String(conversationId)];
@@ -1757,6 +1798,9 @@ function ChatShell({
   const stopGenerating = useCallback(async (): Promise<void> => {
     const conversationId = activeConvRef.current;
     if (conversationId === null) return;
+    // Hold the queue first: if the turn ends on its own before the stop
+    // reaches the core (no chat://stopped), nothing goes out by itself.
+    setQueues((prev) => hold(prev, conversationId, "stopped"));
     try {
       await invoke("chat_stop", { conversationId });
     } catch (err) {
@@ -2014,13 +2058,36 @@ function ChatShell({
     return () => window.removeEventListener("keydown", onKey);
   }, [view, leaveSettings]);
 
+  // Composer queue: while a reply runs (or messages already wait), sending
+  // adds to this conversation's queue instead; the flush below sends it.
+  const activeQueue = activeConvId !== null ? queueOf(queues, activeConvId) : null;
+  const queueing = activeConvId !== null && (streamingActive || (activeQueue?.items.length ?? 0) > 0);
+  const enqueueComposer = (): void => {
+    const id = activeConvId;
+    if (id === null || !composer.trim()) return;
+    queueSeq.current += 1;
+    const seq = queueSeq.current;
+    setQueues((prev) => enqueue(prev, id, composer, seq));
+    setComposer("");
+  };
   const submit = (): void => {
-    void (imageMode ? sendImage() : send());
+    // Image mode never queues: it waits for the running reply (its toggle
+    // is disabled meanwhile).
+    if (imageMode) {
+      if (!composerBusy) void sendImage();
+      return;
+    }
+    if (queueing) {
+      enqueueComposer();
+      return;
+    }
+    void send();
   };
 
   // ---- skills -------------------------------------------------------------
-  const slash = imageMode || slashDismissed ? null : slashQuery(composer);
-  const pickerVisible = view === "chat" && (skillPickerOpen || slash !== null);
+  // While a reply runs a leading "/" is plain text: skills wait too.
+  const slash = imageMode || slashDismissed || composerBusy ? null : slashQuery(composer);
+  const pickerVisible = view === "chat" && !composerBusy && (skillPickerOpen || slash !== null);
   const pickerItems = pickerVisible ? filterSkills(pickerSkills, slash ?? "") : [];
   const pickerActive = Math.min(pickerIndex, Math.max(pickerItems.length - 1, 0));
 
@@ -2124,6 +2191,52 @@ function ChatShell({
     }, AUTO_RETRY_DELAY_MS);
     return () => window.clearTimeout(timer);
   }, [autoRetryConvId, activeConvId, streamingActive, t]);
+
+  // Composer queue flush: once the conversation on screen is idle, send its
+  // next queued message as its own turn. One at a time: the next waits for
+  // that reply to end. A queued message replaces a pending automatic
+  // continuation. A failed send goes back to the front, held.
+  const [flushing, setFlushing] = useState(false);
+  useEffect(() => {
+    if (activeConvId === null || flushing || composerBusy || sessionExpired) return;
+    if (!wantsFlush(queues, activeConvId)) return;
+    const id = activeConvId;
+    const message = nextToSend(queues, id);
+    if (!message) return;
+    setFlushing(true);
+    setQueues((prev) => takeQueued(prev, id));
+    setAutoRetryConvId((prev) => (prev === id ? null : prev));
+    void sendRef
+      .current(message.text)
+      .then((sent) => {
+        if (!sent) setQueues((prev) => requeueFront(prev, id, message));
+      })
+      .finally(() => setFlushing(false));
+  }, [queues, activeConvId, flushing, composerBusy, sessionExpired]);
+
+  const editQueued = useCallback((itemId: number): void => {
+    const id = activeConvRef.current;
+    if (id === null) return;
+    const item = queueOf(queuesRef.current, id).items.find((m) => m.id === itemId);
+    if (!item) return;
+    setQueues((prev) => removeQueued(prev, id, itemId));
+    // Back into the composer, ahead of anything typed since.
+    setComposer((prev) => (prev.trim() ? `${item.text}\n${prev}` : item.text));
+    composerRef.current?.focus();
+  }, []);
+  const removeQueuedMessage = useCallback((itemId: number): void => {
+    const id = activeConvRef.current;
+    if (id === null) return;
+    setQueues((prev) => removeQueued(prev, id, itemId));
+    composerRef.current?.focus();
+  }, []);
+  const sendQueuedNow = useCallback((): void => {
+    const id = activeConvRef.current;
+    if (id === null) return;
+    setQueues((prev) => release(prev, id));
+    // The button goes away with the click: keep focus in the composer.
+    composerRef.current?.focus();
+  }, []);
 
   const onSkillSaved = useCallback((saved: Skill): void => {
     setSkills((prev) => upsertSkill(prev, saved));
@@ -2257,8 +2370,12 @@ function ChatShell({
     const visible = stripToolMarkup(m.content);
     const files = messageFiles(visible, fileRoots, m.artifacts);
     // Only the latest reply offers to continue, and not while a reply runs.
+    // A queued message about to go out replaces it too.
     const offerContinue =
-      !streamingActive && isContinuable(m.end_reason) && messages[messages.length - 1]?.id === m.id;
+      !streamingActive &&
+      !(activeConvId !== null && wantsFlush(queues, activeConvId)) &&
+      isContinuable(m.end_reason) &&
+      messages[messages.length - 1]?.id === m.id;
     // A row that was only tool markup has nothing to show (S16).
     if (
       visible.trim().length === 0 &&
@@ -2750,6 +2867,14 @@ function ChatShell({
                   </span>
                 </div>
               )}
+              <QueuedMessages
+                items={activeQueue?.items ?? []}
+                held={activeQueue?.held ?? false}
+                canSendNow={!sessionExpired}
+                onEdit={editQueued}
+                onRemove={removeQueuedMessage}
+                onSendNow={sendQueuedNow}
+              />
               {pickerVisible && (
                 <div className="skill-picker-anchor">
                   <SkillPicker
@@ -2784,7 +2909,7 @@ function ChatShell({
                   }
                   aria-label={imageMode ? t.chat.imagePromptLabel : t.chat.messageLabel}
                   rows={2}
-                  disabled={composerBusy}
+                  disabled={imageGeneratingActive}
                 />
                 <div className="composer-bar">
                   <FolderPicker
@@ -2849,7 +2974,7 @@ function ChatShell({
                         aria-label={recording ? t.chat.stopDictation : t.chat.dictate}
                         title={recording ? t.chat.stopDictation : t.chat.dictate}
                         onClick={() => void toggleRecording()}
-                        disabled={sttBusy || composerBusy}
+                        disabled={sttBusy || (composerBusy && !recording)}
                       >
                         {recording ? <IconStop size={18} /> : <IconMic size={18} />}
                       </button>
@@ -2860,10 +2985,22 @@ function ChatShell({
                         {t.chat.cancel}
                       </button>
                     ) : streamingActive ? (
-                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => void stopGenerating()}>
-                        <IconStop size={14} />
-                        {t.chat.stop}
-                      </button>
+                      <>
+                        <button type="button" className="btn btn-ghost btn-sm" onClick={() => void stopGenerating()}>
+                          <IconStop size={14} />
+                          {t.chat.stop}
+                        </button>
+                        <button
+                          type="button"
+                          className="send-btn"
+                          onClick={submit}
+                          disabled={composer.trim().length === 0 || imageMode}
+                          aria-label={t.chat.queueSend}
+                          title={t.chat.queueSend}
+                        >
+                          <IconArrowUp size={18} />
+                        </button>
+                      </>
                     ) : (
                       <button
                         type="button"
