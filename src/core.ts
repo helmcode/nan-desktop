@@ -60,6 +60,21 @@ export interface ApprovalRequest {
   /// web in this task (in-app browser protection).
   after_browsing?: boolean;
   expires_in_secs: number;
+  /// `share_artifact` only: what the share does (built by the core).
+  share?: ShareAsk;
+}
+
+/// The share a `share_artifact` card asks about (`ShareAsk` in the core).
+export interface ShareAsk {
+  file_name: string;
+  title: string;
+  audience: "public" | "emails" | "org" | (string & {});
+  recipients: string[];
+  /// 0 = never (org only).
+  expires_days: number;
+  notify: boolean;
+  /// The risk the user's "Allow" accepts.
+  risk: "public" | "external" | null;
 }
 
 /// `tools://approval-resolved` payload (`ApprovalResolved` in the core).
@@ -105,6 +120,9 @@ export type ChatSendArgs = {
   /// Files attached in the composer: the staged id, plus the text the
   /// renderer extracted for a document. Omitted when there are none.
   attachments?: AttachmentInput[];
+  /// Shared links are on for this account (`/api/auth/me`): the core then
+  /// offers the model `share_artifact`. Omitted otherwise.
+  artifacts?: boolean;
 };
 
 // ---------------------------------------------------------------------------

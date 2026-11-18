@@ -119,6 +119,7 @@ import type { StudioSeed } from "./studio/studio";
 import { SkillPicker } from "./skills/SkillPicker";
 import { SkillsView, type SkillFormDraft } from "./skills/SkillsView";
 import { fetchAccess, shareSourceFor, type ArtifactsAccess, type ShareSource } from "./artifacts/artifacts";
+import { SharedLinkCards } from "./artifacts/SharedLinkCards";
 import { ShareArtifactDialog } from "./artifacts/ShareArtifactDialog";
 import { SharedLinksView } from "./artifacts/SharedLinksView";
 import {
@@ -2017,6 +2018,8 @@ function ChatShell({
         ...(skillId ? { skillId } : {}),
         ...(continuation ? { continuation: true } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
+        // Offers the share-by-talking tool (the core still asks per share).
+        ...(artifactsAccess.availability === "on" ? { artifacts: true } : {}),
       });
       void refreshConversations();
       return true;
@@ -2090,7 +2093,7 @@ function ChatShell({
       void refreshConversations();
       return false;
     }
-  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary, attach]);
+  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary, attach, artifactsAccess.availability]);
 
   const sendImage = useCallback(async (): Promise<void> => {
     const prompt = composer.trim();
@@ -2540,6 +2543,7 @@ function ChatShell({
       !offerContinue &&
       !m.partial &&
       (m.sources ?? []).length === 0 &&
+      (m.shares ?? []).length === 0 &&
       files.chips.length === 0 &&
       files.images.length === 0
     )
@@ -2575,6 +2579,7 @@ function ChatShell({
           />
         )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
+        <SharedLinkCards links={m.shares ?? []} />
         <FileChips paths={files.chips} onOpen={openFilePreview} onShare={artifactsOn ? openShare : undefined} />
         {VOICE_UI && visible.trim().length > 0 && (
           <div className="msg-actions">

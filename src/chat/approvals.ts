@@ -7,7 +7,7 @@
 // Resolved cards collapse to a one-line outcome. The core remains the
 // authority; the card only forwards the user's answer.
 
-import type { ApprovalRequest } from "../core";
+import type { ApprovalRequest, ShareAsk } from "../core";
 
 export type ApprovalStatus = "pending" | "sending" | "granted" | "denied";
 
@@ -34,6 +34,8 @@ export interface ApprovalCardState {
   /// An informational line, not a question (in-app browser allow mode:
   /// "Using <host>"). Always rendered resolved, never answerable.
   notice?: true;
+  /// share_artifact: the file, who gets it, the expiry and the risk.
+  share?: ShareAsk;
 }
 
 export type ApprovalEvent =
@@ -47,11 +49,12 @@ export type ApprovalEvent =
 /// Card state from the core's `tools://approval-request` payload.
 export function cardFromRequest(request: ApprovalRequest, anchorIndex: number | null): ApprovalCardState {
   const isCommand = request.command !== null && request.command !== undefined;
+  const share = request.share ?? undefined;
   return {
     id: request.approval_id,
     conversationId: request.conversation_id ?? null,
     action: request.action,
-    target: (isCommand ? request.command : request.path) ?? request.summary,
+    target: share ? share.file_name : ((isCommand ? request.command : request.path) ?? request.summary),
     destination: request.dest_path ?? null,
     cwd: isCommand ? (request.path ?? null) : null,
     diffPreview: request.diff_preview ?? null,
@@ -60,6 +63,7 @@ export function cardFromRequest(request: ApprovalRequest, anchorIndex: number | 
     status: "pending",
     failed: false,
     ...(request.after_browsing === true ? { afterBrowsing: true as const } : {}),
+    ...(share ? { share } : {}),
   };
 }
 

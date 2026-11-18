@@ -771,4 +771,29 @@ export const es: Strings = {
       generic: "No se pudo adjuntar el archivo. Vuelve a intentarlo.",
     },
   },
+  // share_artifact: el asistente comparte un archivo como enlace desde el chat.
+  shareTool: {
+    ask: "Compartir como enlace",
+    who: {
+      public: "Público: cualquiera con el enlace",
+      org: "Toda tu organización",
+      emails: (list: string) => `Con: ${list}`,
+    },
+    notify: "Les llegará el enlace por correo.",
+    expires: (days: number) => (days === 0 ? "Sin caducidad" : days === 1 ? "Caduca en 1 día" : `Caduca en ${days} días`),
+    allowIsAck: "Si lo permites, aceptas este aviso.",
+    region: "Enlaces compartidos en esta respuesta",
+    scope: {
+      public: "Enlace público",
+      org: "Organización",
+      emails: (n: number) => (n === 1 ? "1 persona" : `${n} personas`),
+    },
+    expiresOn: (date: string) => `Caduca el ${date}`,
+    copy: "Copiar enlace",
+    copied: "Enlace copiado",
+    copyFailed: "No se pudo copiar el enlace. Selecciónalo y cópialo a mano.",
+    open: "Abrir",
+    openLabel: (title: string) => `Abrir ${title} en el navegador`,
+    copyLabel: (title: string) => `Copiar el enlace de ${title}`,
+  },
 };

@@ -160,3 +160,62 @@ describe("ApprovalCard (S14)", () => {
     expect(screen.queryByText(/visited web pages/)).toBeNull();
   });
 });
+
+describe("ApprovalCard: share_artifact", () => {
+  const share = {
+    file_name: "informe.pdf",
+    title: "Informe Q3",
+    audience: "public",
+    recipients: [] as string[],
+    expires_days: 7,
+    notify: false,
+    risk: "public" as const,
+  };
+
+  it("names the file, who gets it, the expiry and the risk the Allow accepts", () => {
+    const onRespond = renderCard({ action: "share_artifact", target: "informe.pdf", share });
+    expect(screen.getByText("Share as a link")).toBeTruthy();
+    expect(screen.getByText("informe.pdf")).toBeTruthy();
+    expect(screen.getByText("Informe Q3")).toBeTruthy();
+    expect(screen.getByText("Public: anyone with the link")).toBeTruthy();
+    expect(screen.getByText("Expires in 7 days")).toBeTruthy();
+    const risk = screen.getByRole("note");
+    expect(risk.textContent).toContain("Anyone with this link can open this file");
+    expect(risk.textContent).toContain("Allowing it means you accept this.");
+    fireEvent.click(screen.getByRole("button", { name: "Allow" }));
+    expect(onRespond).toHaveBeenCalledWith("act-1", true);
+  });
+
+  it("lists the recipients, the email notice and the community risk", () => {
+    renderCard({
+      action: "share_artifact",
+      target: "notas.md",
+      share: { ...share, file_name: "notas.md", title: "notas.md", audience: "emails", recipients: ["ana@acme.com", "bo@acme.com"], expires_days: 30, notify: true, risk: "external" },
+    });
+    expect(screen.getByText("With: ana@acme.com, bo@acme.com")).toBeTruthy();
+    expect(screen.getByText("They will get the link by email.")).toBeTruthy();
+    expect(screen.getByText("Expires in 30 days")).toBeTruthy();
+    expect(screen.getByRole("note").textContent).toContain("Only you and these people can open this file");
+  });
+
+  it("an organization share without expiry carries no risk copy (Spanish)", () => {
+    render(
+      <I18nProvider initial="es">
+        <ApprovalCard
+          card={{ ...base, action: "share_artifact", target: "informe.pdf", share: { ...share, audience: "org", expires_days: 0, risk: null } }}
+          onRespond={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    expect(screen.getByText("Compartir como enlace")).toBeTruthy();
+    expect(screen.getByText("Toda tu organización")).toBeTruthy();
+    expect(screen.getByText("Sin caducidad")).toBeTruthy();
+    expect(screen.queryByRole("note")).toBeNull();
+  });
+
+  it("collapses to the outcome with the file name once answered", () => {
+    renderCard({ action: "share_artifact", target: "informe.pdf", share, status: "granted" });
+    expect(screen.getByRole("status").textContent).toContain("Share as a link");
+    expect(screen.getByText("informe.pdf")).toBeTruthy();
+  });
+});
