@@ -1806,8 +1806,10 @@ mod tests {
         );
         assert_eq!(
             location_of(&l.outside.join("a.pdf"), Some(&l.home), None, false).1,
-            l.outside.join("a.pdf").display().to_string(),
-            "outside home: the absolute path"
+            without_verbatim_prefix(&l.outside.join("a.pdf"))
+                .display()
+                .to_string(),
+            "outside home: the absolute path, without a Windows verbatim prefix"
         );
     }
 
