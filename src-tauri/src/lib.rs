@@ -16,6 +16,8 @@
 
 // Shared artifacts (F1): snapshot upload of a granted file + link list/revoke.
 mod artifacts;
+// Chat attachments: composer files (pick, drop, paste), vision routing.
+mod attachments;
 mod chat;
 mod chat_store;
 mod conn_test;
@@ -227,6 +229,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(device_flow::DeviceLoginState::default())
         .manage(chat::ChatState::default())
+        .manage(attachments::AttachmentsState::default())
         .manage(tts::TtsState::default())
         .manage(images::ImagesState::default())
         .manage(tools::ToolsState::default())
@@ -286,6 +289,18 @@ pub fn run() {
                 .build()?;
             Ok(())
         })
+        // Chat attachments: files dropped on the MAIN window are read by the
+        // core from the native drop event (the renderer never names a
+        // path) and announced as `attachments://dropped`.
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) =
+                    event
+                && !paths.is_empty()
+            {
+                attachments::stage_dropped(window.app_handle(), paths.clone());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             profiles_load,
             app_info,
@@ -301,6 +316,10 @@ pub fn run() {
             chat::conversation_delete,
             chat::conversation_rename,
             chat::messages_list,
+            attachments::attachments_pick,
+            attachments::attachments_stage_bytes,
+            attachments::attachment_read,
+            attachments::attachment_discard,
             memory::memory_settings_get,
             memory::memory_set_mode,
             memory::memory_sync,

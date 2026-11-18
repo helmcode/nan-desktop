@@ -586,11 +586,26 @@ pub fn outcome_for_model(result: Result<tools::ToolOutcome, tools::Rejection>) -
 }
 
 /// The chat-completions request body for one round.
+///
+/// A model that does not accept images (anything outside `vision` in
+/// `chat-models.json`) never receives a non-text content part, whatever
+/// path built `messages` (history, tool-trace replay, retries): they are
+/// replaced by text here, the last step before the wire (the platform
+/// answers such a request with a 400 "text-only model").
 pub fn request_body(
     model: &str,
     messages: &[serde_json::Value],
     tools: &[serde_json::Value],
 ) -> serde_json::Value {
+    let cleaned;
+    let messages = if !chat_models_config().is_vision(model)
+        && crate::attachments::has_media_parts(messages)
+    {
+        cleaned = crate::attachments::text_only_messages(messages);
+        cleaned.as_slice()
+    } else {
+        messages
+    };
     let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
@@ -631,12 +646,24 @@ const CHAT_MODELS_JSON: &str = include_str!("../chat-models.json");
 /// Mirrors the shipped `chat-models.json`.
 const FALLBACK_CHAT_MODELS: [&str; 3] = ["deepseek-v4-flash", "glm5.3", "glm5.3-flash"];
 
-/// Parsed chat-model allowlist: the picker order, headliner first.
+/// Compile-time-safe fallback of the models that accept images.
+const FALLBACK_VISION_MODELS: [&str; 2] = ["deepseek-v4-flash", "glm5.3-flash"];
+/// Compile-time-safe fallback of the vision fallback model.
+const FALLBACK_VISION_FALLBACK: &str = "glm5.3-flash";
+
+/// Parsed chat-model allowlist: the picker order, headliner first, plus
+/// which models accept images.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatModelsConfig {
     pub headliner: String,
     /// Allowlisted ids in display order; `models[0] == headliner`, no dupes.
     pub models: Vec<String>,
+    /// Ids that accept image content parts (`"vision"`). Every other model
+    /// is text-only: it never receives an image part.
+    pub vision: Vec<String>,
+    /// Where a turn with images goes when the selected model is text-only
+    /// (`"vision_fallback"`, must be one of `vision`); `None` = no routing.
+    pub vision_fallback: Option<String>,
 }
 
 impl ChatModelsConfig {
@@ -644,7 +671,17 @@ impl ChatModelsConfig {
         Self {
             headliner: DEFAULT_MODEL.to_string(),
             models: FALLBACK_CHAT_MODELS.iter().map(|s| s.to_string()).collect(),
+            vision: FALLBACK_VISION_MODELS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            vision_fallback: Some(FALLBACK_VISION_FALLBACK.to_string()),
         }
+    }
+
+    /// Whether `model` accepts image content parts (exact id match).
+    pub fn is_vision(&self, model: &str) -> bool {
+        self.vision.iter().any(|id| id == model)
     }
 }
 
@@ -666,7 +703,38 @@ pub fn parse_chat_models_config(json: &str) -> Option<ChatModelsConfig> {
             models.push(id.to_string());
         }
     }
-    Some(ChatModelsConfig { headliner, models })
+    // Optional: a missing list means no model accepts images; a present
+    // but malformed one is a broken file (fallback), never a silent guess.
+    let vision = match value.get("vision") {
+        None => Vec::new(),
+        Some(list) => {
+            let mut ids: Vec<String> = Vec::new();
+            for entry in list.as_array()? {
+                let id = entry.as_str()?.trim();
+                if !id.is_empty() && !ids.iter().any(|known| known == id) {
+                    ids.push(id.to_string());
+                }
+            }
+            ids
+        }
+    };
+    let vision_fallback = match value.get("vision_fallback") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(id) => {
+            let id = id.as_str()?.trim();
+            // Must be a known model that accepts images.
+            if !vision.iter().any(|v| v == id) || !models.iter().any(|m| m == id) {
+                return None;
+            }
+            Some(id.to_string())
+        }
+    };
+    Some(ChatModelsConfig {
+        headliner,
+        models,
+        vision,
+        vision_fallback,
+    })
 }
 
 /// Resolve a config body, falling back to [`FALLBACK_CHAT_MODELS`] instead of
@@ -1014,8 +1082,10 @@ pub fn chat_send(
     grant_ids: Option<Vec<String>>,
     skill_id: Option<String>,
     continuation: Option<bool>,
+    attachments: Option<Vec<crate::attachments::AttachmentInput>>,
 ) -> Result<(), String> {
-    if content.trim().is_empty() {
+    let attachments = attachments.unwrap_or_default();
+    if content.trim().is_empty() && attachments.is_empty() {
         return Err("message is empty".to_string());
     }
     // Privacy fix: the active user's realm only.
@@ -1048,16 +1118,64 @@ pub fn chat_send(
     } else {
         model
     };
+    // Attachments are validated and consumed before anything is stored: a
+    // refusal (`attachments:<kind>`) leaves the composer as it was.
+    let app_data = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    let records = if attachments.is_empty() {
+        Vec::new()
+    } else {
+        crate::attachments::commit(
+            &app.state::<crate::attachments::AttachmentsState>(),
+            &app_data,
+            &attachments,
+        )
+        .map_err(|err| format!("attachments:{}", err.as_str()))?
+    };
     if conversation.title.is_empty() {
+        let title_source = if content.trim().is_empty() {
+            records.first().map(|r| r.name.clone()).unwrap_or_default()
+        } else {
+            content.clone()
+        };
         chat_store::set_conversation_title(
             &conn,
             conversation_id,
-            &title_from_first_user_message(&content),
+            &title_from_first_user_message(&title_source),
         )
         .map_err(|err| err.to_string())?;
     }
-    chat_store::insert_message(&conn, conversation_id, "user", &content, None)
-        .map_err(|err| err.to_string())?;
+    let user_row = if records.is_empty() {
+        chat_store::insert_message(&conn, conversation_id, "user", &content, None)
+    } else {
+        chat_store::insert_user_message_with_attachments(&conn, conversation_id, &content, &records)
+    }
+    .map_err(|err| err.to_string())?;
+    for (kind, count) in crate::attachments::counts_by_kind(&records) {
+        crate::telemetry::record(
+            Some(&conversation.profile_id),
+            crate::telemetry::attachment_added(kind, count),
+        );
+    }
+    // Vision routing: this turn's images need a model that sees them. The
+    // user's selection is untouched; the next text-only turn uses it again.
+    let has_images = records.iter().any(|r| r.kind.is_image());
+    let routed = crate::attachments::route_model(&model, has_images, chat_models_config());
+    if routed != model {
+        crate::telemetry::record(
+            Some(&conversation.profile_id),
+            crate::telemetry::vision_routed(&model, &routed),
+        );
+    }
+    let model = routed;
+    if has_images {
+        tauri::async_runtime::spawn(describe_images(
+            dir.clone(),
+            app_data,
+            conversation.profile_id.clone(),
+            user_row,
+            records.into_iter().filter(|r| r.kind.is_image()).collect(),
+        ));
+    }
     chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
 
     let state = app.state::<ChatState>();
@@ -1186,8 +1304,21 @@ async fn run_chat_stream(
         Ok(rows) => rows,
         Err(_) => return fail_early(tracker, ErrorKind::Protocol),
     };
-    let traced_history = turn::history_messages(&rows, true);
-    let plain_history = turn::history_messages(&rows, false);
+    // Images travel as images only to a model that accepts them.
+    let app_data = app.path().app_data_dir().ok();
+    let load_image = |record: &crate::attachments::AttachmentRecord| {
+        app_data
+            .as_deref()
+            .and_then(|root| crate::attachments::image_data_url(root, record))
+    };
+    let image_url: Option<crate::attachments::ImageLoader<'_>> =
+        if chat_models_config().is_vision(&model) {
+            Some(&load_image)
+        } else {
+            None
+        };
+    let traced_history = turn::history_messages(&rows, true, image_url);
+    let plain_history = turn::history_messages(&rows, false, image_url);
     let replayed_traces = traced_history.len() != plain_history.len();
 
     // ---- tools offered this reply ------------------------------------------
@@ -1470,6 +1601,68 @@ async fn run_chat_stream(
     }
     commands.disarm();
     release_stream(&state, conversation_id, generation);
+}
+
+/// Overall timeout of one image-description side request.
+pub const DESCRIBE_TIMEOUT_SECS: u64 = 45;
+
+/// Describe each newly sent image with the vision fallback model (one small
+/// non-streaming request per image) and store the description with the
+/// attachment: it becomes the image's text stand-in for text-only models
+/// and in account memory. Best effort and silent: any failure leaves the
+/// plain `[Image: <name>]` stand-in.
+async fn describe_images(
+    dir: std::path::PathBuf,
+    app_data: std::path::PathBuf,
+    profile_id: String,
+    message_id: i64,
+    images: Vec<crate::attachments::AttachmentRecord>,
+) {
+    let config = chat_models_config();
+    let Some(model) = config.vision_fallback.clone() else {
+        return;
+    };
+    let Ok(key) = read_profile_key(&profile_id) else {
+        return;
+    };
+    let Some(base) = inference_base(&profile_id) else {
+        return;
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(DESCRIBE_TIMEOUT_SECS))
+        .build()
+    else {
+        return;
+    };
+    for record in images {
+        let Some(url) = crate::attachments::image_data_url(&app_data, &record) else {
+            continue;
+        };
+        let body = crate::attachments::describe_request_body(&model, &url);
+        let Ok(response) = client
+            .post(format!("{base}/chat/completions"))
+            .bearer_auth(&key)
+            .json(&body)
+            .send()
+            .await
+        else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(text) = response.text().await else {
+            continue;
+        };
+        let Some(description) = crate::attachments::parse_description(&text) else {
+            continue;
+        };
+        if let Ok(conn) = chat_store::open_db(&dir) {
+            let _ =
+                chat_store::set_attachment_description(&conn, message_id, &record.id, &description);
+        }
+    }
 }
 
 /// Finalize a turn's in-progress row in place: the final text (sanitized
@@ -2267,7 +2460,57 @@ mod tests {
             parsed.models,
             vec!["deepseek-v4-flash", "glm5.3", "glm5.3-flash"]
         );
+        assert_eq!(parsed.vision, vec!["deepseek-v4-flash", "glm5.3-flash"]);
+        assert_eq!(parsed.vision_fallback.as_deref(), Some("glm5.3-flash"));
+        assert!(!parsed.is_vision("glm5.3"), "glm5.3 is text-only");
+        assert!(parsed.is_vision("deepseek-v4-flash") && parsed.is_vision("glm5.3-flash"));
         assert_eq!(chat_models_config(), &parsed);
+    }
+
+    #[test]
+    fn a_text_only_model_never_receives_an_image_part() {
+        let messages = vec![serde_json::json!({"role":"user","content":[
+            {"type":"text","text":"what is it"},
+            {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AAAA"}}
+        ]})];
+        let text_only = request_body("glm5.3", &messages, &[]);
+        assert!(!crate::attachments::has_media_parts(
+            text_only["messages"].as_array().unwrap()
+        ));
+        assert!(!text_only.to_string().contains("base64"));
+        // Unknown models are treated as text-only too.
+        let unknown = request_body("made-up", &messages, &[]);
+        assert!(!unknown.to_string().contains("image_url"));
+        // A vision model gets the parts untouched.
+        let vision = request_body("glm5.3-flash", &messages, &[]);
+        assert_eq!(vision["messages"][0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            request_body("deepseek-v4-flash", &messages, &[])["messages"],
+            vision["messages"]
+        );
+    }
+
+    #[test]
+    fn vision_keys_are_optional_but_validated() {
+        let none = parse_chat_models_config(r#"{"headliner":"a","models":["a"]}"#).unwrap();
+        assert!(none.vision.is_empty() && none.vision_fallback.is_none());
+        assert!(!none.is_vision("a"));
+        let ok = parse_chat_models_config(
+            r#"{"headliner":"a","models":["a","b"],"vision":["b","b"],"vision_fallback":"b"}"#,
+        )
+        .unwrap();
+        assert_eq!(ok.vision, vec!["b"]);
+        assert_eq!(ok.vision_fallback.as_deref(), Some("b"));
+        for bad in [
+            r#"{"headliner":"a","models":["a"],"vision":"a"}"#,
+            r#"{"headliner":"a","models":["a"],"vision":[1]}"#,
+            // The fallback must accept images and be a listed model.
+            r#"{"headliner":"a","models":["a","b"],"vision":["a"],"vision_fallback":"b"}"#,
+            r#"{"headliner":"a","models":["a"],"vision":["z"],"vision_fallback":"z"}"#,
+            r#"{"headliner":"a","models":["a"],"vision":["a"],"vision_fallback":3}"#,
+        ] {
+            assert_eq!(parse_chat_models_config(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

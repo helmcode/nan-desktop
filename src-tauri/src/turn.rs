@@ -460,7 +460,30 @@ fn parse_trace(raw: &str) -> Option<Vec<serde_json::Value>> {
 /// trace right before the reply, newest rounds first within
 /// [`REPLAY_BUDGET_BYTES`]. `replay_traces: false` gives the plain history
 /// (the fallback for a server that rejects tool messages).
-pub fn history_messages(rows: &[ChatMessageRow], replay_traces: bool) -> Vec<serde_json::Value> {
+///
+/// Attachments: a user row's documents are inlined as delimited text
+/// blocks. Its images are sent as IMAGE parts only when `image_url` is
+/// given (the request goes to a model that accepts images) and only the
+/// [`crate::attachments::MAX_IMAGES_PER_REQUEST`] newest ones; every other
+/// image becomes its text stand-in (`[Image: <name> — <description>]`).
+/// `None` = a text-only model: no image part at all.
+pub fn history_messages(
+    rows: &[ChatMessageRow],
+    replay_traces: bool,
+    image_url: Option<crate::attachments::ImageLoader<'_>>,
+) -> Vec<serde_json::Value> {
+    // The newest images (row id, attachment id) that may travel as images.
+    let mut real_images: std::collections::HashSet<(i64, &str)> = std::collections::HashSet::new();
+    if image_url.is_some() {
+        'newest: for row in rows.iter().rev().filter(|row| row.role == "user") {
+            for record in row.attachments.iter().rev().filter(|r| r.kind.is_image()) {
+                if real_images.len() >= crate::attachments::MAX_IMAGES_PER_REQUEST {
+                    break 'newest;
+                }
+                real_images.insert((row.id, record.id.as_str()));
+            }
+        }
+    }
     let mut replay: HashMap<i64, Vec<serde_json::Value>> = HashMap::new();
     if replay_traces {
         let mut budget = REPLAY_BUDGET_BYTES;
@@ -487,9 +510,16 @@ pub fn history_messages(rows: &[ChatMessageRow], replay_traces: bool) -> Vec<ser
             messages.extend(trace);
         }
         let content = if row.role == "assistant" {
-            tool_markup::sanitize_for_ui(&row.content)
+            serde_json::Value::String(tool_markup::sanitize_for_ui(&row.content))
+        } else if row.attachments.is_empty() {
+            serde_json::Value::String(row.content.clone())
         } else {
-            row.content.clone()
+            crate::attachments::user_content(&row.content, &row.attachments, &mut |record| {
+                if !real_images.contains(&(row.id, record.id.as_str())) {
+                    return None;
+                }
+                image_url.and_then(|load| load(record))
+            })
         };
         messages.push(serde_json::json!({ "role": row.role, "content": content }));
     }
@@ -886,7 +916,7 @@ mod tests {
             msg(2, "assistant", "partial", Some(round)),
             msg(3, "user", "sigue", None),
         ];
-        let history = history_messages(&rows, true);
+        let history = history_messages(&rows, true, None);
         assert!(history.iter().any(|m| m["tool_call_id"] == "c7"));
     }
 
@@ -964,7 +994,101 @@ mod tests {
             parent_message_id: None,
             end_reason: None,
             tool_trace: trace.map(|t| serde_json::Value::Array(t).to_string()),
+            attachments: vec![],
         }
+    }
+
+    fn image(
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+    ) -> crate::attachments::AttachmentRecord {
+        crate::attachments::AttachmentRecord {
+            id: id.into(),
+            kind: crate::attachments::AttachmentKind::Image,
+            name: name.into(),
+            size: 1,
+            path: Some(format!("/x/{id}.jpg")),
+            text: None,
+            truncated: false,
+            description: description.map(str::to_string),
+        }
+    }
+
+    fn with_attachments(
+        mut row: ChatMessageRow,
+        attachments: Vec<crate::attachments::AttachmentRecord>,
+    ) -> ChatMessageRow {
+        row.attachments = attachments;
+        row
+    }
+
+    #[test]
+    fn a_text_only_request_never_carries_an_image_part() {
+        let rows = vec![
+            with_attachments(
+                msg(1, "user", "what is this?", None),
+                vec![image("a", "cat.jpg", Some("A cat."))],
+            ),
+            msg(2, "assistant", "A cat.", None),
+            with_attachments(msg(3, "user", "", None), vec![image("b", "dog.jpg", None)]),
+        ];
+        let history = history_messages(&rows, true, None);
+        assert!(!crate::attachments::has_media_parts(&history));
+        assert_eq!(
+            history[0]["content"],
+            "what is this?\n\n[Image: cat.jpg — A cat.]"
+        );
+        assert_eq!(history[2]["content"], "[Image: dog.jpg]");
+    }
+
+    #[test]
+    fn a_vision_request_sends_the_newest_images_as_parts_within_the_cap() {
+        let cap = crate::attachments::MAX_IMAGES_PER_REQUEST;
+        let old: Vec<_> = (0..3)
+            .map(|i| image(&format!("o{i}"), &format!("old{i}.jpg"), None))
+            .collect();
+        let new: Vec<_> = (0..cap)
+            .map(|i| image(&format!("n{i}"), &format!("new{i}.jpg"), None))
+            .collect();
+        let rows = vec![
+            with_attachments(msg(1, "user", "first", None), old),
+            msg(2, "assistant", "ok", None),
+            with_attachments(msg(3, "user", "second", None), new),
+        ];
+        let load =
+            |record: &crate::attachments::AttachmentRecord| Some(format!("data:{}", record.id));
+        let history = history_messages(&rows, true, Some(&load));
+        // The older turn's images are over the cap: stand-ins.
+        let first = history[0]["content"].as_str().expect("text only");
+        assert!(first.contains("[Image: old0.jpg]") && first.contains("[Image: old2.jpg]"));
+        let parts = history[2]["content"].as_array().expect("parts");
+        assert_eq!(parts.len(), cap + 1);
+        assert_eq!(parts[1]["image_url"]["url"], "data:n0");
+        // A missing file degrades to the stand-in.
+        let none = |_: &crate::attachments::AttachmentRecord| None;
+        let history = history_messages(&rows, true, Some(&none));
+        assert!(!crate::attachments::has_media_parts(&history));
+    }
+
+    #[test]
+    fn documents_replay_their_extracted_text() {
+        let doc = crate::attachments::AttachmentRecord {
+            id: "d".into(),
+            kind: crate::attachments::AttachmentKind::Pdf,
+            name: "plan.pdf".into(),
+            size: 1,
+            path: None,
+            text: Some("Step one.".into()),
+            truncated: false,
+            description: None,
+        };
+        let rows = vec![with_attachments(msg(1, "user", "read", None), vec![doc])];
+        let history = history_messages(&rows, false, None);
+        assert_eq!(
+            history[0]["content"],
+            "read\n\n<attached_file name=\"plan.pdf\">\nStep one.\n</attached_file>"
+        );
     }
 
     #[test]
@@ -1002,7 +1126,7 @@ mod tests {
             ),
             msg(7, "user", "sigue", None),
         ];
-        let history = history_messages(&rows, true);
+        let history = history_messages(&rows, true, None);
         let roles: Vec<&str> = history
             .iter()
             .map(|m| m["role"].as_str().unwrap())
@@ -1028,7 +1152,7 @@ mod tests {
         assert_eq!(history[8]["content"], format!("{TRACE_RESULT_MARKER}new"));
         assert!(!history.iter().any(|m| m.to_string().contains("old")));
 
-        let plain = history_messages(&rows, false);
+        let plain = history_messages(&rows, false, None);
         assert_eq!(plain.len(), rows.len(), "plain history: rows only");
         assert!(plain.iter().all(|m| m.get("tool_calls").is_none()));
     }
@@ -1048,7 +1172,7 @@ mod tests {
             msg(2, "assistant", "partial", Some(big)),
             msg(3, "user", "sigue", None),
         ];
-        let history = history_messages(&rows, true);
+        let history = history_messages(&rows, true, None);
         let replayed: usize = history
             .iter()
             .filter(|m| m["role"] == "tool" || m.get("tool_calls").is_some())
@@ -1081,7 +1205,7 @@ mod tests {
             msg(3, "user", "b", None),
             foreign,
         ];
-        let history = history_messages(&rows, true);
+        let history = history_messages(&rows, true, None);
         assert_eq!(history.len(), 4);
         assert!(!history.iter().any(|m| m["content"] == "override"));
         assert!(!history[1]["content"].as_str().unwrap().contains("DSML"));
