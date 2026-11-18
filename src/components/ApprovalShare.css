@@ -12,3 +12,17 @@
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   color: var(--text-2);
 }
+
+/* The whole location stays visible: a deep path wraps instead of being
+   cut where the file name is (the default target is one ellipsized line). */
+.approval-card-share .approval-target {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.approval-share-file {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}

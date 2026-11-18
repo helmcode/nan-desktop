@@ -132,12 +132,17 @@ export function ApprovalCard({
 
   const sending = card.status === "sending";
   return (
-    <div className={`approval-card${danger ? " danger" : ""}`} role="group" aria-label={t.approval.region}>
+    <div
+      className={`approval-card${danger ? " danger" : ""}${card.share ? " approval-card-share" : ""}`}
+      role="group"
+      aria-label={t.approval.region}
+    >
       <span className="approval-icon" aria-hidden="true">
         {actionIcon(card.action)}
       </span>
       <div className="approval-text">
         <strong>{summary}</strong>
+        {card.share && <strong className="approval-share-file">{card.share.file_name}</strong>}
         <code className="approval-target" title={card.target}>
           {card.target}
         </code>

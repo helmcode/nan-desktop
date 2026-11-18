@@ -555,6 +555,31 @@ pub(crate) struct ShareEnv<'a> {
     pub session_token: &'a str,
 }
 
+/// Whether `c` could rewrite how the approval text reads: a control
+/// character (newlines, tabs...), a line/paragraph separator, or an
+/// invisible format/bidi control (LRM/RLM, ALM, embeddings and overrides
+/// U+202A..U+202E, isolates U+2066..U+2069, zero-width, BOM).
+fn misleading_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}')
+}
+
+/// Text from a file name, a path or the model, made safe to show on the
+/// approval card and in the native dialog: every [`misleading_char`]
+/// becomes U+FFFD, so a name like `x.pdf\n\nCon: solo tu organización`
+/// cannot fake a line, and a right-to-left override cannot flip `fdp.exe`
+/// into `exe.pdf`. Pure.
+pub fn display_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| if misleading_char(c) { '\u{FFFD}' } else { c })
+        .collect()
+}
+
 /// Where a file is, for the approval: see [`ShareAsk::source`]. `canonical`
 /// is the resolved path; the home folder is shown as `~`. Pure.
 pub fn location_of(
@@ -711,11 +736,13 @@ pub(crate) async fn share_in<A: Approver>(
         .unwrap_or_else(|_| std::path::PathBuf::from(&request.path));
     let (source_kind, location) =
         location_of(&canonical, env.home, env.scratch, source.kind == "media");
+    // Everything a file system or the model controls is neutralized before
+    // it reaches the card or the dialog.
     let ask = ShareAsk {
-        file_name: file_name.clone(),
+        file_name: display_safe(&file_name),
         source: source_kind,
-        location,
-        title: upload.meta.title.clone(),
+        location: display_safe(&location),
+        title: display_safe(&upload.meta.title),
         audience: request.audience.clone(),
         recipients: upload.meta.emails.clone(),
         expires_days: upload.meta.expires_days,
@@ -1787,6 +1814,108 @@ mod tests {
         assert!(record(&mut turn, &Ok(link.clone())).contains(LINK));
         let _ = record(&mut turn, &Err(ShareFailure::new("offline", "x")));
         assert_eq!(turn.links, vec![link]);
+    }
+
+    #[test]
+    fn display_safe_neutralizes_controls_and_bidi() {
+        assert_eq!(display_safe("plan.pdf"), "plan.pdf");
+        assert_eq!(display_safe("a\nb\rc\td"), "a\u{FFFD}b\u{FFFD}c\u{FFFD}d");
+        for bidi in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}', '\u{061C}',
+            '\u{FEFF}',
+        ] {
+            assert!(
+                !display_safe(&format!("x{bidi}y")).contains(bidi),
+                "{:?}",
+                bidi
+            );
+        }
+        assert_eq!(
+            display_safe("año ünïcode 文件"),
+            "año ünïcode 文件",
+            "ordinary text is kept"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn misleading_characters_never_reach_the_card_or_the_dialog() {
+        // End to end: a real file whose name carries a fake line and an
+        // RTL override (both legal on macOS).
+        let l = layout();
+        let evil = l
+            .grant
+            .join("x.pdf\n\nCon: solo tu organización \u{202E}txt.pdf");
+        fs::write(&evil, b"%PDF-1.7 x").expect("write");
+        let req = request(
+            &evil,
+            serde_json::json!({ "audience": "public", "title": "Plan\u{202E}" }),
+            NAN,
+        );
+        let fake = Fake::new(false);
+        let _ = block(share_in(
+            &store(&l, NAN, ApprovalMode::Ask),
+            &env(&l, NAN, "http://127.0.0.1:9"),
+            &fake,
+            &req,
+            &mut ShareTurn::default(),
+        ));
+        let fake_native = Fake::new(false);
+        let _ = block(share_in(
+            &computer_wide(&l, NAN),
+            &env(&l, NAN, "http://127.0.0.1:9"),
+            &fake_native,
+            &req,
+            &mut ShareTurn::default(),
+        ));
+        let card = fake.inline.lock().unwrap()[0].clone();
+        let ask = card.share.clone().expect("ask");
+        let dialog = fake_native.native.lock().unwrap()[0].1.clone();
+        for text in [
+            &ask.location,
+            &ask.file_name,
+            &ask.title,
+            &card.text,
+            &dialog,
+        ] {
+            assert!(!text.contains('\u{202E}'), "{text:?}");
+            assert!(!text.contains("\n\nCon: solo tu organización"), "{text:?}");
+        }
+        // The dialog's own lines are intact: exactly one "Con:" line.
+        assert_eq!(dialog.matches("\nCon: ").count(), 1, "{dialog}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_in_the_temp_folder_is_named_by_its_real_path_and_refused() {
+        let l = layout();
+        let scratch = l.home.join("tmp").join("conversation-7");
+        fs::create_dir_all(&scratch).expect("mkdir");
+        let real = l.grant.join("informe.pdf");
+        fs::write(&real, b"%PDF-1.7 report").expect("write");
+        let link = scratch.join("website-trap.html");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        // The location comes from the RESOLVED path: the real folder file,
+        // never the friendly "this conversation" label.
+        let canonical = fs::canonicalize(&link).expect("canon");
+        let (source, location) = location_of(&canonical, Some(&l.home), Some(&scratch), false);
+        assert_eq!(source, "folder");
+        assert_eq!(
+            location,
+            format!("~{0}proj{0}informe.pdf", std::path::MAIN_SEPARATOR)
+        );
+        // And the share itself refuses a symlink before any question.
+        let mut st = store(&l, NAN, ApprovalMode::Ask);
+        st = share_store(st, NAN, 7, Some(&scratch));
+        let mut e = env(&l, NAN, "http://127.0.0.1:9");
+        e.scratch = Some(&scratch);
+        let fake = Fake::new(true);
+        let req = request(&link, serde_json::json!({ "audience": "public" }), NAN);
+        let err =
+            block(share_in(&st, &e, &fake, &req, &mut ShareTurn::default())).expect_err("symlink");
+        assert_eq!(err.code, "not_shareable");
+        assert!(fake.inline.lock().unwrap().is_empty());
     }
 
     #[test]

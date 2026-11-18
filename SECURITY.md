@@ -78,7 +78,11 @@ through the same private channel; we route them to the right team.
   never automatic: every share shows an inline card (or the native dialog
   when a computer-wide grant governs the file) naming the file by its FULL
   path (home shown as `~`; a website or file written in this conversation
-  is labeled as such), the model's title labeled as "Title:", who gets it
+  is labeled as such; a symlink is named by its real path and refused),
+  with control, line-separator and bidi/format characters in names, paths
+  and titles replaced by U+FFFD so nothing can fake a line or reorder the
+  text, the file name and the whole wrapped location always visible, the
+  model's title labeled as "Title:", who gets it
   and the expiry, in every folder mode, including "allow without asking"
   and after browsing. Share answers never feed the "always allow"
   suggestion. Approval fatigue is capped: after the user declines a share,

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { I18nProvider } from "../i18n";
 import type { ApprovalCardState } from "../chat/approvals";
 import { ApprovalCard } from "./ApprovalCard";
+import { readFileSync } from "node:fs";
 
 afterEach(cleanup);
 
@@ -190,13 +191,30 @@ describe("ApprovalCard: share_artifact", () => {
     expect(onRespond).toHaveBeenCalledWith("act-1", true);
   });
 
+  it("keeps the file name and the whole location visible (no truncation)", () => {
+    const deep = "~/clients/acme/contracts/2026/q4/legal/review/final/plan.pdf";
+    renderCard({ action: "share_artifact", target: deep, share: { ...share, file_name: "plan.pdf", location: deep } });
+    const card = screen.getByRole("group");
+    expect(card.className).toContain("approval-card-share");
+    const name = screen.getByText("plan.pdf");
+    expect(name.tagName).toBe("STRONG");
+    expect(screen.getByText(deep).className).toBe("approval-target");
+    // The share card's target wraps instead of the default one-line ellipsis.
+    const shareCss = readFileSync("src/components/ApprovalShare.css", "utf8");
+    const rule = shareCss.slice(shareCss.indexOf(".approval-card-share .approval-target"));
+    expect(rule).toMatch(/white-space:\s*normal/);
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule).toMatch(/text-overflow:\s*clip/);
+  });
+
   it("labels a website built in this conversation", () => {
     renderCard({
       action: "share_artifact",
       target: "website-calc.html",
       share: { ...share, source: "website", location: "website-calc.html", file_name: "website-calc.html", title: "Calc" },
     });
-    expect(screen.getByText("website-calc.html")).toBeTruthy();
+    // Name on its own (bold) line, and the location under it.
+    expect(screen.getAllByText("website-calc.html").map((el) => el.tagName)).toEqual(["STRONG", "CODE"]);
     expect(screen.getByText("The website built in this conversation")).toBeTruthy();
   });
 
