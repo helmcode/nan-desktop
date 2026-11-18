@@ -51,8 +51,12 @@ very welcome: start with [CONTRIBUTING.md](CONTRIBUTING.md).
   window inside the app, read them, click and type, while you watch, take
   over or stop it. It never types passwords or card details, and sign-ins
   and payments always ask you first.
-- **Mini-sites**: the `write_website` tool builds small self-contained static
-  websites you can preview and share.
+- **Mini-sites and artifacts**: the `write_website` tool builds small
+  self-contained static websites, and any "artifact" request becomes a
+  complete interactive single-file web app you can preview and share.
+- **Share by talking**: ask the assistant to share a file as a link (public,
+  with specific people, or your whole Helmcode organization); it always asks
+  you first and shows the link with Copy and Open.
 - **Skills**: save reusable instructions as skills; Helmcode organizations
   can share approved skills with their team.
 - **Per-account data privacy**: conversations, skills, folder permissions and
