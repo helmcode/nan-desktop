@@ -818,7 +818,7 @@ pub async fn artifact_share(
 // ---------------------------------------------------------------- tests --
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::tools::grants;
     use std::fs;
@@ -1644,12 +1644,15 @@ mod tests {
     // --------------------------------------------------- the wire --
 
     /// Serve one (status, body) reply; return the raw request.
-    fn mock_server(status: u16, body: String) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+    pub(crate) fn mock_server(
+        status: u16,
+        body: String,
+    ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
         mock_server_with(status, "", body)
     }
 
     /// [`mock_server`] with extra raw header lines (each ending in CRLF).
-    fn mock_server_with(
+    pub(crate) fn mock_server_with(
         status: u16,
         extra_headers: &'static str,
         body: String,

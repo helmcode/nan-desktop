@@ -491,6 +491,22 @@ pub fn compose_messages(
     messages
 }
 
+/// Append the `share_artifact` guidance to the system message when the
+/// tool is offered this reply (never mention a tool the model cannot call).
+pub fn with_share_guidance(
+    mut messages: Vec<serde_json::Value>,
+    share_tool: bool,
+) -> Vec<serde_json::Value> {
+    if share_tool
+        && let Some(first) = messages.first_mut()
+        && first["role"] == "system"
+        && let Some(text) = first["content"].as_str()
+    {
+        first["content"] = format!("{text}\n\n{}", tools::share_artifact::GUIDANCE).into();
+    }
+    messages
+}
+
 /// System message describing the workspace (only sent when one exists).
 pub fn workspace_prompt(workspace: &tools::Workspace) -> String {
     let folders = workspace
@@ -1104,6 +1120,7 @@ pub fn chat_send(
     skill_id: Option<String>,
     continuation: Option<bool>,
     attachments: Option<Vec<crate::attachments::AttachmentInput>>,
+    artifacts: Option<bool>,
 ) -> Result<(), String> {
     let attachments = attachments.unwrap_or_default();
     if content.trim().is_empty() && attachments.is_empty() {
@@ -1260,6 +1277,10 @@ pub fn chat_send(
         skill,
         generation,
         continuation.unwrap_or(false),
+        // The renderer's reading of `/api/auth/me` (artifacts on for this
+        // account): only a UX gate for offering `share_artifact`. The
+        // server enforces the flag and every share asks the user anyway.
+        artifacts == Some(true),
     ));
     attach_stream(&state, conversation_id, generation, handle)?;
     Ok(())
@@ -1321,6 +1342,7 @@ async fn run_chat_stream(
     skill: Option<skills::ActiveSkill>,
     generation: u64,
     continued: bool,
+    share_tool: bool,
 ) {
     let state = app.state::<ChatState>();
     // The one place a turn is summarized (an abort reports `user_stop`).
@@ -1435,10 +1457,21 @@ async fn run_chat_stream(
     // platform cannot serve it). File tools only exist when the user picked
     // a workspace; the system message tells the model where it may work.
     let workspace = tools::workspace_for(&app, &profile_id, conversation_id);
-    let mut messages = compose_messages(workspace.as_ref(), skill.as_ref(), traced_history);
+    // Every rebuild of the request prefix goes through here, so the share
+    // guidance rides along whenever `share_artifact` is offered.
+    let compose = |history: Vec<serde_json::Value>| {
+        with_share_guidance(
+            compose_messages(workspace.as_ref(), skill.as_ref(), history),
+            share_tool,
+        )
+    };
+    let mut messages = compose(traced_history);
     // Where the history ends and this reply's own tool rounds begin.
     let mut prefix_len = messages.len();
     let mut offered_tools = offered_tool_definitions(workspace.as_ref(), &model);
+    if share_tool {
+        offered_tools.push(tools::share_artifact::tool_definition(&profile_id));
+    }
     let mut traces_dropped = !replayed_traces;
     // A vision model rejected an image itself (400): retried once with the
     // text stand-ins instead of the image parts.
@@ -1468,6 +1501,8 @@ async fn run_chat_stream(
     let mut accumulated = String::new();
     let mut sources: Vec<WebSource> = Vec::new();
     let mut artifacts: Vec<chat_store::Artifact> = Vec::new();
+    // Links `share_artifact` created this turn (cards under the reply).
+    let mut shares: Vec<tools::share_artifact::SharedLink> = Vec::new();
     let mut failed: Option<ErrorKind> = None;
     let mut ended: Option<TurnEndReason> = None;
     // This turn's tool exchange (device-local, replayed by later turns).
@@ -1528,7 +1563,7 @@ async fn run_chat_stream(
                 } else {
                     request_history(&rows, true, None)
                 };
-                let prefix = compose_messages(workspace.as_ref(), skill.as_ref(), history);
+                let prefix = compose(history);
                 let new_len = prefix.len();
                 messages = rebase_messages(&messages, prefix_len, prefix);
                 prefix_len = new_len;
@@ -1539,8 +1574,7 @@ async fn run_chat_stream(
             match turn::retry_after_400(round, offer_tools, traces_dropped, replayed_traces) {
                 turn::Retry400::WithoutTraces => {
                     traces_dropped = true;
-                    messages =
-                        compose_messages(workspace.as_ref(), skill.as_ref(), plain_history.clone());
+                    messages = compose(plain_history.clone());
                     prefix_len = messages.len();
                 }
                 turn::Retry400::WithoutTools => {
@@ -1548,11 +1582,7 @@ async fn run_chat_stream(
                     offer_tools = false;
                     if round == 0 && !traces_dropped {
                         traces_dropped = true;
-                        messages = compose_messages(
-                            workspace.as_ref(),
-                            skill.as_ref(),
-                            plain_history.clone(),
-                        );
+                        messages = compose(plain_history.clone());
                         prefix_len = messages.len();
                     }
                 }
@@ -1665,6 +1695,7 @@ async fn run_chat_stream(
                         conversation_id,
                         call,
                         &mut sources,
+                        &mut shares,
                     )
                     .await
                 };
@@ -1680,6 +1711,10 @@ async fn run_chat_stream(
                         u64::try_from(tool_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                     ),
                 );
+            }
+            if call.name == tools::share_artifact::TOOL_NAME && !shares.is_empty() {
+                // Persisted as they appear: a stopped reply keeps its links.
+                let _ = chat_store::set_message_shares(&conn, row, &shares);
             }
             if merge_artifacts(&mut artifacts, produced) {
                 // Persisted as they appear: a stopped reply keeps its chips.
@@ -2176,6 +2211,7 @@ pub fn activity_for_tool(name: &str) -> &'static str {
 /// files/images it produced and the roles the tool declared for them. Web search degrades silently; image
 /// generation reports failures to the model; file actions go through the
 /// core's per-action approval (`tools::run_model_action`).
+#[allow(clippy::too_many_arguments)]
 async fn run_tool_call(
     app: &AppHandle,
     window: &Window,
@@ -2184,6 +2220,7 @@ async fn run_tool_call(
     conversation_id: i64,
     call: &ToolCall,
     sources: &mut Vec<WebSource>,
+    shares: &mut Vec<tools::share_artifact::SharedLink>,
 ) -> (
     String,
     Vec<chat_store::Artifact>,
@@ -2224,6 +2261,26 @@ async fn run_tool_call(
         }
         return (
             tools::save_skill::result_for_model(&draft),
+            Vec::new(),
+            Vec::new(),
+        );
+    }
+    if call.name == tools::share_artifact::TOOL_NAME {
+        // Offered only when artifacts are on for this account. Always asks
+        // the user (inline card, or the native dialog for a computer-wide
+        // grant); the link goes back to the model and under the reply.
+        let result = tools::share_artifact::run_model_share(
+            app,
+            profile_id,
+            conversation_id,
+            &call.arguments,
+        )
+        .await;
+        if let Ok(link) = &result {
+            shares.push(link.clone());
+        }
+        return (
+            tools::share_artifact::result_for_model(&result),
             Vec::new(),
             Vec::new(),
         );
@@ -2721,6 +2778,7 @@ mod tests {
             media_path: None,
             sources: vec![],
             artifacts: vec![],
+            shares: vec![],
             parent_message_id: None,
             end_reason: None,
             tool_trace: None,
@@ -3597,6 +3655,38 @@ mod tests {
     }
 
     // ---- Round 3: act-don't-narrate, produced files, images ----------------
+
+    #[test]
+    fn the_share_guidance_rides_only_with_the_share_tool() {
+        let base = compose_messages(None, None, vec![]);
+        let off = with_share_guidance(base.clone(), false);
+        assert_eq!(off, base, "no tool, no mention");
+        assert!(!system_prompt(None).contains(tools::share_artifact::TOOL_NAME));
+        let on = with_share_guidance(base, true);
+        let text = on[0]["content"].as_str().unwrap_or_default();
+        assert!(text.contains(tools::share_artifact::GUIDANCE));
+        assert!(
+            text.starts_with(ASSISTANT_RULES),
+            "appended, nothing replaced"
+        );
+        // A history without a leading system message is left alone.
+        let user_only = vec![serde_json::json!({ "role": "user", "content": "hola" })];
+        assert_eq!(with_share_guidance(user_only.clone(), true), user_only);
+    }
+
+    #[test]
+    fn the_share_tool_is_never_in_the_default_set() {
+        let names: Vec<String> = offered_tool_definitions(None, "glm5.3")
+            .iter()
+            .map(|d| {
+                d["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert!(!names.contains(&tools::share_artifact::TOOL_NAME.to_string()));
+    }
 
     #[test]
     fn system_prompt_always_carries_the_working_rules() {

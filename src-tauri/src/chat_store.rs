@@ -41,6 +41,8 @@
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+pub use crate::tools::share_artifact::SharedLink;
+
 /// One web search source cited under an assistant message (P1-7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebSource {
@@ -118,6 +120,9 @@ pub struct ChatMessageRow {
     /// Round 3: files the reply's tool actions produced (preview chips) and
     /// images it generated (shown inline). Empty for every other row.
     pub artifacts: Vec<Artifact>,
+    /// Links the reply's `share_artifact` calls created (cards with copy
+    /// and open). Device-local like `artifacts`. Empty for every other row.
+    pub shares: Vec<SharedLink>,
     /// Image edit lineage: the message whose image was the edit's source
     /// (an image row or a tool reply carrying an image artifact). `None` for
     /// every other row, and for edits made only from picked local files.
@@ -191,6 +196,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "messages", "end_reason", "TEXT")?;
     ensure_column(conn, "messages", "tool_trace", "TEXT")?;
     ensure_column(conn, "messages", "attachments", "TEXT")?;
+    ensure_column(conn, "messages", "shares", "TEXT")?;
     ensure_column(conn, "conversations", "remote_id", "TEXT")?;
     ensure_column(conn, "conversations", "synced_at", "TEXT")?;
     conn.execute_batch(
@@ -988,6 +994,25 @@ pub fn set_message_artifacts(
     Ok(())
 }
 
+/// Attach the links a reply's `share_artifact` calls created. An empty
+/// slice clears them (NULL).
+pub fn set_message_shares(
+    conn: &Connection,
+    message_id: i64,
+    shares: &[SharedLink],
+) -> Result<(), rusqlite::Error> {
+    let json = if shares.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(shares).unwrap_or_else(|_| "[]".to_string()))
+    };
+    conn.execute(
+        "UPDATE messages SET shares = ?1 WHERE id = ?2",
+        rusqlite::params![json, message_id],
+    )?;
+    Ok(())
+}
+
 /// List a profile's conversations, most recently updated first. The title is
 /// the stored one, or the untitled fallback when still empty; `last_message`
 /// is the newest message's content, truncated to [`PREVIEW_MAX_CHARS`].
@@ -1034,7 +1059,7 @@ pub fn list_conversations(
 }
 
 /// Column list read by [`map_message_row`] (order matters).
-const MESSAGE_COLUMNS: &str = "id, conversation_id, role, content, model, media_path, created_at, status, sources, artifacts, parent_message_id, end_reason, tool_trace, attachments";
+const MESSAGE_COLUMNS: &str = "id, conversation_id, role, content, model, media_path, created_at, status, sources, artifacts, parent_message_id, end_reason, tool_trace, attachments, shares";
 
 fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::Error> {
     let status: String = row.get(7)?;
@@ -1056,6 +1081,10 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::
         end_reason: row.get(11)?,
         tool_trace: row.get(12)?,
         attachments: crate::attachments::decode_records(row.get(13)?),
+        shares: row
+            .get::<_, Option<String>>(14)?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -1276,6 +1305,7 @@ struct KeptLocal {
     end_reason: Option<String>,
     tool_trace: Option<String>,
     attachments: Option<String>,
+    shares: Option<String>,
 }
 
 impl KeptLocal {
@@ -1322,10 +1352,10 @@ pub fn write_remote_conversation(
         Some(id) => {
             {
                 let mut stmt = tx.prepare(
-                    "SELECT role, content, created_at, artifacts, end_reason, tool_trace, attachments FROM messages
+                    "SELECT role, content, created_at, artifacts, end_reason, tool_trace, attachments, shares FROM messages
                      WHERE conversation_id = ?1 AND media_path IS NULL
                        AND (artifacts IS NOT NULL OR end_reason IS NOT NULL OR tool_trace IS NOT NULL
-                            OR attachments IS NOT NULL)",
+                            OR attachments IS NOT NULL OR shares IS NOT NULL)",
                 )?;
                 let rows = stmt.query_map([id], |row| {
                     Ok(KeptLocal {
@@ -1336,6 +1366,7 @@ pub fn write_remote_conversation(
                         end_reason: row.get(4)?,
                         tool_trace: row.get(5)?,
                         attachments: row.get(6)?,
+                        shares: row.get(7)?,
                     })
                 })?;
                 for row in rows {
@@ -1374,13 +1405,14 @@ pub fn write_remote_conversation(
         let kept = matched.map(|index| kept_local.swap_remove(index));
         // A row with attachments keeps its LOCAL text (the remote copy has
         // the placeholders appended) and its attachments.
-        let (content, artifacts, end_reason, tool_trace, attachments) = match kept {
+        let (content, artifacts, end_reason, tool_trace, attachments, shares) = match kept {
             Some(kept) if kept.attachments.is_some() => (
                 kept.content,
                 kept.artifacts,
                 kept.end_reason,
                 kept.tool_trace,
                 kept.attachments,
+                kept.shares,
             ),
             Some(kept) => (
                 message.content.clone(),
@@ -1388,12 +1420,13 @@ pub fn write_remote_conversation(
                 kept.end_reason,
                 kept.tool_trace,
                 None,
+                kept.shares,
             ),
-            None => (message.content.clone(), None, None, None, None),
+            None => (message.content.clone(), None, None, None, None, None),
         };
         tx.execute(
-            "INSERT INTO messages (conversation_id, role, content, model, created_at, status, sources, artifacts, end_reason, tool_trace, attachments)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO messages (conversation_id, role, content, model, created_at, status, sources, artifacts, end_reason, tool_trace, attachments, shares)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 id,
                 message.role,
@@ -1405,7 +1438,8 @@ pub fn write_remote_conversation(
                 artifacts,
                 end_reason,
                 tool_trace,
-                attachments
+                attachments,
+                shares
             ],
         )?;
     }
@@ -2304,6 +2338,82 @@ mod tests {
                 .sources
                 .is_empty()
         );
+    }
+
+    // ---- share_artifact links ------------------------------------------------
+
+    fn link() -> SharedLink {
+        SharedLink {
+            url: "https://artifacts.helmcode.com/a/tok".into(),
+            title: "Calculadora".into(),
+            scope: "emails".into(),
+            recipients: vec!["ana@acme.com".into()],
+            expires_at: Some("2026-12-18T10:00:00Z".into()),
+        }
+    }
+
+    #[test]
+    fn shares_roundtrip_clear_tolerate_corrupt_json_and_survive_a_sync() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        insert_message(&conn, conv, "user", "compártela", None).expect("user");
+        let row = insert_message(&conn, conv, "assistant", "Listo.", Some("m")).expect("insert");
+        let reply = |conn: &Connection| {
+            list_messages(conn, conv)
+                .expect("list")
+                .into_iter()
+                .find(|m| m.content == "Listo.")
+                .expect("reply")
+        };
+        assert!(reply(&conn).shares.is_empty());
+        set_message_shares(&conn, row, &[link()]).expect("set");
+        assert_eq!(reply(&conn).shares, vec![link()]);
+        // Wire shape the renderer reads.
+        assert_eq!(
+            serde_json::to_value(link()).expect("json"),
+            serde_json::json!({
+                "url": "https://artifacts.helmcode.com/a/tok", "title": "Calculadora",
+                "scope": "emails", "recipients": ["ana@acme.com"],
+                "expires_at": "2026-12-18T10:00:00Z"
+            })
+        );
+
+        // Device-local: the account copy never carries the link, and the
+        // overwrite with that copy keeps it on the reply still present.
+        let remote = export_messages(&conn, conv).expect("export");
+        assert!(
+            serde_json::to_string(&remote)
+                .expect("json")
+                .find("artifacts.helmcode.com")
+                .is_none()
+        );
+        write_remote_conversation(
+            &conn,
+            Some(conv),
+            "nan",
+            "rid-share",
+            "t",
+            "2026-10-01T00:00:00.000Z",
+            "2099-01-01T00:00:00.000Z",
+            &remote,
+        )
+        .expect("overwrite");
+        assert_eq!(
+            reply(&conn).shares,
+            vec![link()],
+            "the link survived the sync"
+        );
+
+        let row = reply(&conn).id;
+        set_message_shares(&conn, row, &[]).expect("clear");
+        assert!(reply(&conn).shares.is_empty());
+        conn.execute(
+            "UPDATE messages SET shares = 'not json' WHERE id = ?1",
+            [row],
+        )
+        .expect("corrupt");
+        assert!(reply(&conn).shares.is_empty());
     }
 
     // ---- Round 3: produced files / generated images ---------------------------

@@ -39,6 +39,7 @@ pub mod audit;
 pub mod diff;
 pub mod grants;
 pub mod save_skill;
+pub mod share_artifact;
 pub mod trash;
 pub mod website;
 
@@ -52,7 +53,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::profile;
-pub use approvals::{ApprovalBroker, ApprovalRequest};
+pub use approvals::{ApprovalBroker, ApprovalRequest, ShareAsk};
 use audit::AuditEntry;
 use grants::{ApprovalMode, GrantScope, GrantsStore};
 
@@ -3118,6 +3119,7 @@ pub fn approval_request(proposal: &PendingProposal) -> ApprovalRequest {
         permanent: proposal.permanent_delete,
         expires_in_secs: PROPOSAL_TTL.as_secs(),
         after_browsing: false,
+        share: None,
     }
 }
 

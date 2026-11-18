@@ -50,6 +50,29 @@ pub struct ApprovalRequest {
     /// The folder allows this action without asking, but the assistant
     /// browsed the web in this task (in-app browser protection).
     pub after_browsing: bool,
+    /// `share_artifact`: what the share does (file, audience, expiry, risk).
+    /// Absent on every other action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share: Option<ShareAsk>,
+}
+
+/// The share an inline `share_artifact` card asks about, built by the core
+/// from the validated tool call (never from renderer input).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShareAsk {
+    /// The file's base name.
+    pub file_name: String,
+    pub title: String,
+    /// `public`, `emails` or `org`.
+    pub audience: String,
+    /// The recipients (scope `emails` only).
+    pub recipients: Vec<String>,
+    /// Days until the link expires; 0 = never (org only).
+    pub expires_days: u32,
+    /// The recipients get the link by email.
+    pub notify: bool,
+    /// The risk the user's "Allow" acknowledges: `public` or `external`.
+    pub risk: Option<String>,
 }
 
 /// `tools://approval-resolved` payload: the request is closed (answered,

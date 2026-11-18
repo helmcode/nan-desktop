@@ -49,7 +49,22 @@ layout) and readable, in the user's language.\n\
 - To change the site, call write_website again with the whole updated document and \
 the same title.\n\
 - After the call, tell the user in one short sentence that the site is ready in the \
-preview, with the path from the tool result.";
+preview, with the path from the tool result.\n\
+\n\
+Artifacts are complete web apps:\n\
+- When the user asks for an artifact (\"artifact\", \"artefacto\") or for an app, web \
+app, dashboard, calculator, game, quiz, tracker, converter, simulator, visualization \
+or any interactive tool, ALWAYS build it with write_website as a COMPLETE, polished, \
+interactive single-file web app, never a sketch, a mockup or a code snippet in the \
+chat.\n\
+- Every feature it shows must really work, in plain JavaScript with in-memory state: \
+real calculations, filters, forms that update the page, keyboard support, \
+empty and error states. Charts and icons as inline SVG or canvas.\n\
+- It runs sandboxed: no localStorage, sessionStorage, cookies, fetch, XHR, WebSockets \
+or external libraries, and no downloads or popups. Embed any data it needs in the \
+script; state lives while the page is open.\n\
+- Make it responsive (works on a phone), accessible (semantic HTML, labels, focus \
+styles, enough contrast) and visually polished, in the user's language.";
 
 /// The arguments the model sends.
 #[derive(Debug, Deserialize)]
@@ -76,7 +91,7 @@ impl WebsiteDraft {
 pub fn tool_definition() -> serde_json::Value {
     serde_json::json!({ "type": "function", "function": {
         "name": TOOL_NAME,
-        "description": "Build a small static website as ONE self-contained HTML file (inline CSS and JS, assets as data: URIs, nothing loaded from the network). It is saved in this conversation's temporary folder (the user approves) and opened in the preview, where it can be shared as a link.",
+        "description": "Build a small static website, or a complete interactive web app (what the user calls an artifact), as ONE self-contained HTML file (inline CSS and JS, assets as data: URIs, nothing loaded from the network). It is saved in this conversation's temporary folder (the user approves) and opened in the preview, where it can be shared as a link.",
         "parameters": { "type": "object", "properties": {
             "title": { "type": "string", "description": "Short title of the site, in the user's language (names the file)." },
             "html": { "type": "string", "description": "The complete HTML document, from <!doctype html> to </html>, fully self-contained." }
@@ -703,5 +718,34 @@ mod tests {
         assert!(GUIDANCE.contains("self-contained"));
         assert!(GUIDANCE.contains("data: URI"));
         assert!(GUIDANCE.contains("sandboxed"));
+    }
+
+    #[test]
+    fn an_artifact_request_always_means_a_complete_web_app() {
+        for needle in [
+            "artifact",
+            "artefacto",
+            "web app",
+            "dashboard",
+            "calculator",
+            "game",
+            "ALWAYS build it with write_website",
+            "COMPLETE, polished, interactive single-file web app",
+            "really work",
+            "in-memory state",
+            "no localStorage",
+            "responsive",
+            "accessible",
+        ] {
+            assert!(GUIDANCE.contains(needle), "{needle}");
+        }
+        // The plain website case keeps its own rules.
+        assert!(GUIDANCE.starts_with("Building a website:"));
+        assert!(
+            tool_definition()["function"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("artifact")
+        );
     }
 }

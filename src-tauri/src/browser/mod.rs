@@ -749,6 +749,7 @@ async fn ask_user(caller: &Caller<'_>, ask: Ask, host: &str) -> bool {
         permanent: false,
         expires_in_secs: crate::tools::PROPOSAL_TTL.as_secs(),
         after_browsing: false,
+        share: None,
     };
     let approver = crate::tools::AppApprover {
         app: caller.app.clone(),
