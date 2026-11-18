@@ -13,6 +13,7 @@ import { APPROVAL_REQUEST_EVENT, APPROVAL_RESOLVED_EVENT, type ApprovalRequest }
 import type { ChatMessageRow } from "./types";
 import { FOLDER_SELECTION_STORAGE_KEY } from "./chat/folderSelection";
 import { NUDGE_SHOWN_STORAGE_KEY } from "./chat/allowNudge";
+import { openChipSections } from "./test/chips";
 
 const PROFILES = {
   profiles: [
@@ -223,6 +224,9 @@ describe("chat shell", () => {
       ]),
     );
     renderApp("en");
+    const files = await screen.findByRole("button", { name: /^Files/, expanded: false });
+    expect(screen.queryByRole("button", { name: "Open preview: report.pdf" })).toBeNull();
+    fireEvent.click(files);
     expect(await screen.findByRole("button", { name: "Open preview: report.pdf" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Open preview: x.pdf" })).toBeNull();
   });
@@ -238,6 +242,7 @@ describe("chat shell", () => {
       ]),
     );
     renderApp("en");
+    await openChipSections();
     expect(await screen.findByRole("button", { name: "Open preview: index.html" })).toBeTruthy();
   });
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Las fuentes y los archivos de una respuesta salen plegados ("Fuentes 8", "Archivos 12"); se despliegan al pulsarlos, para que no llenen el chat.
+
+### Fixed
+- Un correo largo ya no se sale del menu de la cuenta: pasa a la linea siguiente.
+
 ## 0.2.14 - 2026-11-18 - Adjunta, escribe mientras trabaja y navega
 
 ### New
