@@ -16,6 +16,8 @@ export const MAX_ATTACHMENTS = 10;
 /// Extracted characters kept per document (mirrors `MAX_DOC_CHARS`); the
 /// renderer stops one past it so the core can mark the cut.
 export const MAX_DOC_CHARS = 50_000;
+/// Largest sum of a message's original files (mirrors `MAX_TOTAL_BYTES`).
+export const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 /// Extracted characters kept per message (mirrors `MAX_TOTAL_DOC_CHARS`).
 export const MAX_DOC_CHARS_PER_MESSAGE = 120_000;
 

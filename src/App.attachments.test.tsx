@@ -328,4 +328,70 @@ describe("composer attachments", () => {
     fireEvent.click(screen.getByRole("button", { name: "Enviar" }));
     await screen.findByText("Solo se ha usado el principio");
   });
+
+  it("files over 50 MB together are refused before anything is sent", async () => {
+    const mb = 1024 * 1024;
+    resetTauri(
+      handlers({
+        attachments_pick: () => ({
+          staged: [
+            { id: "a", kind: "image", name: "a.png", size: 9 * mb, preview_path: IMAGE_PATH },
+            { id: "b", kind: "text", name: "b.txt", size: 20 * mb, preview_path: null },
+            { id: "c", kind: "text", name: "c.txt", size: 20 * mb, preview_path: null },
+            { id: "d", kind: "text", name: "d.txt", size: 2 * mb, preview_path: null },
+          ],
+          rejected: [],
+        }),
+      }),
+    );
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("d.txt");
+    await waitFor(() => expect(screen.queryByText("Leyendo…")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Enviar" }));
+    await screen.findByText("Estos archivos ocupan demasiado juntos. Quita alguno y vuelve a intentarlo.");
+    expect(invokedWith("chat_send")).toHaveLength(0);
+    expect(screen.getByText("a.png")).toBeTruthy();
+  });
+
+  it("each conversation keeps its own pending files", async () => {
+    resetTauri(
+      handlers({
+        conversation_list: () => [
+          { id: 7, title: "Chat", updated_at: "", last_message: null },
+          { id: 9, title: "Otra charla", updated_at: "", last_message: null },
+        ],
+        messages_list: (args) =>
+          Number(args?.conversationId) === 9 ? [row(5, "user", "otra")] : [row(1, "user", "hola"), row(2, "assistant", "¿Qué tal?")],
+      }),
+    );
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("gato.png");
+    fireEvent.click(screen.getByText("Otra charla"));
+    await screen.findByText("otra");
+    expect(screen.queryByText("gato.png")).toBeNull();
+    fireEvent.click(screen.getByText("Chat"));
+    await screen.findByText("¿Qué tal?");
+    expect(screen.getByText("gato.png")).toBeTruthy();
+  });
+
+  it("an in-page drag shows no drop hint and a native leave ends it", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    act(() => {
+      window.dispatchEvent(new Event("dragstart"));
+    });
+    act(() => emit("tauri://drag-enter", { paths: ["/x/a.png"], position: { x: 1, y: 1 } }));
+    expect(screen.queryByText("Suelta los archivos aquí para adjuntarlos")).toBeNull();
+    act(() => emit("tauri://drag-leave", {}));
+    await waitFor(() =>
+      expect(invokedWith("attachments_internal_drag")).toEqual([{ active: true }, { active: false }]),
+    );
+    act(() => emit("tauri://drag-enter", { paths: ["/x/a.png"], position: { x: 1, y: 1 } }));
+    await screen.findByText("Suelta los archivos aquí para adjuntarlos");
+  });
 });

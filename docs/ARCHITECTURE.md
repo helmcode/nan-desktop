@@ -171,7 +171,9 @@ for non-vision models (tool-trace replay, retries, future tools), so the
 platform's 400 "text-only model" cannot happen. A 400 from a vision model while the
 request carries image parts is retried once with the text stand-ins
 instead (`chat::rebase_messages` keeps the reply's own tool rounds), before
-the usual 400 retries (without traces, then without tools). The selected model in the
+the usual 400 retries (without traces, then without tools). The images that
+were sent are then flagged `vision_rejected` (device-local), so later
+turns send their stand-in directly. The selected model in the
 picker never changes; the reply row stores the model that actually
 answered. No notice is shown: the reply has no model label to annotate
 and the switch is invisible by design.
@@ -183,11 +185,20 @@ description). `NAN_KEY=<member key> node test/vision-check.mjs --real`
 sends the same tiny image to every model in `chat-models.json` on
 `api.nan.builders` and checks each one behaves as the file says.
 
+**Tray per conversation.** Pending files belong to the conversation on
+screen (like the queue): switching chats keeps each one's files apart; the
+blank chat uses `NEW_CHAT_KEY`. Count (10) and total size (50 MB) are
+checked before a send or a queue entry, as the core does.
+
 **Queue.** Attachments stay usable while a reply runs. Queuing a message
 (`chat/queue.ts`, `enqueue(..., attachments)`) takes the tray's files with
 it; the flush passes them to `send()`, Edit puts them back in the tray and
 Remove (or deleting the conversation) discards them in the core. A message
-may be only files.
+may be only files. A queued message whose files the core refuses goes back
+to the front of the queue, held, with the reason shown on it (no stray
+bubble); Edit puts its files back, capped at 10. Deleting a conversation
+while its queued send is in flight discards the files and never recreates
+its queue.
 
 **Continue.** A "Continuar" turn whose last reply came from the vision
 fallback keeps going on the fallback (`attachments::route_continuation`),

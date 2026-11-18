@@ -955,14 +955,22 @@ function ChatShell({
   // They stay usable while a reply runs: they then go with the queued
   // message.
   // Attaching leaves image mode: files go with a chat message.
+  // Per conversation (like the queue): switching chats keeps each one's
+  // pending files apart; the blank chat uses NEW_CHAT_KEY.
   const attach = useComposerAttachments({
     enabled: view === "chat",
+    conversationKey: activeConvId ?? NEW_CHAT_KEY,
     pastedImageName: t.attachments.pastedImage,
     onAdded: () => {
       const key = activeConvRef.current ?? NEW_CHAT_KEY;
       setImageModes((prev) => (prev.has(key) ? withoutKey(prev, key) : prev));
     },
   });
+  // Why the core refused a queued message's files (read by the flush).
+  const queueRefusalRef = useRef<string | null>(null);
+  // Conversations deleted in this session (a flush in flight must not
+  // recreate their queue).
+  const deletedConvsRef = useRef<Set<number>>(new Set());
   const attachAppendRef = useRef(attach.append);
   attachAppendRef.current = attach.append;
 
@@ -1598,7 +1606,10 @@ function ChatShell({
       }
       dispatchApproval({ type: "clearConversation", conversationId });
       dispatchNudge({ type: "clearConversation", conversationId });
-      // Its queued files are discarded with it.
+      // Its queued and pending files are discarded with it; a send in
+      // flight for it never brings its queue back.
+      deletedConvsRef.current.add(conversationId);
+      attach.discardFor(conversationId);
       for (const item of queueOf(queuesRef.current, conversationId).items) {
         for (const file of item.attachments ?? []) void discardAttachment(file.id).catch(() => {});
       }
@@ -1897,7 +1908,8 @@ function ChatShell({
     const files = queuedFiles ?? (fromTray ? attach.items : []);
     const withFiles = files.length > 0;
     if ((!text && !withFiles) || streamingActive) return false;
-    if (fromTray && attach.reading) return false;
+    if (fromTray && (attach.reading || !attach.validate())) return false;
+    queueRefusalRef.current = null;
     const attachments = attachmentPayload(files);
     const shownAttachments = pendingAsMessageAttachments(files);
     const takenAttachments = fromTray ? attach.takeAll() : [];
@@ -1952,13 +1964,15 @@ function ChatShell({
       void refreshConversations();
       return true;
     } catch (err) {
-      // Nothing was sent: give the files back to the composer.
-      if (takenAttachments.length > 0) {
-        const refused = String(err).startsWith("attachments:");
-        attach.restore(takenAttachments, refused ? String(err).slice("attachments:".length) : undefined);
+      // Nothing was sent: give the files back (to the composer, or to the
+      // queued message through queueRefusalRef).
+      const refusal = String(err).startsWith("attachments:") ? String(err).slice("attachments:".length) : null;
+      if (takenAttachments.length > 0) attach.restore(takenAttachments, refusal ?? undefined);
+      if (withFiles) {
         // The core refused the files before storing anything: the text
         // comes back too and the optimistic bubble goes away.
-        if (refused) {
+        if (refusal) {
+          if (!fromTray) queueRefusalRef.current = refusal;
           if (override === undefined) setComposer(text);
           if (conversationId !== null) {
             const id = conversationId;
@@ -2122,6 +2136,7 @@ function ChatShell({
     const id = activeConvId;
     if (id === null || attach.reading) return;
     if (!composer.trim() && attach.items.length === 0) return;
+    if (!attach.validate()) return;
     queueSeq.current += 1;
     const seq = queueSeq.current;
     // The tray's files leave with the queued message.
@@ -2268,7 +2283,17 @@ function ChatShell({
     void sendRef
       .current(message.text, false, message.attachments ?? [])
       .then((sent) => {
-        if (!sent) setQueues((prev) => requeueFront(prev, id, message));
+        if (sent) return;
+        // Deleted while this send was in flight: no queue comes back, and
+        // its files go.
+        if (deletedConvsRef.current.has(id)) {
+          for (const file of message.attachments ?? []) void discardAttachment(file.id).catch(() => {});
+          return;
+        }
+        // Refused files: held with the reason (Edit to fix it).
+        const problem = queueRefusalRef.current ?? undefined;
+        queueRefusalRef.current = null;
+        setQueues((prev) => requeueFront(prev, id, problem ? { ...message, problem } : message));
       })
       .finally(() => setFlushing(false));
   }, [queues, activeConvId, flushing, composerBusy, sessionExpired]);

@@ -31,6 +31,9 @@ function row(id: number, role: string, content: string, endReason: string | null
 }
 
 let rows: ChatMessageRow[];
+let sendCalls: number;
+let refuseQueued: string | null;
+let pickResult: unknown;
 
 function handlers() {
   return {
@@ -43,13 +46,14 @@ function handlers() {
     memory_sync: () => false,
     models_list: () => ["deepseek-v4-flash"],
     tools_grant_list: () => [],
-    chat_send: () => undefined,
+    chat_send: () => {
+      sendCalls += 1;
+      if (sendCalls > 1 && refuseQueued) throw refuseQueued;
+      return undefined;
+    },
     chat_stop: () => undefined,
     tts_stop: () => undefined,
-    attachments_pick: () => ({
-      staged: [{ id: "img-1", kind: "image", name: "plano.png", size: 10, preview_path: IMAGE_PATH }],
-      rejected: [],
-    }),
+    attachments_pick: () => pickResult,
     attachment_discard: () => undefined,
     attachments_set_accepting: () => undefined,
     attachments_internal_drag: () => undefined,
@@ -87,6 +91,12 @@ async function startStreamingWithQueuedImage(): Promise<void> {
 beforeEach(() => {
   window.localStorage.clear();
   rows = [row(1, "user", "hola")];
+  sendCalls = 0;
+  refuseQueued = null;
+  pickResult = {
+    staged: [{ id: "img-1", kind: "image", name: "plano.png", size: 10, preview_path: IMAGE_PATH }],
+    rejected: [],
+  };
 });
 afterEach(cleanup);
 
@@ -139,5 +149,44 @@ describe("queued messages carry their attachments", () => {
       fireEvent.click(queueButton);
     });
     expect(within(queueRegion()).getByText("plano.png")).toBeTruthy();
+  });
+
+  it("a queued message whose files the core refuses is held with the reason and leaves no stray bubble", async () => {
+    refuseQueued = "attachments:total_too_large";
+    await startStreamingWithQueuedImage();
+    rows = [...rows, row(2, "user", "primera"), row(3, "assistant", "Hecho.", "completed")];
+    await act(async () => emit("chat://done", { conversation_id: 8, reason: "completed" }));
+    await waitFor(() => expect(invokedWith("chat_send")).toHaveLength(2));
+    const region = await screen.findByRole("region", { name: "Mensajes en cola" });
+    await within(region).findByText("Estos archivos ocupan demasiado juntos. Quita alguno y vuelve a intentarlo.");
+    expect(within(region).getByText("plano.png")).toBeTruthy();
+    await waitFor(() => {
+      const bubbles = Array.from(document.querySelectorAll(".msg-user")).map((el) => el.textContent ?? "");
+      expect(bubbles.some((text) => text.includes("mira esto"))).toBe(false);
+    });
+    expect(invokedWith("attachment_discard")).toEqual([]);
+  });
+
+  it("Edit into a tray that is already full keeps 10 files and says so", async () => {
+    await startStreamingWithQueuedImage();
+    pickResult = {
+      staged: Array.from({ length: 10 }, (_, i) => ({
+        id: `f${i}`,
+        kind: "image",
+        name: `f${i}.png`,
+        size: 1,
+        preview_path: IMAGE_PATH,
+      })),
+      rejected: [],
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("f9.png");
+    await act(async () => {
+      fireEvent.click(within(queueRegion()).getByRole("button", { name: "Editar" }));
+    });
+    const tray = screen.getByRole("list", { name: "Archivos adjuntos a este mensaje" });
+    expect(within(tray).getAllByRole("listitem")).toHaveLength(10);
+    expect(screen.getByText("Se pueden adjuntar hasta 10 archivos por mensaje.")).toBeTruthy();
+    await waitFor(() => expect(invokedWith("attachment_discard")).toEqual([{ id: "img-1" }]));
   });
 });

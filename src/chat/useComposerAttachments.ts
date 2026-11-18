@@ -2,6 +2,10 @@
 // files dropped on the window (staged by the core from the native drop
 // event), pasted images, and the chips' lifecycle (document text
 // extraction, removal, hand-off to `chat_send`).
+//
+// The tray is PER CONVERSATION (like the composer queue): files attached in
+// one chat stay with it when the user switches to another and back. A new,
+// not yet created chat uses the caller's NEW_CHAT key.
 
 import { listen } from "@tauri-apps/api/event";
 import type { ClipboardEvent } from "react";
@@ -20,6 +24,7 @@ import type { MessageAttachment } from "../types";
 import {
   EXTRACTION_TIMEOUT_MS,
   MAX_ATTACHMENTS,
+  MAX_TOTAL_BYTES,
   attachmentPayload,
   clipboardImages,
   pendingAsMessageAttachments,
@@ -43,6 +48,7 @@ const DRAG_LEAVE = "tauri://drag-leave";
 const DRAG_DROP = "tauri://drag-drop";
 
 export interface ComposerAttachments {
+  /// The chips of the conversation on screen.
   items: PendingAttachment[];
   problem: AttachProblem | null;
   /// A file is being dragged over the window.
@@ -56,35 +62,75 @@ export interface ComposerAttachments {
   payload: () => AttachmentInput[];
   /// The chips as message attachments (optimistic bubble).
   asMessageAttachments: () => MessageAttachment[];
-  /// Clear after a send (the core consumed the files) and return what was
-  /// there, so a refused send can `restore` it.
+  /// Whether the current chips can go out (count and total size, the same
+  /// caps the core enforces); flags the problem when not.
+  validate: () => boolean;
+  /// Clear after a send and return what was there, so a refused send can
+  /// `restore` it.
   takeAll: () => PendingAttachment[];
   restore: (items: PendingAttachment[], reason?: string) => void;
+  /// Put files back (Edit on a queued message), capped at MAX_ATTACHMENTS:
+  /// the extra ones are discarded with the "too many" notice.
   append: (items: readonly PendingAttachment[]) => void;
+  /// Discard every pending file of a conversation (it was deleted).
+  discardFor: (conversationKey: number) => void;
   dismissProblem: () => void;
 }
 
+type Trays = ReadonlyMap<number, PendingAttachment[]>;
+
 export function useComposerAttachments({
   enabled,
+  conversationKey,
   pastedImageName,
   onAdded,
 }: {
   /// The chat composer is on screen: drops elsewhere are discarded.
   enabled: boolean;
+  /// The conversation on screen (or the caller's key for a new chat).
+  conversationKey: number;
   /// Base name of a pasted image without a file name.
   pastedImageName: string;
   /// Something was attached (the composer leaves image mode).
   onAdded?: () => void;
 }): ComposerAttachments {
-  const [items, setItems] = useState<PendingAttachment[]>([]);
+  const [trays, setTrays] = useState<Trays>(() => new Map());
   const [problem, setProblem] = useState<AttachProblem | null>(null);
   const [dragging, setDragging] = useState(false);
-  const itemsRef = useRef(items);
-  itemsRef.current = items;
+  const traysRef = useRef(trays);
+  const keyRef = useRef(conversationKey);
+  keyRef.current = conversationKey;
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const onAddedRef = useRef(onAdded);
   onAddedRef.current = onAdded;
+  const internalDragRef = useRef(false);
+
+  const items = trays.get(conversationKey) ?? [];
+  const current = (): PendingAttachment[] => traysRef.current.get(keyRef.current) ?? [];
+  const commit = (next: Trays): void => {
+    traysRef.current = next;
+    setTrays(next);
+  };
+  const withTray = (key: number, tray: PendingAttachment[]): Trays => {
+    const next = new Map(traysRef.current);
+    if (tray.length === 0) next.delete(key);
+    else next.set(key, tray);
+    return next;
+  };
+  /// Apply `fn` to the item with `id`, whatever conversation holds it.
+  const updateEverywhere = (fn: (tray: PendingAttachment[]) => PendingAttachment[]): void => {
+    const next = new Map<number, PendingAttachment[]>();
+    for (const [key, tray] of traysRef.current) {
+      const updated = fn(tray);
+      if (updated.length > 0) next.set(key, updated);
+    }
+    commit(next);
+  };
+
+  // A different conversation: its own tray, and the last notice was about
+  // the other one.
+  useEffect(() => setProblem(null), [conversationKey]);
 
   const readDocument = useCallback(async (id: string, kind: PendingAttachment["kind"], name: string) => {
     try {
@@ -92,11 +138,10 @@ export function useComposerAttachments({
         readAttachment(id).then((bytes) => extractText(kind, bytes)),
         EXTRACTION_TIMEOUT_MS,
       );
-      if (!itemsRef.current.some((item) => item.id === id)) return;
-      setItems((prev) => prev.map((item) => (item.id === id ? { ...item, status: "ready", text } : item)));
+      updateEverywhere((tray) => tray.map((item) => (item.id === id ? { ...item, status: "ready", text } : item)));
       if (text.trim().length === 0) setProblem({ reason: "no_text", name });
     } catch {
-      setItems((prev) => prev.filter((item) => item.id !== id));
+      updateEverywhere((tray) => tray.filter((item) => item.id !== id));
       void discardAttachment(id).catch(() => {});
       setProblem({ reason: "read_failed", name });
     }
@@ -104,7 +149,9 @@ export function useComposerAttachments({
 
   const add = useCallback(
     (result: StageResult) => {
-      const room = MAX_ATTACHMENTS - itemsRef.current.length;
+      const key = keyRef.current;
+      const tray = traysRef.current.get(key) ?? [];
+      const room = MAX_ATTACHMENTS - tray.length;
       const accepted = result.staged.slice(0, Math.max(room, 0));
       const overflow = result.staged.slice(accepted.length);
       for (const extra of overflow) void discardAttachment(extra.id).catch(() => {});
@@ -121,8 +168,7 @@ export function useComposerAttachments({
         previewPath: staged.preview_path,
         status: staged.kind === "image" ? "ready" : "reading",
       }));
-      itemsRef.current = [...itemsRef.current, ...fresh];
-      setItems(itemsRef.current);
+      commit(withTray(key, [...tray, ...fresh]));
       onAddedRef.current?.();
       for (const item of fresh) {
         if (item.status === "reading") void readDocument(item.id, item.kind, item.name);
@@ -137,11 +183,15 @@ export function useComposerAttachments({
   useEffect(() => {
     void invoke("attachments_set_accepting", { accepting: enabled }).catch(() => {});
   }, [enabled]);
+  const setInternalDrag = useCallback((active: boolean) => {
+    if (internalDragRef.current === active) return;
+    internalDragRef.current = active;
+    if (active) setDragging(false);
+    void invoke("attachments_internal_drag", { active }).catch(() => {});
+  }, []);
   useEffect(() => {
-    const internal = (active: boolean) => () =>
-      void invoke("attachments_internal_drag", { active }).catch(() => {});
-    const start = internal(true);
-    const end = internal(false);
+    const start = () => setInternalDrag(true);
+    const end = () => setInternalDrag(false);
     window.addEventListener("dragstart", start);
     window.addEventListener("dragend", end);
     window.addEventListener("drop", end);
@@ -151,7 +201,7 @@ export function useComposerAttachments({
       window.removeEventListener("drop", end);
       void invoke("attachments_set_accepting", { accepting: false }).catch(() => {});
     };
-  }, []);
+  }, [setInternalDrag]);
 
   // Drops: the core stages them from the native event and announces them.
   useEffect(() => {
@@ -165,18 +215,28 @@ export function useComposerAttachments({
         }
       }),
       listen<{ paths?: string[] }>(DRAG_ENTER, (event) => {
-        if (enabledRef.current && (event.payload?.paths?.length ?? 0) > 0) setDragging(true);
+        // No drop hint for a drag that started inside the page.
+        if (enabledRef.current && !internalDragRef.current && (event.payload?.paths?.length ?? 0) > 0) {
+          setDragging(true);
+        }
       }),
-      listen(DRAG_LEAVE, () => setDragging(false)),
-      listen(DRAG_DROP, () => setDragging(false)),
+      // A native leave or drop ends any drag, including an in-page one.
+      listen(DRAG_LEAVE, () => {
+        setDragging(false);
+        setInternalDrag(false);
+      }),
+      listen(DRAG_DROP, () => {
+        setDragging(false);
+        setInternalDrag(false);
+      }),
     ];
     return () => {
       for (const promise of unlisten) void promise.then((fn) => fn()).catch(() => {});
     };
-  }, [add]);
+  }, [add, setInternalDrag]);
 
   const pick = useCallback(async () => {
-    if (itemsRef.current.length >= MAX_ATTACHMENTS) {
+    if (current().length >= MAX_ATTACHMENTS) {
       setProblem({ reason: "too_many", name: "" });
       return;
     }
@@ -209,36 +269,57 @@ export function useComposerAttachments({
   );
 
   const remove = useCallback((id: string) => {
-    setItems((prev) => prev.filter((item) => item.id !== id));
+    updateEverywhere((tray) => tray.filter((item) => item.id !== id));
     void discardAttachment(id).catch(() => {});
   }, []);
 
-  const payload = useCallback((): AttachmentInput[] => attachmentPayload(itemsRef.current), []);
+  const payload = useCallback((): AttachmentInput[] => attachmentPayload(current()), []);
 
   const asMessageAttachments = useCallback(
-    (): MessageAttachment[] => pendingAsMessageAttachments(itemsRef.current),
+    (): MessageAttachment[] => pendingAsMessageAttachments(current()),
     [],
   );
 
-  /// Put files back (Edit on a queued message), after any already here.
+  const validate = useCallback((): boolean => {
+    const tray = current();
+    if (tray.length > MAX_ATTACHMENTS) {
+      setProblem({ reason: "too_many", name: "" });
+      return false;
+    }
+    if (tray.reduce((sum, item) => sum + item.size, 0) > MAX_TOTAL_BYTES) {
+      setProblem({ reason: "total_too_large", name: "" });
+      return false;
+    }
+    return true;
+  }, []);
+
   const append = useCallback((more: readonly PendingAttachment[]) => {
     if (more.length === 0) return;
-    itemsRef.current = [...itemsRef.current, ...more];
-    setItems(itemsRef.current);
+    const tray = current();
+    const room = Math.max(MAX_ATTACHMENTS - tray.length, 0);
+    const kept = more.slice(0, room);
+    const extra = more.slice(room);
+    for (const file of extra) void discardAttachment(file.id).catch(() => {});
+    if (extra.length > 0) setProblem({ reason: "too_many", name: extra[0].name });
+    commit(withTray(keyRef.current, [...tray, ...kept]));
   }, []);
 
   const takeAll = useCallback((): PendingAttachment[] => {
-    const taken = itemsRef.current;
-    itemsRef.current = [];
-    setItems([]);
+    const taken = current();
+    commit(withTray(keyRef.current, []));
     setProblem(null);
     return taken;
   }, []);
 
   const restore = useCallback((previous: PendingAttachment[], reason?: string) => {
-    itemsRef.current = previous;
-    setItems(previous);
+    commit(withTray(keyRef.current, previous));
     if (reason) setProblem({ reason, name: "" });
+  }, []);
+
+  const discardFor = useCallback((key: number) => {
+    const tray = traysRef.current.get(key) ?? [];
+    for (const file of tray) void discardAttachment(file.id).catch(() => {});
+    if (tray.length > 0) commit(withTray(key, []));
   }, []);
 
   return {
@@ -251,9 +332,11 @@ export function useComposerAttachments({
     remove,
     payload,
     asMessageAttachments,
+    validate,
     takeAll,
     restore,
     append,
+    discardFor,
     dismissProblem: useCallback(() => setProblem(null), []),
   };
 }

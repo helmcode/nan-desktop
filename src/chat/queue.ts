@@ -35,6 +35,9 @@ export interface QueuedMessage {
   text: string;
   /** Files attached in the composer, sent with this message. */
   attachments?: readonly PendingAttachment[];
+  /** Why the core refused its files (an attach problem reason); shown on
+   * the held item until the user edits it. */
+  problem?: string;
 }
 
 import type { PendingAttachment } from "./attachments";

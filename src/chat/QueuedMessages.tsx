@@ -6,6 +6,7 @@
 import { useId } from "react";
 import { useT } from "../i18n";
 import { IconPaperclip } from "../icons";
+import { attachProblemText } from "../components/Attachments";
 import type { HeldReason, QueuedMessage } from "./queue";
 
 export function QueuedMessages({
@@ -55,6 +56,11 @@ export function QueuedMessages({
                     {item.text && (
                       <span className="queued-text" title={item.text}>
                         {item.text}
+                      </span>
+                    )}
+                    {item.problem && (
+                      <span className="queued-problem" role="alert">
+                        {attachProblemText(t, { reason: item.problem, name: "" })}
                       </span>
                     )}
                     {(item.attachments?.length ?? 0) > 0 && (

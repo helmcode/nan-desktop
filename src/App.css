@@ -4096,3 +4096,8 @@ button:disabled {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+
+.queued-problem {
+  color: var(--warn);
+  font-size: 0.78rem;
+}
