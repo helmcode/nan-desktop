@@ -30,7 +30,7 @@ developer surface in the UI — the old T1 spike diagnostics and the tools
 | --- | --- |
 | Welcome | Helmcode mark + two account cards (Comunidad NaN / Helmcode para empresas). Sign-in is confirmed in the browser. |
 | Authorizing | The device code in large Roboto Mono, "Esperando tu confirmación…", Cancel. Denied/expired/error states each explain what happened and offer "Volver a intentarlo". |
-| Chat | Sidebar (mark, "Nueva conversación", history), header (model picker + gear), messages with citation chips, composer with the **workspace chip**, image mode, dictation and send. |
+| Chat | Sidebar (mark, "Nueva conversación", history), header (model picker + gear), messages with citation chips, composer with the **workspace chip**, image mode, dictation and send (typing stays possible while a reply runs: messages are queued, see "Composer queue"). |
 | Settings (gear) | **Carpetas de trabajo**, **Memoria**, **Voz**, **Acerca de** (account, version, sign out). Esc or "Volver al chat" returns. |
 
 **Workspace chip (composer).** The user never has to wonder where the
@@ -394,9 +394,51 @@ active) and completes every `in_progress` row of the conversation — a
 deliberate stop is not a failure: the text that arrived stays persisted,
 with no error event and no interrupted marker. The core emits
 `chat://stopped {conversation_id}` when a stream was actually stopped
-(stopping an idle conversation is a no-op). The composer swaps Send for
-"Stop generating" while streaming; the stopped transcript reloads exactly
+(stopping an idle conversation is a no-op). While streaming the composer
+shows Stop next to a queueing send button (see "Composer queue"); the stopped transcript reloads exactly
 like a finished one.
+
+### Composer queue (type while a reply runs)
+
+The composer stays enabled while a reply streams (`src/chat/queue.ts`,
+`src/chat/QueuedMessages.tsx`, wired in `App.tsx`). Sending then adds the
+message to a queue of **that conversation** instead of sending it; the
+queued messages are listed just above the composer ("Se enviará cuando
+termine la respuesta."), each with **Editar** (back into the composer,
+ahead of anything typed since) and **Quitar**. While a reply runs the
+composer shows both Stop and a send button labelled "Enviar cuando termine".
+
+Semantics:
+
+- **Flush.** When the running turn ends with `completed`, `tool_cap`,
+  `stream_cut`, `length`, `interrupted` or a (non-auth) error, the queue is
+  sent in order, **one message per turn**: the next waits until the reply to
+  the previous one ends. Only the conversation on screen flushes (same rule
+  as the automatic continuation); a conversation whose turn ended while
+  another one was on screen sends its queue when the user opens it again.
+- **Stop holds.** A turn ended by `user_stop` (`chat://stopped`) keeps the
+  queue but does not send it: the user stopped on purpose. It shows "Has
+  detenido la respuesta. Tus mensajes esperan aquí." with **Enviar ahora**.
+  Sending another message releases a held queue (it is appended, order
+  kept).
+- **Expired session holds.** `chat://error {kind: "unauthorized"}` holds the
+  queue (the send would fail too). Signing in again goes through sign-out,
+  which drops it (see below).
+- **Failed send.** A queued message whose `chat_send` fails goes back to the
+  front of the queue, held, so a failing send never loops.
+- **Queue beats the automatic continuation.** If messages are queued when a
+  turn ends `stream_cut` / `length`, no automatic continuation is scheduled,
+  a pending one is cancelled by the flush, and the Continue notice is not
+  shown for that turn: the user already said what comes next.
+- **Scope.** In memory, per conversation, for the app session: it survives
+  switching conversations, not an app restart, and is dropped on sign-out
+  or realm switch (the chat shell is keyed by realm and unmounts).
+- **Other modes.** Only normal chat messages queue. Image mode, image edit,
+  the skills picker (a leading `/` is plain text while busy) and dictation
+  stay unavailable while a reply runs, exactly as before; a dictation that
+  is already recording can still be stopped. While an image is being
+  generated the composer stays disabled. Telemetry is unchanged (no new
+  event).
 
 ### Interrupted marker (crash leftovers)
 

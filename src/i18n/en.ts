@@ -152,6 +152,17 @@ export const en = {
       length: "The reply was very long. Continuing in a moment…",
     },
     cancelAutoRetry: "Cancel",
+    queueSend: "Send when it finishes",
+    queueLabel: "Queued messages",
+    queueWaiting: (count: number): string =>
+      count === 1 ? "It will be sent when the reply finishes." : "They will be sent in order when the reply finishes.",
+    queueHeld: (count: number): string =>
+      count === 1
+        ? "You stopped the reply. Your message is waiting here."
+        : "You stopped the reply. Your messages are waiting here.",
+    queueSendNow: "Send now",
+    queueEdit: "Edit",
+    queueRemove: "Remove",
     thinking: "Thinking…",
     searching: "Searching the web…",
     working: "Working…",
