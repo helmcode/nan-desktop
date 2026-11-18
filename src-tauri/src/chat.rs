@@ -1695,7 +1695,8 @@ async fn run_chat_stream(
                         conversation_id,
                         call,
                         &mut sources,
-                        &mut shares,
+                        // None: the tool was not offered, a call is refused.
+                        share_tool.then_some(&mut shares),
                     )
                     .await
                 };
@@ -2220,7 +2221,7 @@ async fn run_tool_call(
     conversation_id: i64,
     call: &ToolCall,
     sources: &mut Vec<WebSource>,
-    shares: &mut Vec<tools::share_artifact::SharedLink>,
+    shares: Option<&mut Vec<tools::share_artifact::SharedLink>>,
 ) -> (
     String,
     Vec<chat_store::Artifact>,
@@ -2266,6 +2267,13 @@ async fn run_tool_call(
         );
     }
     if call.name == tools::share_artifact::TOOL_NAME {
+        let Some(shares) = shares else {
+            return (
+                invalid_call("share_artifact is not available in this conversation"),
+                Vec::new(),
+                Vec::new(),
+            );
+        };
         // Offered only when artifacts are on for this account. Always asks
         // the user (inline card, or the native dialog for a computer-wide
         // grant); the link goes back to the model and under the reply.
