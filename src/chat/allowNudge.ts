@@ -83,9 +83,10 @@ export type NudgeEvent =
   | { type: "dismiss"; conversationId: number; family?: NudgeFamily }
   | { type: "clearConversation"; conversationId: number };
 
-/// Whether an answered approval counts towards the suggestion. A share
-/// (share_artifact) never does: it is not a folder action and always asks,
-/// so neither its yes nor its no should move the folder counts.
+/// Whether an answered approval counts towards any suggestion family
+/// (folder/computer or browser). A share (share_artifact) never does: it is
+/// neither a folder nor a browser action and always asks, so neither its
+/// yes nor its no may move (or reset) any count.
 export function countsForNudge(action: string): boolean {
   return action !== "share_artifact";
 }

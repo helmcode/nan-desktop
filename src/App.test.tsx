@@ -724,6 +724,57 @@ describe("in-app browser suggestion", () => {
     });
   }
 
+  it("share_artifact answers neither count nor reset the browser suggestion (inline or native)", async () => {
+    resetTauri(chatHandlers([row(1, "user", "Find flights and share them")]));
+    renderApp("en");
+    await screen.findByText("Find flights and share them");
+    const share = {
+      file_name: "vuelos.html",
+      source: "website",
+      location: "vuelos.html",
+      title: "Vuelos",
+      audience: "public",
+      recipients: [],
+      expires_days: 7,
+      notify: false,
+      risk: "public" as const,
+    };
+    const site = (n: number) => {
+      act(() => {
+        emit(APPROVAL_REQUEST_EVENT, approvalPayload({ approval_id: `bs-${n}`, action: "browser_site", path: `site${n}.example` }));
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `bs-${n}`, granted: true });
+      });
+    };
+    site(1);
+    site(2);
+    // Even flagged as after-browsing, a share is not a browser approval.
+    for (const [n, granted] of [[1, false], [2, true]] as const) {
+      act(() => {
+        emit(
+          APPROVAL_REQUEST_EVENT,
+          approvalPayload({ approval_id: `sh-${n}`, action: "share_artifact", path: "/tmp/vuelos.html", after_browsing: true, share }),
+        );
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `sh-${n}`, granted });
+      });
+    }
+    act(() => {
+      emit(APPROVAL_NATIVE_EVENT, {
+        conversation_id: 7,
+        action: "share_artifact",
+        path: "/Users/ana/vuelos.html",
+        granted: false,
+        after_browsing: true,
+      });
+    });
+    expect(screen.queryByText(suggestion)).toBeNull();
+    site(3);
+    expect(await screen.findByText(suggestion)).toBeTruthy();
+  });
+
   it("offers to stop asking after three browser approvals; 'only this session' asks the core", async () => {
     resetTauri({ ...chatHandlers([row(1, "user", "Find flights")]), tools_browser_allow_for_session: () => undefined });
     renderApp("en");
