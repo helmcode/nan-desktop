@@ -279,6 +279,10 @@ pub struct ToolsState {
     /// In-app browser protection: conversations whose current task fed
     /// browser results to the model (cleared by the user's next message).
     browsed: Mutex<std::collections::HashSet<i64>>,
+    /// "Allow the browser for this session": same effect as the stored
+    /// `browser_mode = allow`, in memory only (never persisted), until the
+    /// app quits or the realm switches.
+    browser_session_allow: std::sync::atomic::AtomicBool,
 }
 
 impl Default for ToolsState {
@@ -292,6 +296,7 @@ impl Default for ToolsState {
             scratch_base: std::env::temp_dir(),
             websites: Mutex::new(HashMap::new()),
             browsed: Mutex::new(std::collections::HashSet::new()),
+            browser_session_allow: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -357,6 +362,19 @@ impl ToolsState {
         if let Ok(mut browsed) = self.browsed.lock() {
             browsed.clear();
         }
+        // The next user decides for themselves.
+        self.set_browser_session_allow(false);
+    }
+
+    /// Is the in-app browser allowed without asking for this session?
+    pub fn browser_session_allowed(&self) -> bool {
+        self.browser_session_allow
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_browser_session_allow(&self, allowed: bool) {
+        self.browser_session_allow
+            .store(allowed, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// A browser result was fed to the model in this conversation.
@@ -546,8 +564,11 @@ pub struct ToolOutcome {
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolsSettingsView {
     pub tools_allow_run_command: bool,
-    /// In-app browser protection (ON by default).
-    pub browser_guard: bool,
+    /// Stored in-app browser permission mode (`ask` by default).
+    pub browser_mode: ApprovalMode,
+    /// The browser is allowed without asking until the app quits (set from
+    /// the chat suggestion; not persisted).
+    pub browser_session_allow: bool,
 }
 
 // -------------------------------------------------------- output roles --
@@ -2598,55 +2619,153 @@ pub fn tools_grant_revoke(app: AppHandle, grant_id: String) -> Result<bool, Stri
 pub fn tools_settings_get(app: AppHandle) -> Result<ToolsSettingsView, String> {
     let dir = data_dir(&app)?;
     let store = grants::load_or_seed(&dir)?;
+    let state = app.state::<ToolsState>();
     Ok(ToolsSettingsView {
         tools_allow_run_command: store.tools_allow_run_command,
-        browser_guard: store.browser_guard,
+        browser_mode: store.browser_mode,
+        browser_session_allow: state.browser_session_allowed(),
     })
 }
 
-/// Turn the in-app browser protection on or off. Turning it OFF lowers a
-/// safety default, so it is confirmed by a NATIVE dialog the renderer
-/// cannot fake; turning it on needs nothing.
-#[tauri::command]
-pub async fn tools_set_browser_guard(app: AppHandle, enabled: bool) -> Result<(), String> {
-    if !enabled {
-        let dialog_app = app.clone();
-        let confirmed = off_main_thread(move || {
-            native_confirm(
-                &dialog_app,
-                "Permiso después de navegar",
-                "Después de que el asistente visite páginas web, las órdenes y los cambios en \
-                 tus archivos se harán sin preguntar en las carpetas que tengas en \
-                 \"Permitir sin preguntar\".\n\nLas páginas web pueden contener texto pensado \
-                 para engañar al asistente; por eso esta protección viene activada."
-                    .to_string(),
-                "Desactivar",
-                "Cancelar",
-            )
-        })
-        .await
-        .unwrap_or(false);
-        if !confirmed {
-            return Err("declined".into());
-        }
+/// Effective in-app browser permission: the stored mode or the in-memory
+/// session allow. Pure.
+pub fn browser_allows(mode: ApprovalMode, session_allow: bool) -> bool {
+    mode == ApprovalMode::Allow || session_allow
+}
+
+/// [`browser_allows`] for the running app. Any failure to read the store
+/// reads as "ask" (fail closed).
+pub(crate) fn browser_allows_without_asking(app: &AppHandle) -> bool {
+    let state = app.state::<ToolsState>();
+    let stored = data_dir(app)
+        .and_then(|dir| grants::load_or_seed(&dir))
+        .map(|store| store.browser_mode)
+        .unwrap_or(ApprovalMode::Ask);
+    browser_allows(stored, state.browser_session_allowed())
+}
+
+/// The native confirmation for letting the browser work without asking
+/// (`session`: only until the app quits). Spanish like every core dialog.
+fn browser_allow_dialog(session: bool) -> (&'static str, String, &'static str) {
+    let until = if session {
+        " hasta que cierres la aplicación"
+    } else {
+        ""
+    };
+    (
+        if session {
+            "Navegador sin preguntar en esta sesión"
+        } else {
+            "Navegador sin preguntar"
+        },
+        format!(
+            "El asistente usará páginas web sin pedirte permiso para cada sitio y, después de \
+             navegar, hará órdenes y cambios sin preguntar en las carpetas con \"Permitir sin \
+             preguntar\"{until}.\n\nLas páginas web pueden contener texto pensado para engañar \
+             al asistente. Entrar en cuentas, pagar y abrir direcciones de tu red local seguirán \
+             preguntando."
+        ),
+        if session {
+            "Permitir en esta sesión"
+        } else {
+            "Permitir sin preguntar"
+        },
+    )
+}
+
+async fn confirm_browser_allow(app: &AppHandle, session: bool) -> bool {
+    let dialog_app = app.clone();
+    off_main_thread(move || {
+        let (title, text, accept) = browser_allow_dialog(session);
+        native_confirm(&dialog_app, title, text, accept, "Cancelar")
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Store the browser permission mode and audit it. Choosing `ask` also
+/// ends a session allow ("Preguntar siempre" means it). The confirmation
+/// for `allow` happens before (in the command).
+pub(crate) fn apply_browser_mode(
+    dir: &Path,
+    state: &ToolsState,
+    mode: ApprovalMode,
+) -> Result<(), String> {
+    let mut store = grants::load_or_seed(dir)?;
+    store.browser_mode = mode;
+    grants::save(dir, &store)?;
+    if mode == ApprovalMode::Ask {
+        state.set_browser_session_allow(false);
     }
-    let dir = data_dir(&app)?;
-    let mut store = grants::load_or_seed(&dir)?;
-    store.browser_guard = enabled;
-    grants::save(&dir, &store)?;
     audit::append(
-        &dir,
+        dir,
         &AuditEntry {
             ts: audit::timestamp_now_rfc3339(),
             event: "settings".into(),
-            action: "browser_guard".into(),
+            action: "browser_mode".into(),
             outcome: "ok".into(),
             grant_id: None,
             profile_id: None,
-            detail: Some(if enabled { "enabled" } else { "disabled" }.to_string()),
+            detail: Some(
+                match mode {
+                    ApprovalMode::Ask => "ask",
+                    ApprovalMode::Allow => "allow",
+                }
+                .to_string(),
+            ),
         },
-    )?;
-    Ok(())
+    )
+}
+
+/// Turn on the session allow and audit it (after the confirmation).
+pub(crate) fn apply_browser_session_allow(dir: &Path, state: &ToolsState) -> Result<(), String> {
+    state.set_browser_session_allow(true);
+    audit::append(
+        dir,
+        &AuditEntry {
+            ts: audit::timestamp_now_rfc3339(),
+            event: "settings".into(),
+            action: "browser_mode".into(),
+            outcome: "ok".into(),
+            grant_id: None,
+            profile_id: None,
+            detail: Some("allow for this session".into()),
+        },
+    )
+}
+
+/// Set the in-app browser permission mode (`"ask"` / `"allow"`). `allow`
+/// lowers a safety default, so it is confirmed by a NATIVE dialog the
+/// renderer cannot fake (not asked again when already stored); `ask`
+/// needs nothing. Returns the stored mode.
+#[tauri::command]
+pub async fn tools_set_browser_mode(app: AppHandle, mode: String) -> Result<ApprovalMode, String> {
+    let mode = ApprovalMode::parse(&mode).map_err(|rejection| rejection.message)?;
+    let dir = data_dir(&app)?;
+    let stored = grants::load_or_seed(&dir)?.browser_mode;
+    if mode == ApprovalMode::Allow
+        && stored != ApprovalMode::Allow
+        && !confirm_browser_allow(&app, false).await
+    {
+        return Err("declined".into());
+    }
+    apply_browser_mode(&dir, &app.state::<ToolsState>(), mode)?;
+    Ok(mode)
+}
+
+/// Let the in-app browser work without asking until the app quits (the
+/// chat suggestion's "only this session"). Native-confirmed like
+/// [`tools_set_browser_mode`]; nothing is asked when it already allows.
+#[tauri::command]
+pub async fn tools_browser_allow_for_session(app: AppHandle) -> Result<(), String> {
+    if browser_allows_without_asking(&app) {
+        return Ok(());
+    }
+    if !confirm_browser_allow(&app, true).await {
+        return Err("declined".into());
+    }
+    let dir = data_dir(&app)?;
+    apply_browser_session_allow(&dir, &app.state::<ToolsState>())
 }
 
 /// `async` on purpose (P0-3): enabling shows a native dialog — see the
@@ -3023,6 +3142,9 @@ pub struct NativeDecision {
     pub action: String,
     pub path: Option<String>,
     pub granted: bool,
+    /// Asked only because of the post-browsing guard (the chat counts it
+    /// towards the browser suggestion).
+    pub after_browsing: bool,
 }
 
 /// Route and obtain approval for a stored proposal. `Auto` is audited as an
@@ -3040,7 +3162,7 @@ pub(crate) async fn approve_proposal<A: Approver>(
         base,
         proposal.action.kind(),
         state.browsed(proposal.conversation_id),
-        store.browser_guard,
+        !browser_allows(store.browser_mode, state.browser_session_allowed()),
         touches_computer_wide(&store, proposal),
     );
     let after_browsing = base != route;
@@ -3071,7 +3193,9 @@ pub(crate) async fn approve_proposal<A: Approver>(
                 text = format!("{text}\n\n{AFTER_BROWSING_NOTE}");
             }
             let granted = approver.native(title, text).await;
-            approver.native_decided(&approval_request(proposal), granted);
+            let mut decided = approval_request(proposal);
+            decided.after_browsing = after_browsing;
+            approver.native_decided(&decided, granted);
             granted
         }
         ApprovalRoute::Inline => {
@@ -3158,6 +3282,7 @@ impl Approver for AppApprover {
                 action: request.action.clone(),
                 path: request.path.clone(),
                 granted,
+                after_browsing: request.after_browsing,
             },
         );
     }
@@ -3552,31 +3677,6 @@ pub(crate) fn workspace_for(
     let dir = data_dir(app).ok()?;
     let state = app.state::<ToolsState>();
     workspace_for_conversation_in(&dir, &state, profile_id, conversation_id)
-}
-
-/// In-app browser allow mode: true when the conversation sees at least one
-/// working folder and EVERY folder it sees is in `allow` mode (the user
-/// already chose "do it without asking" for this work). Pure.
-pub fn store_allows_without_asking(store: &GrantsStore, profile_id: &str) -> bool {
-    let grants = store.grants_for(profile_id);
-    !grants.is_empty() && grants.iter().all(|grant| grant.mode == ApprovalMode::Allow)
-}
-
-/// [`store_allows_without_asking`] for one conversation's effective store
-/// (its folder selection). Any failure reads as "ask".
-pub(crate) fn conversation_allows_without_asking(
-    app: &AppHandle,
-    profile_id: &str,
-    conversation_id: i64,
-) -> bool {
-    let Ok(dir) = data_dir(app) else {
-        return false;
-    };
-    let state = app.state::<ToolsState>();
-    grants::load_or_seed(&dir)
-        .ok()
-        .and_then(|store| effective_store(&store, &state, profile_id, Some(conversation_id)).ok())
-        .is_some_and(|store| store_allows_without_asking(&store, profile_id))
 }
 
 /// Audit an in-app browser approval (the site's host only: never a URL
@@ -5064,39 +5164,6 @@ mod tests {
     }
 
     #[test]
-    fn the_browser_runs_without_asking_only_when_every_folder_allows() {
-        let base = tempfile::tempdir().unwrap();
-        let (a, b) = (base.path().join("a"), base.path().join("b"));
-        fs::create_dir_all(&a).unwrap();
-        fs::create_dir_all(&b).unwrap();
-        let mut store = grants::default_store();
-        assert!(
-            !store_allows_without_asking(&store, "nan"),
-            "no folder: ask"
-        );
-        let ga = store
-            .add_grant("ga".into(), "nan", a, "t".into())
-            .unwrap()
-            .id;
-        let gb = store
-            .add_grant("gb".into(), "nan", b, "t".into())
-            .unwrap()
-            .id;
-        assert!(!store_allows_without_asking(&store, "nan"), "default ask");
-        store.set_mode(&ga, ApprovalMode::Allow).unwrap();
-        assert!(
-            !store_allows_without_asking(&store, "nan"),
-            "one still asks"
-        );
-        store.set_mode(&gb, ApprovalMode::Allow).unwrap();
-        assert!(store_allows_without_asking(&store, "nan"));
-        assert!(
-            !store_allows_without_asking(&store, "helmcode"),
-            "per profile"
-        );
-    }
-
-    #[test]
     fn workspace_reports_roots_and_modes_per_profile() {
         let (home, _app_data, _guard) = computer_wide_layout();
         let mut store = grants::default_store();
@@ -5266,16 +5333,18 @@ mod tests {
     }
 
     #[test]
-    fn with_the_browsing_guard_off_allow_mode_runs_without_asking_after_browsing() {
+    fn with_the_browser_mode_on_allow_allow_mode_runs_without_asking_after_browsing() {
         let (folder, _guard) = tempdir();
         let root = canon(&folder);
         let (dir, _guard2) = granted_dir(&folder);
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
-        let mut store = grants::load_or_seed(&dir).unwrap();
-        assert!(store.browser_guard, "ON by default");
-        store.browser_guard = false;
-        grants::save(&dir, &store).unwrap();
         let st = state();
+        assert_eq!(
+            grants::load_or_seed(&dir).unwrap().browser_mode,
+            ApprovalMode::Ask,
+            "ask by default"
+        );
+        apply_browser_mode(&dir, &st, ApprovalMode::Allow).expect("stored");
         st.mark_browsed(1);
         let approver = FakeApprover::answering(false);
         let write = ToolAction::WriteFile {
@@ -5285,9 +5354,77 @@ mod tests {
         let (route, _) = run_with(&dir, &st, &approver, &write).expect("no prompt");
         assert_eq!(route, ApprovalRoute::Auto);
         assert_eq!(approver.prompts(), (0, 0));
+        // The change is audited.
+        assert!(
+            audit::tail(&dir, 50)
+                .expect("audit")
+                .iter()
+                .any(|e| { e.action == "browser_mode" && e.detail.as_deref() == Some("allow") })
+        );
+        // Back to ask: the guard asks again.
+        apply_browser_mode(&dir, &st, ApprovalMode::Ask).expect("stored");
+        let asked = FakeApprover::answering(true);
+        let (route, _) = run_with(&dir, &st, &asked, &write).expect("asked");
+        assert_eq!(route, ApprovalRoute::Inline);
         // A realm switch forgets every browsed conversation.
         st.reset_for_realm_switch();
         assert!(!st.browsed(Some(1)));
+    }
+
+    #[test]
+    fn a_session_allow_lifts_the_guard_until_ask_or_a_realm_switch() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let st = state();
+        let write = ToolAction::WriteFile {
+            path: path_str(&root.join("a.txt")),
+            content: "uno".into(),
+        };
+        assert!(!st.browser_session_allowed(), "off at start");
+        apply_browser_session_allow(&dir, &st).expect("session allow");
+        assert!(st.browser_session_allowed());
+        // Never persisted.
+        assert_eq!(
+            grants::load_or_seed(&dir).unwrap().browser_mode,
+            ApprovalMode::Ask
+        );
+        st.mark_browsed(1);
+        let silent = FakeApprover::answering(false);
+        let (route, _) = run_with(&dir, &st, &silent, &write).expect("no prompt");
+        assert_eq!(route, ApprovalRoute::Auto);
+        assert_eq!(silent.prompts(), (0, 0));
+        // A realm switch ends it: the next user decides for themselves.
+        st.reset_for_realm_switch();
+        assert!(!st.browser_session_allowed());
+        st.mark_browsed(1);
+        let asked = FakeApprover::answering(true);
+        let (route, _) = run_with(&dir, &st, &asked, &write).expect("asked");
+        assert_eq!(route, ApprovalRoute::Inline);
+        // Choosing "ask" also ends a session allow.
+        apply_browser_session_allow(&dir, &st).expect("session allow");
+        apply_browser_mode(&dir, &st, ApprovalMode::Ask).expect("ask");
+        assert!(!st.browser_session_allowed());
+    }
+
+    #[test]
+    fn the_browser_permission_is_the_stored_mode_or_the_session_allow() {
+        assert!(!browser_allows(ApprovalMode::Ask, false));
+        assert!(browser_allows(ApprovalMode::Ask, true));
+        assert!(browser_allows(ApprovalMode::Allow, false));
+        assert!(browser_allows(ApprovalMode::Allow, true));
+    }
+
+    #[test]
+    fn the_allow_dialogs_name_what_keeps_asking() {
+        for session in [false, true] {
+            let (title, text, accept) = browser_allow_dialog(session);
+            assert!(text.contains("Entrar en cuentas, pagar"));
+            assert!(text.contains("red local"));
+            assert!(!title.is_empty() && !accept.is_empty());
+            assert_eq!(text.contains("hasta que cierres"), session);
+        }
     }
 
     #[test]
@@ -6689,6 +6826,7 @@ mod tests {
                 false
             }
             fn native_decided(&self, request: &ApprovalRequest, granted: bool) {
+                assert!(!request.after_browsing, "a plain computer-wide ask");
                 self.0
                     .lock()
                     .expect("lock")
@@ -6714,5 +6852,46 @@ mod tests {
                 .expect("approved");
         assert_eq!(route, ApprovalRoute::Native);
         assert_eq!(*approver.0.lock().expect("lock"), vec![(Some(4), true)]);
+    }
+
+    #[test]
+    fn a_native_decision_says_when_only_the_browsing_guard_asked() {
+        struct Recording(Mutex<Vec<bool>>);
+        impl Approver for Recording {
+            async fn native(&self, _t: String, _x: String) -> bool {
+                true
+            }
+            async fn inline(&self, _r: ApprovalRequest) -> bool {
+                false
+            }
+            fn native_decided(&self, request: &ApprovalRequest, _granted: bool) {
+                self.0.lock().expect("lock").push(request.after_browsing);
+            }
+        }
+        let (home, app_data, _guard) = computer_wide_layout();
+        set_grant_mode(&app_data, "cw", ApprovalMode::Allow);
+        let st = state();
+        st.mark_browsed(4);
+        let proposal = propose(
+            &app_data,
+            &st,
+            "nan",
+            Some(4),
+            &ToolAction::WriteFile {
+                path: path_str(&home.join("nota.txt")),
+                content: "x".into(),
+            },
+        )
+        .expect("proposed");
+        let approver = Recording(Mutex::new(Vec::new()));
+        let route =
+            tauri::async_runtime::block_on(approve_proposal(&app_data, &st, &approver, &proposal))
+                .expect("approved");
+        assert_eq!(
+            route,
+            ApprovalRoute::Native,
+            "computer-wide keeps the native dialog"
+        );
+        assert_eq!(*approver.0.lock().expect("lock"), vec![true]);
     }
 }

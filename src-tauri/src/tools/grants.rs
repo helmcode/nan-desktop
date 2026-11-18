@@ -116,11 +116,20 @@ pub struct GrantsStore {
     /// on load and marked, so a later explicit OFF sticks.
     #[serde(default)]
     pub run_command_promoted: bool,
-    /// In-app browser protection (owner decision, ON by default): after the
-    /// assistant browsed the web in a conversation, commands and file
-    /// changes ask until the user's next message, even in `allow` mode.
-    #[serde(default = "default_true")]
-    pub browser_guard: bool,
+    /// In-app browser permission mode (default `ask`). `Ask`: the browser
+    /// asks once per new public site and conversation, and after the
+    /// assistant browsed, commands and file changes ask until the user's
+    /// next message even in folders that allow. `Allow`: public sites run
+    /// without the site card and that post-browsing guard is off. What
+    /// always asks (local-network sites, sign-in and payment submits) and
+    /// what is never typed (passwords, codes, cards) does not depend on it.
+    #[serde(default)]
+    pub browser_mode: ApprovalMode,
+    /// Legacy (<= 0.2.14) switch: `browser_guard: false` was "do not ask
+    /// after browsing". Read once by [`parse_store`] to migrate a store with
+    /// no `browser_mode` to `allow`; never written again.
+    #[serde(default, rename = "browser_guard", skip_serializing)]
+    pub legacy_browser_guard: Option<bool>,
     #[serde(default)]
     pub grants: Vec<Grant>,
 }
@@ -130,7 +139,8 @@ pub fn default_store() -> GrantsStore {
         version: STORE_VERSION,
         tools_allow_run_command: true,
         run_command_promoted: true,
-        browser_guard: true,
+        browser_mode: ApprovalMode::Ask,
+        legacy_browser_guard: None,
         grants: Vec::new(),
     }
 }
@@ -151,7 +161,27 @@ pub fn parse_store(raw: &str) -> Result<GrantsStore, String> {
         store.tools_allow_run_command = true;
         store.run_command_promoted = true;
     }
+    // A store saved by a version with the old guard switch carries
+    // `browser_guard` and never `browser_mode` (newer versions stop writing
+    // the legacy field): an explicit OFF becomes `allow`, which is what it
+    // meant; ON (or absent) keeps the default `ask`.
+    if store.legacy_browser_guard.take() == Some(false) && !raw_has_browser_mode(raw) {
+        store.browser_mode = ApprovalMode::Allow;
+    }
     Ok(store)
+}
+
+/// Whether the raw JSON object has a `browser_mode` key (an explicit mode
+/// always wins over the legacy switch).
+fn raw_has_browser_mode(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .as_object()
+                .map(|obj| obj.contains_key("browser_mode"))
+        })
+        .unwrap_or(false)
 }
 
 /// Load `tools.json` from `dir`, seeding the default store (empty grants,
@@ -878,18 +908,58 @@ mod tests {
     // ------------------------------------------------- S15 run_command --
 
     #[test]
-    fn the_browser_guard_is_on_by_default_and_an_explicit_off_persists() {
-        assert!(default_store().browser_guard);
-        // A store written before the setting existed reads as ON.
-        let old = r#"{"version":1,"tools_allow_run_command":true,"run_command_promoted":true,"grants":[]}"#;
-        let parsed = parse_store(old).or_else(|_| {
-            parse_store(&old.replace("\"version\":1", &format!("\"version\":{STORE_VERSION}")))
-        });
-        assert!(parsed.unwrap().browser_guard);
+    fn the_browser_mode_defaults_to_ask_and_an_explicit_allow_persists() {
+        assert_eq!(default_store().browser_mode, ApprovalMode::Ask);
+        // A store written before any browser setting existed reads as ask.
+        let old = format!(
+            r#"{{"version":{STORE_VERSION},"tools_allow_run_command":true,"run_command_promoted":true,"grants":[]}}"#
+        );
+        assert_eq!(parse_store(&old).unwrap().browser_mode, ApprovalMode::Ask);
         let mut store = default_store();
-        store.browser_guard = false;
+        store.browser_mode = ApprovalMode::Allow;
         let json = serde_json::to_string(&store).unwrap();
-        assert!(!parse_store(&json).unwrap().browser_guard);
+        assert!(json.contains(r#""browser_mode":"allow""#));
+        assert!(
+            !json.contains("browser_guard"),
+            "the legacy key is never written"
+        );
+        assert_eq!(
+            parse_store(&json).unwrap().browser_mode,
+            ApprovalMode::Allow
+        );
+    }
+
+    #[test]
+    fn a_legacy_guard_switch_migrates_to_the_browser_mode() {
+        let legacy = |guard: bool| {
+            format!(
+                r#"{{"version":{STORE_VERSION},"tools_allow_run_command":true,"run_command_promoted":true,"browser_guard":{guard},"grants":[]}}"#
+            )
+        };
+        // Guard OFF meant "do not ask after browsing": allow.
+        let off = parse_store(&legacy(false)).expect("legacy OFF parses");
+        assert_eq!(off.browser_mode, ApprovalMode::Allow);
+        assert_eq!(off.legacy_browser_guard, None, "consumed by the migration");
+        // Guard ON (the old default) stays ask.
+        assert_eq!(
+            parse_store(&legacy(true)).unwrap().browser_mode,
+            ApprovalMode::Ask
+        );
+        // Re-saving the migrated store keeps allow without the old key.
+        let json = serde_json::to_string(&off).unwrap();
+        assert_eq!(
+            parse_store(&json).unwrap().browser_mode,
+            ApprovalMode::Allow
+        );
+        // An explicit mode always wins over a stale legacy key.
+        let both = legacy(false).replace(
+            r#""browser_guard":false"#,
+            r#""browser_guard":false,"browser_mode":"ask""#,
+        );
+        assert_eq!(parse_store(&both).unwrap().browser_mode, ApprovalMode::Ask);
+        // An unknown mode fails closed (corrupt store), never permissive.
+        let bad = legacy(true).replace(r#""browser_guard":true"#, r#""browser_mode":"yolo""#);
+        assert!(parse_store(&bad).is_err());
     }
 
     #[test]

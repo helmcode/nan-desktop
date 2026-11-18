@@ -255,6 +255,12 @@ export const es: Strings = {
     dismiss: "Descartar sugerencia",
     switching: "Esperando tu confirmación…",
     allowed: (name: string) => `Ahora se permite siempre en ${name}.`,
+    // In-app browser variant (many browser approvals in one conversation).
+    browser: "Estás aprobando muchos permisos mientras el asistente navega. ¿Quieres que el navegador deje de preguntar?",
+    browserAlways: "Permitir siempre",
+    browserSession: "Solo en esta sesión",
+    browserAllowed: "El navegador ya no pregunta. Puedes cambiarlo en Ajustes.",
+    browserSessionAllowed: "El navegador no preguntará hasta que cierres la aplicación.",
   },
   computerWide: {
     title: "¿Dar acceso a todo tu equipo?",
@@ -355,9 +361,15 @@ export const es: Strings = {
       modeAllowHint: "Las acciones cubiertas se hacen sin preguntar, también los borrados.",
       newFolderMode: "Carpetas nuevas",
     },
-    browserGuard: {
-      title: "Pedir permiso para órdenes y cambios después de navegar por internet",
-      body: "Si el asistente ha usado el navegador, te pregunta antes de ejecutar órdenes o cambiar archivos hasta tu siguiente mensaje, también en carpetas con \"Permitir sin preguntar\". Leer archivos sigue sin preguntar.",
+    // In-app browser permission mode (one selector like "Carpetas nuevas").
+    browserMode: {
+      label: "Navegador",
+      askHint:
+        "Pregunta antes de usar cada web nueva en una conversación y, después de navegar, antes de ejecutar órdenes o cambiar archivos.",
+      allowHint:
+        "El asistente usa webs sin preguntar y, después de navegar, actúa sin preguntar en las carpetas con Permitir sin preguntar. Entrar en cuentas, pagar y tu red local siguen preguntando.",
+      session: "Permitido sin preguntar en esta sesión, hasta que cierres la aplicación.",
+      askAgain: "Volver a preguntar",
     },
     commands: {
       title: "Ejecutar órdenes",

@@ -107,8 +107,10 @@ export interface GrantView {
 
 export interface ToolsSettingsView {
   tools_allow_run_command: boolean;
-  /// In-app browser protection (ON by default; older cores omit it).
-  browser_guard?: boolean;
+  /// In-app browser permission mode (`ask` by default; older cores omit it).
+  browser_mode?: "ask" | "allow";
+  /// The browser is allowed without asking until the app quits.
+  browser_session_allow?: boolean;
 }
 
 export type MemoryMode = "remote" | "local";

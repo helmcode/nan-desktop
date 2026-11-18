@@ -5,12 +5,15 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
 import { BrandLogo, BrandMark } from "./brand";
 import {
+  BROWSER_NUDGE_SHOWN_STORAGE_KEY,
+  decisionTarget,
   initialNudgeState,
   loadShownNudges,
+  nudgeFamily,
   nudgeReducer,
   saveShownNudges,
-  targetForPath,
   type Nudge,
+  type NudgeScope,
 } from "./chat/allowNudge";
 import { approvalsReducer, placeCards, type ApprovalCardState } from "./chat/approvals";
 import { lastProducedTarget, type DeclaredOutput } from "./chat/autoOpen";
@@ -68,6 +71,8 @@ import {
   browserHost,
   onApprovalResolved,
   onNativeDecision,
+  allowBrowserForSession,
+  setBrowserMode,
   respondToApproval,
   sendChat,
   DEFAULT_GRANT_MODE,
@@ -806,9 +811,13 @@ function ChatShell({
 
   // Allow-mode suggestion: one per conversation, remembered across runs.
   const [nudges, dispatchNudge] = useReducer(nudgeReducer, undefined, () =>
-    initialNudgeState(loadShownNudges(realm)),
+    initialNudgeState(loadShownNudges(realm), loadShownNudges(realm, BROWSER_NUDGE_SHOWN_STORAGE_KEY)),
   );
   useEffect(() => saveShownNudges(nudges.shown, realm), [nudges.shown, realm]);
+  useEffect(
+    () => saveShownNudges(nudges.shownBrowser, realm, BROWSER_NUDGE_SHOWN_STORAGE_KEY),
+    [nudges.shownBrowser, realm],
+  );
   const countedApprovals = useRef<Set<string>>(new Set());
 
   // Image mode: the composer sends the prompt to `image_generate`. It is a
@@ -1357,14 +1366,14 @@ function ChatShell({
   // native decisions (computer-wide) arrive as their own event. Actions
   // count towards the conversation's SELECTED folders only.
   const nudgeDecision = useCallback(
-    (conversationId: number, path: string | null, granted: boolean): void => {
+    (conversationId: number, action: string, afterBrowsing: boolean | undefined, path: string | null, granted: boolean): void => {
       const ws = workspaceRef.current;
       const selected = selectionFor(selectionsRef.current, conversationId);
       const folders = ws.folders.filter((grant) => selected.includes(grant.id));
       dispatchNudge({
         type: "decision",
         conversationId,
-        target: targetForPath(path, folders, ws.computerWide),
+        target: decisionTarget(action, afterBrowsing, path, folders, ws.computerWide),
         granted,
         anchorIndex: activeConvRef.current === conversationId ? messageCountRef.current : Number.MAX_SAFE_INTEGER,
       });
@@ -1378,14 +1387,16 @@ function ChatShell({
       if (countedApprovals.current.has(card.id)) continue;
       countedApprovals.current.add(card.id);
       if (card.conversationId === null) continue;
-      nudgeDecision(card.conversationId, card.cwd ?? card.target, card.status === "granted");
+      nudgeDecision(card.conversationId, card.action, card.afterBrowsing, card.cwd ?? card.target, card.status === "granted");
     }
   }, [approvals, nudgeDecision]);
 
   useEffect(() => {
     const unlisten = onNativeDecision((decision) => {
       const conversationId = decision.conversation_id ?? activeConvRef.current;
-      if (conversationId !== null) nudgeDecision(conversationId, decision.path, decision.granted);
+      if (conversationId !== null) {
+        nudgeDecision(conversationId, decision.action, decision.after_browsing, decision.path, decision.granted);
+      }
     });
     return () => {
       void unlisten.then((fn) => fn());
@@ -1403,6 +1414,23 @@ function ChatShell({
     },
     [workspace],
   );
+
+  // Browser suggestion: the core confirms natively; a cancel (or any
+  // failure) dismisses the card.
+  const allowBrowserFromNudge = useCallback(async (nudge: Nudge, scope: NudgeScope): Promise<void> => {
+    const conversationId = nudge.conversationId;
+    dispatchNudge({ type: "switching", conversationId, family: "browser" });
+    try {
+      if (scope === "always") {
+        if ((await setBrowserMode("allow")) !== "allow") throw new Error("not stored");
+      } else {
+        await allowBrowserForSession();
+      }
+      dispatchNudge({ type: "allowed", conversationId, family: "browser", scope });
+    } catch {
+      dispatchNudge({ type: "dismiss", conversationId, family: "browser" });
+    }
+  }, []);
 
   // Image event transport: the core persists the row before `done`.
   useEffect(() => {
@@ -2432,18 +2460,25 @@ function ChatShell({
   // (the identity the core verified at login), never a cached guess.
   const accountName = overview.active_user?.email || profileLabel;
   const placed = placeCards(approvals, activeConvId, messages.length);
-  // The open conversation's allow-mode suggestion, anchored like the cards.
-  const activeNudge = nudges.active.find((nudge) => nudge.conversationId === activeConvId);
-  const nudgeSlot = activeNudge ? Math.min(activeNudge.anchorIndex, messages.length) : -1;
-  const nudgeCard = activeNudge ? (
-    <AllowNudgeCard
-      nudge={activeNudge}
-      folderName={activeNudge.target.kind === "folder" ? folderName(activeNudge.target.path) : ""}
-      onAllow={() => void allowFromNudge(activeNudge)}
-      onOpenSettings={() => openSettings("folders")}
-      onDismiss={() => dispatchNudge({ type: "dismiss", conversationId: activeNudge.conversationId })}
-    />
-  ) : null;
+  // The open conversation's allow-mode suggestions (folder and browser),
+  // anchored like the cards.
+  const activeNudges = nudges.active.filter((nudge) => nudge.conversationId === activeConvId);
+  const nudgeCardsAt = (slot: number): ReactNode =>
+    activeNudges
+      .filter((nudge) => Math.min(nudge.anchorIndex, messages.length) === slot)
+      .map((nudge) => (
+        <AllowNudgeCard
+          key={nudgeFamily(nudge.target)}
+          nudge={nudge}
+          folderName={nudge.target.kind === "folder" ? folderName(nudge.target.path) : ""}
+          onAllow={() => void allowFromNudge(nudge)}
+          onAllowBrowser={(scope) => void allowBrowserFromNudge(nudge, scope)}
+          onOpenSettings={() => openSettings("folders")}
+          onDismiss={() =>
+            dispatchNudge({ type: "dismiss", conversationId: nudge.conversationId, family: nudgeFamily(nudge.target) })
+          }
+        />
+      ));
   const workspaceError = grantErrorLabel(t, workspace.error);
 
   // The lineage link of an edited image: bring its original into view.
@@ -2889,7 +2924,7 @@ function ChatShell({
                   </div>
                 )}
                 <ApprovalCards cards={placed.after.get(0)} onRespond={(id, g) => void respondApproval(id, g)} />
-                {nudgeSlot === 0 && messages.length > 0 && nudgeCard}
+                {messages.length > 0 && nudgeCardsAt(0)}
                 {messages.map((m, index) => (
                   <Fragment key={m.id}>
                     <ErrorBoundary
@@ -2906,11 +2941,11 @@ function ChatShell({
                       cards={placed.after.get(index + 1)}
                       onRespond={(id, g) => void respondApproval(id, g)}
                     />
-                    {nudgeSlot === index + 1 && index + 1 < messages.length && nudgeCard}
+                    {index + 1 < messages.length && nudgeCardsAt(index + 1)}
                   </Fragment>
                 ))}
                 <ApprovalCards cards={placed.tail} onRespond={(id, g) => void respondApproval(id, g)} />
-                {nudgeSlot === messages.length && nudgeCard}
+                {nudgeCardsAt(messages.length)}
                 {streamingActive && visibleDraft !== undefined && (
                   <article className="msg msg-assistant streaming" aria-live="polite">
                     {visibleDraft.length > 0 && <Markdown text={visibleDraft} onOpenLink={openWebPreview} />}

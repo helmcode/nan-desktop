@@ -4,6 +4,10 @@
 
 ### Changed
 - Las fuentes y los archivos de una respuesta salen plegados ("Fuentes 8", "Archivos 12"); se despliegan al pulsarlos, para que no llenen el chat.
+- Ajustes, Carpetas de trabajo: el permiso del navegador es ahora un selector "Navegador" igual que el de "Carpetas nuevas", con "Preguntar siempre" o "Permitir sin preguntar". En "Permitir sin preguntar" el asistente usa webs publicas sin pedir permiso por sitio y, despues de navegar, no vuelve a preguntar en las carpetas con "Permitir sin preguntar". Activarlo pide una confirmacion del sistema. Sustituye al interruptor "Pedir permiso para ordenes y cambios despues de navegar por internet"; si lo tenias desactivado, pasa a "Permitir sin preguntar".
+- Si apruebas muchas acciones del navegador en una conversacion (3 seguidas), el chat te pregunta si quieres que deje de preguntar: "Permitir siempre" o "Solo en esta sesion" (hasta que cierres la app). Se muestra una vez por conversacion.
+- En "Preguntar siempre", cada web nueva pide permiso una vez por conversacion aunque todas tus carpetas esten en "Permitir sin preguntar" (antes, en ese caso, las webs publicas no preguntaban). Solo el selector "Navegador" decide si el navegador pregunta.
+- En cualquier modo siguen preguntando las direcciones de tu red local, los inicios de sesion y los pagos, y el asistente nunca escribe contrasenas, codigos ni datos de tarjeta.
 
 ### Fixed
 - Un correo largo ya no se sale del menu de la cuenta: pasa a la linea siguiente.
