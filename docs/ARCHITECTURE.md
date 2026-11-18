@@ -829,14 +829,18 @@ user. Flow per call:
 1. Parse and validate the arguments (`path`, `title`, `audience`,
    `emails`, `expires_days`, `notify`; unknown fields refused, so no
    `risk_ack`, `secret_ack` or `member_ids` from the model).
+0. `share_artifact::gate`: refused when not offered, after a "no" in
+   this reply, or after 3 questions in this reply (`ShareTurn`).
 2. `artifacts::prepare_upload` over the conversation's effective grants
-   plus this run's session folders (generated images as `media`): the read,
+   plus THIS conversation's temp folder (`share_store`; generated images
+   as `media`): the read,
    cap, sniff and secret pre-scan. A refusal returns to the model with a
    message; a credential, unsupported type or oversized file sends the user
    to the manual Share.
 3. The risk acknowledgement is taken out of the prepared upload, the user
-   is asked (inline card with the file, audience, recipients, expiry and
-   risk copy; the native dialog when a computer-wide grant governs the
+   is asked (inline card with the file's full path or its
+   "this conversation" label (`location_of`), the labeled title, audience,
+   recipients, expiry and risk copy; the native dialog when a computer-wide grant governs the
    file; never `Auto`), the decision is audited (scope-free, no path).
 4. Only after "Allow": `risk_ack` goes back in and
    `artifacts::send_upload` posts the exact bytes read in step 2. The
