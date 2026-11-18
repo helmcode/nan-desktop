@@ -465,7 +465,7 @@ fn parse_trace(raw: &str) -> Option<Vec<serde_json::Value>> {
 /// blocks. Its images are sent as IMAGE parts only when `image_url` is
 /// given (the request goes to a model that accepts images) and only the
 /// [`crate::attachments::MAX_IMAGES_PER_REQUEST`] newest ones; every other
-/// image becomes its text stand-in (`[Image: <name> — <description>]`).
+/// image becomes its text stand-in (`[Image: <name> (<description>)]`).
 /// `None` = a text-only model: no image part at all.
 pub fn history_messages(
     rows: &[ChatMessageRow],
@@ -1037,7 +1037,7 @@ mod tests {
         assert!(!crate::attachments::has_media_parts(&history));
         assert_eq!(
             history[0]["content"],
-            "what is this?\n\n[Image: cat.jpg — A cat.]"
+            "what is this?\n\n[Image: cat.jpg (A cat.)]"
         );
         assert_eq!(history[2]["content"], "[Image: dog.jpg]");
     }

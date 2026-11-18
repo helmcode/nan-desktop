@@ -1126,7 +1126,6 @@ pub fn chat_send(
     } else {
         crate::attachments::commit(
             &app.state::<crate::attachments::AttachmentsState>(),
-            &app_data,
             &attachments,
         )
         .map_err(|err| format!("attachments:{}", err.as_str()))?

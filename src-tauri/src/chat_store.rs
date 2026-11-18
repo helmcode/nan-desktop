@@ -2461,7 +2461,7 @@ mod tests {
         let exported = export_messages(&conn, conv).expect("export");
         assert_eq!(
             exported[0].content,
-            "look\n\n[Attached file: plan.pdf]\n[Image: cat.jpg — A cat.]"
+            "look\n\n[Attached file: plan.pdf]\n[Image: cat.jpg (A cat.)]"
         );
         let wire = serde_json::to_string(&exported).expect("json");
         assert!(

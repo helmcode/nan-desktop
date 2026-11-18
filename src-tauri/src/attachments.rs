@@ -39,7 +39,7 @@
 //! configured vision fallback when the selected model is text-only
 //! ([`route_model`]); a text-only model never receives an image part
 //! ([`text_only_messages`], applied to every request body). Earlier images
-//! reach a text-only model as `[Image: <name> — <description>]`, the
+//! reach a text-only model as `[Image: <name> (<description>)]`, the
 //! description being one cheap side request made when the image is sent
 //! ([`describe_request_body`]).
 
@@ -394,14 +394,14 @@ pub fn prepare_image(bytes: &[u8]) -> Result<Vec<u8>, AttachError> {
 // Folders
 // ---------------------------------------------------------------------------
 
-/// Sent image attachments: `<root>/images/attachments` (asset scope).
+/// Image attachments: `<root>/images/attachments/<id>.jpg` (asset scope).
+/// An image is prepared straight into this folder when it is staged, so
+/// its path never changes (the composer chip, the just-sent bubble and the
+/// stored message show the same file). One that is never sent is not
+/// referenced by any message and goes with the startup orphan sweep
+/// (`images::sweep_orphan_images`, 24 h).
 pub fn images_dir(app_data: &Path) -> PathBuf {
     crate::images::images_dir(app_data).join(IMAGES_SUBDIR)
-}
-
-/// Not-yet-sent images: `<root>/images/attachments/staged`.
-pub fn staged_images_dir(app_data: &Path) -> PathBuf {
-    images_dir(app_data).join(STAGED_SUBDIR)
 }
 
 /// Not-yet-sent documents: `<root>/attachments/staged` (outside the asset
@@ -486,7 +486,7 @@ impl AttachmentsState {
 }
 
 /// Stage bytes the core already read: classify, size-check, prepare (image)
-/// or copy (document) into the staged folders. Returns the new id and entry.
+/// (image, into its final folder) or copy (document, staged folder). Returns the new id and entry.
 pub fn stage_bytes(
     app_data: &Path,
     raw_name: &str,
@@ -501,7 +501,7 @@ pub fn stage_bytes(
     let id = uuid::Uuid::new_v4().to_string();
     let path = if kind.is_image() {
         let jpeg = prepare_image(bytes)?;
-        let dir = staged_images_dir(app_data);
+        let dir = images_dir(app_data);
         std::fs::create_dir_all(&dir).map_err(|_| AttachError::Protocol)?;
         let path = dir.join(format!("{id}.jpg"));
         std::fs::write(&path, jpeg).map_err(|_| AttachError::Protocol)?;
@@ -720,12 +720,11 @@ fn cap_text(text: &str, max: usize) -> (String, bool) {
 
 /// Turn the composer's staged attachments into stored records, in order:
 /// validates the count, that every id is staged and unique, the total size,
-/// and caps the extracted text (per file, then per message). Images move
-/// from the staged folder to the sent folder; staged document copies are
+/// and caps the extracted text (per file, then per message). Images stay
+/// where they were prepared; staged document copies are
 /// deleted. Nothing is consumed when validation fails.
 pub fn commit(
     state: &AttachmentsState,
-    app_data: &Path,
     inputs: &[AttachmentInput],
 ) -> Result<Vec<AttachmentRecord>, AttachError> {
     if inputs.len() > MAX_FILES_PER_MESSAGE {
@@ -744,7 +743,6 @@ pub fn commit(
     if total > MAX_TOTAL_BYTES {
         return Err(AttachError::TotalTooLarge);
     }
-    let sent_dir = images_dir(app_data);
     let mut records = Vec::with_capacity(inputs.len());
     let mut doc_budget = MAX_TOTAL_DOC_CHARS;
     for (input, entry) in inputs.iter().zip(entries) {
@@ -759,12 +757,7 @@ pub fn commit(
             description: None,
         };
         if entry.kind.is_image() {
-            std::fs::create_dir_all(&sent_dir).map_err(|_| AttachError::Protocol)?;
-            let target = sent_dir.join(format!("{}.jpg", input.id));
-            std::fs::rename(&entry.path, &target)
-                .or_else(|_| std::fs::copy(&entry.path, &target).map(|_| ()))
-                .map_err(|_| AttachError::Protocol)?;
-            record.path = Some(target.display().to_string());
+            record.path = Some(entry.path.display().to_string());
         } else {
             let raw = input.text.as_deref().unwrap_or("").replace('\0', "");
             let limit = MAX_DOC_CHARS.min(doc_budget);
@@ -789,10 +782,10 @@ pub fn commit(
 // What the model sees
 // ---------------------------------------------------------------------------
 
-/// The text stand-in of an image: `[Image: <name> — <description>]`.
+/// The text stand-in of an image: `[Image: <name> (<description>)]`.
 pub fn image_stand_in(record: &AttachmentRecord) -> String {
     match record.description.as_deref().filter(|d| !d.is_empty()) {
-        Some(description) => format!("[Image: {} — {}]", record.name, description),
+        Some(description) => format!("[Image: {} ({})]", record.name, description),
         None => format!("[Image: {}]", record.name),
     }
 }
@@ -875,8 +868,8 @@ pub fn image_data_url(app_data: &Path, record: &AttachmentRecord) -> Option<Stri
 }
 
 /// Copy of `messages` safe for a text-only model: every non-text content
-/// part (image, audio, video, file) becomes text — the image's own stand-in
-/// is unknown here, so a generic `[Image]` note is used — and an array
+/// part (image, audio, video, file) becomes text (the image's own stand-in
+/// is unknown here, so a generic `[Image]` note is used) and an array
 /// content of only text parts collapses to a string. Defense in depth: the
 /// history builder already sends stand-ins to such models.
 pub fn text_only_messages(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
@@ -1033,15 +1026,16 @@ pub fn counts_by_kind(records: &[AttachmentRecord]) -> Vec<(AttachmentKind, usiz
 // Cleanup
 // ---------------------------------------------------------------------------
 
-/// Delete staged files (both folders) older than `min_age`: composer
-/// attachments that were never sent. Regular files only.
+/// Delete staged DOCUMENT copies older than `min_age`: composer attachments
+/// that were never sent (unsent images are orphans of the image sweep).
+/// Regular files only.
 pub fn sweep_staged(
     app_data: &Path,
     min_age: std::time::Duration,
     now: std::time::SystemTime,
 ) -> usize {
     let mut deleted = 0;
-    for dir in [staged_images_dir(app_data), staged_docs_dir(app_data)] {
+    for dir in [staged_docs_dir(app_data)] {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -1300,7 +1294,7 @@ mod tests {
         let (_tmp, app) = app();
         let (_, image) = stage_bytes(&app, "photo.png", &png(10, 10, 255)).unwrap();
         assert_eq!(image.kind, AttachmentKind::Image);
-        assert!(image.path.starts_with(staged_images_dir(&app)));
+        assert!(image.path.starts_with(images_dir(&app)));
         assert!(
             std::fs::read(&image.path)
                 .unwrap()
@@ -1394,7 +1388,6 @@ mod tests {
         let long = "é".repeat(MAX_DOC_CHARS + 5);
         let records = commit(
             &state,
-            &app,
             &[
                 AttachmentInput {
                     id: img.clone(),
@@ -1410,7 +1403,10 @@ mod tests {
         assert_eq!(records[0].kind, AttachmentKind::Image);
         assert_eq!(records[0].text, None);
         let sent = PathBuf::from(records[0].path.clone().unwrap());
-        assert!(sent.starts_with(images_dir(&app)) && !sent.starts_with(staged_images_dir(&app)));
+        assert!(
+            sent.starts_with(images_dir(&app)),
+            "the staged image is the sent one"
+        );
         assert!(sent.is_file());
         assert_eq!(
             records[1].text.as_ref().unwrap().chars().count(),
@@ -1423,7 +1419,6 @@ mod tests {
         assert_eq!(
             commit(
                 &state,
-                &app,
                 &[AttachmentInput {
                     id: img,
                     text: None
@@ -1443,11 +1438,10 @@ mod tests {
                 text: None,
             })
             .collect();
-        assert_eq!(commit(&state, &app, &many), Err(AttachError::TooMany));
+        assert_eq!(commit(&state, &many), Err(AttachError::TooMany));
         assert_eq!(
             commit(
                 &state,
-                &app,
                 &[AttachmentInput {
                     id: "nope".into(),
                     text: None
@@ -1459,7 +1453,6 @@ mod tests {
         assert_eq!(
             commit(
                 &state,
-                &app,
                 &[
                     AttachmentInput {
                         id: a.clone(),
@@ -1486,7 +1479,7 @@ mod tests {
                 text: Some("z".repeat(MAX_DOC_CHARS)),
             })
             .collect();
-        let records = commit(&state, &app, &inputs).unwrap();
+        let records = commit(&state, &inputs).unwrap();
         let total: usize = records
             .iter()
             .map(|r| r.text.as_ref().unwrap().chars().count())
@@ -1523,10 +1516,7 @@ mod tests {
                 text: None,
             })
             .collect();
-        assert_eq!(
-            commit(&state, &app, &inputs),
-            Err(AttachError::TotalTooLarge)
-        );
+        assert_eq!(commit(&state, &inputs), Err(AttachError::TotalTooLarge));
     }
 
     #[test]
@@ -1542,7 +1532,7 @@ mod tests {
         let text = text_only.as_str().unwrap();
         assert!(text.starts_with("Summarize\n\n<attached_file name=\"report.pdf\">\nQ3 revenue\n"));
         assert!(text.contains(TRUNCATED_NOTE));
-        assert!(text.ends_with("[Image: cat.jpg — A cat on a sofa.]"));
+        assert!(text.ends_with("[Image: cat.jpg (A cat on a sofa.)]"));
 
         let vision = user_content("Summarize", &records, &mut |_| {
             Some("data:image/jpeg;base64,AA".into())
@@ -1567,7 +1557,7 @@ mod tests {
         let mut img = record(AttachmentKind::Image, "a.png");
         assert_eq!(image_stand_in(&img), "[Image: a.png]");
         img.description = Some("Red square.".into());
-        assert_eq!(image_stand_in(&img), "[Image: a.png — Red square.]");
+        assert_eq!(image_stand_in(&img), "[Image: a.png (Red square.)]");
     }
 
     #[test]
@@ -1598,7 +1588,7 @@ mod tests {
         let synced = sync_content("hi", &[doc.clone(), img.clone()]);
         assert_eq!(
             synced,
-            "hi\n\n[Attached file: q.xlsx]\n[Image: c.jpg — A chart.]"
+            "hi\n\n[Attached file: q.xlsx]\n[Image: c.jpg (A chart.)]"
         );
         assert!(!synced.contains("SECRET") && !synced.contains("/app/"));
         assert_eq!(sync_content("", &[doc]), "[Attached file: q.xlsx]");
@@ -1699,16 +1689,34 @@ mod tests {
     }
 
     #[test]
-    fn the_staged_sweep_removes_only_old_staged_files() {
+    fn the_staged_sweep_removes_only_old_document_copies() {
         let (_tmp, app) = app();
         let (_, img) = stage_bytes(&app, "p.png", &png(2, 2, 255)).unwrap();
         let (_, doc) = stage_bytes(&app, "a.txt", b"x").unwrap();
-        let sent = images_dir(&app).join("kept.jpg");
-        std::fs::write(&sent, b"x").unwrap();
         let day = std::time::Duration::from_secs(86_400);
         assert_eq!(sweep_staged(&app, day, std::time::SystemTime::now()), 0);
         let later = std::time::SystemTime::now() + day * 2;
-        assert_eq!(sweep_staged(&app, day, later), 2);
-        assert!(!img.path.exists() && !doc.path.exists() && sent.exists());
+        assert_eq!(sweep_staged(&app, day, later), 1);
+        assert!(!doc.path.exists());
+        assert!(img.path.exists(), "images are left to the orphan sweep");
+    }
+
+    #[test]
+    fn unsent_or_deleted_attachment_images_are_swept_as_orphans() {
+        let (_tmp, app) = app();
+        let (_, sent) = stage_bytes(&app, "sent.png", &png(2, 2, 255)).unwrap();
+        let (_, unsent) = stage_bytes(&app, "unsent.png", &png(2, 2, 255)).unwrap();
+        let conn = crate::chat_store::open_db(&app).unwrap();
+        let conv = crate::chat_store::insert_conversation(&conn, "nan", "t").unwrap();
+        let mut rec = record(AttachmentKind::Image, "sent.png");
+        rec.path = Some(sent.path.display().to_string());
+        rec.id = sent.path.file_stem().unwrap().to_string_lossy().to_string();
+        crate::chat_store::insert_user_message_with_attachments(&conn, conv, "", &[rec]).unwrap();
+        drop(conn);
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3 * 86_400);
+        let deleted =
+            crate::images::sweep_orphan_images(&app, crate::images::ORPHAN_MIN_AGE, later);
+        assert_eq!(deleted, 1);
+        assert!(sent.path.exists() && !unsent.path.exists());
     }
 }
