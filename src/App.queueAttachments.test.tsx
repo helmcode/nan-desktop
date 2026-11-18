@@ -34,6 +34,7 @@ let rows: ChatMessageRow[];
 let sendCalls: number;
 let refuseQueued: string | null;
 let pickResult: unknown;
+let pendingSecondSend: boolean;
 
 function handlers() {
   return {
@@ -49,6 +50,8 @@ function handlers() {
     chat_send: () => {
       sendCalls += 1;
       if (sendCalls > 1 && refuseQueued) throw refuseQueued;
+      // The flushed message's send never settles (still in flight).
+      if (sendCalls === 2 && pendingSecondSend) return new Promise(() => {});
       return undefined;
     },
     chat_stop: () => undefined,
@@ -63,9 +66,9 @@ function handlers() {
 const composer = () => screen.getByRole("textbox", { name: "Mensaje" }) as HTMLTextAreaElement;
 const queueRegion = () => screen.getByRole("region", { name: "Mensajes en cola" });
 
-async function startStreamingWithQueuedImage(): Promise<void> {
+async function startStreamingWithQueuedImage(): Promise<ReturnType<typeof render>> {
   resetTauri(handlers());
-  render(
+  const view = render(
     <I18nProvider initial="es">
       <App />
     </I18nProvider>,
@@ -86,6 +89,7 @@ async function startStreamingWithQueuedImage(): Promise<void> {
   // The files left the tray with the queued message.
   expect(screen.queryByRole("list", { name: "Archivos adjuntos a este mensaje" })).toBeNull();
   expect(within(queueRegion()).getByText("plano.png")).toBeTruthy();
+  return view;
 }
 
 beforeEach(() => {
@@ -93,6 +97,7 @@ beforeEach(() => {
   rows = [row(1, "user", "hola")];
   sendCalls = 0;
   refuseQueued = null;
+  pendingSecondSend = false;
   pickResult = {
     staged: [{ id: "img-1", kind: "image", name: "plano.png", size: 10, preview_path: IMAGE_PATH }],
     rejected: [],
@@ -188,5 +193,32 @@ describe("queued messages carry their attachments", () => {
     expect(within(tray).getAllByRole("listitem")).toHaveLength(10);
     expect(screen.getByText("Se pueden adjuntar hasta 10 archivos por mensaje.")).toBeTruthy();
     await waitFor(() => expect(invokedWith("attachment_discard")).toEqual([{ id: "img-1" }]));
+  });
+
+  it("signing out discards the files of queued messages, not those of a message already being sent", async () => {
+    pendingSecondSend = true;
+    const view = await startStreamingWithQueuedImage();
+    // The turn ends: the flush takes "mira esto" (img-1) and its send stays
+    // in flight.
+    rows = [...rows, row(2, "user", "primera"), row(3, "assistant", "Hecho.", "completed")];
+    await act(async () => emit("chat://done", { conversation_id: 8, reason: "completed" }));
+    await waitFor(() => expect(invokedWith("chat_send")).toHaveLength(2));
+    expect(invokedWith("chat_send")[1]).toMatchObject({ attachments: [{ id: "img-1" }] });
+    // Meanwhile another message with its own image is queued.
+    pickResult = {
+      staged: [{ id: "img-2", kind: "image", name: "alzado.png", size: 10, preview_path: IMAGE_PATH }],
+      rejected: [],
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("alzado.png");
+    fireEvent.change(composer(), { target: { value: "y esto" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Enviar cuando termine" }));
+    });
+    expect(within(queueRegion()).getByText("alzado.png")).toBeTruthy();
+    expect(invokedWith("attachment_discard")).toEqual([]);
+
+    view.unmount();
+    await waitFor(() => expect(invokedWith("attachment_discard")).toEqual([{ id: "img-2" }]));
   });
 });
