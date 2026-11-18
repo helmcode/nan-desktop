@@ -971,6 +971,18 @@ function ChatShell({
   // Conversations deleted in this session (a flush in flight must not
   // recreate their queue).
   const deletedConvsRef = useRef<Set<number>>(new Set());
+  // The chat shell goes away (sign-out, account switch): queued files are
+  // discarded in the core (the tray's own are discarded by its hook).
+  useEffect(
+    () => () => {
+      for (const queue of queuesRef.current.values()) {
+        for (const item of queue.items) {
+          for (const file of item.attachments ?? []) void discardAttachment(file.id).catch(() => {});
+        }
+      }
+    },
+    [],
+  );
   const attachAppendRef = useRef(attach.append);
   attachAppendRef.current = attach.append;
 
@@ -1967,7 +1979,11 @@ function ChatShell({
       // Nothing was sent: give the files back (to the composer, or to the
       // queued message through queueRefusalRef).
       const refusal = String(err).startsWith("attachments:") ? String(err).slice("attachments:".length) : null;
-      if (takenAttachments.length > 0) attach.restore(takenAttachments, refusal ?? undefined);
+      // Explicit key: a new chat was created (and the screen may have
+      // changed) while the send ran.
+      if (takenAttachments.length > 0) {
+        attach.restore(takenAttachments, refusal ?? undefined, conversationId ?? NEW_CHAT_KEY);
+      }
       if (withFiles) {
         // The core refused the files before storing anything: the text
         // comes back too and the optimistic bubble goes away.
@@ -1982,7 +1998,8 @@ function ChatShell({
               next.delete(id);
               return next;
             });
-            void loadMessages(id);
+            // Only reload what is on screen.
+            if (activeConvRef.current === id) void loadMessages(id);
           }
           void refreshConversations();
           return false;

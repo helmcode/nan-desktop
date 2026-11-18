@@ -68,7 +68,9 @@ export interface ComposerAttachments {
   /// Clear after a send and return what was there, so a refused send can
   /// `restore` it.
   takeAll: () => PendingAttachment[];
-  restore: (items: PendingAttachment[], reason?: string) => void;
+  /// Put files back on conversation `key` (explicit: the conversation may
+  /// have been created, and the screen changed, while the send ran).
+  restore: (items: PendingAttachment[], reason: string | undefined, key: number) => void;
   /// Put files back (Edit on a queued message), capped at MAX_ATTACHMENTS:
   /// the extra ones are discarded with the "too many" notice.
   append: (items: readonly PendingAttachment[]) => void;
@@ -95,7 +97,9 @@ export function useComposerAttachments({
   onAdded?: () => void;
 }): ComposerAttachments {
   const [trays, setTrays] = useState<Trays>(() => new Map());
-  const [problem, setProblem] = useState<AttachProblem | null>(null);
+  // The last notice and the conversation it is about: shown only there (a
+  // late extraction notice from chat A never shows up in chat B).
+  const [notice, setNotice] = useState<{ key: number; problem: AttachProblem } | null>(null);
   const [dragging, setDragging] = useState(false);
   const traysRef = useRef(trays);
   const keyRef = useRef(conversationKey);
@@ -128,9 +132,16 @@ export function useComposerAttachments({
     commit(next);
   };
 
-  // A different conversation: its own tray, and the last notice was about
-  // the other one.
-  useEffect(() => setProblem(null), [conversationKey]);
+  /// Show `problem` on conversation `key` (default: the one on screen);
+  /// `null` clears the notice.
+  const setProblem = (problem: AttachProblem | null, key = keyRef.current): void => {
+    setNotice(problem ? { key, problem } : null);
+  };
+  /// The conversation whose tray holds the item `id`.
+  const keyOf = (id: string): number => {
+    for (const [key, tray] of traysRef.current) if (tray.some((item) => item.id === id)) return key;
+    return keyRef.current;
+  };
 
   const readDocument = useCallback(async (id: string, kind: PendingAttachment["kind"], name: string) => {
     try {
@@ -138,12 +149,14 @@ export function useComposerAttachments({
         readAttachment(id).then((bytes) => extractText(kind, bytes)),
         EXTRACTION_TIMEOUT_MS,
       );
+      const key = keyOf(id);
       updateEverywhere((tray) => tray.map((item) => (item.id === id ? { ...item, status: "ready", text } : item)));
-      if (text.trim().length === 0) setProblem({ reason: "no_text", name });
+      if (text.trim().length === 0) setProblem({ reason: "no_text", name }, key);
     } catch {
+      const key = keyOf(id);
       updateEverywhere((tray) => tray.filter((item) => item.id !== id));
       void discardAttachment(id).catch(() => {});
-      setProblem({ reason: "read_failed", name });
+      setProblem({ reason: "read_failed", name }, key);
     }
   }, []);
 
@@ -311,10 +324,21 @@ export function useComposerAttachments({
     return taken;
   }, []);
 
-  const restore = useCallback((previous: PendingAttachment[], reason?: string) => {
-    commit(withTray(keyRef.current, previous));
-    if (reason) setProblem({ reason, name: "" });
+  const restore = useCallback((previous: PendingAttachment[], reason: string | undefined, key: number) => {
+    commit(withTray(key, [...(traysRef.current.get(key) ?? []), ...previous]));
+    if (reason) setProblem({ reason, name: "" }, key);
   }, []);
+
+  // The chat shell goes away (sign-out, account switch): every pending
+  // file is discarded in the core.
+  useEffect(
+    () => () => {
+      for (const tray of traysRef.current.values()) {
+        for (const file of tray) void discardAttachment(file.id).catch(() => {});
+      }
+    },
+    [],
+  );
 
   const discardFor = useCallback((key: number) => {
     const tray = traysRef.current.get(key) ?? [];
@@ -324,7 +348,7 @@ export function useComposerAttachments({
 
   return {
     items,
-    problem,
+    problem: notice && notice.key === conversationKey ? notice.problem : null,
     dragging,
     reading: items.some((item) => item.status === "reading"),
     pick,

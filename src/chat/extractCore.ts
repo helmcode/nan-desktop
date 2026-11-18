@@ -44,10 +44,15 @@ export async function docxText(bytes: Uint8Array): Promise<string> {
   return result.value;
 }
 
-export function sheetText(bytes: Uint8Array, max: number): string {
+export function sheetText(
+  bytes: Uint8Array,
+  max: number,
+  maxRows = MAX_SHEET_ROWS,
+  maxCols = MAX_SHEET_COLS,
+): string {
   const workbook = isBinaryWorkbook(bytes)
-    ? XLSX.read(bytes, { type: "array", sheetRows: MAX_SHEET_ROWS })
-    : XLSX.read(decodeText(bytes), { type: "string", sheetRows: MAX_SHEET_ROWS });
+    ? XLSX.read(bytes, { type: "array", sheetRows: maxRows })
+    : XLSX.read(decodeText(bytes), { type: "string", sheetRows: maxRows });
   const blocks: string[] = [];
   let length = 0;
   for (const name of workbook.SheetNames) {
@@ -56,8 +61,8 @@ export function sheetText(bytes: Uint8Array, max: number): string {
     const ref = sheet["!ref"];
     if (ref) {
       const range = XLSX.utils.decode_range(ref);
-      range.e.r = Math.min(range.e.r, range.s.r + MAX_SHEET_ROWS - 1);
-      range.e.c = Math.min(range.e.c, range.s.c + MAX_SHEET_COLS - 1);
+      range.e.r = Math.min(range.e.r, range.s.r + maxRows - 1);
+      range.e.c = Math.min(range.e.c, range.s.c + maxCols - 1);
       sheet["!ref"] = XLSX.utils.encode_range(range);
     }
     const csv = XLSX.utils.sheet_to_csv(sheet, { blankrows: false });

@@ -394,4 +394,73 @@ describe("composer attachments", () => {
     act(() => emit("tauri://drag-enter", { paths: ["/x/a.png"], position: { x: 1, y: 1 } }));
     await screen.findByText("Suelta los archivos aquí para adjuntarlos");
   });
+
+  it("a send refused from a brand-new chat keeps the files on the new conversation, not the blank chat", async () => {
+    let created = false;
+    resetTauri(
+      handlers({
+        conversation_list: () => (created ? [{ id: 11, title: "Nueva", updated_at: "", last_message: null }] : []),
+        messages_list: () => [],
+        conversation_create: () => {
+          created = true;
+          return 11;
+        },
+        chat_send: () => {
+          throw "attachments:total_too_large";
+        },
+      }),
+    );
+    renderApp();
+    await screen.findByRole("button", { name: "Adjuntar archivos" });
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("gato.png");
+    await waitFor(() => expect(screen.queryByText("Leyendo…")).toBeNull());
+    fireEvent.change(screen.getByRole("textbox", { name: "Mensaje" }), { target: { value: "mira" } });
+    fireEvent.click(screen.getByRole("button", { name: "Enviar" }));
+    await waitFor(() => expect(invokedWith("chat_send")).toHaveLength(1));
+    await screen.findByText("Estos archivos ocupan demasiado juntos. Quita alguno y vuelve a intentarlo.");
+    expect(screen.getByText("gato.png")).toBeTruthy();
+    expect(invokedWith("chat_send")[0]).toMatchObject({ conversationId: 11 });
+    // The blank chat has its own, empty tray.
+    fireEvent.click(screen.getByRole("button", { name: "Nueva conversación" }));
+    await waitFor(() => expect(screen.queryByText("gato.png")).toBeNull());
+  });
+
+  it("a late extraction notice stays with its own conversation", async () => {
+    let release: (bytes: ArrayBuffer) => void = () => {};
+    resetTauri(
+      handlers({
+        conversation_list: () => [
+          { id: 7, title: "Chat", updated_at: "", last_message: null },
+          { id: 9, title: "Otra charla", updated_at: "", last_message: null },
+        ],
+        messages_list: (args) =>
+          Number(args?.conversationId) === 9 ? [row(5, "user", "otra")] : [row(1, "user", "hola"), row(2, "assistant", "¿Qué tal?")],
+        attachment_read: () => new Promise<ArrayBuffer>((resolve) => (release = resolve)),
+      }),
+    );
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("notas.md");
+    fireEvent.click(screen.getByText("Otra charla"));
+    await screen.findByText("otra");
+    act(() => release(new Uint8Array([32]).buffer));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.queryByText(/No se encontró texto/)).toBeNull();
+    fireEvent.click(screen.getByText("Chat"));
+    await screen.findByText("No se encontró texto en «notas.md». Si es un documento escaneado, adjunta una captura como imagen.");
+  });
+
+  it("signing out discards every pending file in the core", async () => {
+    resetTauri(handlers());
+    const view = renderApp();
+    await screen.findByText("¿Qué tal?");
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("gato.png");
+    view.unmount();
+    await waitFor(() =>
+      expect(invokedWith("attachment_discard")).toEqual(expect.arrayContaining([{ id: "img-1" }, { id: "doc-1" }])),
+    );
+  });
 });

@@ -107,16 +107,18 @@ describe("attachment helpers", () => {
   });
 
   it("reads only the first rows and columns of a huge sheet", async () => {
-    const { MAX_SHEET_ROWS, MAX_SHEET_COLS } = await import("./extractCore");
-    const rows = Array.from({ length: MAX_SHEET_ROWS + 50 }, (_, r) =>
-      Array.from({ length: MAX_SHEET_COLS + 5 }, (_, c) => (c === 0 ? `r${r}` : 1)),
-    );
+    // Small caps on a small fixture: the same code path, deterministic and
+    // fast (the real caps are pinned below).
+    const { MAX_SHEET_ROWS, MAX_SHEET_COLS, sheetText } = await import("./extractCore");
+    expect([MAX_SHEET_ROWS, MAX_SHEET_COLS]).toEqual([5_000, 100]);
+    const rows = Array.from({ length: 12 }, (_, r) => Array.from({ length: 6 }, (_, c) => (c === 0 ? `r${r}` : c)));
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(rows), "Big");
     const bytes = new Uint8Array(XLSX.write(book, { type: "array", bookType: "xlsx" }) as ArrayBuffer);
-    const text = await extractText("sheet", bytes, 10_000_000);
-    const lines = text.split("\n");
-    expect(lines).toHaveLength(MAX_SHEET_ROWS);
-    expect(lines[0].split(",")).toHaveLength(MAX_SHEET_COLS);
+    const lines = sheetText(bytes, 1_000_000, 5, 3).split("\n");
+    expect(lines).toEqual(["r0,1,2", "r1,1,2", "r2,1,2", "r3,1,2", "r4,1,2"]);
+    // The same caps apply to CSV.
+    const csv = new TextEncoder().encode(rows.map((r) => r.join(",")).join("\n"));
+    expect(sheetText(csv, 1_000_000, 2, 2).split("\n")).toEqual(["r0,1", "r1,1"]);
   });
 });
