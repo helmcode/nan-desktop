@@ -30,7 +30,7 @@ developer surface in the UI — the old T1 spike diagnostics and the tools
 | --- | --- |
 | Welcome | Helmcode mark + two account cards (Comunidad NaN / Helmcode para empresas). Sign-in is confirmed in the browser. |
 | Authorizing | The device code in large Roboto Mono, "Esperando tu confirmación…", Cancel. Denied/expired/error states each explain what happened and offer "Volver a intentarlo". |
-| Chat | Sidebar (mark, "Nueva conversación", history), header (model picker + gear), messages with citation chips, composer with the **workspace chip**, image mode, dictation and send. |
+| Chat | Sidebar (mark, "Nueva conversación", history), header (model picker + gear), messages with citation chips, composer with the **workspace chip**, image mode, dictation and send (typing stays possible while a reply runs: messages are queued, see "Composer queue"). |
 | Settings (gear) | **Carpetas de trabajo**, **Memoria**, **Voz**, **Acerca de** (account, version, sign out). Esc or "Volver al chat" returns. |
 
 **Workspace chip (composer).** The user never has to wonder where the
@@ -179,6 +179,12 @@ platform's exact 400; a non-streaming image request gets a one-line
 description). `NAN_KEY=<member key> node test/vision-check.mjs --real`
 sends the same tiny image to every model in `chat-models.json` on
 `api.nan.builders` and checks each one behaves as the file says.
+
+**Queue.** Attachments stay usable while a reply runs. Queuing a message
+(`chat/queue.ts`, `enqueue(..., attachments)`) takes the tray's files with
+it; the flush passes them to `send()`, Edit puts them back in the tray and
+Remove (or deleting the conversation) discards them in the core. A message
+may be only files.
 
 **Continue.** A "Continuar" turn whose last reply came from the vision
 fallback keeps going on the fallback (`attachments::route_continuation`),
@@ -460,9 +466,60 @@ active) and completes every `in_progress` row of the conversation — a
 deliberate stop is not a failure: the text that arrived stays persisted,
 with no error event and no interrupted marker. The core emits
 `chat://stopped {conversation_id}` when a stream was actually stopped
-(stopping an idle conversation is a no-op). The composer swaps Send for
-"Stop generating" while streaming; the stopped transcript reloads exactly
+(stopping an idle conversation is a no-op). While streaming the composer
+shows Stop next to a queueing send button (see "Composer queue"); the stopped transcript reloads exactly
 like a finished one.
+
+### Composer queue (type while a reply runs)
+
+The composer stays enabled while a reply streams (`src/chat/queue.ts`,
+`src/chat/QueuedMessages.tsx`, wired in `App.tsx`). Sending then adds the
+message to a queue of **that conversation** instead of sending it; the
+queued messages are listed just above the composer ("Se enviará cuando
+termine la respuesta."), each with **Editar** (back into the composer,
+ahead of anything typed since; sent again it goes to the end of the queue,
+as a new message) and **Quitar**; a truncated item shows its full text on
+hover. A visually hidden `role=status` region stays mounted (empty when
+nothing waits) so the first queued message is announced. While a reply runs the
+composer shows both Stop and a send button labelled "Enviar cuando termine".
+
+Semantics:
+
+- **Flush.** When the running turn ends with `completed`, `tool_cap`,
+  `stream_cut`, `length` or `interrupted` (other than rate limited), the queue is
+  sent in order, **one message per turn**: the next waits until the reply to
+  the previous one ends. Only the conversation on screen flushes (same rule
+  as the automatic continuation); a conversation whose turn ended while
+  another one was on screen sends its queue when the user opens it again.
+- **Stop holds** (`held: "stopped"`). Pressing Stop holds the queue before
+  `chat_stop` is invoked, so a turn that ends on its own in the meantime
+  (`chat://done` without `chat://stopped`) does not flush it; `user_stop`
+  holds it too. It shows "Has detenido la respuesta. Tus mensajes esperan
+  aquí." with **Enviar ahora** (focus returns to the composer). Sending
+  another message releases a held queue (appended, order kept).
+- **Failure holds** (`held: "failed"`): every `chat://error` kind (the error
+  stays on screen next to the queue) and an `interrupted` turn whose request
+  was rate limited (the busy notice stays). Copy: "No se ha podido enviar.
+  Tu mensaje espera aquí." with **Enviar ahora**. While the session is
+  expired, **Enviar ahora** is hidden and nothing flushes (the banner asks
+  to sign in again, which goes through sign-out and drops the queue).
+- **Failed send.** A queued message whose `chat_send` fails goes back to the
+  front of the queue, held `"failed"`, so a failing send never loops.
+- **Deleted conversation.** Its queue is dropped.
+- **Queue beats the automatic continuation.** If messages are queued when a
+  turn ends `stream_cut` / `length`, no automatic continuation is scheduled,
+  a pending one is cancelled by the flush, and the Continue notice is not
+  shown for that turn: the user already said what comes next.
+- **Scope.** In memory, per conversation, for the app session: it survives
+  switching conversations, not an app restart, and is dropped on sign-out
+  or realm switch (the chat shell is keyed by realm and unmounts).
+- **Other modes.** Only normal chat messages queue. Image mode, image edit,
+  the skills picker (a leading `/` is plain text while busy) and dictation
+  stay unavailable while a reply runs, exactly as before (the queueing send
+button is disabled in image mode); a dictation that
+  is already recording can still be stopped. While an image is being
+  generated the composer stays disabled. Telemetry is unchanged (no new
+  event).
 
 ### Interrupted marker (crash leftovers)
 

@@ -9,7 +9,7 @@
 // history replays exactly what the model saw. Nothing leaves the computer
 // except, later, inside the chat request itself.
 
-import type { AttachmentKind } from "../types";
+import type { AttachmentKind, MessageAttachment } from "../types";
 
 /// Most files per message (mirrors `MAX_FILES_PER_MESSAGE` in the core).
 export const MAX_ATTACHMENTS = 10;
@@ -48,6 +48,29 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
         reject(err);
       },
     );
+  });
+}
+
+/// The `chat_send` payload of composer chips: staged ids, plus the
+/// extracted text of documents.
+export function attachmentPayload(items: readonly PendingAttachment[]): { id: string; text?: string }[] {
+  return items.map((item) => (item.kind === "image" ? { id: item.id } : { id: item.id, text: item.text ?? "" }));
+}
+
+/// Composer chips as message attachments (the just-sent bubble). Mirrors
+/// the core's caps (per file, then per message) so the bubble already says
+/// when only the beginning of a document is used.
+export function pendingAsMessageAttachments(items: readonly PendingAttachment[]): MessageAttachment[] {
+  let budget = MAX_DOC_CHARS_PER_MESSAGE;
+  return items.map((item) => {
+    let truncated = false;
+    if (item.kind !== "image") {
+      const length = (item.text ?? "").trimEnd().length;
+      const limit = Math.min(MAX_DOC_CHARS, budget);
+      truncated = length > limit;
+      budget -= Math.min(length, limit);
+    }
+    return { id: item.id, kind: item.kind, name: item.name, size: item.size, path: item.previewPath, truncated };
   });
 }
 

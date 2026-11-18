@@ -20,9 +20,9 @@ import type { MessageAttachment } from "../types";
 import {
   EXTRACTION_TIMEOUT_MS,
   MAX_ATTACHMENTS,
-  MAX_DOC_CHARS,
-  MAX_DOC_CHARS_PER_MESSAGE,
+  attachmentPayload,
   clipboardImages,
+  pendingAsMessageAttachments,
   extractText,
   withTimeout,
   fileToBase64,
@@ -60,6 +60,7 @@ export interface ComposerAttachments {
   /// there, so a refused send can `restore` it.
   takeAll: () => PendingAttachment[];
   restore: (items: PendingAttachment[], reason?: string) => void;
+  append: (items: readonly PendingAttachment[]) => void;
   dismissProblem: () => void;
 }
 
@@ -212,33 +213,18 @@ export function useComposerAttachments({
     void discardAttachment(id).catch(() => {});
   }, []);
 
-  const payload = useCallback(
-    (): AttachmentInput[] =>
-      itemsRef.current.map((item) => (item.kind === "image" ? { id: item.id } : { id: item.id, text: item.text ?? "" })),
+  const payload = useCallback((): AttachmentInput[] => attachmentPayload(itemsRef.current), []);
+
+  const asMessageAttachments = useCallback(
+    (): MessageAttachment[] => pendingAsMessageAttachments(itemsRef.current),
     [],
   );
 
-  // Mirrors the core's caps (per file, then per message) so the just-sent
-  // bubble already says when only the beginning of a document is used.
-  const asMessageAttachments = useCallback((): MessageAttachment[] => {
-    let budget = MAX_DOC_CHARS_PER_MESSAGE;
-    return itemsRef.current.map((item) => {
-      let truncated = false;
-      if (item.kind !== "image") {
-        const length = (item.text ?? "").trimEnd().length;
-        const limit = Math.min(MAX_DOC_CHARS, budget);
-        truncated = length > limit;
-        budget -= Math.min(length, limit);
-      }
-      return {
-        id: item.id,
-        kind: item.kind,
-        name: item.name,
-        size: item.size,
-        path: item.previewPath,
-        truncated,
-      };
-    });
+  /// Put files back (Edit on a queued message), after any already here.
+  const append = useCallback((more: readonly PendingAttachment[]) => {
+    if (more.length === 0) return;
+    itemsRef.current = [...itemsRef.current, ...more];
+    setItems(itemsRef.current);
   }, []);
 
   const takeAll = useCallback((): PendingAttachment[] => {
@@ -267,6 +253,7 @@ export function useComposerAttachments({
     asMessageAttachments,
     takeAll,
     restore,
+    append,
     dismissProblem: useCallback(() => setProblem(null), []),
   };
 }

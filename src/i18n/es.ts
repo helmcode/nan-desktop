@@ -152,6 +152,23 @@ export const es: Strings = {
       length: "La respuesta era muy larga. Sigo en un momento…",
     },
     cancelAutoRetry: "Cancelar",
+    queueSend: "Enviar cuando termine",
+    queueLabel: "Mensajes en cola",
+    queueWaiting: (count: number): string =>
+      count === 1
+        ? "Se enviará cuando termine la respuesta."
+        : "Se enviarán en orden cuando termine la respuesta.",
+    queueHeld: (count: number): string =>
+      count === 1
+        ? "Has detenido la respuesta. Tu mensaje espera aquí."
+        : "Has detenido la respuesta. Tus mensajes esperan aquí.",
+    queueFailed: (count: number): string =>
+      count === 1
+        ? "No se ha podido enviar. Tu mensaje espera aquí."
+        : "No se ha podido enviar. Tus mensajes esperan aquí.",
+    queueSendNow: "Enviar ahora",
+    queueEdit: "Editar",
+    queueRemove: "Quitar",
     thinking: "Pensando…",
     searching: "Buscando en internet…",
     working: "Trabajando…",
