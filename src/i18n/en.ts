@@ -680,6 +680,7 @@ export const en = {
     reading: "Reading…",
     dropHint: "Drop files here to attach them",
     pastedImage: "Pasted image",
+    dismissProblem: "Close notice",
     truncated: "Only the beginning was used",
     kinds: {
       image: "Image",
@@ -697,9 +698,11 @@ export const en = {
       unsupported: (name: string) =>
         `"${name}" cannot be read. Try an image, a PDF, a Word document, a spreadsheet or a text file.`,
       unreadable: (name: string) => `"${name}" could not be opened. It may be damaged.`,
-      not_allowed: (name: string) => `"${name}" cannot be attached, to keep your computer safe.`,
+      not_allowed: (name: string) =>
+        `"${name}" cannot be attached. Try an image, a PDF, a Word document, a spreadsheet or a text file.`,
       read_failed: (name: string) => `The text of "${name}" could not be read.`,
-      no_text: (name: string) => `No text was found in "${name}". It will be sent without it.`,
+      no_text: (name: string) =>
+        `No text was found in "${name}". If it is a scanned document, attach a screenshot as an image.`,
       generic: "The file could not be attached. Try again.",
     },
   },

@@ -782,8 +782,27 @@ pub fn commit(
 // What the model sees
 // ---------------------------------------------------------------------------
 
-/// The text stand-in of an image: `[Image: <name> (<description>)]`.
+/// The text stand-in of an image for the MODEL. Every image reaching this
+/// point was already sent as an image earlier (to a vision model) and only
+/// stands in now; the wording says so, so a text-only model does not
+/// answer "I can't see images" about something the conversation already
+/// covered.
 pub fn image_stand_in(record: &AttachmentRecord) -> String {
+    match record.description.as_deref().filter(|d| !d.is_empty()) {
+        Some(description) => format!(
+            "[Image: {}. {STAND_IN_VIEWED}; description: {description}]",
+            record.name
+        ),
+        None => format!("[Image: {}. {STAND_IN_VIEWED}]", record.name),
+    }
+}
+
+/// The stand-in's note that the image was seen in an earlier turn.
+pub const STAND_IN_VIEWED: &str = "Already viewed earlier in this conversation";
+
+/// The account-memory placeholder of an image: `[Image: <name>
+/// (<description>)]` (shown as text on the user's other devices).
+pub fn sync_placeholder(record: &AttachmentRecord) -> String {
     match record.description.as_deref().filter(|d| !d.is_empty()) {
         Some(description) => format!("[Image: {} ({})]", record.name, description),
         None => format!("[Image: {}]", record.name),
@@ -923,7 +942,7 @@ pub fn sync_content(text: &str, records: &[AttachmentRecord]) -> String {
         .iter()
         .map(|record| {
             if record.kind.is_image() {
-                image_stand_in(record)
+                sync_placeholder(record)
             } else {
                 format!("[Attached file: {}]", record.name)
             }
@@ -998,6 +1017,90 @@ pub fn parse_description(body: &str) -> Option<String> {
         .replace(['[', ']'], "");
     let (text, _) = cap_text(collapsed.trim(), MAX_DESCRIPTION_CHARS);
     (!text.is_empty()).then_some(text)
+}
+
+// ---------------------------------------------------------------------------
+// Descriptions in flight
+// ---------------------------------------------------------------------------
+
+/// Longest a text-only turn waits for the description of an image sent in
+/// an earlier turn that is still being described.
+pub const DESCRIPTION_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Poll interval of that wait.
+pub const DESCRIPTION_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Attachment ids whose description side request is running.
+static DESCRIBING: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Whether the description of attachment `id` is still being requested.
+pub fn is_describing(id: &str) -> bool {
+    DESCRIBING.lock().is_ok_and(|set| set.contains(id))
+}
+
+/// Marks attachment ids as being described until each is `finish`ed or the
+/// guard is dropped (an early return or an aborted task never leaves an id
+/// marked forever).
+pub struct DescribingGuard(Vec<String>);
+
+impl DescribingGuard {
+    /// Mark `ids` synchronously (before the side request is spawned, so the
+    /// very next turn already sees them as pending).
+    pub fn mark(ids: Vec<String>) -> Self {
+        if let Ok(mut set) = DESCRIBING.lock() {
+            set.extend(ids.iter().cloned());
+        }
+        Self(ids)
+    }
+
+    /// The description of `id` is stored (or failed): stop waiting for it.
+    pub fn finish(&mut self, id: &str) {
+        if let Ok(mut set) = DESCRIBING.lock() {
+            set.remove(id);
+        }
+        self.0.retain(|known| known != id);
+    }
+}
+
+impl Drop for DescribingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = DESCRIBING.lock() {
+            for id in &self.0 {
+                set.remove(id);
+            }
+        }
+    }
+}
+
+/// Whether a user row of `rows` has an image without a description whose
+/// description is still pending.
+pub fn pending_descriptions(
+    rows: &[crate::chat_store::ChatMessageRow],
+    is_pending: impl Fn(&str) -> bool,
+) -> bool {
+    rows.iter()
+        .filter(|row| row.role == "user")
+        .flat_map(|row| row.attachments.iter())
+        .any(|r| r.kind.is_image() && r.description.is_none() && is_pending(&r.id))
+}
+
+/// Wait until `done()` or `limit` elapses, polling every `poll`. Returns
+/// whether `done()` became true.
+pub async fn wait_until(
+    limit: std::time::Duration,
+    poll: std::time::Duration,
+    mut done: impl FnMut() -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if done() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(poll).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1532,7 +1635,9 @@ mod tests {
         let text = text_only.as_str().unwrap();
         assert!(text.starts_with("Summarize\n\n<attached_file name=\"report.pdf\">\nQ3 revenue\n"));
         assert!(text.contains(TRUNCATED_NOTE));
-        assert!(text.ends_with("[Image: cat.jpg (A cat on a sofa.)]"));
+        assert!(text.ends_with(
+            "[Image: cat.jpg. Already viewed earlier in this conversation; description: A cat on a sofa.]"
+        ));
 
         let vision = user_content("Summarize", &records, &mut |_| {
             Some("data:image/jpeg;base64,AA".into())
@@ -1555,9 +1660,17 @@ mod tests {
     #[test]
     fn stand_ins_carry_the_description_when_there_is_one() {
         let mut img = record(AttachmentKind::Image, "a.png");
-        assert_eq!(image_stand_in(&img), "[Image: a.png]");
+        assert_eq!(
+            image_stand_in(&img),
+            "[Image: a.png. Already viewed earlier in this conversation]"
+        );
+        assert_eq!(sync_placeholder(&img), "[Image: a.png]");
         img.description = Some("Red square.".into());
-        assert_eq!(image_stand_in(&img), "[Image: a.png (Red square.)]");
+        assert_eq!(
+            image_stand_in(&img),
+            "[Image: a.png. Already viewed earlier in this conversation; description: Red square.]"
+        );
+        assert_eq!(sync_placeholder(&img), "[Image: a.png (Red square.)]");
     }
 
     #[test]
@@ -1718,5 +1831,66 @@ mod tests {
             crate::images::sweep_orphan_images(&app, crate::images::ORPHAN_MIN_AGE, later);
         assert_eq!(deleted, 1);
         assert!(sent.path.exists() && !unsent.path.exists());
+    }
+
+    #[test]
+    fn a_turn_waits_only_for_descriptions_still_in_flight() {
+        let mut rec = record(AttachmentKind::Image, "a.png");
+        rec.id = "pending-desc-test".into();
+        let row = crate::chat_store::ChatMessageRow {
+            id: 1,
+            conversation_id: 1,
+            role: "user".into(),
+            content: String::new(),
+            model: None,
+            created_at: String::new(),
+            partial: false,
+            media_path: None,
+            sources: vec![],
+            artifacts: vec![],
+            parent_message_id: None,
+            end_reason: None,
+            tool_trace: None,
+            attachments: vec![rec.clone()],
+        };
+        let rows = vec![row.clone()];
+        assert!(!pending_descriptions(&rows, is_describing));
+        let mut guard = DescribingGuard::mark(vec![rec.id.clone()]);
+        assert!(pending_descriptions(&rows, is_describing));
+        // A described image never waits.
+        let mut described = row.clone();
+        described.attachments[0].description = Some("x".into());
+        assert!(!pending_descriptions(&[described], is_describing));
+        guard.finish(&rec.id);
+        assert!(!pending_descriptions(&rows, is_describing));
+        // Dropping the guard clears whatever is left.
+        {
+            let _other = DescribingGuard::mark(vec!["dropped-desc-test".into()]);
+            assert!(is_describing("dropped-desc-test"));
+        }
+        assert!(!is_describing("dropped-desc-test"));
+    }
+
+    #[test]
+    fn the_wait_is_bounded_and_returns_early_when_done() {
+        let ms = std::time::Duration::from_millis;
+        let started = std::time::Instant::now();
+        assert!(!tauri::async_runtime::block_on(wait_until(
+            ms(120),
+            ms(20),
+            || false
+        )));
+        assert!(started.elapsed() >= ms(120) && started.elapsed() < ms(1000));
+        let mut calls = 0;
+        let started = std::time::Instant::now();
+        assert!(tauri::async_runtime::block_on(wait_until(
+            ms(5000),
+            ms(10),
+            || {
+                calls += 1;
+                calls >= 3
+            }
+        )));
+        assert!(started.elapsed() < ms(1000));
     }
 }

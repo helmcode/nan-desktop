@@ -29,6 +29,26 @@ export interface PendingAttachment {
   text?: string;
 }
 
+/// Longest a document's text extraction may take before it is given up.
+export const EXTRACTION_TIMEOUT_MS = 30_000;
+
+/// `promise`, or a rejection with "timeout" after `ms`.
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 /// Human size, e.g. "820 KB", "3,4 MB" (locale decimal separator).
 export function formatSize(bytes: number, locale: string): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -140,8 +160,12 @@ export async function extractText(kind: AttachmentKind, bytes: Uint8Array, max =
 }
 
 /// Image files on the clipboard (pasting a screenshot into the composer).
+/// Only when the clipboard carries no meaningful text: Office and Excel put
+/// both the text and a picture of it, and the text is what the user means.
 export function clipboardImages(data: DataTransfer | null): File[] {
   if (!data) return [];
+  const text = typeof data.getData === "function" ? data.getData("text/plain") : "";
+  if (text.trim().length > 0) return [];
   return Array.from(data.files ?? []).filter((file) => file.type.startsWith("image/"));
 }
 

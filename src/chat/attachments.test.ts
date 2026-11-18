@@ -25,6 +25,7 @@ import * as XLSX from "xlsx";
 import {
   MAX_DOC_CHARS,
   capForCore,
+  withTimeout,
   clipboardImages,
   extractText,
   fileToBase64,
@@ -79,5 +80,18 @@ describe("attachment helpers", () => {
     const named = new File([new Uint8Array([1])], "captura.png", { type: "image/png" });
     expect(pastedName(named, "x")).toBe("captura.png");
     expect(await fileToBase64(png)).toBe(btoa(String.fromCharCode(137, 80, 78, 71)));
+  });
+
+  it("gives up on an extraction that takes too long", async () => {
+    vi.useFakeTimers();
+    try {
+      const never = new Promise<string>(() => {});
+      const raced = withTimeout(never, 30_000);
+      vi.advanceTimersByTime(30_001);
+      await expect(raced).rejects.toThrow("timeout");
+      await expect(withTimeout(Promise.resolve("ok"), 30_000)).resolves.toBe("ok");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

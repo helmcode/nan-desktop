@@ -465,7 +465,7 @@ fn parse_trace(raw: &str) -> Option<Vec<serde_json::Value>> {
 /// blocks. Its images are sent as IMAGE parts only when `image_url` is
 /// given (the request goes to a model that accepts images) and only the
 /// [`crate::attachments::MAX_IMAGES_PER_REQUEST`] newest ones; every other
-/// image becomes its text stand-in (`[Image: <name> (<description>)]`).
+/// image becomes its text stand-in ([`crate::attachments::image_stand_in`]).
 /// `None` = a text-only model: no image part at all.
 pub fn history_messages(
     rows: &[ChatMessageRow],
@@ -1037,9 +1037,12 @@ mod tests {
         assert!(!crate::attachments::has_media_parts(&history));
         assert_eq!(
             history[0]["content"],
-            "what is this?\n\n[Image: cat.jpg (A cat.)]"
+            "what is this?\n\n[Image: cat.jpg. Already viewed earlier in this conversation; description: A cat.]"
         );
-        assert_eq!(history[2]["content"], "[Image: dog.jpg]");
+        assert_eq!(
+            history[2]["content"],
+            "[Image: dog.jpg. Already viewed earlier in this conversation]"
+        );
     }
 
     #[test]
@@ -1061,7 +1064,10 @@ mod tests {
         let history = history_messages(&rows, true, Some(&load));
         // The older turn's images are over the cap: stand-ins.
         let first = history[0]["content"].as_str().expect("text only");
-        assert!(first.contains("[Image: old0.jpg]") && first.contains("[Image: old2.jpg]"));
+        assert!(
+            first.contains("[Image: old0.jpg. Already")
+                && first.contains("[Image: old2.jpg. Already")
+        );
         let parts = history[2]["content"].as_array().expect("parts");
         assert_eq!(parts.len(), cap + 1);
         assert_eq!(parts[1]["image_url"]["url"], "data:n0");

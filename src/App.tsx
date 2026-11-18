@@ -2796,7 +2796,12 @@ function ChatShell({
                     {t.attachments.dropHint}
                   </p>
                 )}
-                <AttachmentTray items={attach.items} onRemove={attach.remove} disabled={composerBusy} />
+                <AttachmentTray
+                  items={attach.items}
+                  onRemove={attach.remove}
+                  onFocusComposer={() => composerRef.current?.focus()}
+                  disabled={composerBusy}
+                />
                 <textarea
                   ref={composerRef}
                   className="composer-input"
@@ -2937,7 +2942,8 @@ function ChatShell({
                   <button
                     type="button"
                     className="attach-problem-x"
-                    aria-label={t.app.cancel}
+                    aria-label={t.attachments.dismissProblem}
+                    title={t.attachments.dismissProblem}
                     onClick={attach.dismissProblem}
                   >
                     <IconX size={12} />

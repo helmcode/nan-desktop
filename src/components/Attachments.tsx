@@ -4,6 +4,7 @@
 // copy; documents are only named (their text never reaches the UI).
 
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import type { Strings } from "../i18n/en";
 import type { AttachProblem } from "../chat/useComposerAttachments";
@@ -20,20 +21,42 @@ function KindIcon({ kind }: { kind: AttachmentKind }) {
 export function AttachmentTray({
   items,
   onRemove,
+  onFocusComposer,
   disabled,
 }: {
   items: PendingAttachment[];
   onRemove: (id: string) => void;
+  /// Focus goes back to the text box when the last chip is removed.
+  onFocusComposer: () => void;
   disabled?: boolean;
 }) {
   const { t, locale } = useI18n();
+  const removeButtons = useRef(new Map<string, HTMLButtonElement>());
+  // Where focus goes once a removal has rendered: the next chip's remove
+  // button, else the previous one, else the composer.
+  const [focusAfter, setFocusAfter] = useState<{ target: string | null } | null>(null);
+
+  useEffect(() => {
+    if (!focusAfter) return;
+    const button = focusAfter.target ? removeButtons.current.get(focusAfter.target) : undefined;
+    if (button) button.focus();
+    else onFocusComposer();
+    setFocusAfter(null);
+  }, [focusAfter, items, onFocusComposer]);
+
+  const remove = (index: number): void => {
+    const neighbour = items[index + 1] ?? items[index - 1] ?? null;
+    setFocusAfter({ target: neighbour?.id ?? null });
+    onRemove(items[index].id);
+  };
+
   if (items.length === 0) return null;
   return (
-    <ul className="attach-tray" aria-label={t.attachments.trayLabel}>
-      {items.map((item) => {
+    <ul className="attach-tray" aria-label={t.attachments.trayLabel} aria-live="polite">
+      {items.map((item, index) => {
         const reading = item.status === "reading";
         return (
-          <li key={item.id} className={`attach-chip${reading ? " reading" : ""}`}>
+          <li key={item.id} className={`attach-chip${reading ? " reading" : ""}`} aria-busy={reading}>
             {item.kind === "image" && item.previewPath ? (
               <img className="attach-thumb" src={convertFileSrc(item.previewPath)} alt="" />
             ) : (
@@ -54,7 +77,11 @@ export function AttachmentTray({
               className="attach-remove"
               aria-label={t.attachments.remove(item.name)}
               title={t.attachments.remove(item.name)}
-              onClick={() => onRemove(item.id)}
+              ref={(node) => {
+                if (node) removeButtons.current.set(item.id, node);
+                else removeButtons.current.delete(item.id);
+              }}
+              onClick={() => remove(index)}
               disabled={disabled}
             >
               <IconX size={13} />

@@ -17,9 +17,11 @@ import {
 } from "../core";
 import type { MessageAttachment } from "../types";
 import {
+  EXTRACTION_TIMEOUT_MS,
   MAX_ATTACHMENTS,
   clipboardImages,
   extractText,
+  withTimeout,
   fileToBase64,
   pastedName,
   type PendingAttachment,
@@ -82,7 +84,10 @@ export function useComposerAttachments({
 
   const readDocument = useCallback(async (id: string, kind: PendingAttachment["kind"], name: string) => {
     try {
-      const text = await extractText(kind, await readAttachment(id));
+      const text = await withTimeout(
+        readAttachment(id).then((bytes) => extractText(kind, bytes)),
+        EXTRACTION_TIMEOUT_MS,
+      );
       if (!itemsRef.current.some((item) => item.id === id)) return;
       setItems((prev) => prev.map((item) => (item.id === id ? { ...item, status: "ready", text } : item)));
       if (text.trim().length === 0) setProblem({ reason: "no_text", name });

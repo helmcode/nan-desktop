@@ -156,8 +156,13 @@ the model saw, so history replays it verbatim.
 **Vision.** `chat-models.json` lists `vision` (models that accept image
 parts) and `vision_fallback`. `turn::history_messages` sends the newest
 `MAX_IMAGES_PER_REQUEST` (10) images as `image_url` data URLs to a vision
-model and every other image as its stand-in; a text-only model gets
-stand-ins only. `chat::request_body` strips any remaining non-text part
+model and every other image as its stand-in
+(`[Image: <name>. Already viewed earlier in this conversation;
+description: ...]`, worded so a text-only model does not claim it cannot
+see an image the conversation already covered); a text-only model gets
+stand-ins only. A text-only turn whose history has an image whose
+description is still being requested waits for it up to 5 s
+(`attachments::DescribingGuard`, `pending_descriptions`, `wait_until`). `chat::request_body` strips any remaining non-text part
 for non-vision models (tool-trace replay, retries, future tools), so the
 platform's 400 "text-only model" cannot happen. The selected model in the
 picker never changes; the reply row stores the model that actually

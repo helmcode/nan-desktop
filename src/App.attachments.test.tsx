@@ -133,7 +133,7 @@ describe("composer attachments", () => {
     await screen.findByText("foto.jpg");
     expect(screen.queryByText("Suelta los archivos aquí para adjuntarlos")).toBeNull();
     expect(screen.getByRole("alert").textContent).toContain(
-      "No puedo leer «programa.exe». Prueba con una imagen, un PDF, un Word, una hoja de cálculo o un archivo de texto.",
+      "No se puede leer «programa.exe». Prueba con una imagen, un PDF, un Word, una hoja de cálculo o un archivo de texto.",
     );
   });
 
@@ -197,7 +197,7 @@ describe("composer attachments", () => {
     fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
     await screen.findByText("f9.png");
     expect(screen.queryByText("f10.png")).toBeNull();
-    expect(screen.getByText("Puedes adjuntar hasta 10 archivos por mensaje.")).toBeTruthy();
+    expect(screen.getByText("Se pueden adjuntar hasta 10 archivos por mensaje.")).toBeTruthy();
     await waitFor(() => expect(invokedWith("attachment_discard")).toEqual([{ id: "f10" }, { id: "f11" }]));
   });
   it("a pasted screenshot is staged as an image; a plain-text paste is left alone", async () => {
@@ -223,5 +223,76 @@ describe("composer attachments", () => {
     ]);
     fireEvent.paste(box, { clipboardData: { files: [] } });
     expect(invokedWith("attachments_stage_bytes")).toHaveLength(1);
+  });
+  it("a clipboard with text and an image (Office, Excel) pastes the text and stages nothing", async () => {
+    resetTauri(handlers({ attachments_stage_bytes: () => ({}) }));
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    const box = screen.getByRole("textbox", { name: "Mensaje" });
+    const png = new File([new Uint8Array([137, 80, 78, 71])], "image.png", { type: "image/png" });
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.assign(event, {
+      clipboardData: { files: [png], getData: (type: string) => (type === "text/plain" ? "A1\tB1\n" : "") },
+    });
+    box.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(invokedWith("attachments_stage_bytes")).toHaveLength(0);
+  });
+
+  it("removing a chip moves focus to the next chip, then the previous one, then the composer", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("gato.png");
+    fireEvent.click(screen.getByRole("button", { name: "Quitar gato.png" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Quitar notas.md" })));
+    fireEvent.click(screen.getByRole("button", { name: "Quitar notas.md" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Mensaje" })));
+  });
+
+  it("removing the last chip of several focuses the previous chip", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("notas.md");
+    fireEvent.click(screen.getByRole("button", { name: "Quitar notas.md" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Quitar gato.png" })));
+  });
+
+  it("the tray announces changes politely, marks reading chips busy, and the notice closes with its own label", async () => {
+    let release: (bytes: ArrayBuffer) => void = () => {};
+    resetTauri(
+      handlers({
+        attachment_read: () => new Promise<ArrayBuffer>((resolve) => (release = resolve)),
+        attachments_pick: () => ({ ...PICKED, rejected: [{ name: "x.key", reason: "not_allowed" }] }),
+      }),
+    );
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    const tray = await screen.findByRole("list", { name: "Archivos adjuntos a este mensaje" });
+    expect(tray.getAttribute("aria-live")).toBe("polite");
+    const reading = screen.getByText("notas.md").closest("li");
+    expect(reading?.getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByRole("alert").textContent).toContain(
+      "«x.key» no se puede adjuntar. Prueba con una imagen, un PDF, un Word, una hoja de cálculo o un archivo de texto.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cerrar aviso" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    act(() => release(new TextEncoder().encode("hola").buffer));
+    await waitFor(() => expect(screen.getByText("notas.md").closest("li")?.getAttribute("aria-busy")).toBe("false"));
+  });
+
+  it("a scanned PDF without text suggests attaching it as an image", async () => {
+    resetTauri(handlers({ attachment_read: () => new Uint8Array([32, 32]).buffer }));
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText(
+      "No se encontró texto en «notas.md». Si es un documento escaneado, adjunta una captura como imagen.",
+    );
   });
 });

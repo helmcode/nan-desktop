@@ -264,9 +264,10 @@ Files attached to a message (`src-tauri/src/attachments.rs`):
   when the model accepts images (`src-tauri/chat-models.json`, `vision`);
   every request body is checked right before it is sent and a model that
   does not accept images never receives an image part. For text-only
-  models an image becomes `[Image: <name> (<description>)]`; the short
-  description comes from one small request to the vision model when the
-  image is sent, using the same inference key as the chat.
+  models an image becomes `[Image: <name>. Already viewed earlier in this
+  conversation; description: <description>]`; the short description comes
+  from one small request to the vision model when the image is sent, using
+  the same inference key as the chat.
 - **Documents** are copied to a private staging folder (outside the
   folder the window can load files from), read back once by the window to
   extract their text locally (pdf.js, mammoth, SheetJS) and deleted when

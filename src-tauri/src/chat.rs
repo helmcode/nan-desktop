@@ -1167,7 +1167,16 @@ pub fn chat_send(
     }
     let model = routed;
     if has_images {
+        // Marked now, so the next turn already knows to wait for them.
+        let describing = crate::attachments::DescribingGuard::mark(
+            records
+                .iter()
+                .filter(|r| r.kind.is_image())
+                .map(|r| r.id.clone())
+                .collect(),
+        );
         tauri::async_runtime::spawn(describe_images(
+            describing,
             dir.clone(),
             app_data,
             conversation.profile_id.clone(),
@@ -1299,10 +1308,25 @@ async fn run_chat_stream(
     // back, the model would imitate it (sanitized in `history_messages`).
     // The most recent turns replay their tool exchange (device-local); the
     // plain history is the fallback for a server that rejects it.
-    let rows = match chat_store::list_messages(&conn, conversation_id) {
+    let mut rows = match chat_store::list_messages(&conn, conversation_id) {
         Ok(rows) => rows,
         Err(_) => return fail_early(tracker, ErrorKind::Protocol),
     };
+    // A text-only model sees earlier images as their description: give a
+    // description still being written a moment (bounded) to arrive.
+    if !chat_models_config().is_vision(&model)
+        && crate::attachments::pending_descriptions(&rows, crate::attachments::is_describing)
+    {
+        crate::attachments::wait_until(
+            crate::attachments::DESCRIPTION_WAIT,
+            crate::attachments::DESCRIPTION_POLL,
+            || !crate::attachments::pending_descriptions(&rows, crate::attachments::is_describing),
+        )
+        .await;
+        if let Ok(fresh) = chat_store::list_messages(&conn, conversation_id) {
+            rows = fresh;
+        }
+    }
     // Images travel as images only to a model that accepts them.
     let app_data = app.path().app_data_dir().ok();
     let load_image = |record: &crate::attachments::AttachmentRecord| {
@@ -1611,6 +1635,7 @@ pub const DESCRIBE_TIMEOUT_SECS: u64 = 45;
 /// and in account memory. Best effort and silent: any failure leaves the
 /// plain `[Image: <name>]` stand-in.
 async fn describe_images(
+    mut describing: crate::attachments::DescribingGuard,
     dir: std::path::PathBuf,
     app_data: std::path::PathBuf,
     profile_id: String,
@@ -1635,32 +1660,50 @@ async fn describe_images(
         return;
     };
     for record in images {
-        let Some(url) = crate::attachments::image_data_url(&app_data, &record) else {
-            continue;
-        };
-        let body = crate::attachments::describe_request_body(&model, &url);
-        let Ok(response) = client
-            .post(format!("{base}/chat/completions"))
-            .bearer_auth(&key)
-            .json(&body)
-            .send()
-            .await
-        else {
-            continue;
-        };
-        if !response.status().is_success() {
-            continue;
-        }
-        let Ok(text) = response.text().await else {
-            continue;
-        };
-        let Some(description) = crate::attachments::parse_description(&text) else {
-            continue;
-        };
-        if let Ok(conn) = chat_store::open_db(&dir) {
-            let _ =
-                chat_store::set_attachment_description(&conn, message_id, &record.id, &description);
-        }
+        describe_one(
+            &client, &base, &key, &model, &app_data, &dir, message_id, &record,
+        )
+        .await;
+        describing.finish(&record.id);
+    }
+}
+
+/// One image of [`describe_images`] (silent on any failure).
+#[allow(clippy::too_many_arguments)]
+async fn describe_one(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    model: &str,
+    app_data: &std::path::Path,
+    dir: &std::path::Path,
+    message_id: i64,
+    record: &crate::attachments::AttachmentRecord,
+) {
+    let Some(url) = crate::attachments::image_data_url(app_data, record) else {
+        return;
+    };
+    let body = crate::attachments::describe_request_body(model, &url);
+    let Ok(response) = client
+        .post(format!("{base}/chat/completions"))
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await
+    else {
+        return;
+    };
+    if !response.status().is_success() {
+        return;
+    }
+    let Ok(text) = response.text().await else {
+        return;
+    };
+    let Some(description) = crate::attachments::parse_description(&text) else {
+        return;
+    };
+    if let Ok(conn) = chat_store::open_db(dir) {
+        let _ = chat_store::set_attachment_description(&conn, message_id, &record.id, &description);
     }
 }
 
