@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.14 - 2026-11-18 - Adjunta, escribe mientras trabaja y navega
 
 ### New
 - Ya puedes escribir mientras el asistente responde. Si envias, el mensaje queda en cola encima del cuadro de texto ("Se enviara cuando termine la respuesta.") y sale solo al terminar, uno detras de otro. Cada mensaje en cola se puede editar o quitar. Si pulsas Detener o algo falla, la cola espera hasta que pulses "Enviar ahora". Un mensaje en cola tiene prioridad sobre la continuacion automatica de una respuesta cortada.
