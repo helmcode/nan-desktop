@@ -773,6 +773,10 @@ export const en = {
   // share_artifact: the assistant shares a file as a link from the chat.
   shareTool: {
     ask: "Share as a link",
+    fromWebsite: "The website built in this conversation",
+    fromConversation: "A file created in this conversation",
+    fromGenerated: "An image generated in the app",
+    titleLabel: (title: string) => `Title: ${title}`,
     who: {
       public: "Public: anyone with the link",
       org: "Your whole organization",

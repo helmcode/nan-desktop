@@ -66,7 +66,16 @@ function ShareDetails({ share }: { share: ShareAsk }) {
         : null;
   return (
     <>
-      {share.title && share.title !== share.file_name && <span className="approval-detail">{share.title}</span>}
+      {share.source !== "folder" && (
+        <span className="approval-detail">
+          {share.source === "website"
+            ? t.shareTool.fromWebsite
+            : share.source === "generated"
+              ? t.shareTool.fromGenerated
+              : t.shareTool.fromConversation}
+        </span>
+      )}
+      {share.title && <span className="approval-detail">{t.shareTool.titleLabel(share.title)}</span>}
       <span className="approval-detail approval-share-who">{who}</span>
       {share.notify && <span className="approval-detail">{t.shareTool.notify}</span>}
       <span className="approval-detail">{t.shareTool.expires(share.expires_days)}</span>

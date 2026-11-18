@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   NUDGE_THRESHOLD,
+  countsForNudge,
   decisionTarget,
   initialNudgeState,
   isBrowserApproval,
@@ -190,5 +191,14 @@ describe("browser suggestion", () => {
     expect(decisionTarget("browser_local_site", undefined, "192.168.1.1", folders, null)).toBeNull();
     // A plain folder approval keeps counting towards its folder.
     expect(decisionTarget("write_file", undefined, inFolder, folders, null)).toEqual(FOLDER);
+  });
+});
+
+describe("countsForNudge", () => {
+  it("counts folder actions but never a share", () => {
+    for (const action of ["write_file", "delete_path", "run_command", "save_image", "write_website"]) {
+      expect(countsForNudge(action)).toBe(true);
+    }
+    expect(countsForNudge("share_artifact")).toBe(false);
   });
 });

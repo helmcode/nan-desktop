@@ -1501,8 +1501,9 @@ async fn run_chat_stream(
     let mut accumulated = String::new();
     let mut sources: Vec<WebSource> = Vec::new();
     let mut artifacts: Vec<chat_store::Artifact> = Vec::new();
-    // Links `share_artifact` created this turn (cards under the reply).
-    let mut shares: Vec<tools::share_artifact::SharedLink> = Vec::new();
+    // This reply's shares: the links created (cards under the reply) and
+    // the approval-fatigue state (stops after a "no" or 3 questions).
+    let mut shares = tools::share_artifact::ShareTurn::default();
     let mut failed: Option<ErrorKind> = None;
     let mut ended: Option<TurnEndReason> = None;
     // This turn's tool exchange (device-local, replayed by later turns).
@@ -1695,8 +1696,8 @@ async fn run_chat_stream(
                         conversation_id,
                         call,
                         &mut sources,
-                        // None: the tool was not offered, a call is refused.
-                        share_tool.then_some(&mut shares),
+                        share_tool,
+                        &mut shares,
                     )
                     .await
                 };
@@ -1713,9 +1714,9 @@ async fn run_chat_stream(
                     ),
                 );
             }
-            if call.name == tools::share_artifact::TOOL_NAME && !shares.is_empty() {
+            if call.name == tools::share_artifact::TOOL_NAME {
                 // Persisted as they appear: a stopped reply keeps its links.
-                let _ = chat_store::set_message_shares(&conn, row, &shares);
+                let _ = persist_shares(&conn, row, &shares.links);
             }
             if merge_artifacts(&mut artifacts, produced) {
                 // Persisted as they appear: a stopped reply keeps its chips.
@@ -2143,6 +2144,16 @@ where
     })
 }
 
+/// Store the links this reply's `share_artifact` calls created on its row
+/// (NULL while there are none). Returns whether anything was written.
+pub fn persist_shares(
+    conn: &rusqlite::Connection,
+    row: i64,
+    links: &[tools::share_artifact::SharedLink],
+) -> bool {
+    !links.is_empty() && chat_store::set_message_shares(conn, row, links).is_ok()
+}
+
 /// Add newly produced artifacts (deduplicated by path, first kind wins).
 /// Returns whether anything was added.
 pub fn merge_artifacts(
@@ -2221,7 +2232,8 @@ async fn run_tool_call(
     conversation_id: i64,
     call: &ToolCall,
     sources: &mut Vec<WebSource>,
-    shares: Option<&mut Vec<tools::share_artifact::SharedLink>>,
+    share_tool: bool,
+    shares: &mut tools::share_artifact::ShareTurn,
 ) -> (
     String,
     Vec<chat_store::Artifact>,
@@ -2267,28 +2279,25 @@ async fn run_tool_call(
         );
     }
     if call.name == tools::share_artifact::TOOL_NAME {
-        let Some(shares) = shares else {
-            return (
-                invalid_call("share_artifact is not available in this conversation"),
-                Vec::new(),
-                Vec::new(),
-            );
-        };
-        // Offered only when artifacts are on for this account. Always asks
+        // Offered only when artifacts are on for this account; refused
+        // after a "no" in this reply or past the per-reply cap. Always asks
         // the user (inline card, or the native dialog for a computer-wide
         // grant); the link goes back to the model and under the reply.
-        let result = tools::share_artifact::run_model_share(
-            app,
-            profile_id,
-            conversation_id,
-            &call.arguments,
-        )
-        .await;
-        if let Ok(link) = &result {
-            shares.push(link.clone());
-        }
+        let result = match tools::share_artifact::gate(share_tool, shares) {
+            Ok(()) => {
+                tools::share_artifact::run_model_share(
+                    app,
+                    profile_id,
+                    conversation_id,
+                    &call.arguments,
+                    shares,
+                )
+                .await
+            }
+            Err(failure) => Err(failure),
+        };
         return (
-            tools::share_artifact::result_for_model(&result),
+            tools::share_artifact::record(shares, &result),
             Vec::new(),
             Vec::new(),
         );
@@ -3680,6 +3689,31 @@ mod tests {
         // A history without a leading system message is left alone.
         let user_only = vec![serde_json::json!({ "role": "user", "content": "hola" })];
         assert_eq!(with_share_guidance(user_only.clone(), true), user_only);
+    }
+
+    #[test]
+    fn a_shared_link_is_persisted_on_the_reply() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let conn = chat_store::open_db(dir.path()).expect("db");
+        let conv = chat_store::insert_conversation(&conn, "nan", "t").expect("conv");
+        let row = chat_store::insert_in_progress_assistant(&conn, conv, Some("m")).expect("row");
+        let mut turn = tools::share_artifact::ShareTurn::default();
+        // A refused call stores nothing.
+        let refused = Err(tools::share_artifact::gate(false, &turn).expect_err("off"));
+        let _ = tools::share_artifact::record(&mut turn, &refused);
+        assert!(!persist_shares(&conn, row, &turn.links));
+        let link = tools::share_artifact::SharedLink {
+            url: "https://artifacts.nan.builders/a/tok".into(),
+            title: "Web".into(),
+            scope: "public".into(),
+            recipients: vec![],
+            expires_at: None,
+        };
+        let content = tools::share_artifact::record(&mut turn, &Ok(link.clone()));
+        assert!(content.contains("\"ok\":true"));
+        assert!(persist_shares(&conn, row, &turn.links));
+        let rows = chat_store::list_messages(&conn, conv).expect("list");
+        assert_eq!(rows[0].shares, vec![link]);
     }
 
     #[test]

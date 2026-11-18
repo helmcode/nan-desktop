@@ -54,7 +54,7 @@ export function cardFromRequest(request: ApprovalRequest, anchorIndex: number | 
     id: request.approval_id,
     conversationId: request.conversation_id ?? null,
     action: request.action,
-    target: share ? share.file_name : ((isCommand ? request.command : request.path) ?? request.summary),
+    target: share ? share.location : ((isCommand ? request.command : request.path) ?? request.summary),
     destination: request.dest_path ?? null,
     cwd: isCommand ? (request.path ?? null) : null,
     diffPreview: request.diff_preview ?? null,

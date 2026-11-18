@@ -774,6 +774,10 @@ export const es: Strings = {
   // share_artifact: el asistente comparte un archivo como enlace desde el chat.
   shareTool: {
     ask: "Compartir como enlace",
+    fromWebsite: "La web creada en esta conversación",
+    fromConversation: "Un archivo creado en esta conversación",
+    fromGenerated: "Una imagen generada en la app",
+    titleLabel: (title: string) => `Título: ${title}`,
     who: {
       public: "Público: cualquiera con el enlace",
       org: "Toda tu organización",

@@ -56,7 +56,10 @@ decline, do not retry.\n\
 open it and when it expires. If the tool refuses the file (for example it may contain a \
 password or key), tell the user to share it by hand with the Share button on the file.";
 
-/// Days a link lives when the model does not say (the server defaults).
+/// Days a link lives when the model does not say. Mirrors the manual
+/// dialog's `defaultExpiry` (src/artifacts/artifacts.ts) and the server's
+/// scope defaults (enterprise-api / cloud-api `docs/ARTIFACTS.md`: public 7,
+/// emails 30, members/org 90); `artifacts::expiry_allowed` holds the options.
 fn default_expiry(audience: &str) -> u32 {
     match audience {
         "public" => 7,
@@ -453,6 +456,12 @@ pub fn result_for_model(result: &Result<SharedLink, ShareFailure>) -> String {
 
 /// The native dialog copy (Spanish UI, like `confirmation_text`).
 pub fn confirmation_text(ask: &ShareAsk) -> (String, String) {
+    let file = match ask.source.as_str() {
+        "website" => format!("La web creada en esta conversación: {}", ask.location),
+        "conversation" => format!("Un archivo creado en esta conversación: {}", ask.location),
+        "generated" => format!("Una imagen generada en la app: {}", ask.location),
+        _ => ask.location.clone(),
+    };
     let who = match ask.audience.as_str() {
         "public" => "Con: cualquiera que tenga el enlace (enlace público)".to_string(),
         "org" => "Con: todas las personas de tu organización".to_string(),
@@ -485,8 +494,8 @@ pub fn confirmation_text(ask: &ShareAsk) -> (String, String) {
     (
         "Compartir un archivo".into(),
         format!(
-            "El asistente quiere COMPARTIR este archivo como enlace:\n\n{}\n\n{who}\n{expiry}{risk}\n\n¿Se lo permites?",
-            ask.file_name
+            "El asistente quiere COMPARTIR este archivo como enlace:\n\n{file}\n\nTítulo: {}\n{who}\n{expiry}{risk}\n\n¿Se lo permites?",
+            ask.title
         ),
     )
 }
@@ -500,8 +509,109 @@ pub(crate) struct ShareEnv<'a> {
     pub home: Option<&'a Path>,
     pub profile_id: &'a str,
     pub conversation_id: i64,
+    /// THIS conversation's session temp folder (canonical), when it exists.
+    pub scratch: Option<&'a Path>,
     pub base: &'a str,
     pub session_token: &'a str,
+}
+
+/// Where a file is, for the approval: see [`ShareAsk::source`]. `canonical`
+/// is the resolved path; the home folder is shown as `~`. Pure.
+pub fn location_of(
+    canonical: &Path,
+    home: Option<&Path>,
+    scratch: Option<&Path>,
+    generated: bool,
+) -> (String, String) {
+    let name = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if generated {
+        return ("generated".into(), name);
+    }
+    if scratch.is_some_and(|dir| super::grants::is_under(dir, canonical)) {
+        let website = name.starts_with("website-") && name.ends_with(".html");
+        return (
+            if website { "website" } else { "conversation" }.into(),
+            name,
+        );
+    }
+    let shown = match home.and_then(|home| canonical.strip_prefix(home).ok()) {
+        Some(rest) if !rest.as_os_str().is_empty() => {
+            format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display())
+        }
+        _ => canonical.display().to_string(),
+    };
+    ("folder".into(), shown)
+}
+
+/// The most share questions one reply may ask (approval fatigue).
+pub const MAX_ASKS_PER_TURN: u8 = 3;
+
+/// One reply's shares: the links created (shown under it) and how many
+/// times it asked. After a "no" it stops asking until the next message.
+#[derive(Debug, Default)]
+pub struct ShareTurn {
+    pub links: Vec<SharedLink>,
+    asks: u8,
+    declined: bool,
+}
+
+/// Whether a `share_artifact` call may run now. Pure.
+/// - not offered this reply (artifacts off): refused;
+/// - the user already declined a share in this reply: refused;
+/// - [`MAX_ASKS_PER_TURN`] questions already asked: refused.
+pub fn gate(offered: bool, turn: &ShareTurn) -> Result<(), ShareFailure> {
+    if !offered {
+        return Err(ShareFailure::new(
+            "invalid_call",
+            "share_artifact is not available in this conversation",
+        ));
+    }
+    if turn.declined {
+        return Err(ShareFailure::new(
+            "declined",
+            "the user declined a share in this reply",
+        ));
+    }
+    if turn.asks >= MAX_ASKS_PER_TURN {
+        return Err(ShareFailure::new(
+            "too_many_shares",
+            format!(
+                "At most {MAX_ASKS_PER_TURN} share requests per reply. Do not retry now; tell \
+                 the user what is left to share and let them ask again."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Record one call's result in the turn (a created link is kept for the
+/// reply) and return the tool message for the model.
+pub fn record(turn: &mut ShareTurn, result: &Result<SharedLink, ShareFailure>) -> String {
+    if let Ok(link) = result {
+        turn.links.push(link.clone());
+    }
+    result_for_model(result)
+}
+
+/// The store a model share reads from: the conversation's effective grants
+/// plus THIS conversation's temp folder (its websites), read-only. Never the
+/// whole session root: conversation A cannot share B's temp files. Pure.
+pub fn share_store(
+    mut store: GrantsStore,
+    profile_id: &str,
+    conversation_id: i64,
+    scratch: Option<&Path>,
+) -> GrantsStore {
+    if let Some(dir) = scratch {
+        let grant = super::scratch_grant(profile_id, conversation_id, dir.to_path_buf());
+        if !store.grants.iter().any(|g| g.id == grant.id) {
+            store.grants.push(grant);
+        }
+    }
+    store
 }
 
 /// Which source a path is: an image this app generated, else a file that
@@ -539,7 +649,9 @@ pub(crate) async fn share_in<A: Approver>(
     env: &ShareEnv<'_>,
     approver: &A,
     request: &ShareRequest,
+    turn: &mut ShareTurn,
 ) -> Result<SharedLink, ShareFailure> {
+    gate(true, turn)?;
     let risk = request.risk(env.profile_id);
     let source = source_for(env.app_data, &request.path);
     let mut upload: Upload = artifacts::prepare_upload(
@@ -555,8 +667,14 @@ pub(crate) async fn share_in<A: Approver>(
     let held_ack = upload.meta.risk_ack.take();
 
     let file_name = artifacts::sanitize_filename(&request.path);
+    let canonical = std::fs::canonicalize(&request.path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&request.path));
+    let (source_kind, location) =
+        location_of(&canonical, env.home, env.scratch, source.kind == "media");
     let ask = ShareAsk {
         file_name: file_name.clone(),
+        source: source_kind,
+        location,
         title: upload.meta.title.clone(),
         audience: request.audience.clone(),
         recipients: upload.meta.emails.clone(),
@@ -565,6 +683,7 @@ pub(crate) async fn share_in<A: Approver>(
         risk: risk.map(str::to_string),
     };
     let (title, text) = confirmation_text(&ask);
+    turn.asks = turn.asks.saturating_add(1);
     let granted = if governed_by_computer_wide(store, env.profile_id, &request.path) {
         let granted = approver.native(title, text).await;
         let request = approval_request(
@@ -589,6 +708,7 @@ pub(crate) async fn share_in<A: Approver>(
     };
     audit_decision(env, granted);
     if !granted {
+        turn.declined = true;
         return Err(ShareFailure::new(
             "declined",
             "the user did not allow this share",
@@ -615,6 +735,8 @@ fn approval_request(
         summary: format!("Share {} as a link", ask.file_name),
         title,
         text,
+        // The card names the file by `share.location`; the raw path the
+        // model sent stays for the record.
         path: Some(path.to_string()),
         dest_path: None,
         command: None,
@@ -649,8 +771,10 @@ pub(crate) async fn run_model_share(
     profile_id: &str,
     conversation_id: i64,
     arguments: &str,
+    turn: &mut ShareTurn,
 ) -> Result<SharedLink, ShareFailure> {
     use tauri::Manager as _;
+    gate(true, turn)?;
     let request = parse_request(profile_id, arguments)
         .map_err(|message| ShareFailure::new("invalid_call", message))?;
     let unavailable = || refusal(&ArtifactError::Unavailable);
@@ -659,14 +783,18 @@ pub(crate) async fn run_model_share(
         .ok_or_else(|| refusal(&ArtifactError::NoSession))?;
     let app_data = app.path().app_data_dir().map_err(|_| unavailable())?;
     let realm_dir = super::data_dir(app).map_err(|_| unavailable())?;
-    // The conversation's own folders (its selection), plus this run's
-    // session temp folders (websites the assistant built).
-    let store = {
+    // The conversation's own folders (its selection), plus THIS
+    // conversation's temp folder (websites the assistant built here).
+    let (store, scratch) = {
         let state = app.state::<super::ToolsState>();
+        let scratch = std::fs::canonicalize(state.scratch_dir(conversation_id)).ok();
         let store = super::load_store(&realm_dir).map_err(|_| unavailable())?;
         let store = super::effective_store(&store, &state, profile_id, Some(conversation_id))
             .map_err(|_| unavailable())?;
-        crate::preview::with_session_grant(store, super::session_read_grant(&state, profile_id))
+        (
+            share_store(store, profile_id, conversation_id, scratch.as_deref()),
+            scratch,
+        )
     };
     let home = std::env::home_dir();
     let env = ShareEnv {
@@ -675,11 +803,12 @@ pub(crate) async fn run_model_share(
         home: home.as_deref(),
         profile_id,
         conversation_id,
+        scratch: scratch.as_deref(),
         base: &base,
         session_token: &token,
     };
     let approver = super::AppApprover { app: app.clone() };
-    share_in(&store, &env, &approver, &request).await
+    share_in(&store, &env, &approver, &request, turn).await
 }
 
 // ---------------------------------------------------------------- tests --
@@ -992,6 +1121,7 @@ mod tests {
             home: Some(&l.home),
             profile_id: profile,
             conversation_id: 7,
+            scratch: None,
             base,
             session_token: TOKEN,
         }
@@ -1040,7 +1170,14 @@ mod tests {
             serde_json::json!({ "audience": "public", "title": "Informe" }),
             NAN,
         );
-        let link = block(share_in(&store, &env(&l, NAN, &base), &fake, &req)).expect("shared");
+        let link = block(share_in(
+            &store,
+            &env(&l, NAN, &base),
+            &fake,
+            &req,
+            &mut ShareTurn::default(),
+        ))
+        .expect("shared");
         assert_eq!(link.url, LINK);
         assert_eq!(link.scope, "public");
         assert_eq!(link.expires_at.as_deref(), Some("2026-11-25T10:00:00Z"));
@@ -1092,6 +1229,7 @@ mod tests {
             &env(&l, NAN, "http://127.0.0.1:9"),
             &fake,
             &req,
+            &mut ShareTurn::default(),
         ))
         .expect_err("declined");
         assert_eq!(err.code, "declined");
@@ -1152,6 +1290,7 @@ mod tests {
             &env(&l, NAN, &base),
             &fake,
             &req,
+            &mut ShareTurn::default(),
         ))
         .expect("ok");
         let meta = meta_part(&server.join().expect("server"));
@@ -1170,6 +1309,7 @@ mod tests {
             &env(&l, HELMCODE, &base),
             &fake,
             &req,
+            &mut ShareTurn::default(),
         ))
         .expect("ok");
         let meta = meta_part(&server.join().expect("server"));
@@ -1199,6 +1339,7 @@ mod tests {
             &env(&l, NAN, &base),
             &fake,
             &req,
+            &mut ShareTurn::default(),
         ))
         .expect("ok");
         server.join().expect("server");
@@ -1221,6 +1362,7 @@ mod tests {
             &env(&l, NAN, "http://127.0.0.1:9"),
             &fake,
             &req,
+            &mut ShareTurn::default(),
         ))
         .expect_err("outside");
         assert_eq!(err.code, "not_shareable");
@@ -1252,6 +1394,7 @@ mod tests {
                 &env(&l, NAN, "http://127.0.0.1:9"),
                 &fake,
                 &req,
+                &mut ShareTurn::default(),
             ))
             .expect_err(code);
             assert_eq!(err.code, code);
@@ -1323,6 +1466,7 @@ mod tests {
             &env(&l, NAN, &base),
             &Fake::new(true),
             &req,
+            &mut ShareTurn::default(),
         ))
         .expect_err("quota");
         server.join().expect("server");
@@ -1335,6 +1479,7 @@ mod tests {
             &env(&l, NAN, &base),
             &Fake::new(true),
             &req,
+            &mut ShareTurn::default(),
         ))
         .expect_err("bad link");
         server.join().expect("server");
@@ -1369,6 +1514,212 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn the_card_and_the_dialog_name_the_full_path_not_just_the_name() {
+        let l = layout();
+        let nested = l.grant.join("clients").join("acme");
+        fs::create_dir_all(&nested).expect("mkdir");
+        let path = nested.join("plan.pdf");
+        fs::write(&path, b"%PDF-1.7 plan").expect("write");
+        let shown = format!(
+            "~{0}proj{0}clients{0}acme{0}plan.pdf",
+            std::path::MAIN_SEPARATOR
+        );
+
+        // Inline card: the location is the whole path (home as ~).
+        let fake = Fake::new(false);
+        let req = request(
+            &path,
+            serde_json::json!({ "audience": "public", "title": "Mi plan" }),
+            NAN,
+        );
+        let _ = block(share_in(
+            &store(&l, NAN, ApprovalMode::Ask),
+            &env(&l, NAN, "http://127.0.0.1:9"),
+            &fake,
+            &req,
+            &mut ShareTurn::default(),
+        ));
+        let ask = fake.inline.lock().unwrap()[0].share.clone().expect("ask");
+        assert_eq!(ask.source, "folder");
+        assert_eq!(ask.location, shown);
+        assert_eq!(ask.file_name, "plan.pdf");
+        assert!(fake.inline.lock().unwrap()[0].text.contains(&shown));
+        assert!(
+            fake.inline.lock().unwrap()[0]
+                .text
+                .contains("Título: Mi plan"),
+            "the model's title is labeled"
+        );
+
+        // Native dialog (computer-wide): the same full path.
+        let fake = Fake::new(false);
+        let _ = block(share_in(
+            &computer_wide(&l, NAN),
+            &env(&l, NAN, "http://127.0.0.1:9"),
+            &fake,
+            &req,
+            &mut ShareTurn::default(),
+        ));
+        let native = fake.native.lock().unwrap().clone();
+        assert!(native[0].1.contains(&shown), "{}", native[0].1);
+        assert!(native[0].1.contains("Título: Mi plan"));
+    }
+
+    #[test]
+    fn a_website_from_this_conversation_gets_a_friendly_label() {
+        let l = layout();
+        let scratch = l.home.join("tmp").join("conversation-7");
+        fs::create_dir_all(&scratch).expect("mkdir");
+        let site = scratch.join("website-calculadora.html");
+        fs::write(&site, b"<!doctype html><html><body>hola</body></html>").expect("write");
+        let store = share_store(grants::default_store(), NAN, 7, Some(&scratch));
+        let mut e = env(&l, NAN, "http://127.0.0.1:9");
+        e.scratch = Some(&scratch);
+        let fake = Fake::new(false);
+        let req = request(&site, serde_json::json!({ "audience": "public" }), NAN);
+        let _ = block(share_in(&store, &e, &fake, &req, &mut ShareTurn::default()));
+        let card = fake.inline.lock().unwrap()[0].clone();
+        let ask = card.share.expect("ask");
+        assert_eq!(
+            (ask.source.as_str(), ask.location.as_str()),
+            ("website", "website-calculadora.html")
+        );
+        assert!(
+            card.text
+                .contains("La web creada en esta conversación: website-calculadora.html")
+        );
+        assert_eq!(
+            location_of(
+                &scratch.join("notas.md"),
+                Some(&l.home),
+                Some(&scratch),
+                false
+            )
+            .0,
+            "conversation"
+        );
+        assert_eq!(
+            location_of(&l.app_data.join("x.png"), Some(&l.home), None, true).0,
+            "generated"
+        );
+        assert_eq!(
+            location_of(&l.outside.join("a.pdf"), Some(&l.home), None, false).1,
+            l.outside.join("a.pdf").display().to_string(),
+            "outside home: the absolute path"
+        );
+    }
+
+    #[test]
+    fn another_conversations_temp_files_are_not_shareable() {
+        let l = layout();
+        let mine = l.home.join("tmp").join("conversation-7");
+        let theirs = l.home.join("tmp").join("conversation-8");
+        for dir in [&mine, &theirs] {
+            fs::create_dir_all(dir).expect("mkdir");
+        }
+        let other = theirs.join("website-secreto.html");
+        fs::write(&other, b"<!doctype html><p>x</p>").expect("write");
+        let store = share_store(grants::default_store(), NAN, 7, Some(&mine));
+        let fake = Fake::new(true);
+        let req = request(&other, serde_json::json!({ "audience": "public" }), NAN);
+        let err = block(share_in(
+            &store,
+            &env(&l, NAN, "http://127.0.0.1:9"),
+            &fake,
+            &req,
+            &mut ShareTurn::default(),
+        ))
+        .expect_err("other conversation");
+        assert_eq!(err.code, "not_shareable");
+        assert!(fake.inline.lock().unwrap().is_empty());
+        // No duplicate grant when the effective store already has the folder.
+        let twice = share_store(store.clone(), NAN, 7, Some(&mine));
+        assert_eq!(twice.grants.len(), store.grants.len());
+    }
+
+    #[test]
+    fn the_gate_refuses_when_not_offered_after_a_no_and_past_the_cap() {
+        let turn = ShareTurn::default();
+        assert_eq!(gate(false, &turn).expect_err("off").code, "invalid_call");
+        assert!(gate(true, &turn).is_ok());
+        let declined = ShareTurn {
+            declined: true,
+            ..ShareTurn::default()
+        };
+        assert_eq!(gate(true, &declined).expect_err("no").code, "declined");
+        let full = ShareTurn {
+            asks: MAX_ASKS_PER_TURN,
+            ..ShareTurn::default()
+        };
+        let err = gate(true, &full).expect_err("cap");
+        assert_eq!(err.code, "too_many_shares");
+        assert!(result_for_model(&Err(err)).contains("Do not retry"));
+    }
+
+    #[test]
+    fn after_a_no_the_turn_stops_asking_and_the_cap_holds() {
+        let l = layout();
+        let path = l.grant.join("informe.pdf");
+        fs::write(&path, b"%PDF-1.7 report").expect("write");
+        let req = request(&path, serde_json::json!({ "audience": "public" }), NAN);
+        let st = store(&l, NAN, ApprovalMode::Ask);
+
+        let mut turn = ShareTurn::default();
+        let fake = Fake::new(false);
+        let e = env(&l, NAN, "http://127.0.0.1:9");
+        assert_eq!(
+            block(share_in(&st, &e, &fake, &req, &mut turn))
+                .expect_err("no")
+                .code,
+            "declined"
+        );
+        assert_eq!(
+            block(share_in(&st, &e, &fake, &req, &mut turn))
+                .expect_err("again")
+                .code,
+            "declined"
+        );
+        assert_eq!(fake.inline.lock().unwrap().len(), 1, "asked once only");
+
+        // Three granted asks (each upload fails offline), then the cap.
+        let mut turn = ShareTurn::default();
+        let fake = Fake::new(true);
+        for _ in 0..MAX_ASKS_PER_TURN {
+            assert_eq!(
+                block(share_in(&st, &e, &fake, &req, &mut turn))
+                    .expect_err("offline")
+                    .code,
+                "offline"
+            );
+        }
+        assert_eq!(
+            block(share_in(&st, &e, &fake, &req, &mut turn))
+                .expect_err("cap")
+                .code,
+            "too_many_shares"
+        );
+        assert_eq!(
+            fake.inline.lock().unwrap().len(),
+            usize::from(MAX_ASKS_PER_TURN)
+        );
+    }
+
+    #[test]
+    fn a_created_link_is_kept_for_the_reply() {
+        let mut turn = ShareTurn::default();
+        let link = SharedLink {
+            url: LINK.into(),
+            title: "Informe".into(),
+            scope: "public".into(),
+            recipients: vec![],
+            expires_at: None,
+        };
+        assert!(record(&mut turn, &Ok(link.clone())).contains(LINK));
+        let _ = record(&mut turn, &Err(ShareFailure::new("offline", "x")));
+        assert_eq!(turn.links, vec![link]);
     }
 
     #[test]

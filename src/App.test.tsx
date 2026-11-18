@@ -625,6 +625,55 @@ describe("folder selection and allow-mode suggestion", () => {
     expect(JSON.parse(window.localStorage.getItem(NUDGE_SHOWN_STORAGE_KEY) ?? "[]")).toEqual([7]);
   });
 
+  it("share_artifact answers neither count nor reset (inline or native)", async () => {
+    window.localStorage.setItem(FOLDER_SELECTION_STORAGE_KEY, JSON.stringify({ "7": ["g1"] }));
+    resetTauri(chatHandlers([row(1, "user", "Tidy and share")]));
+    renderApp("en");
+    await screen.findByText("Tidy and share");
+    await waitFor(() => expect(chipLabel()).toBe("Proyecto"));
+    const suggestion = "You are approving many actions in Proyecto. Always allow in this folder?";
+    const folderYes = (n: number) => {
+      act(() => {
+        emit(APPROVAL_REQUEST_EVENT, approvalPayload({ approval_id: `pf-${n}`, path: `/Users/ana/Proyecto/f${n}.txt` }));
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `pf-${n}`, granted: true });
+      });
+    };
+    const share = {
+      file_name: "informe.pdf",
+      source: "folder",
+      location: "~/Proyecto/informe.pdf",
+      title: "Informe",
+      audience: "public",
+      recipients: [],
+      expires_days: 7,
+      notify: false,
+      risk: "public" as const,
+    };
+    folderYes(1);
+    folderYes(2);
+    // Inline share: a "no" must not reset, a "yes" must not count.
+    for (const [n, granted] of [[1, false], [2, true], [3, true]] as const) {
+      act(() => {
+        emit(
+          APPROVAL_REQUEST_EVENT,
+          approvalPayload({ approval_id: `ps-${n}`, action: "share_artifact", path: "/Users/ana/Proyecto/informe.pdf", share }),
+        );
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `ps-${n}`, granted });
+      });
+    }
+    // Native share decisions (computer-wide) are ignored too.
+    act(() => {
+      emit(APPROVAL_NATIVE_EVENT, { conversation_id: 7, action: "share_artifact", path: "/Users/ana/Proyecto/informe.pdf", granted: false });
+    });
+    expect(screen.queryByText(suggestion)).toBeNull();
+    folderYes(3);
+    expect(await screen.findByText(suggestion)).toBeTruthy();
+  });
+
   it("a denial resets the count", async () => {
     window.localStorage.setItem(FOLDER_SELECTION_STORAGE_KEY, JSON.stringify({ "7": ["g1"] }));
     resetTauri(chatHandlers([row(1, "user", "Tidy")]));

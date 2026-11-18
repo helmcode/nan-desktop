@@ -67,6 +67,11 @@ export interface ApprovalRequest {
 /// The share a `share_artifact` card asks about (`ShareAsk` in the core).
 export interface ShareAsk {
   file_name: string;
+  /// Which file: `folder` (location = full path, home as ~), `website` or
+  /// `conversation` (written in this conversation; location = its name),
+  /// `generated` (an image the app made).
+  source: "folder" | "website" | "conversation" | "generated" | (string & {});
+  location: string;
   title: string;
   audience: "public" | "emails" | "org" | (string & {});
   recipients: string[];

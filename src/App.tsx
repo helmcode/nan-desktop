@@ -11,6 +11,7 @@ import {
   loadShownNudges,
   nudgeFamily,
   nudgeReducer,
+  countsForNudge,
   saveShownNudges,
   type Nudge,
   type NudgeScope,
@@ -1387,7 +1388,8 @@ function ChatShell({
       if (card.status !== "granted" && card.status !== "denied") continue;
       if (countedApprovals.current.has(card.id)) continue;
       countedApprovals.current.add(card.id);
-      if (card.conversationId === null) continue;
+      // A share never counts towards, nor resets, any suggestion family.
+      if (card.conversationId === null || !countsForNudge(card.action)) continue;
       nudgeDecision(card.conversationId, card.action, card.afterBrowsing, card.cwd ?? card.target, card.status === "granted");
     }
   }, [approvals, nudgeDecision]);
@@ -1395,7 +1397,7 @@ function ChatShell({
   useEffect(() => {
     const unlisten = onNativeDecision((decision) => {
       const conversationId = decision.conversation_id ?? activeConvRef.current;
-      if (conversationId !== null) {
+      if (conversationId !== null && countsForNudge(decision.action)) {
         nudgeDecision(conversationId, decision.action, decision.after_browsing, decision.path, decision.granted);
       }
     });

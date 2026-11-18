@@ -164,6 +164,8 @@ describe("ApprovalCard (S14)", () => {
 describe("ApprovalCard: share_artifact", () => {
   const share = {
     file_name: "informe.pdf",
+    source: "folder",
+    location: "~/clients/acme/informe.pdf",
     title: "Informe Q3",
     audience: "public",
     recipients: [] as string[],
@@ -173,10 +175,12 @@ describe("ApprovalCard: share_artifact", () => {
   };
 
   it("names the file, who gets it, the expiry and the risk the Allow accepts", () => {
-    const onRespond = renderCard({ action: "share_artifact", target: "informe.pdf", share });
+    const onRespond = renderCard({ action: "share_artifact", target: share.location, share });
     expect(screen.getByText("Share as a link")).toBeTruthy();
-    expect(screen.getByText("informe.pdf")).toBeTruthy();
-    expect(screen.getByText("Informe Q3")).toBeTruthy();
+    // The whole path, so a look-alike file elsewhere cannot pass for yours.
+    expect(screen.getByText("~/clients/acme/informe.pdf")).toBeTruthy();
+    // The model's title is labeled, never a bare statement.
+    expect(screen.getByText("Title: Informe Q3")).toBeTruthy();
     expect(screen.getByText("Public: anyone with the link")).toBeTruthy();
     expect(screen.getByText("Expires in 7 days")).toBeTruthy();
     const risk = screen.getByRole("note");
@@ -184,6 +188,16 @@ describe("ApprovalCard: share_artifact", () => {
     expect(risk.textContent).toContain("Allowing it means you accept this.");
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
     expect(onRespond).toHaveBeenCalledWith("act-1", true);
+  });
+
+  it("labels a website built in this conversation", () => {
+    renderCard({
+      action: "share_artifact",
+      target: "website-calc.html",
+      share: { ...share, source: "website", location: "website-calc.html", file_name: "website-calc.html", title: "Calc" },
+    });
+    expect(screen.getByText("website-calc.html")).toBeTruthy();
+    expect(screen.getByText("The website built in this conversation")).toBeTruthy();
   });
 
   it("lists the recipients, the email notice and the community risk", () => {

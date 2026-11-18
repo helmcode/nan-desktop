@@ -23,6 +23,8 @@ describe("cardFromRequest (real core payload)", () => {
   it("carries a share_artifact request's details and names the file", () => {
     const share = {
       file_name: "website-calculadora.html",
+      source: "website",
+      location: "website-calculadora.html",
       title: "Calculadora",
       audience: "public",
       recipients: [],

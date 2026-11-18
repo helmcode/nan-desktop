@@ -62,6 +62,12 @@ pub struct ApprovalRequest {
 pub struct ShareAsk {
     /// The file's base name.
     pub file_name: String,
+    /// Where the file is, so the user can tell WHICH file is shared:
+    /// `folder` (`location` = the full path, home as `~`), `website` or
+    /// `conversation` (a file written in THIS conversation's temp folder;
+    /// `location` = its name) or `generated` (an image this app made).
+    pub source: String,
+    pub location: String,
     pub title: String,
     /// `public`, `emails` or `org`.
     pub audience: String,
