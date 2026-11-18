@@ -185,7 +185,7 @@ describe("ApprovalCard: share_artifact", () => {
     expect(screen.getByText("Expires in 7 days")).toBeTruthy();
     const risk = screen.getByRole("note");
     expect(risk.textContent).toContain("Anyone with this link can open this file");
-    expect(risk.textContent).toContain("Allowing it means you accept this.");
+    expect(risk.textContent).toContain("By allowing it, you accept this risk.");
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
     expect(onRespond).toHaveBeenCalledWith("act-1", true);
   });

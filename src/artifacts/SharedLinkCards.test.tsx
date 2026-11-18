@@ -9,7 +9,7 @@ vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).
 import { I18nProvider } from "../i18n";
 import type { Locale } from "../i18n/locale";
 import type { SharedLink } from "../types";
-import { formatExpiry, isOpenableLink, SharedLinkCards } from "./SharedLinkCards";
+import { formatExpiry, isExpired, isOpenableLink, SharedLinkCards } from "./SharedLinkCards";
 
 const LINK: SharedLink = {
   url: "https://artifacts.helmcode.com/a/tok-1",
@@ -76,7 +76,10 @@ describe("SharedLinkCards", () => {
       fireEvent.click(screen.getByRole("button", { name: `Copy the link to ${LINK.title}` }));
     });
     expect(writeText).toHaveBeenCalledWith(LINK.url);
-    expect(screen.getByRole("status").textContent).toBe("Link copied");
+    // Announced through a persistent polite live region (the button's
+    // aria-label would hide its text from screen readers).
+    const live = document.querySelector('[aria-live="polite"]');
+    expect(live?.textContent).toBe("Link copied");
   });
 
   it("says so when the clipboard refuses", async () => {
@@ -102,6 +105,16 @@ describe("SharedLinkCards", () => {
     expect(screen.queryByRole("list")).toBeNull();
     expect(isOpenableLink("https://a.example/a/t")).toBe(true);
     expect(isOpenableLink("https://a.example/a b")).toBe(false);
+  });
+
+  it("marks an expired link", () => {
+    renderCards([{ ...LINK, expires_at: "2020-01-01T00:00:00Z" }], "es");
+    expect(screen.getByText("Caducado")).toBeTruthy();
+    expect(screen.queryByText(/Caduca el/)).toBeNull();
+    expect(isExpired("2020-01-01T00:00:00Z")).toBe(true);
+    expect(isExpired("2999-01-01T00:00:00Z")).toBe(false);
+    expect(isExpired(null)).toBe(false);
+    expect(isExpired("soon")).toBe(false);
   });
 
   it("formats the expiry per locale and ignores bad dates", () => {

@@ -49,12 +49,50 @@ a PDF or any other file this conversation produced or that is inside the user's 
 folders.\n\
 - audience: \"public\" (anyone with the link), \"emails\" (only the listed people; they \
 open it signed in) or, when offered, \"org\" (the whole organization). Use exactly what \
-the user said; if they did not say who, ask before sharing. Never invent addresses.\n\
-- The user always confirms the share in the app before anything is uploaded. If they \
-decline, do not retry.\n\
+the user said; if they did not say who, ask who before sharing. Never invent addresses.\n\
+- Do not ask the user to confirm in the chat before calling share_artifact: the app \
+always shows its own confirmation card with the file, the recipients and the expiry \
+(asking twice is noise). If they decline, do not retry.\n\
 - After a successful call, give the user the link from the tool result and say who can \
 open it and when it expires. If the tool refuses the file (for example it may contain a \
-password or key), tell the user to share it by hand with the Share button on the file.";
+password or key), end your reply with the file's absolute path on its own line and tell \
+the user to share it by hand with the Share button on that file.";
+
+/// Appended to the system prompt instead of [`GUIDANCE`] when the account
+/// could have shared links with another plan (community paywall): no tool
+/// is offered, the model only explains.
+pub const PAYWALL_HINT: &str = "Sharing as a link: sharing files as links (Shared links) \
+is not included in the user's current membership. If they ask to share something as a \
+link, tell them in one sentence that it needs a membership with Shared links, and do not \
+try to publish the file anywhere else.";
+
+/// What the reply may do about sharing, from the renderer's reading of
+/// `/api/auth/me` (`chat_send`'s `artifacts`: `on`, `paywall`, else off).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareOffer {
+    Off,
+    On,
+    Paywall,
+}
+
+impl ShareOffer {
+    pub fn from_wire(value: Option<&str>) -> Self {
+        match value {
+            Some("on") => Self::On,
+            Some("paywall") => Self::Paywall,
+            _ => Self::Off,
+        }
+    }
+
+    /// The system-prompt addition for this reply, if any.
+    pub fn guidance(self) -> Option<&'static str> {
+        match self {
+            Self::On => Some(GUIDANCE),
+            Self::Paywall => Some(PAYWALL_HINT),
+            Self::Off => None,
+        }
+    }
+}
 
 /// Days a link lives when the model does not say. Mirrors the manual
 /// dialog's `defaultExpiry` (src/artifacts/artifacts.ts) and the server's
@@ -276,8 +314,10 @@ impl ShareFailure {
     }
 }
 
-const SHARE_BY_HAND: &str = "Do not retry. Tell the user they can share it by hand with \
-     the Share button on the file, where they can review it first.";
+const SHARE_BY_HAND: &str = "Do not retry. End your reply with the file's absolute \
+     path on its own line (so the app shows the file with its Share button) and tell \
+     the user they can share it by hand from that Share button, where they can review it \
+     first.";
 
 /// A core refusal before anything was uploaded.
 fn refusal(err: &ArtifactError) -> ShareFailure {
@@ -1000,14 +1040,41 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_asks_the_model_to_surface_the_file_chip() {
+        for err in [ArtifactError::PossibleSecret, ArtifactError::TooLarge] {
+            let text = result_for_model(&Err(refusal(&err)));
+            assert!(text.contains("absolute path on its own line"), "{text}");
+            assert!(text.contains("Share button"), "{text}");
+        }
+        assert!(GUIDANCE.contains("absolute path on its own line"));
+    }
+
+    #[test]
+    fn the_offer_follows_the_wire_value() {
+        assert_eq!(ShareOffer::from_wire(Some("on")), ShareOffer::On);
+        assert_eq!(ShareOffer::from_wire(Some("paywall")), ShareOffer::Paywall);
+        assert_eq!(ShareOffer::from_wire(Some("off")), ShareOffer::Off);
+        assert_eq!(ShareOffer::from_wire(None), ShareOffer::Off);
+        assert_eq!(ShareOffer::On.guidance(), Some(GUIDANCE));
+        assert_eq!(ShareOffer::Paywall.guidance(), Some(PAYWALL_HINT));
+        assert!(
+            !PAYWALL_HINT.contains(TOOL_NAME),
+            "no tool is mentioned behind the paywall"
+        );
+        assert_eq!(ShareOffer::Off.guidance(), None);
+    }
+
+    #[test]
     fn guidance_covers_the_flow() {
         for needle in [
             "share_artifact",
             "public",
             "emails",
-            "always confirms",
+            "always shows its own confirmation card",
             "Share button",
             "Never invent addresses",
+            "Do not ask the user to confirm in the chat",
+            "ask who before sharing",
         ] {
             assert!(GUIDANCE.contains(needle), "{needle}");
         }

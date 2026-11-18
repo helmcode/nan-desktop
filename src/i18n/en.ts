@@ -784,7 +784,8 @@ export const en = {
     },
     notify: "They will get the link by email.",
     expires: (days: number) => (days === 0 ? "No expiry" : days === 1 ? "Expires in 1 day" : `Expires in ${days} days`),
-    allowIsAck: "Allowing it means you accept this.",
+    allowIsAck: "By allowing it, you accept this risk.",
+    expired: "Expired",
     region: "Links shared in this reply",
     scope: {
       public: "Public link",

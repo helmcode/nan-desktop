@@ -72,14 +72,15 @@ describe("share_artifact offer", () => {
     await waitFor(() => expect(invokedWith("artifacts_request").length).toBeGreaterThan(0));
     // The access answer arrives before the user types.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(await sendHello()).toMatchObject({ artifacts: true });
+    expect(await sendHello()).toMatchObject({ artifacts: "on" });
   });
 
-  it("does not offer it behind the paywall or when /me fails", async () => {
+  it("behind the paywall only says so (the core adds a hint, no tool); nothing when /me fails", async () => {
     setup({ email: "ana@acme.com", entitlements: { artifacts: false } });
     renderApp();
     await waitFor(() => expect(invokedWith("artifacts_request").length).toBeGreaterThan(0));
-    expect(await sendHello()).not.toHaveProperty("artifacts");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await sendHello()).toMatchObject({ artifacts: "paywall" });
     cleanup();
 
     setup(null);

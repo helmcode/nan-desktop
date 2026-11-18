@@ -2020,8 +2020,9 @@ function ChatShell({
         ...(skillId ? { skillId } : {}),
         ...(continuation ? { continuation: true } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
-        // Offers the share-by-talking tool (the core still asks per share).
-        ...(artifactsAccess.availability === "on" ? { artifacts: true } : {}),
+        // Offers the share-by-talking tool (the core still asks per share),
+        // or behind the paywall only a hint so the model can explain.
+        ...(artifactsAccess.availability !== "off" ? { artifacts: artifactsAccess.availability } : {}),
       });
       void refreshConversations();
       return true;

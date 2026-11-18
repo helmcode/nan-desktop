@@ -125,9 +125,10 @@ export type ChatSendArgs = {
   /// Files attached in the composer: the staged id, plus the text the
   /// renderer extracted for a document. Omitted when there are none.
   attachments?: AttachmentInput[];
-  /// Shared links are on for this account (`/api/auth/me`): the core then
-  /// offers the model `share_artifact`. Omitted otherwise.
-  artifacts?: boolean;
+  /// Shared links for this account (`/api/auth/me`): `on` offers the model
+  /// `share_artifact`; `paywall` only adds a one-line hint so it can explain
+  /// the plan lacks them. Omitted when off/unknown.
+  artifacts?: "on" | "paywall";
 };
 
 // ---------------------------------------------------------------------------

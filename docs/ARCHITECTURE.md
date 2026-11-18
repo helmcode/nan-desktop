@@ -819,8 +819,9 @@ model**.
 
 `src-tauri/src/tools/share_artifact.rs`. When the renderer's reading of
 `/api/auth/me` says shared links are on (`availability === "on"`),
-`chat_send` carries `artifacts: true` and the core offers the model a
-`share_artifact` tool (`org` audience on Helmcode only) plus its guidance
+`chat_send` carries `artifacts: "on"` and the core offers the model a
+`share_artifact` tool (with `"paywall"`, community without the plan, no tool
+is offered: a one-line `PAYWALL_HINT` lets the model explain) (`org` audience on Helmcode only) plus its guidance
 in the system message. The capability is a UX gate, not a security
 boundary: the renderer already parses every `/me` shape for the manual
 Share, the server enforces the flag (404/403), and every share asks the

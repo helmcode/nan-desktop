@@ -491,18 +491,20 @@ pub fn compose_messages(
     messages
 }
 
-/// Append the `share_artifact` guidance to the system message when the
-/// tool is offered this reply (never mention a tool the model cannot call).
+/// Append the sharing guidance to the system message: how to use
+/// `share_artifact` when it is offered this reply, the one-line paywall hint
+/// when the plan lacks shared links, nothing otherwise (never mention a
+/// tool the model cannot call).
 pub fn with_share_guidance(
     mut messages: Vec<serde_json::Value>,
-    share_tool: bool,
+    offer: tools::share_artifact::ShareOffer,
 ) -> Vec<serde_json::Value> {
-    if share_tool
+    if let Some(extra) = offer.guidance()
         && let Some(first) = messages.first_mut()
         && first["role"] == "system"
         && let Some(text) = first["content"].as_str()
     {
-        first["content"] = format!("{text}\n\n{}", tools::share_artifact::GUIDANCE).into();
+        first["content"] = format!("{text}\n\n{extra}").into();
     }
     messages
 }
@@ -1120,7 +1122,7 @@ pub fn chat_send(
     skill_id: Option<String>,
     continuation: Option<bool>,
     attachments: Option<Vec<crate::attachments::AttachmentInput>>,
-    artifacts: Option<bool>,
+    artifacts: Option<String>,
 ) -> Result<(), String> {
     let attachments = attachments.unwrap_or_default();
     if content.trim().is_empty() && attachments.is_empty() {
@@ -1280,7 +1282,7 @@ pub fn chat_send(
         // The renderer's reading of `/api/auth/me` (artifacts on for this
         // account): only a UX gate for offering `share_artifact`. The
         // server enforces the flag and every share asks the user anyway.
-        artifacts == Some(true),
+        tools::share_artifact::ShareOffer::from_wire(artifacts.as_deref()),
     ));
     attach_stream(&state, conversation_id, generation, handle)?;
     Ok(())
@@ -1342,8 +1344,9 @@ async fn run_chat_stream(
     skill: Option<skills::ActiveSkill>,
     generation: u64,
     continued: bool,
-    share_tool: bool,
+    share_offer: tools::share_artifact::ShareOffer,
 ) {
+    let share_tool = share_offer == tools::share_artifact::ShareOffer::On;
     let state = app.state::<ChatState>();
     // The one place a turn is summarized (an abort reports `user_stop`).
     let mut tracker = TurnTracker::start(&profile_id, &model, continued);
@@ -1462,7 +1465,7 @@ async fn run_chat_stream(
     let compose = |history: Vec<serde_json::Value>| {
         with_share_guidance(
             compose_messages(workspace.as_ref(), skill.as_ref(), history),
-            share_tool,
+            share_offer,
         )
     };
     let mut messages = compose(traced_history);
@@ -3675,11 +3678,16 @@ mod tests {
 
     #[test]
     fn the_share_guidance_rides_only_with_the_share_tool() {
+        use tools::share_artifact::ShareOffer;
         let base = compose_messages(None, None, vec![]);
-        let off = with_share_guidance(base.clone(), false);
+        let off = with_share_guidance(base.clone(), ShareOffer::Off);
         assert_eq!(off, base, "no tool, no mention");
         assert!(!system_prompt(None).contains(tools::share_artifact::TOOL_NAME));
-        let on = with_share_guidance(base, true);
+        let paywall = with_share_guidance(base.clone(), ShareOffer::Paywall);
+        let hint = paywall[0]["content"].as_str().unwrap_or_default();
+        assert!(hint.contains(tools::share_artifact::PAYWALL_HINT));
+        assert!(!hint.contains(tools::share_artifact::TOOL_NAME));
+        let on = with_share_guidance(base, ShareOffer::On);
         let text = on[0]["content"].as_str().unwrap_or_default();
         assert!(text.contains(tools::share_artifact::GUIDANCE));
         assert!(
@@ -3688,7 +3696,10 @@ mod tests {
         );
         // A history without a leading system message is left alone.
         let user_only = vec![serde_json::json!({ "role": "user", "content": "hola" })];
-        assert_eq!(with_share_guidance(user_only.clone(), true), user_only);
+        assert_eq!(
+            with_share_guidance(user_only.clone(), ShareOffer::On),
+            user_only
+        );
     }
 
     #[test]

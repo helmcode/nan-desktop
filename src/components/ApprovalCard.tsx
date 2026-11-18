@@ -7,6 +7,7 @@ import type { ApprovalCardState } from "../chat/approvals";
 import type { ShareAsk } from "../core";
 import { isOpen } from "../chat/approvals";
 import { useT } from "../i18n";
+import "./ApprovalShare.css";
 import {
   IconCheck,
   IconFile,

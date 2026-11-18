@@ -1,0 +1,14 @@
+/* share_artifact details on the inline approval card. */
+.approval-share-who {
+  color: var(--text);
+}
+
+.approval-share-risk {
+  display: block;
+  margin-top: 0.15rem;
+  padding: 0.35rem 0.6rem;
+  border-left: 2px solid var(--warn);
+  background-color: var(--warn-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text-2);
+}

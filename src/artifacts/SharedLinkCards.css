@@ -55,6 +55,10 @@
   white-space: nowrap;
 }
 
+.shared-link-expired {
+  color: var(--warn);
+}
+
 .shared-link-error {
   font-size: 0.78rem;
   color: var(--error);

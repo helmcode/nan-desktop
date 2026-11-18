@@ -785,7 +785,8 @@ export const es: Strings = {
     },
     notify: "Les llegará el enlace por correo.",
     expires: (days: number) => (days === 0 ? "Sin caducidad" : days === 1 ? "Caduca en 1 día" : `Caduca en ${days} días`),
-    allowIsAck: "Si lo permites, aceptas este aviso.",
+    allowIsAck: "Al permitirlo, aceptas este riesgo.",
+    expired: "Caducado",
     region: "Enlaces compartidos en esta respuesta",
     scope: {
       public: "Enlace público",
