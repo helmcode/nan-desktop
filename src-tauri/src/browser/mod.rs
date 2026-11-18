@@ -1209,10 +1209,20 @@ pub fn attach_screenshots(messages: &mut Vec<serde_json::Value>, new: &[String])
     let Some(last) = new.last() else {
         return;
     };
+    stub_screenshots(messages);
+    messages.push(screenshot_message(last));
+}
+
+/// Replace every screenshot image in `messages` with a text stub (also
+/// used when the server rejects images: the retry must not resend them).
+/// Returns how many were replaced. Pure.
+pub fn stub_screenshots(messages: &mut [serde_json::Value]) -> usize {
+    let mut replaced = 0;
     for message in messages.iter_mut().filter(|m| is_screenshot_message(m)) {
         *message = serde_json::json!({ "role": "user", "content": SCREENSHOT_STUB });
+        replaced += 1;
     }
-    messages.push(screenshot_message(last));
+    replaced
 }
 
 // ------------------------------------------------------------ commands --
@@ -1565,6 +1575,13 @@ mod tests {
         assert!(json.contains("CCC"));
         assert!(json.contains(SCREENSHOT_STUB));
         assert!(SCREENSHOT_SUMMARY.contains("Only the newest screenshot is kept"));
+        // An image-rejecting server: the retry carries no screenshot at all.
+        assert_eq!(stub_screenshots(&mut messages), 1);
+        assert!(
+            !serde_json::to_string(&messages)
+                .unwrap()
+                .contains("data:image")
+        );
     }
 
     #[test]

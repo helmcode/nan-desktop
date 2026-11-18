@@ -61,6 +61,24 @@ export interface ChatMessageRow {
   // "length" or "user_stop" (null for older replies and crash leftovers).
   // Optional: older cores did not send it.
   end_reason?: string | null;
+  // Files attached to a user message (never the extracted text).
+  // Optional: older cores did not send it.
+  attachments?: MessageAttachment[];
+}
+
+/// What a chat attachment is (`AttachmentKind` in the core).
+export type AttachmentKind = "image" | "pdf" | "docx" | "sheet" | "text" | "other";
+
+/// An attachment of a stored user message.
+export interface MessageAttachment {
+  id: string;
+  kind: AttachmentKind;
+  name: string;
+  size: number;
+  /// The image file (asset protocol); null for documents.
+  path: string | null;
+  /// Only the beginning of the document's text was used.
+  truncated: boolean;
 }
 
 /// A local file picked for an image edit, staged by the core.

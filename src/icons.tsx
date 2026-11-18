@@ -283,3 +283,16 @@ export const IconIssue = (p: IconProps) => (
     <circle cx="12" cy="12" r="1.5" />
   </Icon>
 );
+
+export const IconPaperclip = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="m21 11.5-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9" />
+  </Icon>
+);
+
+export const IconTable = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+    <path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10" />
+  </Icon>
+);

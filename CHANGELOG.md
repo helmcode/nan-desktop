@@ -9,10 +9,19 @@
 - El asistente nunca escribe contrasenas, codigos de verificacion ni datos de tarjeta: te pide que lo hagas tu en la ventana. Enviar un inicio de sesion o pulsar un boton de pago o compra pide permiso cada vez.
 - Con modelos que ven imagenes, el asistente puede hacer una captura de la pagina.
 - La ventana del navegador se abre al lado del chat sin quitarle el foco, y cuando el asistente pide permiso el chat pasa al frente. Cerrar el navegador detiene al asistente. Si una pagina intenta descargar un archivo, se bloquea y el asistente te dice que lo descargues desde tu navegador habitual.
+- Adjuntar archivos al mensaje: boton de clip en el cuadro de texto, arrastrar archivos a la ventana o pegar una captura. Se ven como fichas que puedes quitar antes de enviar (hasta 10 por mensaje; imagenes de hasta 10 MB y documentos de hasta 20 MB).
+- Los PDF, Word, hojas de calculo (xlsx, xls, csv) y archivos de texto o codigo se leen en tu equipo y el asistente recibe su texto. Si un documento es muy largo, solo se usa el principio y se indica en la ficha.
+- Las imagenes se reducen antes de enviarlas. Si el modelo elegido no puede ver imagenes, esa respuesta la da automaticamente un modelo que si puede; tu eleccion de modelo no cambia y el siguiente mensaje sin imagenes vuelve a tu modelo.
+- Los mensajes enviados muestran sus imagenes y documentos, tambien al volver a abrir la conversacion.
+- Mientras el asistente responde tambien puedes adjuntar archivos: van con el mensaje en cola.
 
 ### Security
 - Despues de que el asistente use el navegador, te pide permiso antes de ejecutar ordenes o cambiar archivos hasta tu siguiente mensaje, tambien en carpetas con "Permitir sin preguntar" (leer archivos no pregunta). Se puede desactivar en Ajustes, Carpetas de trabajo.
 - El navegador del asistente no puede llamar a ningun comando de la app, usa un almacen de datos privado que se borra al cerrarlo, bloquea las descargas y solo abre paginas http/https. Los comandos de la app ahora solo se aceptan desde la ventana del chat.
+
+### Changed
+- Los archivos adjuntos se quedan en este equipo: la memoria de tu cuenta solo guarda una linea con el nombre de cada archivo, nunca su contenido ni la descripcion de las imagenes.
+- Telemetria: dos eventos nuevos sin contenido, `attachment_added` (tipo de archivo y cuantos) y `vision_routed` (de que modelo a que modelo se envio una respuesta con imagenes). Detalle en SECURITY.md.
 
 ## 0.2.13 - 2026-11-17 - El asistente termina lo que empieza
 

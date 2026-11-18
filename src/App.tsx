@@ -28,6 +28,13 @@ import { stripToolMarkup } from "./chat/toolMarkup";
 import { AllowNudgeCard } from "./components/AllowNudgeCard";
 import { BrowserBar, useBrowserView } from "./components/BrowserBar";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { AttachmentTray, MessageAttachments, attachProblemText } from "./components/Attachments";
+import { useComposerAttachments } from "./chat/useComposerAttachments";
+import {
+  attachmentPayload,
+  pendingAsMessageAttachments,
+  type PendingAttachment,
+} from "./chat/attachments";
 import { ChatImage } from "./components/ChatImage";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FolderPicker } from "./components/FolderPicker";
@@ -54,6 +61,7 @@ import {
   storedVoice,
 } from "./copy";
 import {
+  discardAttachment,
   onApprovalRequest,
   onBrowserSiteUsed,
   browserHost,
@@ -78,6 +86,7 @@ import {
   IconGlobe,
   IconMemory,
   IconMic,
+  IconPaperclip,
   IconPanel,
   IconPencil,
   IconImage,
@@ -945,6 +954,41 @@ function ChatShell({
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
+  // Composer attachments (paperclip, drop on the window, pasted images).
+  // They stay usable while a reply runs: they then go with the queued
+  // message.
+  // Attaching leaves image mode: files go with a chat message.
+  // Per conversation (like the queue): switching chats keeps each one's
+  // pending files apart; the blank chat uses NEW_CHAT_KEY.
+  const attach = useComposerAttachments({
+    enabled: view === "chat",
+    conversationKey: activeConvId ?? NEW_CHAT_KEY,
+    pastedImageName: t.attachments.pastedImage,
+    onAdded: () => {
+      const key = activeConvRef.current ?? NEW_CHAT_KEY;
+      setImageModes((prev) => (prev.has(key) ? withoutKey(prev, key) : prev));
+    },
+  });
+  // Why the core refused a queued message's files (read by the flush).
+  const queueRefusalRef = useRef<string | null>(null);
+  // Conversations deleted in this session (a flush in flight must not
+  // recreate their queue).
+  const deletedConvsRef = useRef<Set<number>>(new Set());
+  // The chat shell goes away (sign-out, account switch): queued files are
+  // discarded in the core (the tray's own are discarded by its hook).
+  useEffect(
+    () => () => {
+      for (const queue of queuesRef.current.values()) {
+        for (const item of queue.items) {
+          for (const file of item.attachments ?? []) void discardAttachment(file.id).catch(() => {});
+        }
+      }
+    },
+    [],
+  );
+  const attachAppendRef = useRef(attach.append);
+  attachAppendRef.current = attach.append;
+
   const refreshConversations = useCallback(async (): Promise<ConversationView[]> => {
     const profileId = activeProfileRef.current;
     if (!profileId) return [];
@@ -1588,6 +1632,13 @@ function ChatShell({
       }
       dispatchApproval({ type: "clearConversation", conversationId });
       dispatchNudge({ type: "clearConversation", conversationId });
+      // Its queued and pending files are discarded with it; a send in
+      // flight for it never brings its queue back.
+      deletedConvsRef.current.add(conversationId);
+      attach.discardFor(conversationId);
+      for (const item of queueOf(queuesRef.current, conversationId).items) {
+        for (const file of item.attachments ?? []) void discardAttachment(file.id).catch(() => {});
+      }
       setQueues((prev) => dropQueue(prev, conversationId));
       setSelections((prev) => {
         const next = { ...prev };
@@ -1878,9 +1929,24 @@ function ChatShell({
   // `override` sends a fixed text (round 15: "Save as skill") without
   // touching what the user is typing; the result says whether it went out.
   // `continuation` marks the "Continue" button of an unfinished turn.
-  const send = useCallback(async (override?: string, continuation = false): Promise<boolean> => {
+  // `queuedFiles`: the attachments of a queued message being flushed (the
+  // tray is not involved). Otherwise the tray's files go with what the user
+  // typed, never with a fixed text.
+  const send = useCallback(async (
+    override?: string,
+    continuation = false,
+    queuedFiles?: readonly PendingAttachment[],
+  ): Promise<boolean> => {
     const text = (override ?? composer).trim();
-    if (!text || streamingActive) return false;
+    const fromTray = queuedFiles === undefined && override === undefined && attach.items.length > 0;
+    const files = queuedFiles ?? (fromTray ? attach.items : []);
+    const withFiles = files.length > 0;
+    if ((!text && !withFiles) || streamingActive) return false;
+    if (fromTray && (attach.reading || !attach.validate())) return false;
+    queueRefusalRef.current = null;
+    const attachments = attachmentPayload(files);
+    const shownAttachments = pendingAsMessageAttachments(files);
+    const takenAttachments = fromTray ? attach.takeAll() : [];
     // Any send replaces a pending automatic continuation.
     setAutoRetryConvId(null);
     setSessionExpired(false);
@@ -1907,6 +1973,7 @@ function ChatShell({
           partial: false,
           media_path: null,
           sources: [],
+          attachments: shownAttachments,
         },
       ]);
       if (override === undefined) setComposer("");
@@ -1916,7 +1983,9 @@ function ChatShell({
       // Round 5: a new chat is listed (streaming) right away, so switching
       // away mid-reply never hides it; the refresh after `chat_send` swaps
       // in the core's stored title and ordering.
-      setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(text)));
+      setConversations((prev) =>
+        withConversation(prev, id, titleFromFirstMessage(text || (shownAttachments[0]?.name ?? ""))),
+      );
       await sendChat({
         conversationId: id,
         model,
@@ -1924,10 +1993,40 @@ function ChatShell({
         grantIds,
         ...(skillId ? { skillId } : {}),
         ...(continuation ? { continuation: true } : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
       });
       void refreshConversations();
       return true;
     } catch (err) {
+      // Nothing was sent: give the files back (to the composer, or to the
+      // queued message through queueRefusalRef).
+      const refusal = String(err).startsWith("attachments:") ? String(err).slice("attachments:".length) : null;
+      // Explicit key: a new chat was created (and the screen may have
+      // changed) while the send ran.
+      if (takenAttachments.length > 0) {
+        attach.restore(takenAttachments, refusal ?? undefined, conversationId ?? NEW_CHAT_KEY);
+      }
+      if (withFiles) {
+        // The core refused the files before storing anything: the text
+        // comes back too and the optimistic bubble goes away.
+        if (refusal) {
+          if (!fromTray) queueRefusalRef.current = refusal;
+          if (override === undefined) setComposer(text);
+          if (conversationId !== null) {
+            const id = conversationId;
+            setStreamingIds((prev) => withoutKey(prev, id));
+            setDrafts((prev) => {
+              const next = new Map(prev);
+              next.delete(id);
+              return next;
+            });
+            // Only reload what is on screen.
+            if (activeConvRef.current === id) void loadMessages(id);
+          }
+          void refreshConversations();
+          return false;
+        }
+      }
       // The skill was deleted elsewhere: nothing was sent or stored. Turn it
       // off and give the text back so the user can resend.
       if (skillId && String(err).startsWith("skill:")) {
@@ -1968,7 +2067,7 @@ function ChatShell({
       void refreshConversations();
       return false;
     }
-  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary]);
+  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary, attach]);
 
   const sendImage = useCallback(async (): Promise<void> => {
     const prompt = composer.trim();
@@ -2074,10 +2173,14 @@ function ChatShell({
   const queueing = activeConvId !== null && (streamingActive || (activeQueue?.items.length ?? 0) > 0);
   const enqueueComposer = (): void => {
     const id = activeConvId;
-    if (id === null || !composer.trim()) return;
+    if (id === null || attach.reading) return;
+    if (!composer.trim() && attach.items.length === 0) return;
+    if (!attach.validate()) return;
     queueSeq.current += 1;
     const seq = queueSeq.current;
-    setQueues((prev) => enqueue(prev, id, composer, seq));
+    // The tray's files leave with the queued message.
+    const files = attach.takeAll();
+    setQueues((prev) => enqueue(prev, id, composer, seq, files));
     setComposer("");
   };
   const submit = (): void => {
@@ -2217,9 +2320,19 @@ function ChatShell({
     setQueues((prev) => takeQueued(prev, id));
     setAutoRetryConvId((prev) => (prev === id ? null : prev));
     void sendRef
-      .current(message.text)
+      .current(message.text, false, message.attachments ?? [])
       .then((sent) => {
-        if (!sent) setQueues((prev) => requeueFront(prev, id, message));
+        if (sent) return;
+        // Deleted while this send was in flight: no queue comes back, and
+        // its files go.
+        if (deletedConvsRef.current.has(id)) {
+          for (const file of message.attachments ?? []) void discardAttachment(file.id).catch(() => {});
+          return;
+        }
+        // Refused files: held with the reason (Edit to fix it).
+        const problem = queueRefusalRef.current ?? undefined;
+        queueRefusalRef.current = null;
+        setQueues((prev) => requeueFront(prev, id, problem ? { ...message, problem } : message));
       })
       .finally(() => setFlushing(false));
   }, [queues, activeConvId, flushing, composerBusy, sessionExpired]);
@@ -2230,13 +2343,17 @@ function ChatShell({
     const item = queueOf(queuesRef.current, id).items.find((m) => m.id === itemId);
     if (!item) return;
     setQueues((prev) => removeQueued(prev, id, itemId));
-    // Back into the composer, ahead of anything typed since.
+    // Back into the composer, ahead of anything typed since; its files go
+    // back to the tray.
     setComposer((prev) => (prev.trim() ? `${item.text}\n${prev}` : item.text));
+    attachAppendRef.current(item.attachments ?? []);
     composerRef.current?.focus();
   }, []);
   const removeQueuedMessage = useCallback((itemId: number): void => {
     const id = activeConvRef.current;
     if (id === null) return;
+    const item = queueOf(queuesRef.current, id).items.find((m) => m.id === itemId);
+    for (const file of item?.attachments ?? []) void discardAttachment(file.id).catch(() => {});
     setQueues((prev) => removeQueued(prev, id, itemId));
     composerRef.current?.focus();
   }, []);
@@ -2344,7 +2461,8 @@ function ChatShell({
     if (m.role !== "assistant") {
       return (
         <article className="msg msg-user">
-          <p className="msg-user-text">{m.content}</p>
+          {m.attachments && m.attachments.length > 0 && <MessageAttachments attachments={m.attachments} />}
+          {m.content.trim().length > 0 && <p className="msg-user-text">{m.content}</p>}
         </article>
       );
     }
@@ -2899,7 +3017,20 @@ function ChatShell({
                   />
                 </div>
               )}
-              <div className={`composer-box${imageMode ? " image-mode" : ""}`}>
+              <div
+                className={`composer-box${imageMode ? " image-mode" : ""}${attach.dragging ? " drop-target" : ""}`}
+              >
+                {attach.dragging && (
+                  <p className="drop-hint" role="status">
+                    {t.attachments.dropHint}
+                  </p>
+                )}
+                <AttachmentTray
+                  items={attach.items}
+                  onRemove={attach.remove}
+                  onFocusComposer={() => composerRef.current?.focus()}
+                  disabled={imageGeneratingActive}
+                />
                 <textarea
                   ref={composerRef}
                   className="composer-input"
@@ -2910,6 +3041,7 @@ function ChatShell({
                     setPickerIndex(0);
                     if (!value.startsWith("/")) setSlashDismissed(false);
                   }}
+                  onPaste={attach.paste}
                   onKeyDown={(e) => {
                     if (pickerKey(e)) return;
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -2948,6 +3080,18 @@ function ChatShell({
                           ))}
                         </select>
                       </label>
+                    )}
+                    {!imageMode && (
+                      <button
+                        type="button"
+                        className="icon-btn attach-btn"
+                        aria-label={t.attachments.attach}
+                        title={t.attachments.attach}
+                        onClick={() => void attach.pick()}
+                        disabled={imageGeneratingActive}
+                      >
+                        <IconPaperclip size={18} />
+                      </button>
                     )}
                     {!imageMode && (
                       <button
@@ -3007,7 +3151,11 @@ function ChatShell({
                           type="button"
                           className="send-btn"
                           onClick={submit}
-                          disabled={composer.trim().length === 0 || imageMode}
+                          disabled={
+                            imageMode ||
+                            (composer.trim().length === 0 && attach.items.length === 0) ||
+                            attach.reading
+                          }
                           aria-label={t.chat.queueSend}
                           title={t.chat.queueSend}
                         >
@@ -3019,7 +3167,11 @@ function ChatShell({
                         type="button"
                         className="send-btn"
                         onClick={submit}
-                        disabled={composer.trim().length === 0}
+                        disabled={
+                          imageMode
+                            ? composer.trim().length === 0
+                            : (composer.trim().length === 0 && attach.items.length === 0) || attach.reading
+                        }
                         aria-label={imageMode ? t.chat.createImage : t.chat.send}
                         title={imageMode ? t.chat.createImage : t.chat.send}
                       >
@@ -3029,6 +3181,20 @@ function ChatShell({
                   </div>
                 </div>
               </div>
+              {attach.problem && (
+                <p className="composer-hint attach-problem" role="alert">
+                  {attachProblemText(t, attach.problem)}
+                  <button
+                    type="button"
+                    className="attach-problem-x"
+                    aria-label={t.attachments.dismissProblem}
+                    title={t.attachments.dismissProblem}
+                    onClick={attach.dismissProblem}
+                  >
+                    <IconX size={12} />
+                  </button>
+                </p>
+              )}
               {(sttHint || workspaceError) && (
                 <p className="composer-hint" role="status">
                   {sttHint || workspaceError}

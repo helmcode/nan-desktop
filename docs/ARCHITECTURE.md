@@ -125,6 +125,91 @@ together with the chosen mode. Commands: `memory_settings_get`,
 `memory_set_mode`, `memory_sync` (always `Ok`; returns whether the list
 changed).
 
+## Chat attachments and vision routing
+
+Composer attachments live in `src-tauri/src/attachments.rs` (core) and
+`src/chat/attachments.ts`, `src/chat/useComposerAttachments.ts`,
+`src/components/Attachments.tsx` (renderer). The user-facing security
+contract is in [SECURITY.md](../SECURITY.md#chat-attachments).
+
+```
+paperclip ─ attachments_pick ─┐   (core opens the native dialog)
+drop on window ─ WindowEvent::DragDrop (lib.rs) ─┤ stage_paths: deny-list,
+paste ─ attachments_stage_bytes (images only) ───┘ caps, classify by content
+        │
+        ├─ image → prepare_image (≤1568 px JPEG q85) → images/attachments/<id>.jpg
+        └─ document → attachments/staged/<id>.bin → attachment_read (raw bytes)
+                       → renderer extracts text (pdf.js; mammoth / SheetJS in
+                         src/chat/extractWorker.ts, terminated after 30 s)
+chat_send(..., attachments: [{id, text?}])
+   → commit: count/size/text caps → messages.attachments (JSON, device-local)
+   → consume (only after the row is stored: a failed send stays re-sendable)
+   → route_model: images + text-only selection → vision_fallback
+   → describe_images: side request (vision_fallback, non-streaming) → description
+     (eager when the selection is text-only, else lazily on the first
+     text-only request; device-local, never synced)
+```
+
+**Why extraction runs in the renderer.** The renderer already ships (and
+lazy-loads) pdf.js, mammoth and SheetJS for the preview pane; moving them
+to Rust would add three parsers to the core for the same result. The core
+still owns everything that matters: which file is read (no renderer path),
+the caps, what is stored and what is sent. The stored text is exactly what
+the model saw, so history replays it verbatim.
+
+**Vision.** `chat-models.json` lists `vision` (models that accept image
+parts) and `vision_fallback`. `turn::history_messages` sends the newest
+`MAX_IMAGES_PER_REQUEST` (10) images as `image_url` data URLs to a vision
+model and every other image as its stand-in
+(`[Image: <name>. Already viewed earlier in this conversation;
+description: ...]`, worded so a text-only model does not claim it cannot
+see an image the conversation already covered); a text-only model gets
+stand-ins only. A text-only turn whose history has an image whose
+description is still being requested waits for it up to 5 s
+(`attachments::DescribingGuard`, `pending_descriptions`, `wait_until`). `chat::request_body` strips any remaining non-text part
+for non-vision models (tool-trace replay, retries, future tools), so the
+platform's 400 "text-only model" cannot happen. A 400 from a vision model while the
+request carries image parts is retried once with the text stand-ins
+instead (`chat::rebase_messages` keeps the reply's own tool rounds), before
+the usual 400 retries (without traces, then without tools). The images that
+were sent are then flagged `vision_rejected` (device-local), so later
+turns send their stand-in directly. The selected model in the
+picker never changes; the reply row stores the model that actually
+answered. No notice is shown: the reply has no model label to annotate
+and the switch is invisible by design.
+
+**Checks.** `node test/vision-check.mjs` proves the mock contract
+(`test/mock-chat.mjs`: `glm5.3` answers any image part with the
+platform's exact 400; a non-streaming image request gets a one-line
+description). `NAN_KEY=<member key> node test/vision-check.mjs --real`
+sends the same tiny image to every model in `chat-models.json` on
+`api.nan.builders` and checks each one behaves as the file says.
+
+**Tray per conversation.** Pending files belong to the conversation on
+screen (like the queue): switching chats keeps each one's files apart; the
+blank chat uses `NEW_CHAT_KEY`. Count (10) and total size (50 MB) are
+checked before a send or a queue entry, as the core does.
+
+**Queue.** Attachments stay usable while a reply runs. Queuing a message
+(`chat/queue.ts`, `enqueue(..., attachments)`) takes the tray's files with
+it; the flush passes them to `send()`, Edit puts them back in the tray and
+Remove (or deleting the conversation) discards them in the core. A message
+may be only files. A queued message whose files the core refuses goes back
+to the front of the queue, held, with the reason shown on it (no stray
+bubble); Edit puts its files back, capped at 10. Deleting a conversation
+while its queued send is in flight discards the files and never recreates
+its queue.
+
+**Continue.** A "Continuar" turn whose last reply came from the vision
+fallback keeps going on the fallback (`attachments::route_continuation`),
+so a routed image task does not continue blind on the text-only model.
+
+**Sync.** `chat_store::export_messages` uploads `attachments::sync_content`
+(text + `[Attached file: <name>]` / `[Image: <name>]`, never the
+description). `write_remote_conversation` matches a local row
+with attachments by role, timestamp and text prefix, and keeps its local
+text and attachments.
+
 ## Telemetry (S8)
 
 Always on (owner decision 2026-11-17), metadata only. The user-facing
@@ -133,7 +218,7 @@ contract (events, fields, what is never sent, delivery rules) lives in
 implementation map (`src-tauri/src/telemetry.rs`):
 
 - **Builders** (`app_start`, `turn_end`, `tool_call`, `error_shown`,
-  `crash_rust`, `crash_renderer`) are the only way to make an event. Props
+  `crash_rust`, `crash_renderer`, `attachment_added`, `vision_routed`) are the only way to make an event. Props
   come from enums (`TurnEndReason`, `ToolOutcome`, `Surface`, the
   `ErrorKind` enums via their serde spelling), counters, durations and two
   fixed lists (`TOOL_NAMES`, the `chat-models.json` allowlist). A test
@@ -353,7 +438,8 @@ node test/t4-check.mjs
 
 ### What is NOT in the MVP
 
-- Tool use / computer use (T8), vision upload and image EDITING (the image
+- Tool use / computer use (T8), vision upload (shipped later: see "Chat
+  attachments and vision routing") and image EDITING (the image
   GENERATION half of T5 shipped — see below; editing stays out of v1 per the
   product review) — the model picker still filters those models out.
 - Conversation rename, message editing/regeneration, persisted model choice
@@ -982,13 +1068,13 @@ the actions `browser_site`, `browser_local_site`, `browser_login` and
 
 Chat integration (`chat.rs`): `offered_tool_definitions` adds the browser
 tools to every reply (`browser_screenshot` only when
-`browser::tools::model_sees_images(model)`, which reads the `vision` list
-of `chat-models.json` when present and otherwise the same built-in list:
-`deepseek-v4-flash`, `glm5.3-flash`). Browser calls are routed to
+`chat_models_config().is_vision(model)`: the single `vision` list of
+`chat-models.json`, the same one attachments use). Browser calls are routed to
 `browser::run_model_tool`; a screenshot comes back as a `data:` URL and is
 sent as a user message with an `image_url` part after the round's tool
 messages (tool messages cannot carry images). Images are never written to
-the tool trace. The activity is `browsing`.
+the tool trace; when a vision model rejects images (400), the attachments
+retry also turns this reply's screenshots into text stubs. The activity is `browsing`.
 
 ### Command ACL
 

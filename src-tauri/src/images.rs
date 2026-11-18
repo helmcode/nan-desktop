@@ -499,8 +499,31 @@ pub fn sweep_orphan_images(
     let Some(stores) = chat_stores_for_sweep(app_data) else {
         return 0;
     };
-    let Ok(entries) = std::fs::read_dir(images_dir(app_data)) else {
-        return 0;
+    // Generated images, then images attached to messages (their own
+    // folder; a deleted conversation's attachments become orphans too).
+    let mut deleted = 0;
+    for dir in [
+        images_dir(app_data),
+        crate::attachments::images_dir(app_data),
+    ] {
+        match sweep_orphans_in(&dir, &stores, min_age, now) {
+            Ok(count) => deleted += count,
+            Err(count) => return deleted + count,
+        }
+    }
+    deleted
+}
+
+/// One folder of [`sweep_orphan_images`]. `Err(deleted)` = a store could
+/// not answer: stop everything (never guess).
+fn sweep_orphans_in(
+    dir: &Path,
+    stores: &[rusqlite::Connection],
+    min_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> Result<usize, usize> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(0);
     };
     let mut deleted = 0;
     for entry in entries.flatten() {
@@ -532,7 +555,7 @@ pub fn sweep_orphan_images(
             continue;
         }
         let mut referenced = false;
-        for conn in &stores {
+        for conn in stores {
             match chat_store::references_file_name(conn, name) {
                 Ok(true) => {
                     referenced = true;
@@ -540,14 +563,14 @@ pub fn sweep_orphan_images(
                 }
                 Ok(false) => {}
                 // A store cannot answer: stop, never guess.
-                Err(_) => return deleted,
+                Err(_) => return Err(deleted),
             }
         }
         if !referenced && std::fs::remove_file(entry.path()).is_ok() {
             deleted += 1;
         }
     }
-    deleted
+    Ok(deleted)
 }
 
 /// Every chat store the orphan sweep must consult: the pre-realm
@@ -589,7 +612,8 @@ pub fn sweep_orphans_in_background(app_data: PathBuf) {
         .spawn(move || {
             let now = std::time::SystemTime::now();
             let deleted = sweep_orphan_images(&app_data, ORPHAN_MIN_AGE, now)
-                + crate::image_edit::sweep_staged_sources(&app_data, ORPHAN_MIN_AGE, now);
+                + crate::image_edit::sweep_staged_sources(&app_data, ORPHAN_MIN_AGE, now)
+                + crate::attachments::sweep_staged(&app_data, ORPHAN_MIN_AGE, now);
             if deleted > 0 {
                 eprintln!("helmcode-desktop: removed {deleted} orphaned generated image(s)");
             }

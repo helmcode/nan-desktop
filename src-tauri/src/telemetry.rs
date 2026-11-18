@@ -352,6 +352,25 @@ pub fn error_shown<K: Serialize>(surface: Surface, kind: &K) -> EventSpec {
     )
 }
 
+/// `attachment_added`: what kind of file was attached to a sent message and
+/// how many of that kind. Never a name, a path, a size or any content.
+pub fn attachment_added(kind: crate::attachments::AttachmentKind, count: usize) -> EventSpec {
+    spec(
+        "attachment_added",
+        serde_json::json!({ "kind": kind.as_str(), "count": count }),
+    )
+}
+
+/// `vision_routed`: a turn with images was sent to the vision fallback
+/// because the selected model is text-only. Both ids go through the
+/// built-in model allowlist ([`model_id`]).
+pub fn vision_routed(from_model: &str, to_model: &str) -> EventSpec {
+    spec(
+        "vision_routed",
+        serde_json::json!({ "from_model": model_id(from_model), "to_model": model_id(to_model) }),
+    )
+}
+
 /// The panic location as `file:line`, without build-machine prefixes:
 /// absolute paths (a dependency in the cargo registry, the std library)
 /// keep their last 3 components; only `[A-Za-z0-9._/-]` survive.
@@ -447,6 +466,8 @@ pub fn catalogue_keys(name: &str) -> Option<&'static [&'static str]> {
         "tool_call" => &["tool", "outcome", "duration_ms"],
         "error_shown" => &["surface", "kind"],
         "crash" => &["source", "location"],
+        "attachment_added" => &["kind", "count"],
+        "vision_routed" => &["from_model", "to_model"],
         _ => return None,
     })
 }
@@ -1493,6 +1514,19 @@ mod tests {
             77,
         ));
         out.push(crash_renderer("TypeError"));
+        use crate::attachments::AttachmentKind as Att;
+        for kind in [
+            Att::Image,
+            Att::Pdf,
+            Att::Docx,
+            Att::Sheet,
+            Att::Text,
+            Att::Other,
+        ] {
+            out.push(attachment_added(kind, 3));
+        }
+        out.push(vision_routed("glm5.3", "glm5.3-flash"));
+        out.push(vision_routed("made-up", "glm5.3-flash"));
         out
     }
 
@@ -1524,6 +1558,12 @@ mod tests {
             }
             ("error_shown", "kind") => s.is_some_and(valid_name),
             ("crash", "source") => matches!(s, Some("rust_panic" | "renderer")),
+            ("attachment_added", "kind") => matches!(
+                s,
+                Some("image" | "pdf" | "docx" | "sheet" | "text" | "other")
+            ),
+            ("attachment_added", "count") => value.is_u64(),
+            ("vision_routed", "from_model" | "to_model") => s.is_some_and(|m| model_id(m) == m),
             ("crash", "location") => s.is_some_and(|l| {
                 l.len() <= MAX_PROP_STRING_CHARS
                     && l.chars().all(|c| {
@@ -1544,7 +1584,15 @@ mod tests {
         let names: HashSet<&str> = events.iter().map(|e| e.name).collect();
         assert_eq!(
             names,
-            HashSet::from(["app_start", "turn_end", "tool_call", "error_shown", "crash"])
+            HashSet::from([
+                "app_start",
+                "turn_end",
+                "tool_call",
+                "error_shown",
+                "crash",
+                "attachment_added",
+                "vision_routed",
+            ])
         );
         for event in &events {
             assert!(valid_name(event.name), "{}", event.name);
@@ -1574,6 +1622,7 @@ mod tests {
             events.push(tool_call(canary, ToolOutcome::Ok, 1));
             events.push(error_shown(Surface::Chat, canary));
             events.push(crash_renderer(canary));
+            events.push(vision_routed(canary, canary));
             let result = serde_json::json!({
                 "ok": false, "error": "io", "message": canary, "path": canary
             })
@@ -2003,6 +2052,33 @@ mod tests {
         }
         let reopened = Queue::open(tmp.path(), unix_now());
         assert_eq!(reopened.items(), &[first, second]);
+    }
+
+    #[test]
+    fn attachment_and_routing_events_survive_a_queue_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let events: Vec<Queued> = [
+            attachment_added(crate::attachments::AttachmentKind::Pdf, 2),
+            vision_routed("glm5.3", "glm5.3-flash"),
+        ]
+        .into_iter()
+        .map(|spec| Queued {
+            profile: Some("nan".into()),
+            realm: None,
+            at: unix_now(),
+            event: stamp(spec, &uuid::Uuid::new_v4().to_string(), SystemTime::now()),
+        })
+        .collect();
+        {
+            let mut queue = Queue::open(tmp.path(), unix_now());
+            for event in &events {
+                queue.push(event.clone());
+            }
+        }
+        let reopened = Queue::open(tmp.path(), unix_now());
+        assert_eq!(reopened.items(), events.as_slice());
+        assert_eq!(reopened.items()[0].event.props["kind"], "pdf");
+        assert_eq!(reopened.items()[1].event.props["to_model"], "glm5.3-flash");
     }
 
     #[test]

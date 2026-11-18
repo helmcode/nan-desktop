@@ -16,6 +16,8 @@
 
 // Shared artifacts (F1): snapshot upload of a granted file + link list/revoke.
 mod artifacts;
+// Chat attachments: composer files (pick, drop, paste), vision routing.
+mod attachments;
 // In-app browser the assistant drives (computer use, phase 1): isolated
 // window, `browser_*` tools, approval policy.
 mod browser;
@@ -222,6 +224,13 @@ fn app_info(app: AppHandle) -> AppInfo {
     }
 }
 
+/// Only the chat window stages dropped files as attachments. Files dropped
+/// on the assistant's browser window are swallowed by Tauri's drop handler
+/// (left enabled there, so a page never receives the file) and ignored.
+fn accepts_file_drops(window_label: &str) -> bool {
+    window_label == "main"
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Debug and release builds expose exactly the same IPC surface: the
@@ -230,6 +239,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(device_flow::DeviceLoginState::default())
         .manage(chat::ChatState::default())
+        .manage(attachments::AttachmentsState::default())
         .manage(tts::TtsState::default())
         .manage(images::ImagesState::default())
         .manage(tools::ToolsState::default())
@@ -290,6 +300,18 @@ pub fn run() {
                 .build()?;
             Ok(())
         })
+        // Chat attachments: files dropped on the MAIN window are read by the
+        // core from the native drop event (the renderer never names a
+        // path) and announced as `attachments://dropped`.
+        .on_window_event(|window, event| {
+            if accepts_file_drops(window.label())
+                && let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) =
+                    event
+                && !paths.is_empty()
+            {
+                attachments::stage_dropped(window.app_handle(), paths.clone());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             profiles_load,
             app_info,
@@ -305,6 +327,12 @@ pub fn run() {
             chat::conversation_delete,
             chat::conversation_rename,
             chat::messages_list,
+            attachments::attachments_pick,
+            attachments::attachments_stage_bytes,
+            attachments::attachment_read,
+            attachments::attachment_discard,
+            attachments::attachments_set_accepting,
+            attachments::attachments_internal_drag,
             memory::memory_settings_get,
             memory::memory_set_mode,
             memory::memory_sync,
@@ -467,6 +495,13 @@ mod tests {
             assert!(!text.contains(&format!("\"{}\"", browser::LABEL)));
             assert!(!text.contains("\"remote\""));
         }
+    }
+
+    #[test]
+    fn only_the_chat_window_turns_dropped_files_into_attachments() {
+        assert!(accepts_file_drops("main"));
+        assert!(!accepts_file_drops(browser::LABEL));
+        assert!(!accepts_file_drops(""));
     }
 
     #[test]

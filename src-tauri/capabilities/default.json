@@ -69,6 +69,12 @@
     "allow-update-install",
     "allow-browser-state",
     "allow-browser-control",
-    "allow-browser-set-language"
+    "allow-browser-set-language",
+    "allow-attachments-pick",
+    "allow-attachments-stage-bytes",
+    "allow-attachment-read",
+    "allow-attachment-discard",
+    "allow-attachments-set-accepting",
+    "allow-attachments-internal-drag"
   ]
 }

@@ -47,33 +47,10 @@ action says the element is stale, read the page again.\n\
 - Use web_search to find information; use the browser when the user wants something done on a \
 specific site or the page needs interaction.";
 
-const VISION_FALLBACK: &[&str] = &["deepseek-v4-flash", "glm5.3-flash"];
-
-/// Models that accept image input. Read from the `vision` list of
-/// `chat-models.json` when the file has one (the attachments feature adds
-/// it); until then the same data lives here. Pure: `json` is the file.
-pub fn vision_models_from(json: &str) -> Vec<String> {
-    serde_json::from_str::<Value>(json)
-        .ok()
-        .and_then(|value| value.get("vision").and_then(Value::as_array).cloned())
-        .map(|list| {
-            list.iter()
-                .filter_map(Value::as_str)
-                .map(|id| id.trim().to_string())
-                .filter(|id| !id.is_empty())
-                .collect()
-        })
-        .unwrap_or_else(|| VISION_FALLBACK.iter().map(|id| id.to_string()).collect())
-}
-
 /// Whether `model` can see images (decides if `browser_screenshot` is
-/// offered at all).
+/// offered at all). Single source: the `vision` list of `chat-models.json`.
 pub fn model_sees_images(model: &str) -> bool {
-    static VISION: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    VISION
-        .get_or_init(|| vision_models_from(include_str!("../../chat-models.json")))
-        .iter()
-        .any(|id| id == model)
+    crate::chat::chat_models_config().is_vision(model)
 }
 
 fn def(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
@@ -292,20 +269,6 @@ mod tests {
         for name in &with {
             assert!(is_browser_tool(name));
         }
-    }
-
-    #[test]
-    fn the_vision_list_comes_from_chat_models_json_when_present() {
-        assert_eq!(
-            vision_models_from(r#"{"headliner":"a","models":["a","b"],"vision":["b"," c "]}"#),
-            vec!["b".to_string(), "c".to_string()]
-        );
-        // Without the key (today's file): the built-in list.
-        assert_eq!(
-            vision_models_from(r#"{"headliner":"a","models":["a"]}"#),
-            vec!["deepseek-v4-flash".to_string(), "glm5.3-flash".to_string()]
-        );
-        assert_eq!(vision_models_from("not json").len(), 2);
     }
 
     #[test]
