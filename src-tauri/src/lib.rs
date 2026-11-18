@@ -320,6 +320,8 @@ pub fn run() {
             attachments::attachments_stage_bytes,
             attachments::attachment_read,
             attachments::attachment_discard,
+            attachments::attachments_set_accepting,
+            attachments::attachments_internal_drag,
             memory::memory_settings_get,
             memory::memory_set_mode,
             memory::memory_sync,

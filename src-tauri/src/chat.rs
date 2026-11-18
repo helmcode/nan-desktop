@@ -1149,6 +1149,10 @@ pub fn chat_send(
         chat_store::insert_user_message_with_attachments(&conn, conversation_id, &content, &records)
     }
     .map_err(|err| err.to_string())?;
+    // Stored: only now are the staged files consumed (a failure above leaves
+    // them re-sendable).
+    app.state::<crate::attachments::AttachmentsState>()
+        .consume(&records.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
     for (kind, count) in crate::attachments::counts_by_kind(&records) {
         crate::telemetry::record(
             Some(&conversation.profile_id),
@@ -1157,16 +1161,29 @@ pub fn chat_send(
     }
     // Vision routing: this turn's images need a model that sees them. The
     // user's selection is untouched; the next text-only turn uses it again.
+    // A "Continue" goes on with the model that was answering the unfinished
+    // turn when that was the vision fallback (its images stay visible).
     let has_images = records.iter().any(|r| r.kind.is_image());
-    let routed = crate::attachments::route_model(&model, has_images, chat_models_config());
+    let routed = if continuation.unwrap_or(false) && !has_images {
+        let last = chat_store::last_assistant_model(&conn, conversation_id)
+            .ok()
+            .flatten();
+        crate::attachments::route_continuation(&model, last.as_deref(), chat_models_config())
+    } else {
+        crate::attachments::route_model(&model, has_images, chat_models_config())
+    };
     if routed != model {
         crate::telemetry::record(
             Some(&conversation.profile_id),
             crate::telemetry::vision_routed(&model, &routed),
         );
     }
+    let selected_sees_images = chat_models_config().is_vision(&model);
     let model = routed;
-    if has_images {
+    // Descriptions are only needed as text stand-ins for a text-only model:
+    // described now when the selection is text-only (its next turn needs
+    // them), otherwise lazily the first time a text-only request is built.
+    if has_images && !selected_sees_images {
         // Marked now, so the next turn already knows to wait for them.
         let describing = crate::attachments::DescribingGuard::mark(
             records
@@ -1180,8 +1197,11 @@ pub fn chat_send(
             dir.clone(),
             app_data,
             conversation.profile_id.clone(),
-            user_row,
-            records.into_iter().filter(|r| r.kind.is_image()).collect(),
+            records
+                .into_iter()
+                .filter(|r| r.kind.is_image())
+                .map(|r| (user_row, r))
+                .collect(),
         ));
     }
     chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
@@ -1312,8 +1332,33 @@ async fn run_chat_stream(
         Ok(rows) => rows,
         Err(_) => return fail_early(tracker, ErrorKind::Protocol),
     };
-    // A text-only model sees earlier images as their description: give a
-    // description still being written a moment (bounded) to arrive.
+    // A text-only model sees earlier images as their description: request
+    // the missing ones now (once per image and app session), then give the
+    // descriptions being written a moment (bounded) to arrive.
+    if !chat_models_config().is_vision(&model) {
+        let missing: Vec<_> = crate::attachments::undescribed_images(
+            &rows,
+            crate::attachments::is_describing,
+            crate::attachments::MAX_IMAGES_PER_REQUEST,
+        )
+        .into_iter()
+        .filter(|(_, record)| crate::attachments::first_lazy_attempt(&record.id))
+        .collect();
+        if !missing.is_empty()
+            && let Ok(app_data) = app.path().app_data_dir()
+        {
+            let describing = crate::attachments::DescribingGuard::mark(
+                missing.iter().map(|(_, r)| r.id.clone()).collect(),
+            );
+            tauri::async_runtime::spawn(describe_images(
+                describing,
+                dir.clone(),
+                app_data,
+                profile_id.clone(),
+                missing,
+            ));
+        }
+    }
     if !chat_models_config().is_vision(&model)
         && crate::attachments::pending_descriptions(&rows, crate::attachments::is_describing)
     {
@@ -1340,8 +1385,17 @@ async fn run_chat_stream(
         } else {
             None
         };
-    let traced_history = turn::history_messages(&rows, true, image_url);
-    let plain_history = turn::history_messages(&rows, false, image_url);
+    let mut traced_history = turn::history_messages(&rows, true, image_url);
+    let mut plain_history = turn::history_messages(&rows, false, image_url);
+    // Attached content is data, never instructions (said once, up front).
+    if rows.iter().any(|row| !row.attachments.is_empty()) {
+        let note = serde_json::json!({
+            "role": "system",
+            "content": crate::attachments::UNTRUSTED_NOTE,
+        });
+        traced_history.insert(0, note.clone());
+        plain_history.insert(0, note);
+    }
     let replayed_traces = traced_history.len() != plain_history.len();
 
     // ---- tools offered this reply ------------------------------------------
@@ -1629,18 +1683,17 @@ async fn run_chat_stream(
 /// Overall timeout of one image-description side request.
 pub const DESCRIBE_TIMEOUT_SECS: u64 = 45;
 
-/// Describe each newly sent image with the vision fallback model (one small
-/// non-streaming request per image) and store the description with the
-/// attachment: it becomes the image's text stand-in for text-only models
-/// and in account memory. Best effort and silent: any failure leaves the
-/// plain `[Image: <name>]` stand-in.
+/// Describe images with the vision fallback model (one small non-streaming
+/// request per image) and store each description with its attachment
+/// (device-local): it becomes the image's text stand-in for text-only
+/// models. Best effort and silent: any failure leaves the stand-in without
+/// a description.
 async fn describe_images(
     mut describing: crate::attachments::DescribingGuard,
     dir: std::path::PathBuf,
     app_data: std::path::PathBuf,
     profile_id: String,
-    message_id: i64,
-    images: Vec<crate::attachments::AttachmentRecord>,
+    images: Vec<(i64, crate::attachments::AttachmentRecord)>,
 ) {
     let config = chat_models_config();
     let Some(model) = config.vision_fallback.clone() else {
@@ -1659,7 +1712,7 @@ async fn describe_images(
     else {
         return;
     };
-    for record in images {
+    for (message_id, record) in images {
         describe_one(
             &client, &base, &key, &model, &app_data, &dir, message_id, &record,
         )

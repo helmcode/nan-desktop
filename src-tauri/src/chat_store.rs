@@ -672,6 +672,21 @@ pub fn insert_message(
     Ok(conn.last_insert_rowid())
 }
 
+/// The model of the newest assistant reply of a conversation, if any.
+pub fn last_assistant_model(
+    conn: &Connection,
+    conversation_id: i64,
+) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT model FROM messages WHERE conversation_id = ?1 AND role = 'assistant'
+         ORDER BY id DESC LIMIT 1",
+        [conversation_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+}
+
 /// Insert a user message with its attachments (device-local JSON column).
 pub fn insert_user_message_with_attachments(
     conn: &Connection,
@@ -2461,7 +2476,7 @@ mod tests {
         let exported = export_messages(&conn, conv).expect("export");
         assert_eq!(
             exported[0].content,
-            "look\n\n[Attached file: plan.pdf]\n[Image: cat.jpg (A cat.)]"
+            "look\n\n[Attached file: plan.pdf]\n[Image: cat.jpg]"
         );
         let wire = serde_json::to_string(&exported).expect("json");
         assert!(
@@ -2477,6 +2492,21 @@ mod tests {
         assert_eq!(views[0].last_message.as_deref(), Some("plan.pdf"));
         // The orphan sweep sees attachment files as referenced.
         assert!(references_file_name(&conn, "i1.jpg").expect("refs"));
+    }
+
+    #[test]
+    fn the_last_reply_model_drives_a_continuation() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        assert_eq!(last_assistant_model(&conn, conv).expect("q"), None);
+        insert_message(&conn, conv, "user", "hi", None).expect("insert");
+        insert_message(&conn, conv, "assistant", "a", Some("glm5.3")).expect("insert");
+        insert_message(&conn, conv, "assistant", "b", Some("glm5.3-flash")).expect("insert");
+        assert_eq!(
+            last_assistant_model(&conn, conv).expect("q").as_deref(),
+            Some("glm5.3-flash")
+        );
     }
 
     #[test]
