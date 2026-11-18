@@ -162,6 +162,10 @@ export const es: Strings = {
       count === 1
         ? "Has detenido la respuesta. Tu mensaje espera aquí."
         : "Has detenido la respuesta. Tus mensajes esperan aquí.",
+    queueFailed: (count: number): string =>
+      count === 1
+        ? "No se ha podido enviar. Tu mensaje espera aquí."
+        : "No se ha podido enviar. Tus mensajes esperan aquí.",
     queueSendNow: "Enviar ahora",
     queueEdit: "Editar",
     queueRemove: "Quitar",

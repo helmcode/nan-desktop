@@ -4,6 +4,7 @@
 // new sign-in): then the queue is held until the user asks to send it.
 import { describe, expect, it } from "vitest";
 import {
+  dropQueue,
   EMPTY_QUEUES,
   enqueue,
   heldAfter,
@@ -60,16 +61,21 @@ describe("composer queue", () => {
     expect(removeQueued(q, 8, 2).has(8)).toBe(false);
   });
 
-  it("holds after a user stop and only for that reason", () => {
-    expect(heldAfter("user_stop")).toBe(true);
+  it("holds after a user stop or a busy interruption, and says why", () => {
+    expect(heldAfter("user_stop")).toBe("stopped");
+    expect(heldAfter("interrupted", "rate_limited")).toBe("failed");
     for (const reason of ["completed", "tool_cap", "stream_cut", "length", "interrupted", "error", undefined]) {
       expect(heldAfter(reason)).toBe(false);
     }
+    expect(heldAfter("interrupted", "server")).toBe(false);
   });
 
-  it("does not flush a held queue until it is released", () => {
+  it("does not flush a held queue until it is released, and keeps the reason", () => {
     let q = enqueue(EMPTY_QUEUES, 8, "a", 1);
-    q = hold(q, 8);
+    q = hold(q, 8, "stopped");
+    expect(queueOf(q, 8).held).toBe("stopped");
+    q = hold(q, 8, "failed");
+    expect(queueOf(q, 8).held).toBe("failed");
     expect(wantsFlush(q, 8)).toBe(false);
     expect(nextToSend(q, 8)?.text).toBe("a");
     q = release(q, 8);
@@ -77,12 +83,12 @@ describe("composer queue", () => {
   });
 
   it("holding or releasing an empty conversation is a no-op", () => {
-    expect(hold(EMPTY_QUEUES, 8)).toBe(EMPTY_QUEUES);
+    expect(hold(EMPTY_QUEUES, 8, "stopped")).toBe(EMPTY_QUEUES);
     expect(release(EMPTY_QUEUES, 8)).toBe(EMPTY_QUEUES);
   });
 
   it("a new message releases a held queue (sending again means go)", () => {
-    let q = hold(enqueue(EMPTY_QUEUES, 8, "a", 1), 8);
+    let q = hold(enqueue(EMPTY_QUEUES, 8, "a", 1), 8, "stopped");
     q = enqueue(q, 8, "b", 2);
     expect(queueOf(q, 8)).toEqual({ items: [{ id: 1, text: "a" }, { id: 2, text: "b" }], held: false });
   });
@@ -90,6 +96,15 @@ describe("composer queue", () => {
   it("puts a message that failed to send back at the front, held", () => {
     let q = enqueue(EMPTY_QUEUES, 8, "b", 2);
     q = requeueFront(q, 8, { id: 1, text: "a" });
-    expect(queueOf(q, 8)).toEqual({ items: [{ id: 1, text: "a" }, { id: 2, text: "b" }], held: true });
+    expect(queueOf(q, 8)).toEqual({ items: [{ id: 1, text: "a" }, { id: 2, text: "b" }], held: "failed" });
+  });
+
+  it("drops a deleted conversation's queue only", () => {
+    let q = enqueue(EMPTY_QUEUES, 8, "a", 1);
+    q = enqueue(q, 5, "b", 2);
+    q = dropQueue(q, 8);
+    expect(q.has(8)).toBe(false);
+    expect(queueOf(q, 5).items).toHaveLength(1);
+    expect(dropQueue(q, 99)).toBe(q);
   });
 });

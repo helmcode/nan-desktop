@@ -6,15 +6,23 @@
 //   turn (each waits for the previous reply), for the conversation on
 //   screen. A conversation whose turn ended while another one was on screen
 //   sends its queue when the user comes back to it.
-// - A turn the user stopped (`user_stop`) holds the queue: the user stopped
+// - A turn the user stopped (`user_stop`, or the Stop button even if the turn
+//   ended on its own meanwhile) holds the queue as "stopped": the user stopped
 //   on purpose, so nothing goes out by itself. The queue stays visible with
-//   a "Send now" action. A turn that ended because the session expired holds
-//   it too (the send would fail).
-// - Every other end (completed, tool_cap, stream_cut, length, interrupted,
-//   error) flushes the queue, and a queued message takes precedence over the
-//   automatic continuation of a cut reply (the user already said what next).
+//   a "Send now" action.
+// - A turn that failed holds it as "failed": any `chat://error` (an expired
+//   session included) and an `interrupted` turn whose request was rate
+//   limited (sending right away would fail the same way). The error stays on
+//   screen next to the held queue.
+// - Every other end (completed, tool_cap, stream_cut, length, interrupted
+//   for another reason) flushes the queue, and a queued message takes
+//   precedence over the automatic continuation of a cut reply (the user
+//   already said what comes next).
 // - Sending another message while the queue is held releases it.
-// - A message that fails to go out is put back at the front, held.
+// - A message that fails to go out is put back at the front, held "failed".
+// - Editing a queued message takes it out of the queue; sent again, it goes
+//   to the end (it is a new message).
+// - Deleting a conversation drops its queue.
 // - The queue lives in memory for the app session: it survives switching
 //   conversations, not restarts, and is gone on sign-out / realm switch
 //   (the chat shell is keyed by realm).
@@ -29,9 +37,11 @@ export interface QueuedMessage {
 
 export interface ConversationQueue {
   items: readonly QueuedMessage[];
-  /** Waiting for the user (after a stop): not sent by itself. */
-  held: boolean;
+  /** Waiting for the user, and why: not sent by itself while set. */
+  held: HeldReason | false;
 }
+
+export type HeldReason = "stopped" | "failed";
 
 export type Queues = ReadonlyMap<number, ConversationQueue>;
 
@@ -76,26 +86,36 @@ export function removeQueued(queues: Queues, conversationId: number, id: number)
  * failing send never loops. */
 export function requeueFront(queues: Queues, conversationId: number, message: QueuedMessage): Queues {
   const current = queueOf(queues, conversationId);
-  return withQueue(queues, conversationId, { items: [message, ...current.items], held: true });
+  return withQueue(queues, conversationId, { items: [message, ...current.items], held: "failed" });
 }
 
-function setHeld(queues: Queues, conversationId: number, held: boolean): Queues {
+function setHeld(queues: Queues, conversationId: number, held: HeldReason | false): Queues {
   const current = queues.get(conversationId);
   if (!current || current.held === held) return queues;
   return withQueue(queues, conversationId, { ...current, held });
 }
 
-export function hold(queues: Queues, conversationId: number): Queues {
-  return setHeld(queues, conversationId, true);
+export function hold(queues: Queues, conversationId: number, reason: HeldReason): Queues {
+  return setHeld(queues, conversationId, reason);
 }
 
 export function release(queues: Queues, conversationId: number): Queues {
   return setHeld(queues, conversationId, false);
 }
 
-/** Whether the turn end `reason` holds the queue instead of sending it. */
-export function heldAfter(reason: string | null | undefined): boolean {
-  return reason === "user_stop";
+/** Whether (and why) the turn end `reason` holds the queue instead of
+ * sending it. */
+export function heldAfter(reason: string | null | undefined, errorKind?: string | null): HeldReason | false {
+  if (reason === "user_stop") return "stopped";
+  if (reason === "interrupted" && errorKind === "rate_limited") return "failed";
+  return false;
+}
+
+export function dropQueue(queues: Queues, conversationId: number): Queues {
+  if (!queues.has(conversationId)) return queues;
+  const next = new Map(queues);
+  next.delete(conversationId);
+  return next;
 }
 
 /** The conversation has queued messages that should go out by themselves. */

@@ -160,6 +160,10 @@ export const en = {
       count === 1
         ? "You stopped the reply. Your message is waiting here."
         : "You stopped the reply. Your messages are waiting here.",
+    queueFailed: (count: number): string =>
+      count === 1
+        ? "It could not be sent. Your message is waiting here."
+        : "They could not be sent. Your messages are waiting here.",
     queueSendNow: "Send now",
     queueEdit: "Edit",
     queueRemove: "Remove",

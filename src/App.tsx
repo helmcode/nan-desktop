@@ -139,6 +139,7 @@ import { useWorkspace } from "./workspace";
 import { TurnIndicator, useTurnStarts } from "./chat/TurnIndicator";
 import { AUTO_RETRY_DELAY_MS, isContinuable, shouldAutoRetry, UnfinishedTurn } from "./chat/UnfinishedTurn";
 import {
+  dropQueue,
   EMPTY_QUEUES,
   enqueue,
   heldAfter,
@@ -768,7 +769,9 @@ function ChatShell({
   // so sign-out and realm switches drop it).
   const [queues, setQueues] = useState<Queues>(EMPTY_QUEUES);
   const queuesRef = useRef(queues);
-  useEffect(() => {
+  // Layout effect: the ref is current before any click handler can run, so
+  // Edit never takes a message the flush already took.
+  useLayoutEffect(() => {
     queuesRef.current = queues;
   }, [queues]);
   const queueSeq = useRef(0);
@@ -1221,7 +1224,8 @@ function ChatShell({
           queueOf(queuesRef.current, id).items.length === 0
         )
           setAutoRetryConvId(id);
-        if (heldAfter(reason)) setQueues((prev) => hold(prev, id));
+        const heldReason = heldAfter(reason, error_kind);
+        if (heldReason) setQueues((prev) => hold(prev, id, heldReason));
         finish(id);
         void syncMemory();
       }),
@@ -1235,7 +1239,7 @@ function ChatShell({
         distilledDraftsRef.current.delete(id);
         autoRetryTurnsRef.current.delete(id);
         // Stopped on purpose: queued messages wait for the user.
-        setQueues((prev) => hold(prev, id));
+        setQueues((prev) => hold(prev, id, "stopped"));
         finish(id);
       }),
       listen<ChatError>("chat://error", (event) => {
@@ -1245,9 +1249,10 @@ function ChatShell({
         clearDraft(conversation_id);
         declaredOutputsRef.current.delete(conversation_id);
         void settleSkillAfterError(conversation_id);
+        // Any failure holds the queue (the error stays on screen next to it;
+        // sending right away would likely fail the same way).
+        setQueues((prev) => hold(prev, conversation_id, "failed"));
         if (kind === "unauthorized") {
-          // The next send would fail too: the queue waits.
-          setQueues((prev) => hold(prev, conversation_id));
           setSessionExpired(true);
         } else if (activeConvRef.current === conversation_id) {
           setInlineError(kind);
@@ -1569,6 +1574,7 @@ function ChatShell({
       }
       dispatchApproval({ type: "clearConversation", conversationId });
       dispatchNudge({ type: "clearConversation", conversationId });
+      setQueues((prev) => dropQueue(prev, conversationId));
       setSelections((prev) => {
         const next = { ...prev };
         delete next[String(conversationId)];
@@ -1791,6 +1797,9 @@ function ChatShell({
   const stopGenerating = useCallback(async (): Promise<void> => {
     const conversationId = activeConvRef.current;
     if (conversationId === null) return;
+    // Hold the queue first: if the turn ends on its own before the stop
+    // reaches the core (no chat://stopped), nothing goes out by itself.
+    setQueues((prev) => hold(prev, conversationId, "stopped"));
     try {
       await invoke("chat_stop", { conversationId });
     } catch (err) {
@@ -2213,6 +2222,8 @@ function ChatShell({
     const id = activeConvRef.current;
     if (id === null) return;
     setQueues((prev) => release(prev, id));
+    // The button goes away with the click: keep focus in the composer.
+    composerRef.current?.focus();
   }, []);
 
   const onSkillSaved = useCallback((saved: Skill): void => {
@@ -2836,15 +2847,14 @@ function ChatShell({
                   </span>
                 </div>
               )}
-              {activeQueue && (
-                <QueuedMessages
-                  items={activeQueue.items}
-                  held={activeQueue.held}
-                  onEdit={editQueued}
-                  onRemove={removeQueuedMessage}
-                  onSendNow={sendQueuedNow}
-                />
-              )}
+              <QueuedMessages
+                items={activeQueue?.items ?? []}
+                held={activeQueue?.held ?? false}
+                canSendNow={!sessionExpired}
+                onEdit={editQueued}
+                onRemove={removeQueuedMessage}
+                onSendNow={sendQueuedNow}
+              />
               {pickerVisible && (
                 <div className="skill-picker-anchor">
                   <SkillPicker
@@ -2964,7 +2974,7 @@ function ChatShell({
                           type="button"
                           className="send-btn"
                           onClick={submit}
-                          disabled={composer.trim().length === 0}
+                          disabled={composer.trim().length === 0 || imageMode}
                           aria-label={t.chat.queueSend}
                           title={t.chat.queueSend}
                         >

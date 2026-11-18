@@ -405,27 +405,35 @@ The composer stays enabled while a reply streams (`src/chat/queue.ts`,
 message to a queue of **that conversation** instead of sending it; the
 queued messages are listed just above the composer ("Se enviará cuando
 termine la respuesta."), each with **Editar** (back into the composer,
-ahead of anything typed since) and **Quitar**. While a reply runs the
+ahead of anything typed since; sent again it goes to the end of the queue,
+as a new message) and **Quitar**; a truncated item shows its full text on
+hover. A visually hidden `role=status` region stays mounted (empty when
+nothing waits) so the first queued message is announced. While a reply runs the
 composer shows both Stop and a send button labelled "Enviar cuando termine".
 
 Semantics:
 
 - **Flush.** When the running turn ends with `completed`, `tool_cap`,
-  `stream_cut`, `length`, `interrupted` or a (non-auth) error, the queue is
+  `stream_cut`, `length` or `interrupted` (other than rate limited), the queue is
   sent in order, **one message per turn**: the next waits until the reply to
   the previous one ends. Only the conversation on screen flushes (same rule
   as the automatic continuation); a conversation whose turn ended while
   another one was on screen sends its queue when the user opens it again.
-- **Stop holds.** A turn ended by `user_stop` (`chat://stopped`) keeps the
-  queue but does not send it: the user stopped on purpose. It shows "Has
-  detenido la respuesta. Tus mensajes esperan aquí." with **Enviar ahora**.
-  Sending another message releases a held queue (it is appended, order
-  kept).
-- **Expired session holds.** `chat://error {kind: "unauthorized"}` holds the
-  queue (the send would fail too). Signing in again goes through sign-out,
-  which drops it (see below).
+- **Stop holds** (`held: "stopped"`). Pressing Stop holds the queue before
+  `chat_stop` is invoked, so a turn that ends on its own in the meantime
+  (`chat://done` without `chat://stopped`) does not flush it; `user_stop`
+  holds it too. It shows "Has detenido la respuesta. Tus mensajes esperan
+  aquí." with **Enviar ahora** (focus returns to the composer). Sending
+  another message releases a held queue (appended, order kept).
+- **Failure holds** (`held: "failed"`): every `chat://error` kind (the error
+  stays on screen next to the queue) and an `interrupted` turn whose request
+  was rate limited (the busy notice stays). Copy: "No se ha podido enviar.
+  Tu mensaje espera aquí." with **Enviar ahora**. While the session is
+  expired, **Enviar ahora** is hidden and nothing flushes (the banner asks
+  to sign in again, which goes through sign-out and drops the queue).
 - **Failed send.** A queued message whose `chat_send` fails goes back to the
-  front of the queue, held, so a failing send never loops.
+  front of the queue, held `"failed"`, so a failing send never loops.
+- **Deleted conversation.** Its queue is dropped.
 - **Queue beats the automatic continuation.** If messages are queued when a
   turn ends `stream_cut` / `length`, no automatic continuation is scheduled,
   a pending one is cancelled by the flush, and the Continue notice is not
@@ -435,7 +443,8 @@ Semantics:
   or realm switch (the chat shell is keyed by realm and unmounts).
 - **Other modes.** Only normal chat messages queue. Image mode, image edit,
   the skills picker (a leading `/` is plain text while busy) and dictation
-  stay unavailable while a reply runs, exactly as before; a dictation that
+  stay unavailable while a reply runs, exactly as before (the queueing send
+button is disabled in image mode); a dictation that
   is already recording can still be stopped. While an image is being
   generated the composer stays disabled. Telemetry is unchanged (no new
   event).

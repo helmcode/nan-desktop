@@ -152,7 +152,7 @@ describe("composer queue while a reply runs", () => {
     await waitFor(() => expect(sent()).toEqual(["primera", "segunda"]));
     // The next one waits for the reply to "segunda".
     expect(within(queueRegion() as HTMLElement).getAllByRole("listitem")).toHaveLength(1);
-    expect(screen.getByText("Se enviará cuando termine la respuesta.")).toBeTruthy();
+    expect(within(queueRegion() as HTMLElement).getByText("Se enviará cuando termine la respuesta.")).toBeTruthy();
 
     await endTurn("tool_cap");
     await waitFor(() => expect(sent()).toEqual(["primera", "segunda", "tercera"]));
@@ -188,7 +188,7 @@ describe("composer queue while a reply runs", () => {
     await type("segunda");
     await pressEnter();
     await act(async () => emit("chat://stopped", { conversation_id: 8, reason: "user_stop" }));
-    await screen.findByText(/Has detenido la respuesta\./);
+    await waitFor(() => expect(within(queueRegion() as HTMLElement).getByText(/Has detenido la respuesta\./)).toBeTruthy());
 
     await type("tercera");
     await pressEnter();
@@ -270,17 +270,112 @@ describe("composer queue while a reply runs", () => {
     expect(invokedWith("chat_send")[1]?.conversationId).toBe(8);
   });
 
-  it("holds the queue when the session expired", async () => {
+  it("holds the queue when the session expired, without a Send now that cannot work", async () => {
     await startStreaming();
     await type("segunda");
     await pressEnter();
     await act(async () => emit("chat://error", { conversation_id: 8, kind: "unauthorized" }));
     await screen.findByText(/Tu sesión ha caducado/);
-    expect(await screen.findByText("segunda")).toBeTruthy();
+    const region = queueRegion() as HTMLElement;
+    expect(within(region).getByText("segunda")).toBeTruthy();
+    expect(within(region).getByText("No se ha podido enviar. Tu mensaje espera aquí.")).toBeTruthy();
+    expect(within(region).queryByRole("button", { name: "Enviar ahora" })).toBeNull();
     await act(async () => {
       await new Promise((r) => setTimeout(r, 20));
     });
     expect(sent()).toEqual(["primera"]);
+  });
+
+  it("holds the queue after any error and keeps the error on screen", async () => {
+    await startStreaming();
+    await type("segunda");
+    await pressEnter();
+    await type("tercera");
+    await pressEnter();
+    await act(async () => emit("chat://error", { conversation_id: 8, kind: "network" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("No hemos podido conectar");
+    const region = queueRegion() as HTMLElement;
+    expect(within(region).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(region).getByText("No se ha podido enviar. Tus mensajes esperan aquí.")).toBeTruthy();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(sent()).toEqual(["primera"]);
+
+    // Send now: the first goes out, the next waits for its reply.
+    await act(async () => {
+      fireEvent.click(within(region).getByRole("button", { name: "Enviar ahora" }));
+    });
+    await waitFor(() => expect(sent()).toEqual(["primera", "segunda"]));
+    await endTurn("completed");
+    await waitFor(() => expect(sent()).toEqual(["primera", "segunda", "tercera"]));
+  });
+
+  it("holds the queue after a busy interruption (sending now would fail the same way)", async () => {
+    await startStreaming();
+    await type("segunda");
+    await pressEnter();
+    rows = [...rows, row(140, "assistant", "Mitad.", "interrupted")];
+    await act(async () =>
+      emit("chat://done", { conversation_id: 8, reason: "interrupted", error_kind: "rate_limited" }),
+    );
+    expect(await screen.findByText(/Hay mucha demanda ahora mismo\./)).toBeTruthy();
+    const region = queueRegion() as HTMLElement;
+    expect(within(region).getByRole("button", { name: "Enviar ahora" })).toBeTruthy();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(sent()).toEqual(["primera"]);
+  });
+
+  it("Stop holds the queue even if the turn ends on its own first", async () => {
+    await startStreaming();
+    await type("segunda");
+    await pressEnter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Detener" }));
+    });
+    // The reply finished just before the stop reached the core: no stopped event.
+    await endTurn("completed");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(sent()).toEqual(["primera"]);
+    expect(within(queueRegion() as HTMLElement).getByText(/Has detenido la respuesta\./)).toBeTruthy();
+  });
+
+  it("Send now puts the keyboard back in the composer", async () => {
+    await startStreaming();
+    await type("segunda");
+    await pressEnter();
+    await act(async () => emit("chat://stopped", { conversation_id: 8, reason: "user_stop" }));
+    const sendNow = await screen.findByRole("button", { name: "Enviar ahora" });
+    sendNow.focus();
+    await act(async () => {
+      fireEvent.click(sendNow);
+    });
+    expect(document.activeElement).toBe(composer());
+  });
+
+  it("announces the first queued message through a live region that is always there", async () => {
+    await startStreaming();
+    const live = document.querySelector(".queued-live");
+    expect(live?.getAttribute("role")).toBe("status");
+    expect(live?.textContent).toBe("");
+    await type("segunda");
+    await pressEnter();
+    expect(document.querySelector(".queued-live")).toBe(live);
+    expect(live?.textContent).toBe("Se enviará cuando termine la respuesta.");
+  });
+
+  it("shows the full text of a long queued message on hover", async () => {
+    await startStreaming();
+    const long = "una pregunta muy larga ".repeat(10).trim();
+    await type(long);
+    await pressEnter();
+    const text = (queueRegion() as HTMLElement).querySelector(".queued-text");
+    expect(text?.getAttribute("title")).toBe(long);
   });
 
   it("puts a message that failed to send back, held", async () => {
@@ -296,6 +391,7 @@ describe("composer queue while a reply runs", () => {
       return r;
     });
     expect(within(region).getByText("segunda")).toBeTruthy();
+    expect(within(region).getByText("No se ha podido enviar. Tu mensaje espera aquí.")).toBeTruthy();
     expect(within(region).getByRole("button", { name: "Enviar ahora" })).toBeTruthy();
     await act(async () => {
       await new Promise((r) => setTimeout(r, 20));
@@ -334,5 +430,63 @@ describe("queue vs the automatic continuation", () => {
       vi.advanceTimersByTime(5000);
     });
     expect(invokedWith("chat_send").filter((args) => args?.continuation === true)).toHaveLength(0);
+  });
+});
+
+describe("queue lifetime", () => {
+  it("is dropped on sign-out: signing in again starts with an empty queue", async () => {
+    let signedIn = true;
+    resetTauri({
+      ...handlers(),
+      profiles_load: () =>
+        signedIn
+          ? { ...SIGNED_IN, active_user: { email: "ana@example.com", realm: "realm-a" } }
+          : {
+              profiles: [{ id: "nan", name: "NaN", has_key: false, key_mask: null }],
+              active_profile: null,
+              active_user: null,
+            },
+      conversation_list: () => (signedIn ? conversations.map((c) => ({ ...c })) : []),
+      device_login_start: () => undefined,
+      device_logout: () => {
+        signedIn = false;
+      },
+      skills_list: () => [],
+    });
+    renderApp("en");
+    await screen.findByText("hola");
+    const box = () => screen.getByRole("textbox", { name: "Message" });
+    await act(async () => {
+      fireEvent.change(box(), { target: { value: "primera" } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(box(), { key: "Enter" });
+    });
+    await screen.findByRole("button", { name: "Stop" });
+    await act(async () => {
+      fireEvent.change(box(), { target: { value: "segunda" } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(box(), { key: "Enter" });
+    });
+    expect(screen.getByRole("region", { name: "Queued messages" })).toBeTruthy();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Account menu/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+    await screen.findByText("Choose how to sign in:");
+
+    fireEvent.click(await screen.findByRole("button", { name: /NaN/ }));
+    await waitFor(() => expect(invokedWith("device_login_start").length).toBeGreaterThan(0));
+    signedIn = true;
+    await act(async () => {
+      emit("device://approved", { key_alias: "desktop", profile_id: "nan", fresh_realm: false });
+    });
+    await screen.findByText("hola");
+    expect(screen.queryByRole("region", { name: "Queued messages" })).toBeNull();
+    expect(screen.queryByText("segunda")).toBeNull();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(sent()).toEqual(["primera"]);
   });
 });
