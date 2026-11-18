@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.15 - 2026-11-18 - Comparte hablando y navega sin tantas preguntas
 
 ### New
 - Compartir hablando: pidele al asistente que comparta algo ("comparte la web con ana@acme.com", "dame un enlace publico", "compartelo con mi organizacion") y crea el enlace. Funciona con la web que ha construido, un PDF o cualquier archivo de la conversacion o de tus carpetas.
