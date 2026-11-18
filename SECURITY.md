@@ -408,7 +408,11 @@ images) are taken by the engine itself (WKWebView snapshot, WebView2
 never the rest of the screen. Only the newest screenshot is sent with a
 request (earlier ones become a text stub), only to the profile's own
 inference API, and none is stored in the conversation or its tool trace.
-At most 4 MiB; Linux snapshots are scaled to 1280 px wide.
+At most 4 MiB; Linux snapshots are scaled to 1280 px wide. If a vision model rejects
+images in a reply (400), the retry turns that reply's screenshots into text
+stubs, no further screenshot is offered or sent as an image in that reply,
+and attachment images are not flagged `vision_rejected` (the culprit is
+unknown).
 
 **Known limitations.** Clicks and typing are synthetic DOM events: a few
 sites that only accept real input may ignore them (the user can do that

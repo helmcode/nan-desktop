@@ -128,6 +128,12 @@ pub fn tool_definitions(vision: bool) -> Vec<Value> {
     defs
 }
 
+/// Stop offering `browser_screenshot` (the server rejected images in this
+/// reply). Pure.
+pub fn drop_screenshot_tool(defs: &mut Vec<Value>) {
+    defs.retain(|def| def["function"]["name"] != SCREENSHOT);
+}
+
 /// A parsed browser tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserCall {
@@ -277,6 +283,15 @@ mod tests {
         assert!(model_sees_images("glm5.3-flash"));
         assert!(!model_sees_images("glm5.3"));
         assert!(!model_sees_images("unknown"));
+    }
+
+    #[test]
+    fn the_screenshot_tool_can_be_withdrawn_mid_reply() {
+        let mut defs = tool_definitions(true);
+        drop_screenshot_tool(&mut defs);
+        assert_eq!(names(&defs).len(), TOOL_NAMES.len() - 1);
+        assert!(!names(&defs).contains(&SCREENSHOT.to_string()));
+        assert!(names(&defs).contains(&READ.to_string()));
     }
 
     #[test]

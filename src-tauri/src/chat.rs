@@ -1519,6 +1519,8 @@ async fn run_chat_stream(
             }
             if !images_dropped && crate::attachments::has_media_parts(&messages) {
                 images_dropped = true;
+                // No more screenshots this reply: the model rejected images.
+                crate::browser::tools::drop_screenshot_tool(&mut offered_tools);
                 pending_rejected = Some(turn::real_image_ids(&rows));
                 plain_history = request_history(&rows, false, None);
                 let history = if traces_dropped {
@@ -1697,7 +1699,7 @@ async fn run_chat_stream(
         }
         // Live request only (not in the stored trace: images stay out of
         // the device-local replay).
-        crate::browser::attach_screenshots(&mut messages, &screenshots);
+        crate::browser::attach_screenshots(&mut messages, &screenshots, !images_dropped);
         // The round is complete (every call has its result): keep it for
         // the next turns. Written per round so a stopped turn keeps the
         // rounds that finished; only the newest rounds within the replay
