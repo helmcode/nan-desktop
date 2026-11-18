@@ -687,6 +687,40 @@ export const en = {
       revoked_notice: (title: string) => `${title} is no longer shared.`,
     },
   },
+  attachments: {
+    attach: "Attach files",
+    trayLabel: "Files attached to this message",
+    sentLabel: "Attached files",
+    remove: (name: string) => `Remove ${name}`,
+    reading: "Reading…",
+    dropHint: "Drop files here to attach them",
+    pastedImage: "Pasted image",
+    dismissProblem: "Close notice",
+    truncated: "Only the beginning was used",
+    kinds: {
+      image: "Image",
+      pdf: "PDF",
+      docx: "Word",
+      sheet: "Spreadsheet",
+      text: "Text",
+      other: "File",
+    },
+    errors: {
+      too_many: "You can attach up to 10 files per message.",
+      too_large: (name: string) =>
+        `"${name}" is too large. Images can be up to 10 MB and documents up to 20 MB.`,
+      total_too_large: "These files are too large together. Remove one and try again.",
+      unsupported: (name: string) =>
+        `"${name}" cannot be read. Try an image, a PDF, a Word document, a spreadsheet or a text file.`,
+      unreadable: (name: string) => `"${name}" could not be opened. It may be damaged.`,
+      not_allowed: (name: string) =>
+        `"${name}" cannot be attached. Try an image, a PDF, a Word document, a spreadsheet or a text file.`,
+      read_failed: (name: string) => `The text of "${name}" could not be read.`,
+      no_text: (name: string) =>
+        `No text was found in "${name}". If it is a scanned document, attach a screenshot as an image.`,
+      generic: "The file could not be attached. Try again.",
+    },
+  },
 };
 
 export type Strings = typeof en;

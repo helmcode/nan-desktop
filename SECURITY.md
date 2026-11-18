@@ -212,6 +212,8 @@ durations and fixed lists; tests pin every builder):
 | `turn_end` | `reason` (`completed`, `tool_cap`, `stream_cut`, `length`, `interrupted`, `user_stop`, `error`), `error_kind` (the classified kind for `error` and `interrupted`, else null), `rounds`, `tool_calls`, `duration_ms`, `model` (only ids from the app's built-in model list, else `other`), `continued` (bool) |
 | `tool_call` | `tool` (only names from the app's fixed tool list, else `unknown`), `outcome` (`ok`, `error`, `timeout`, `denied`), `duration_ms` |
 | `error_shown` | `surface` (`chat`, `images`, `sign_in`, `memory`), `kind` (the classified error kind, e.g. `rate_limited`, `network`) |
+| `attachment_added` | `kind` (`image`, `pdf`, `docx`, `sheet`, `text`, `other`), `count` (how many files of that kind one sent message carried; one event per kind) |
+| `vision_routed` | `from_model`, `to_model` (only ids from the app's built-in model list, else `other`): a reply with images went to the model that can see them because the selected one cannot |
 | `crash` | `source` (`rust_panic`, `renderer`), `location` (Rust: `file:line` where the panic happened, the app's or a library's source file, build-machine path prefixes removed; renderer: the error name, only standard error classes such as `TypeError` or the `typeof` of a non-Error rejection, anything else is sent as `Error`) |
 
 **Never sent:** message text, prompts, replies, file names or contents,
@@ -243,6 +245,64 @@ install (counted in memory, saved at each flush and on exit), and at most
 per 24 h and answer `202` with `dropped`; the app treats any `202` as
 delivered and never retries it. Automatic and "Continue" turns both
 report `continued: true`.
+
+## Chat attachments
+
+Files attached to a message (`src-tauri/src/attachments.rs`):
+
+- **Who chooses the file.** The paperclip opens the native file dialog
+  from the Rust core, and files dropped on the window are read from the
+  window's own drop event in the core; the renderer never names a path.
+  A pasted image is bytes the renderer already holds (images only, and
+  only when the clipboard has no text).
+- **What can be attached.** Any regular file the user explicitly picks or
+  drops, whatever the folder permissions say, except: the app's own data
+  folder; the always-refused write deny-list (keychains and credential
+  stores, login items, shell startup files, `.pem`/`.key` files); and
+  read secrets under the home folder (`~/.aws/credentials`,
+  `~/.aws/config`, `~/.kube/config`, `~/.netrc`, `~/.docker/config.json`,
+  `~/.config/gh/hosts.yml`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`)
+  plus any file named `.env` or `.env.*` anywhere. The user sees a neutral
+  "cannot be attached" message. On Unix the file is opened with
+  `O_NOFOLLOW` and its type and size are checked on the open handle; size
+  caps are checked before reading.
+- **Drops** are staged only while the chat composer is on screen and no
+  drag that started inside the page is in progress (WebKitGTK may report
+  an in-page drag of a `file://` link as a file drop). Both signals come
+  from the window, so this is defense in depth, not a boundary. **Needs
+  manual verification on Linux.**
+- **Images** are decoded with a pixel cap (decompression bombs are
+  refused) and at most 2 at a time, downscaled to 1568 px on the long side
+  and re-encoded as JPEG under the app's images folder. They are sent to
+  the model as images only when the model accepts images
+  (`src-tauri/chat-models.json`, `vision`); every request body is checked
+  right before it is sent and a model that does not accept images never
+  receives an image part. For text-only models an image becomes
+  `[Image: <name>. Already viewed earlier in this conversation;
+  description: <description>]`. The short description (which may
+  transcribe text visible in the image) comes from one small request to
+  the vision model, using the same inference key as the chat, made when
+  the selected model is text-only or the first time a text-only request
+  needs it. It is stored only on this device and never synced.
+- **Documents** are copied to a private staging folder (outside the
+  folder the window can load files from), read back once by the window to
+  extract their text locally (pdf.js; mammoth and SheetJS inside a Web
+  Worker that is terminated after 30 s, at most 5,000 rows x 100 columns
+  per sheet) and deleted when the message is stored. The extracted text is
+  capped (50,000 characters per file, 120,000 per message, with a note to
+  the model when cut) and stored with the message on this device so the
+  history can replay it. The window never receives the stored text again.
+- **Prompt injection.** A document body cannot open or close its own
+  `<attached_file>` block (such tokens are neutralized), descriptions lose
+  brackets, parentheses and angle brackets, and a system note tells the
+  model that attached content is data, never instructions.
+- **Account memory** never uploads attachment bytes, extracted text or
+  image descriptions: the synced copy of the message is its text plus one
+  placeholder line per attachment (`[Attached file: <name>]`,
+  `[Image: <name>]`). A new conversation started with files only is titled
+  after the first file name, and that title syncs like any title.
+- **Cleanup.** Unsent staged documents are deleted after 24 h; unsent or
+  deleted images go with the startup sweep of unreferenced images.
 
 ## Tool output kept for continuity
 

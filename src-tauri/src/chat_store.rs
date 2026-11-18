@@ -131,6 +131,10 @@ pub struct ChatMessageRow {
     /// renderer (it carries raw tool output; S16).
     #[serde(skip)]
     pub tool_trace: Option<String>,
+    /// Files attached to a user message (device-local). The renderer gets
+    /// views without the extracted document text.
+    #[serde(serialize_with = "crate::attachments::serialize_views")]
+    pub attachments: Vec<crate::attachments::AttachmentRecord>,
 }
 
 /// What a produced artifact is: a file inside the user's folders (opened in
@@ -186,6 +190,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "messages", "parent_message_id", "INTEGER")?;
     ensure_column(conn, "messages", "end_reason", "TEXT")?;
     ensure_column(conn, "messages", "tool_trace", "TEXT")?;
+    ensure_column(conn, "messages", "attachments", "TEXT")?;
     ensure_column(conn, "conversations", "remote_id", "TEXT")?;
     ensure_column(conn, "conversations", "synced_at", "TEXT")?;
     conn.execute_batch(
@@ -667,6 +672,95 @@ pub fn insert_message(
     Ok(conn.last_insert_rowid())
 }
 
+/// The model of the newest assistant reply of a conversation, if any.
+pub fn last_assistant_model(
+    conn: &Connection,
+    conversation_id: i64,
+) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT model FROM messages WHERE conversation_id = ?1 AND role = 'assistant'
+         ORDER BY id DESC LIMIT 1",
+        [conversation_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+}
+
+/// Insert a user message with its attachments (device-local JSON column).
+pub fn insert_user_message_with_attachments(
+    conn: &Connection,
+    conversation_id: i64,
+    content: &str,
+    attachments: &[crate::attachments::AttachmentRecord],
+) -> Result<i64, rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO messages (conversation_id, role, content, created_at, attachments)
+         VALUES (?1, 'user', ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?3)",
+        rusqlite::params![
+            conversation_id,
+            content,
+            crate::attachments::encode_records(attachments)
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Store the description of one image attachment of a message (the side
+/// request finished). Read-modify-write of the JSON column; `false` when the
+/// message or the attachment is gone.
+pub fn set_attachment_description(
+    conn: &Connection,
+    message_id: i64,
+    attachment_id: &str,
+    description: &str,
+) -> Result<bool, rusqlite::Error> {
+    let raw: Option<Option<String>> = conn
+        .query_row(
+            "SELECT attachments FROM messages WHERE id = ?1",
+            [message_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut records = crate::attachments::decode_records(raw.flatten());
+    let Some(record) = records.iter_mut().find(|r| r.id == attachment_id) else {
+        return Ok(false);
+    };
+    record.description = Some(description.to_string());
+    conn.execute(
+        "UPDATE messages SET attachments = ?1 WHERE id = ?2",
+        rusqlite::params![crate::attachments::encode_records(&records), message_id],
+    )?;
+    Ok(true)
+}
+
+/// Flag images a vision model rejected (400): later requests send their
+/// stand-in. Unknown messages or attachments are skipped.
+pub fn mark_images_vision_rejected(
+    conn: &Connection,
+    images: &[(i64, String)],
+) -> Result<(), rusqlite::Error> {
+    for (message_id, attachment_id) in images {
+        let raw: Option<Option<String>> = conn
+            .query_row(
+                "SELECT attachments FROM messages WHERE id = ?1",
+                [message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut records = crate::attachments::decode_records(raw.flatten());
+        let Some(record) = records.iter_mut().find(|r| &r.id == attachment_id) else {
+            continue;
+        };
+        record.vision_rejected = true;
+        conn.execute(
+            "UPDATE messages SET attachments = ?1 WHERE id = ?2",
+            rusqlite::params![crate::attachments::encode_records(&records), message_id],
+        )?;
+    }
+    Ok(())
+}
+
 /// Insert an assistant image message (T5): `content` is the generation
 /// prompt, `model` the image model, `media_path` the saved file's absolute
 /// path. Written directly as `status='complete'` (no streaming lifecycle).
@@ -748,6 +842,7 @@ pub fn references_file_name(conn: &Connection, file_name: &str) -> Result<bool, 
         "SELECT EXISTS(SELECT 1 FROM messages
              WHERE instr(COALESCE(media_path, ''), ?1) > 0
                 OR instr(COALESCE(artifacts, ''), ?1) > 0
+                OR instr(COALESCE(attachments, ''), ?1) > 0
                 OR instr(content, ?1) > 0)",
         [file_name],
         |row| row.get::<_, bool>(0),
@@ -922,14 +1017,24 @@ pub fn list_conversations(
             view.title = UNTITLED_FALLBACK.to_string();
         }
         if let Some(last) = last_message(conn, view.id)? {
-            view.last_message = Some(truncate_chars(&last.content, PREVIEW_MAX_CHARS));
+            // A message with only attachments previews their names.
+            let preview = if last.content.trim().is_empty() && !last.attachments.is_empty() {
+                last.attachments
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                last.content
+            };
+            view.last_message = Some(truncate_chars(&preview, PREVIEW_MAX_CHARS));
         }
     }
     Ok(views)
 }
 
 /// Column list read by [`map_message_row`] (order matters).
-const MESSAGE_COLUMNS: &str = "id, conversation_id, role, content, model, media_path, created_at, status, sources, artifacts, parent_message_id, end_reason, tool_trace";
+const MESSAGE_COLUMNS: &str = "id, conversation_id, role, content, model, media_path, created_at, status, sources, artifacts, parent_message_id, end_reason, tool_trace, attachments";
 
 fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::Error> {
     let status: String = row.get(7)?;
@@ -950,6 +1055,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow, rusqlite::
         parent_message_id: row.get(10)?,
         end_reason: row.get(11)?,
         tool_trace: row.get(12)?,
+        attachments: crate::attachments::decode_records(row.get(13)?),
     })
 }
 
@@ -1151,7 +1257,8 @@ pub fn export_messages(
         .filter(|row| row.media_path.is_none() && !row.partial)
         .map(|row| MessageRecord {
             role: row.role,
-            content: row.content,
+            // Attachments never travel: their text placeholder does.
+            content: crate::attachments::sync_content(&row.content, &row.attachments),
             model: row.model,
             created_at: row.created_at,
             sources: row.sources,
@@ -1168,6 +1275,24 @@ struct KeptLocal {
     artifacts: Option<String>,
     end_reason: Option<String>,
     tool_trace: Option<String>,
+    attachments: Option<String>,
+}
+
+impl KeptLocal {
+    /// Whether `message` (from the remote copy) is this local row. A row
+    /// with attachments was uploaded as its text plus placeholders
+    /// ([`crate::attachments::sync_content`]); a description that arrived
+    /// after the upload may have changed the placeholder, so its text
+    /// PREFIX is what must match.
+    fn matches(&self, message: &MessageRecord, created: &str) -> bool {
+        if self.role != message.role || self.created_at != created {
+            return false;
+        }
+        match &self.attachments {
+            Some(_) => message.content.starts_with(&self.content),
+            None => self.content == message.content,
+        }
+    }
 }
 
 /// Insert (`local_id: None`) or overwrite a conversation with the remote
@@ -1197,9 +1322,10 @@ pub fn write_remote_conversation(
         Some(id) => {
             {
                 let mut stmt = tx.prepare(
-                    "SELECT role, content, created_at, artifacts, end_reason, tool_trace FROM messages
+                    "SELECT role, content, created_at, artifacts, end_reason, tool_trace, attachments FROM messages
                      WHERE conversation_id = ?1 AND media_path IS NULL
-                       AND (artifacts IS NOT NULL OR end_reason IS NOT NULL OR tool_trace IS NOT NULL)",
+                       AND (artifacts IS NOT NULL OR end_reason IS NOT NULL OR tool_trace IS NOT NULL
+                            OR attachments IS NOT NULL)",
                 )?;
                 let rows = stmt.query_map([id], |row| {
                     Ok(KeptLocal {
@@ -1209,6 +1335,7 @@ pub fn write_remote_conversation(
                         artifacts: row.get(3)?,
                         end_reason: row.get(4)?,
                         tool_trace: row.get(5)?,
+                        attachments: row.get(6)?,
                     })
                 })?;
                 for row in rows {
@@ -1241,30 +1368,44 @@ pub fn write_remote_conversation(
             serde_json::to_string(&message.sources).ok()
         };
         let created = normalize_timestamp(&message.created_at);
-        let matched = kept_local.iter().position(|kept| {
-            kept.role == message.role
-                && kept.content == message.content
-                && kept.created_at == created
-        });
+        let matched = kept_local
+            .iter()
+            .position(|kept| kept.matches(message, &created));
         let kept = matched.map(|index| kept_local.swap_remove(index));
-        let (artifacts, end_reason, tool_trace) = match kept {
-            Some(kept) => (kept.artifacts, kept.end_reason, kept.tool_trace),
-            None => (None, None, None),
+        // A row with attachments keeps its LOCAL text (the remote copy has
+        // the placeholders appended) and its attachments.
+        let (content, artifacts, end_reason, tool_trace, attachments) = match kept {
+            Some(kept) if kept.attachments.is_some() => (
+                kept.content,
+                kept.artifacts,
+                kept.end_reason,
+                kept.tool_trace,
+                kept.attachments,
+            ),
+            Some(kept) => (
+                message.content.clone(),
+                kept.artifacts,
+                kept.end_reason,
+                kept.tool_trace,
+                None,
+            ),
+            None => (message.content.clone(), None, None, None, None),
         };
         tx.execute(
-            "INSERT INTO messages (conversation_id, role, content, model, created_at, status, sources, artifacts, end_reason, tool_trace)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO messages (conversation_id, role, content, model, created_at, status, sources, artifacts, end_reason, tool_trace, attachments)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 id,
                 message.role,
-                message.content,
+                content,
                 message.model,
                 message.created_at,
                 STATUS_COMPLETE,
                 sources,
                 artifacts,
                 end_reason,
-                tool_trace
+                tool_trace,
+                attachments
             ],
         )?;
     }
@@ -2305,6 +2446,182 @@ mod tests {
                 .is_none(),
             "media paths never leave the device"
         );
+    }
+
+    fn attached(
+        kind: crate::attachments::AttachmentKind,
+        id: &str,
+        name: &str,
+    ) -> crate::attachments::AttachmentRecord {
+        crate::attachments::AttachmentRecord {
+            id: id.into(),
+            kind,
+            name: name.into(),
+            size: 3,
+            path: kind
+                .is_image()
+                .then(|| format!("/local/images/attachments/{id}.jpg")),
+            text: (!kind.is_image()).then(|| "PRIVATE EXTRACTED TEXT".to_string()),
+            truncated: false,
+            description: None,
+            vision_rejected: false,
+        }
+    }
+
+    #[test]
+    fn attachments_persist_reach_the_renderer_as_views_and_sync_as_placeholders() {
+        use crate::attachments::AttachmentKind;
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let records = vec![
+            attached(AttachmentKind::Pdf, "d1", "plan.pdf"),
+            attached(AttachmentKind::Image, "i1", "cat.jpg"),
+        ];
+        let row =
+            insert_user_message_with_attachments(&conn, conv, "look", &records).expect("insert");
+        let listed = list_messages(&conn, conv).expect("list");
+        assert_eq!(
+            listed[0].attachments, records,
+            "history keeps the extracted text"
+        );
+        let json = serde_json::to_string(&listed[0]).expect("json");
+        assert!(json.contains("\"attachments\":[{\"id\":\"d1\""), "{json}");
+        assert!(
+            !json.contains("PRIVATE"),
+            "the renderer never gets extracted text"
+        );
+
+        assert!(set_attachment_description(&conn, row, "i1", "A cat.").expect("set"));
+        assert!(!set_attachment_description(&conn, row, "nope", "x").expect("set"));
+        assert!(!set_attachment_description(&conn, 9999, "i1", "x").expect("set"));
+        let listed = list_messages(&conn, conv).expect("list");
+        assert_eq!(
+            listed[0].attachments[1].description.as_deref(),
+            Some("A cat.")
+        );
+
+        let exported = export_messages(&conn, conv).expect("export");
+        assert_eq!(
+            exported[0].content,
+            "look\n\n[Attached file: plan.pdf]\n[Image: cat.jpg]"
+        );
+        let wire = serde_json::to_string(&exported).expect("json");
+        assert!(
+            !wire.contains("PRIVATE") && !wire.contains("/local/"),
+            "{wire}"
+        );
+
+        // A file attached on its own previews its name in the list.
+        let views = list_conversations(&conn, "nan").expect("views");
+        assert_eq!(views[0].last_message.as_deref(), Some("look"));
+        insert_user_message_with_attachments(&conn, conv, "", &records[..1]).expect("insert");
+        let views = list_conversations(&conn, "nan").expect("views");
+        assert_eq!(views[0].last_message.as_deref(), Some("plan.pdf"));
+        // The orphan sweep sees attachment files as referenced.
+        assert!(references_file_name(&conn, "i1.jpg").expect("refs"));
+    }
+
+    #[test]
+    fn rejected_images_are_remembered() {
+        use crate::attachments::AttachmentKind;
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let records = vec![
+            attached(AttachmentKind::Image, "i1", "a.jpg"),
+            attached(AttachmentKind::Image, "i2", "b.jpg"),
+        ];
+        let row = insert_user_message_with_attachments(&conn, conv, "x", &records).expect("insert");
+        mark_images_vision_rejected(&conn, &[(row, "i2".into()), (999, "zz".into())])
+            .expect("mark");
+        let listed = list_messages(&conn, conv).expect("list");
+        assert!(!listed[0].attachments[0].vision_rejected);
+        assert!(listed[0].attachments[1].vision_rejected);
+        let json = serde_json::to_string(&listed[0]).expect("json");
+        assert!(!json.contains("vision_rejected"), "device-local detail");
+    }
+
+    #[test]
+    fn the_last_reply_model_drives_a_continuation() {
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        assert_eq!(last_assistant_model(&conn, conv).expect("q"), None);
+        insert_message(&conn, conv, "user", "hi", None).expect("insert");
+        insert_message(&conn, conv, "assistant", "a", Some("glm5.3")).expect("insert");
+        insert_message(&conn, conv, "assistant", "b", Some("glm5.3-flash")).expect("insert");
+        assert_eq!(
+            last_assistant_model(&conn, conv).expect("q").as_deref(),
+            Some("glm5.3-flash")
+        );
+    }
+
+    #[test]
+    fn a_remote_overwrite_keeps_the_local_text_and_attachments_of_a_row() {
+        use crate::attachments::AttachmentKind;
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let records = vec![attached(AttachmentKind::Image, "i1", "cat.jpg")];
+        insert_user_message_with_attachments(&conn, conv, "look", &records).expect("insert");
+        let mut remote = export_messages(&conn, conv).expect("export");
+        // Uploaded before the description arrived; then the description is
+        // stored locally and another device adds a reply.
+        let row = list_messages(&conn, conv).expect("list")[0].id;
+        set_attachment_description(&conn, row, "i1", "A cat.").expect("set");
+        remote.push(MessageRecord {
+            role: "assistant".into(),
+            content: "Nice cat".into(),
+            model: None,
+            created_at: "2026-11-18T10:00:00.000Z".into(),
+            sources: vec![],
+        });
+        write_remote_conversation(
+            &conn,
+            Some(conv),
+            "nan",
+            "r1",
+            "t",
+            "2026-01-01",
+            "2026-12-01",
+            &remote,
+        )
+        .expect("write");
+        let listed = list_messages(&conn, conv).expect("list");
+        assert_eq!(
+            listed[0].content, "look",
+            "the local text, not the placeholder copy"
+        );
+        assert_eq!(listed[0].attachments.len(), 1);
+        assert_eq!(
+            listed[0].attachments[0].description.as_deref(),
+            Some("A cat.")
+        );
+        assert_eq!(listed[1].content, "Nice cat");
+        // A remote-only message with placeholders stays plain text.
+        let other = vec![MessageRecord {
+            role: "user".into(),
+            content: "[Image: x.jpg]".into(),
+            model: None,
+            created_at: "2026-11-18T11:00:00.000Z".into(),
+            sources: vec![],
+        }];
+        write_remote_conversation(
+            &conn,
+            Some(conv),
+            "nan",
+            "r1",
+            "t",
+            "2026-01-01",
+            "2026-12-02",
+            &other,
+        )
+        .expect("write");
+        let listed = list_messages(&conn, conv).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].attachments.is_empty());
+        assert_eq!(listed[0].content, "[Image: x.jpg]");
     }
 
     #[test]

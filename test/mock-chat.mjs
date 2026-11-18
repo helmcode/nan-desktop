@@ -19,8 +19,14 @@
 //                                 [DONE], no end: the client must disconnect
 //                                 to stop it (the transport contract the stop
 //                                 button relies on).
-//                                 stream:false → a plain (non-streaming) reply.
-//   GET  /__stats__             → { deltasSent, clientDisconnects } recorded
+//                                 stream:false → a plain (non-streaming) reply
+//                                 (with an image part: a one-line description,
+//                                 like the app's description side request).
+//                                 Vision: a model in TEXT_ONLY_MODELS ("glm5.3")
+//                                 answers any non-text content part with the
+//                                 platform's exact 400; the request's model and
+//                                 image-part count are recorded in /__stats__.
+//   GET  /__stats__             → { deltasSent, clientDisconnects, requests } recorded
 //                                 since the last /reset (T4b check).
 //   GET  /reset                 → clears the recorded stats.
 //   GET  /__probe__             → 200, readiness probe for the checks.
@@ -47,6 +53,22 @@ const CHAT_MODELS = [
   "gemma4",
   "qwen3.6",
 ];
+// Text-only models: the platform rejects image/audio/video/file parts.
+const TEXT_ONLY_MODELS = ["glm5.3"];
+const TEXT_ONLY_400 = (model) =>
+  `The model '${model}' does not support image, audio, video or file input: it is a text-only model. ` +
+  "Remove those parts from the conversation (earlier turns included), or use a model that accepts them.";
+
+/// Non-text content parts across all messages of a request body.
+function mediaParts(body) {
+  let count = 0;
+  for (const message of body.messages ?? []) {
+    if (!Array.isArray(message.content)) continue;
+    for (const part of message.content) if (part?.type !== "text") count += 1;
+  }
+  return count;
+}
+
 const NON_CHAT_MODELS = [
   "kokoro",
   "whisper",
@@ -103,7 +125,7 @@ const SLOW_EVENT_DELAY_MS = 200;
 // Recorded since the last /reset: how many content deltas were written and
 // how many clients disconnected mid-stream (closed before the response
 // finished) — the T4b check asserts both.
-const stats = { deltasSent: 0, clientDisconnects: 0 };
+const stats = { deltasSent: 0, clientDisconnects: 0, requests: [] };
 
 // Track premature client disconnects: `close` fires on normal completion
 // too, so only count it when the response never finished.
@@ -224,6 +246,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/reset") {
     stats.deltasSent = 0;
     stats.clientDisconnects = 0;
+    stats.requests = [];
     sendJson(res, 200, { ok: true, note: "recorded stats cleared" });
     return;
   }
@@ -262,6 +285,12 @@ const server = createServer(async (req, res) => {
       sendJson(res, 400, { error: { message: "invalid JSON body" } });
       return;
     }
+    const images = mediaParts(body);
+    stats.requests.push({ model: body.model, stream: body.stream === true, images });
+    if (TEXT_ONLY_MODELS.includes(body.model) && images > 0) {
+      sendJson(res, 400, { error: { message: TEXT_ONLY_400(body.model), type: "invalid_request_error" } });
+      return;
+    }
     if (body.model === "trigger-429") {
       sendJson(res, 429, { error: { message: "rate limited", type: "rate_limit" } });
       return;
@@ -284,7 +313,11 @@ const server = createServer(async (req, res) => {
       object: "chat.completion",
       model: body.model ?? "mock-model",
       choices: [
-        { index: 0, message: { role: "assistant", content: REPLY }, finish_reason: "stop" },
+        {
+          index: 0,
+          message: { role: "assistant", content: images > 0 ? "A small red test square." : REPLY },
+          finish_reason: "stop",
+        },
       ],
     });
     return;

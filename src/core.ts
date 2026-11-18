@@ -12,7 +12,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { GrantView } from "./types";
+import type { AttachmentKind, GrantView } from "./types";
 
 // ---------------------------------------------------------------------------
 // Inline approvals (S14) - src-tauri/src/tools/approvals.rs
@@ -97,7 +97,74 @@ export type ChatSendArgs = {
   /// A "Continue" click on an unfinished turn. The content is a normal
   /// user message; the flag only reaches the core's turn summary.
   continuation?: boolean;
+  /// Files attached in the composer: the staged id, plus the text the
+  /// renderer extracted for a document. Omitted when there are none.
+  attachments?: AttachmentInput[];
 };
+
+// ---------------------------------------------------------------------------
+// Chat attachments - src-tauri/src/attachments.rs
+//
+// The core opens the native picker and reads dropped files from the
+// window's own drop event, so the renderer never names a path; it only
+// receives staged ids (plus a thumbnail path for images) and reads a
+// staged DOCUMENT back once to extract its text locally.
+// ---------------------------------------------------------------------------
+
+/// A file staged for the next message (`StagedAttachment` in the core).
+export interface StagedAttachment {
+  id: string;
+  kind: AttachmentKind;
+  name: string;
+  size: number;
+  /// The prepared image (asset protocol); null for documents.
+  preview_path: string | null;
+}
+
+/// A file that could not be attached, with the core's reason
+/// (`too_many`, `too_large`, `total_too_large`, `unsupported`,
+/// `unreadable`, `not_allowed`, `protocol`).
+export interface RejectedFile {
+  name: string;
+  reason: string;
+}
+
+export interface StageResult {
+  staged: StagedAttachment[];
+  rejected: RejectedFile[];
+}
+
+export interface AttachmentInput {
+  id: string;
+  text?: string;
+}
+
+/// Files dropped on the window, staged by the core.
+export const ATTACHMENTS_DROPPED_EVENT = "attachments://dropped";
+
+export function pickAttachments(): Promise<StageResult> {
+  return invoke<StageResult>("attachments_pick");
+}
+
+export function stageAttachmentBytes(name: string, dataBase64: string): Promise<StagedAttachment> {
+  return invoke<StagedAttachment>("attachments_stage_bytes", { name, dataBase64 });
+}
+
+export async function readAttachment(id: string): Promise<Uint8Array> {
+  // Raw IPC response: an ArrayBuffer (a number array from older shims).
+  const raw = await invoke<ArrayBuffer | ArrayBufferView | number[]>("attachment_read", { id });
+  if (Array.isArray(raw)) return Uint8Array.from(raw);
+  if (ArrayBuffer.isView(raw)) return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+  return new Uint8Array(raw);
+}
+
+export function discardAttachment(id: string): Promise<void> {
+  return invoke("attachment_discard", { id });
+}
+
+export function onAttachmentsDropped(handler: (result: StageResult) => void): Promise<UnlistenFn> {
+  return listen<StageResult>(ATTACHMENTS_DROPPED_EVENT, (event) => handler(event.payload));
+}
 
 export function sendChat(args: ChatSendArgs): Promise<void> {
   return invoke("chat_send", { ...args });

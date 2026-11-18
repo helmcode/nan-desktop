@@ -5,6 +5,8 @@
 
 import { useId } from "react";
 import { useT } from "../i18n";
+import { IconPaperclip } from "../icons";
+import { attachProblemText } from "../components/Attachments";
 import type { HeldReason, QueuedMessage } from "./queue";
 
 export function QueuedMessages({
@@ -50,8 +52,27 @@ export function QueuedMessages({
               const textId = `${baseId}-m${item.id}`;
               return (
                 <li key={item.id} className="queued-item">
-                  <span className="queued-text" id={textId} title={item.text}>
-                    {item.text}
+                  <span className="queued-body" id={textId}>
+                    {item.text && (
+                      <span className="queued-text" title={item.text}>
+                        {item.text}
+                      </span>
+                    )}
+                    {item.problem && (
+                      <span className="queued-problem" role="alert">
+                        {attachProblemText(t, { reason: item.problem, name: "" })}
+                      </span>
+                    )}
+                    {(item.attachments?.length ?? 0) > 0 && (
+                      <span className="queued-files" aria-label={t.attachments.sentLabel}>
+                        <IconPaperclip size={12} />
+                        {item.attachments?.map((file) => (
+                          <span key={file.id} className="queued-file">
+                            {file.name}
+                          </span>
+                        ))}
+                      </span>
+                    )}
                   </span>
                   <span className="queued-actions">
                     <button

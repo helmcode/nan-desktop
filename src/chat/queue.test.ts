@@ -108,3 +108,26 @@ describe("composer queue", () => {
     expect(dropQueue(q, 99)).toBe(q);
   });
 });
+
+describe("queued attachments", () => {
+  const file = {
+    id: "img-1",
+    kind: "image" as const,
+    name: "a.png",
+    size: 1,
+    previewPath: "/x/a.jpg",
+    status: "ready" as const,
+  };
+
+  it("a message may be only files, and keeps them through requeue", () => {
+    let queues = enqueue(EMPTY_QUEUES, 1, "   ", 1);
+    expect(queueOf(queues, 1).items).toHaveLength(0);
+    queues = enqueue(queues, 1, "  ", 2, [file]);
+    expect(queueOf(queues, 1).items).toEqual([{ id: 2, text: "", attachments: [file] }]);
+    const head = queueOf(queues, 1).items[0];
+    queues = requeueFront(takeQueued(queues, 1), 1, head);
+    expect(queueOf(queues, 1).items[0].attachments).toEqual([file]);
+    // A plain message carries no attachments key at all.
+    expect(queueOf(enqueue(EMPTY_QUEUES, 1, "hola", 3), 1).items[0]).toEqual({ id: 3, text: "hola" });
+  });
+});

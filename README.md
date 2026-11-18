@@ -39,6 +39,11 @@ very welcome: start with [CONTRIBUTING.md](CONTRIBUTING.md).
   markdown and code, a curated model picker, and conversation memory. Grant
   folders and the assistant can work with the files in them, with a native
   confirmation for every action.
+- **Attachments**: attach images, PDFs, Word documents, spreadsheets and
+  text/code files to a message (paperclip, drag and drop, or paste a
+  screenshot). Documents are read on your computer; images are downscaled
+  and, when the selected model cannot see images, that one reply goes to a
+  model that can.
 - **Artifacts sharing**: share what the assistant produces as links. Access
   is sign-in-gated, so only the people you share with can open them, and you
   can revoke a link at any time.

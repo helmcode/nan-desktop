@@ -33,7 +33,14 @@ export interface QueuedMessage {
   /** Local id (edit / remove target); never sent anywhere. */
   id: number;
   text: string;
+  /** Files attached in the composer, sent with this message. */
+  attachments?: readonly PendingAttachment[];
+  /** Why the core refused its files (an attach problem reason); shown on
+   * the held item until the user edits it. */
+  problem?: string;
 }
+
+import type { PendingAttachment } from "./attachments";
 
 export interface ConversationQueue {
   items: readonly QueuedMessage[];
@@ -61,12 +68,19 @@ function withQueue(queues: Queues, conversationId: number, queue: ConversationQu
 }
 
 /** Add a message at the end. Sending again means "go": it releases a held
- * queue. Blank text is ignored. */
-export function enqueue(queues: Queues, conversationId: number, text: string, id: number): Queues {
+ * queue. Blank text without attachments is ignored. */
+export function enqueue(
+  queues: Queues,
+  conversationId: number,
+  text: string,
+  id: number,
+  attachments: readonly PendingAttachment[] = [],
+): Queues {
   const trimmed = text.trim();
-  if (!trimmed) return queues;
+  if (!trimmed && attachments.length === 0) return queues;
   const current = queueOf(queues, conversationId);
-  return withQueue(queues, conversationId, { items: [...current.items, { id, text: trimmed }], held: false });
+  const message: QueuedMessage = attachments.length > 0 ? { id, text: trimmed, attachments } : { id, text: trimmed };
+  return withQueue(queues, conversationId, { items: [...current.items, message], held: false });
 }
 
 /** Drop the head (it is being sent). */

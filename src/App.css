@@ -2227,6 +2227,151 @@ button:disabled {
   font-size: 0.85rem;
 }
 
+/* ---- attachments ------------------------------------------------------ */
+
+/* A file dragged over the window: a calm outline, no overlay. */
+.composer-box.drop-target {
+  border-style: dashed;
+  border-color: rgba(129, 140, 248, 0.55);
+  background-color: var(--surface-2);
+}
+
+.drop-hint {
+  padding: 0.6rem 1rem 0;
+  color: var(--accent-text);
+  font-size: 0.85rem;
+}
+
+.attach-tray,
+.msg-attach-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.6rem 0.75rem 0;
+  list-style: none;
+}
+
+.msg-attach-files {
+  padding: 0;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 16rem;
+  padding: 0.3rem 0.35rem 0.3rem 0.4rem;
+  background-color: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.attach-chip.static {
+  padding-right: 0.6rem;
+  background-color: var(--surface-3);
+}
+
+.attach-chip.reading {
+  opacity: 0.7;
+}
+
+.attach-thumb {
+  width: 2rem;
+  height: 2rem;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.attach-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  flex-shrink: 0;
+  color: var(--text-2);
+  background-color: var(--surface-3);
+  border-radius: 6px;
+}
+
+.attach-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.attach-name {
+  overflow: hidden;
+  font-size: 0.82rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.attach-meta {
+  color: var(--text-2);
+  font-size: 0.72rem;
+}
+
+.attach-remove,
+.attach-problem-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem;
+  color: var(--text-2);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.attach-remove:hover,
+.attach-problem-x:hover {
+  color: var(--text);
+  background-color: var(--surface-3);
+}
+
+.attach-remove:focus-visible,
+.attach-problem-x:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 1px;
+}
+
+.attach-problem {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--warn);
+}
+
+.msg-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.msg-attachments + .msg-user-text {
+  margin-top: 0.55rem;
+}
+
+.msg-attach-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.msg-attach-image {
+  display: block;
+  max-width: 14rem;
+  max-height: 11rem;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
 /* ---- workspace chip --------------------------------------------------- */
 
 .ws {
@@ -3925,4 +4070,34 @@ button:disabled {
   margin: 0;
   color: var(--text-2);
   font-size: 0.82rem;
+}
+
+/* Queued message with attachments: the file names under its text. */
+.queued-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.queued-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text-2);
+  font-size: 0.78rem;
+}
+
+.queued-file {
+  max-width: 12rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.queued-problem {
+  color: var(--warn);
+  font-size: 0.78rem;
 }

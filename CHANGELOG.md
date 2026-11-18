@@ -4,6 +4,15 @@
 
 ### New
 - Ya puedes escribir mientras el asistente responde. Si envias, el mensaje queda en cola encima del cuadro de texto ("Se enviara cuando termine la respuesta.") y sale solo al terminar, uno detras de otro. Cada mensaje en cola se puede editar o quitar. Si pulsas Detener o algo falla, la cola espera hasta que pulses "Enviar ahora". Un mensaje en cola tiene prioridad sobre la continuacion automatica de una respuesta cortada.
+- Adjuntar archivos al mensaje: boton de clip en el cuadro de texto, arrastrar archivos a la ventana o pegar una captura. Se ven como fichas que puedes quitar antes de enviar (hasta 10 por mensaje; imagenes de hasta 10 MB y documentos de hasta 20 MB).
+- Los PDF, Word, hojas de calculo (xlsx, xls, csv) y archivos de texto o codigo se leen en tu equipo y el asistente recibe su texto. Si un documento es muy largo, solo se usa el principio y se indica en la ficha.
+- Las imagenes se reducen antes de enviarlas. Si el modelo elegido no puede ver imagenes, esa respuesta la da automaticamente un modelo que si puede; tu eleccion de modelo no cambia y el siguiente mensaje sin imagenes vuelve a tu modelo.
+- Los mensajes enviados muestran sus imagenes y documentos, tambien al volver a abrir la conversacion.
+- Mientras el asistente responde tambien puedes adjuntar archivos: van con el mensaje en cola.
+
+### Changed
+- Los archivos adjuntos se quedan en este equipo: la memoria de tu cuenta solo guarda una linea con el nombre de cada archivo, nunca su contenido ni la descripcion de las imagenes.
+- Telemetria: dos eventos nuevos sin contenido, `attachment_added` (tipo de archivo y cuantos) y `vision_routed` (de que modelo a que modelo se envio una respuesta con imagenes). Detalle en SECURITY.md.
 
 ## 0.2.13 - 2026-11-17 - El asistente termina lo que empieza
 
