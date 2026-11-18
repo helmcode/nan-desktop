@@ -791,8 +791,15 @@ button:disabled {
 
 .user-menu-account-text {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-width: 0;
+}
+
+/* Long emails (plus addressing, long domains) wrap inside the popover
+   instead of overflowing it. */
+.user-menu-account-text strong {
+  overflow-wrap: anywhere;
 }
 
 .user-menu-account-text span {
@@ -2073,11 +2080,56 @@ button:disabled {
   margin-top: 0.9rem;
 }
 
-.sources-label {
-  display: block;
-  margin-bottom: 0.4rem;
+.sources-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.45rem;
+  margin-left: -0.45rem;
+  font: inherit;
   font-size: 0.78rem;
   color: var(--text-2);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.sources-toggle:hover {
+  color: var(--text);
+  background-color: var(--surface-2);
+}
+
+.sources-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.sources-label {
+  display: inline;
+}
+
+.sources-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+.sources-chevron {
+  transition: transform 120ms ease;
+}
+
+.sources.open .sources-chevron {
+  transform: rotate(180deg);
+}
+
+.sources.open ul {
+  margin-top: 0.4rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sources-chevron {
+    transition: none;
+  }
 }
 
 .sources ul {

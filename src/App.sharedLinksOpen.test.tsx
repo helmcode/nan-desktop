@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invokedWith, resetTauri } from "./test/tauriMock";
 import { createRoot } from "react-dom/client";
+import { openChipSections } from "./test/chips";
 
 const pdf = vi.hoisted(() => ({ destroy: vi.fn() }));
 
@@ -143,6 +144,7 @@ describe("R20-A: the first open of Shared links", () => {
     it(`with a PDF open in the preview and ${name}: never the crashed-section fallback`, async () => {
       setup(list);
       renderApp();
+      await openChipSections();
       await openPdfPreview();
       fireEvent.click(screen.getByRole("button", { name: /Menú de la cuenta/ }));
       fireEvent.click(await screen.findByRole("menuitem", { name: "Enlaces compartidos" }));
@@ -159,6 +161,7 @@ describe("R20-A: the first open of Shared links", () => {
   it("from the share dialog's Manage links, with the shared PDF still in the preview", async () => {
     setup(ENTERPRISE_LIST);
     renderApp();
+    await openChipSections();
     await openPdfPreview();
     const pane = screen.getByRole("complementary", { name: "Vista previa" });
     fireEvent.click(within(pane).getByRole("button", { name: "Compartir informe.pdf como enlace" }));
@@ -191,6 +194,9 @@ describe("R20-A: a file chip clicked as soon as it appears", () => {
     try {
       await new Promise<void>((resolve) => {
         const seen = new MutationObserver(() => {
+          // The files section is collapsed: expand it at its first commit too.
+          const toggle = host.querySelector<HTMLButtonElement>('button.sources-toggle[aria-expanded="false"]');
+          if (toggle) toggle.click();
           const chip = host.querySelector<HTMLButtonElement>('button[aria-label="Abrir la vista previa: informe.pdf"]');
           if (!chip) return;
           seen.disconnect();

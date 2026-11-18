@@ -36,6 +36,7 @@ import {
   type PendingAttachment,
 } from "./chat/attachments";
 import { ChatImage } from "./components/ChatImage";
+import { ChipSection } from "./components/ChipSection";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FolderPicker } from "./components/FolderPicker";
 import { LanguageScreen } from "./components/LanguageScreen";
@@ -300,20 +301,17 @@ function SourceChips({ sources, onOpen }: { sources: WebSource[]; onOpen: (url: 
   const t = useT();
   if (sources.length === 0) return null;
   return (
-    <div className="sources" aria-label={t.chat.sources}>
-      <span className="sources-label">{t.chat.sources}</span>
-      <ul>
-        {sources.map((source, index) => (
-          <li key={source.url}>
-            <button type="button" className="source-chip" title={source.url} onClick={() => onOpen(source.url)}>
-              <span className="source-index">{index + 1}</span>
-              <span className="source-title">{source.title}</span>
-              <span className="source-host">{hostOf(source.url)}</span>
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
+    <ChipSection label={t.chat.sources} count={sources.length}>
+      {sources.map((source, index) => (
+        <li key={source.url}>
+          <button type="button" className="source-chip" title={source.url} onClick={() => onOpen(source.url)}>
+            <span className="source-index">{index + 1}</span>
+            <span className="source-title">{source.title}</span>
+            <span className="source-host">{hostOf(source.url)}</span>
+          </button>
+        </li>
+      ))}
+    </ChipSection>
   );
 }
 
@@ -331,9 +329,7 @@ function FileChips({
   const t = useT();
   if (paths.length === 0) return null;
   return (
-    <div className="sources" aria-label={t.chat.files}>
-      <span className="sources-label">{t.chat.files}</span>
-      <ul>
+    <ChipSection label={t.chat.files} count={paths.length}>
         {paths.map((path) => (
           <li key={path}>
             <button
@@ -359,8 +355,7 @@ function FileChips({
             )}
           </li>
         ))}
-      </ul>
-    </div>
+      </ChipSection>
   );
 }
 

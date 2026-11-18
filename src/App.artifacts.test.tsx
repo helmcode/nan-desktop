@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invokedWith, resetTauri } from "./test/tauriMock";
+import { openChipSections } from "./test/chips";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("./test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).eventModule());
@@ -74,6 +75,7 @@ describe("share action gating", () => {
   it("Helmcode with the org flag: share from the chip opens the three-scope dialog (no free emails, R21)", async () => {
     setup("helmcode", { email: "ana@acme.com", featureFlags: ["chat", "artifacts"] });
     renderApp();
+    await openChipSections();
     fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
     const dialog = await screen.findByRole("dialog", { name: "Share as a link" });
     expect(within(dialog).getAllByRole("radio").map((radio) => (radio as HTMLInputElement).value)).toEqual([
@@ -86,18 +88,21 @@ describe("share action gating", () => {
   it("Helmcode's real /me (top-level artifacts: true, featureFlags list): share shows", async () => {
     setup("helmcode", { email: "ana@acme.com", role: "member", featureFlags: ["chat", "artifacts"], artifacts: true });
     renderApp();
+    await openChipSections();
     expect(await screen.findByRole("button", { name: "Share notes.md as a link" })).toBeTruthy();
   });
 
   it("Helmcode with only the top-level boolean: share shows", async () => {
     setup("helmcode", { email: "ana@acme.com", featureFlags: [], artifacts: true });
     renderApp();
+    await openChipSections();
     expect(await screen.findByRole("button", { name: "Share notes.md as a link" })).toBeTruthy();
   });
 
   it("Helmcode without the flag: no share action and no Shared links entry", async () => {
     setup("helmcode", { email: "ana@acme.com", featureFlags: ["chat", "skills_sharing"], skillsSharing: true });
     renderApp();
+    await openChipSections();
     await screen.findByRole("button", { name: "Open preview: notes.md" });
     await waitFor(() => expect(invokedWith("artifacts_request").length).toBeGreaterThan(0));
     expect(chipShare()).toBeNull();
@@ -108,6 +113,7 @@ describe("share action gating", () => {
   it("an unanswered /api/auth/me keeps it hidden", async () => {
     setup("helmcode", null);
     renderApp();
+    await openChipSections();
     await screen.findByRole("button", { name: "Open preview: notes.md" });
     await waitFor(() => expect(invokedWith("artifacts_request").length).toBeGreaterThan(0));
     expect(chipShare()).toBeNull();
@@ -116,6 +122,7 @@ describe("share action gating", () => {
   it("community's real /me (entitlements.artifacts): a two-scope dialog", async () => {
     setup("nan", { email: "ana@x.io", entitlements: { inference: true, artifacts: true }, entitlementsError: false });
     renderApp();
+    await openChipSections();
     fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
     const dialog = await screen.findByRole("dialog", { name: "Share as a link" });
     expect(within(dialog).getAllByRole("radio")).toHaveLength(2);
@@ -124,6 +131,7 @@ describe("share action gating", () => {
   it("community with entitlements.artifacts false: the membership copy", async () => {
     setup("nan", { email: "ana@x.io", entitlements: { inference: true, artifacts: false }, entitlementsError: false });
     renderApp();
+    await openChipSections();
     fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
     expect(await screen.findByText("Sharing links is part of the membership")).toBeTruthy();
   });
@@ -131,6 +139,7 @@ describe("share action gating", () => {
   it("community with the capability: a two-scope dialog", async () => {
     setup("nan", { email: "ana@x.io", capabilities: { inference: true, artifacts: true } });
     renderApp();
+    await openChipSections();
     fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
     const dialog = await screen.findByRole("dialog", { name: "Share as a link" });
     expect(within(dialog).getAllByRole("radio")).toHaveLength(2);
@@ -139,6 +148,7 @@ describe("share action gating", () => {
   it("community without the capability: the share button opens the membership copy", async () => {
     setup("nan", { email: "ana@x.io", capabilities: { inference: false } });
     renderApp();
+    await openChipSections();
     fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
     expect(await screen.findByText("Sharing links is part of the membership")).toBeTruthy();
     expect(invokedWith("artifact_share")).toHaveLength(0);
@@ -147,6 +157,7 @@ describe("share action gating", () => {
   it("community whose account endpoint sends no artifacts flag at all: the paywall stays", async () => {
     setup("nan", { email: "ana@x.io", entitlements: { inference: true }, entitlementsError: false });
     renderApp();
+    await openChipSections();
     fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
     expect(await screen.findByText("Sharing links is part of the membership")).toBeTruthy();
     expect(invokedWith("artifact_share")).toHaveLength(0);
@@ -155,6 +166,7 @@ describe("share action gating", () => {
   it("community whose entitlements failed to resolve: hidden, never a paywall", async () => {
     setup("nan", { email: "ana@x.io", entitlements: null, entitlementsError: true });
     renderApp();
+    await openChipSections();
     await screen.findByRole("button", { name: "Open preview: notes.md" });
     await waitFor(() => expect(invokedWith("artifacts_request").length).toBeGreaterThan(0));
     expect(chipShare()).toBeNull();
@@ -165,6 +177,7 @@ describe("entry points", () => {
   it("the preview header offers Share for the open file", async () => {
     setup("helmcode", { featureFlags: ["artifacts"] });
     renderApp();
+    await openChipSections();
     await screen.findByRole("button", { name: "Share notes.md as a link" });
     fireEvent.click(screen.getByRole("button", { name: "Open preview: notes.md" }));
     const pane = await screen.findByRole("complementary", { name: "Preview" });
@@ -175,6 +188,7 @@ describe("entry points", () => {
   it("Shared links opens from the account menu, in Spanish too", async () => {
     setup("helmcode", { featureFlags: ["artifacts"] });
     renderApp("es");
+    await openChipSections();
     await screen.findByRole("button", { name: "Compartir notes.md como enlace" });
     fireEvent.click(screen.getByRole("button", { name: /Menú de la cuenta/ }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Enlaces compartidos" }));
@@ -194,6 +208,7 @@ describe("member picker (R20-B)", () => {
   it("never offers the signed-in account (the realm's email)", async () => {
     setup("helmcode", { featureFlags: ["artifacts"] }, { activeEmail: "Ana@Acme.com", members: MEMBERS });
     renderApp();
+    await openChipSections();
     fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
     const dialog = await screen.findByRole("dialog", { name: "Share as a link" });
     fireEvent.click(within(dialog).getByRole("radio", { name: /Team members/ }));
@@ -204,6 +219,7 @@ describe("member picker (R20-B)", () => {
   it("falls back to the email /api/auth/me reports", async () => {
     setup("helmcode", { email: "ana@acme.com", featureFlags: ["artifacts"] }, { members: MEMBERS });
     renderApp();
+    await openChipSections();
     fireEvent.click(await screen.findByRole("button", { name: "Share notes.md as a link" }));
     const dialog = await screen.findByRole("dialog", { name: "Share as a link" });
     fireEvent.click(within(dialog).getByRole("radio", { name: /Team members/ }));
