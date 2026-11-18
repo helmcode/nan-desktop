@@ -116,6 +116,11 @@ pub struct GrantsStore {
     /// on load and marked, so a later explicit OFF sticks.
     #[serde(default)]
     pub run_command_promoted: bool,
+    /// In-app browser protection (owner decision, ON by default): after the
+    /// assistant browsed the web in a conversation, commands and file
+    /// changes ask until the user's next message, even in `allow` mode.
+    #[serde(default = "default_true")]
+    pub browser_guard: bool,
     #[serde(default)]
     pub grants: Vec<Grant>,
 }
@@ -125,6 +130,7 @@ pub fn default_store() -> GrantsStore {
         version: STORE_VERSION,
         tools_allow_run_command: true,
         run_command_promoted: true,
+        browser_guard: true,
         grants: Vec::new(),
     }
 }
@@ -870,6 +876,21 @@ mod tests {
     }
 
     // ------------------------------------------------- S15 run_command --
+
+    #[test]
+    fn the_browser_guard_is_on_by_default_and_an_explicit_off_persists() {
+        assert!(default_store().browser_guard);
+        // A store written before the setting existed reads as ON.
+        let old = r#"{"version":1,"tools_allow_run_command":true,"run_command_promoted":true,"grants":[]}"#;
+        let parsed = parse_store(old).or_else(|_| {
+            parse_store(&old.replace("\"version\":1", &format!("\"version\":{STORE_VERSION}")))
+        });
+        assert!(parsed.unwrap().browser_guard);
+        let mut store = default_store();
+        store.browser_guard = false;
+        let json = serde_json::to_string(&store).unwrap();
+        assert!(!parse_store(&json).unwrap().browser_guard);
+    }
 
     #[test]
     fn pre_promotion_store_is_migrated_on_once_and_explicit_off_sticks() {

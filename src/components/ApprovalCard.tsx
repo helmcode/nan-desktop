@@ -20,6 +20,11 @@ function actionIcon(action: string): ReactNode {
     case "save_image":
       return <IconImage size={16} />;
     case "write_website":
+    case "browser_site":
+    case "browser_site_used":
+    case "browser_local_site":
+    case "browser_login":
+    case "browser_payment":
       return <IconGlobe size={16} />;
     case "read_file":
     case "list_files":
@@ -38,7 +43,20 @@ export function ApprovalCard({
 }) {
   const t = useT();
   const summary = t.approval.actions[card.action] ?? t.approval.actions.unknown;
-  const danger = card.action === "delete_path" || card.action === "run_command";
+  const danger = card.action === "delete_path" || card.action === "run_command" || card.action === "browser_payment";
+  const detail = t.approval.details[card.action];
+
+  if (card.notice) {
+    return (
+      <div className="approval-line granted" role="status">
+        {actionIcon(card.action)}
+        <span className="approval-line-text">{summary}</span>
+        <code className="approval-line-target" title={card.target}>
+          {card.target}
+        </code>
+      </div>
+    );
+  }
 
   if (!isOpen(card)) {
     const granted = card.status === "granted";
@@ -76,6 +94,8 @@ export function ApprovalCard({
             {t.approval.inFolder} <code title={card.cwd}>{card.cwd}</code>
           </span>
         )}
+        {detail && <span className="approval-detail">{detail}</span>}
+        {card.afterBrowsing && <span className="approval-detail">{t.approval.afterBrowsing}</span>}
         {card.permanent && <span className="approval-permanent">{t.approval.permanent}</span>}
         {card.diffPreview && (
           <details className="approval-diff">

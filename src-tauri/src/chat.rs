@@ -419,6 +419,26 @@ pub fn tool_definitions(workspace: Option<&tools::Workspace>) -> Vec<serde_json:
     defs
 }
 
+/// Whether a send is a new message from the user (it ends the in-app
+/// browser guards) rather than a "continue" of the previous reply. Pure.
+pub fn send_starts_new_task(continuation: Option<bool>) -> bool {
+    continuation != Some(true)
+}
+
+/// Every tool offered for one reply with `model`: [`tool_definitions`]
+/// plus the in-app browser tools (`browser_screenshot` only for a model
+/// that can see images).
+pub fn offered_tool_definitions(
+    workspace: Option<&tools::Workspace>,
+    model: &str,
+) -> Vec<serde_json::Value> {
+    let mut defs = tool_definitions(workspace);
+    defs.extend(crate::browser::tools::tool_definitions(
+        crate::browser::tools::model_sees_images(model),
+    ));
+    defs
+}
+
 /// How the assistant must work with tools (round 3). The owner's session
 /// showed the model narrating intentions ("now I'll create…") several
 /// times without acting, and a final answer that never said where the
@@ -441,9 +461,10 @@ working folders; for any other place, ask the user to add that folder first.";
 /// workspace description when the user set one up.
 pub fn system_prompt(workspace: Option<&tools::Workspace>) -> String {
     let rules = format!(
-        "{ASSISTANT_RULES}\n\n{}\n\n{}",
+        "{ASSISTANT_RULES}\n\n{}\n\n{}\n\n{}",
         tools::save_skill::GUIDANCE,
-        tools::website::GUIDANCE
+        tools::website::GUIDANCE,
+        crate::browser::tools::GUIDANCE
     );
     match workspace {
         Some(workspace) => format!("{rules}\n\n{}", workspace_prompt(workspace)),
@@ -1205,6 +1226,15 @@ pub fn chat_send(
         ));
     }
     chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
+    // Only once the user's message is persisted (a send that failed before
+    // this point changes nothing): a new message (not a "continue") lets a
+    // browser the user closed be used again and ends this conversation's
+    // post-browsing guard.
+    if send_starts_new_task(continuation) {
+        crate::browser::user_message_sent(&app);
+        app.state::<tools::ToolsState>()
+            .clear_browsed(conversation_id);
+    }
 
     let state = app.state::<ChatState>();
     // Cancel-safe: reserve (aborting the previous stream for this
@@ -1241,7 +1271,14 @@ pub fn chat_send(
 /// no interrupted marker. Emits `chat://stopped` when a stream was actually
 /// stopped; stopping an idle conversation is a no-op.
 #[tauri::command]
-pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result<(), String> {
+pub fn chat_stop(app: AppHandle, conversation_id: i64) -> Result<(), String> {
+    stop_reply(&app, conversation_id)
+}
+
+/// Stop a conversation's running reply (the Stop button, or the user
+/// closing the in-app browser that reply was driving). What already
+/// arrived stays persisted.
+pub(crate) fn stop_reply(app: &AppHandle, conversation_id: i64) -> Result<(), String> {
     let state = app.state::<ChatState>();
     if !abort_stream(&state, conversation_id)? {
         return Ok(());
@@ -1249,14 +1286,15 @@ pub fn chat_stop(app: AppHandle, window: Window, conversation_id: i64) -> Result
     // A command the aborted turn was running keeps going on its blocking
     // thread: end its process tree now instead of at its timeout.
     crate::process::stop_conversation_commands(conversation_id);
-    let dir = crate::realm::active_dir(&app)?;
+    let dir = crate::realm::active_dir(app)?;
     let conn = chat_store::open_db(&dir)?;
     chat_store::finalize_in_progress(&conn, conversation_id, "user_stop")
         .map_err(|err| err.to_string())?;
     // Retention: raw tool output only for the replies that can be replayed.
     let _ = chat_store::prune_tool_traces(&conn, Some(conversation_id));
     chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
-    let _ = window.emit(
+    let _ = app.emit_to(
+        "main",
         "chat://stopped",
         DonePayload {
             conversation_id,
@@ -1290,6 +1328,9 @@ async fn run_chat_stream(
     // An aborted task (Stop, a new send, a realm switch) ends the command
     // its tool call was running instead of leaving it to its timeout.
     let commands = crate::process::StopCommandsOnDrop::new(conversation_id);
+    // Once this reply uses the in-app browser, the bar shows it driving
+    // until the reply ends, however it ends.
+    let _browser_reply = crate::browser::ReplyGuard::new(&app, conversation_id);
 
     let emit_error = |kind: ErrorKind| {
         crate::telemetry::record(
@@ -1397,7 +1438,7 @@ async fn run_chat_stream(
     let mut messages = compose_messages(workspace.as_ref(), skill.as_ref(), traced_history);
     // Where the history ends and this reply's own tool rounds begin.
     let mut prefix_len = messages.len();
-    let mut offered_tools = tool_definitions(workspace.as_ref());
+    let mut offered_tools = offered_tool_definitions(workspace.as_ref(), &model);
     let mut traces_dropped = !replayed_traces;
     // A vision model rejected an image itself (400): retried once with the
     // text stand-ins instead of the image parts.
@@ -1405,6 +1446,9 @@ async fn run_chat_stream(
     // The images of that request: flagged only once the stand-in retry
     // gets past the 400 (otherwise the image was not the cause).
     let mut pending_rejected: Option<Vec<(i64, String)>> = None;
+    // That request also carried browser screenshots (then the culprit is
+    // unknown and no attachment image is flagged).
+    let mut rejected_had_screenshots = false;
 
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
@@ -1459,7 +1503,9 @@ async fn run_chat_stream(
                 }
             };
             let status = response.status().as_u16();
-            if let Some(images) = rejection_to_persist(&mut pending_rejected, status) {
+            if let Some(images) =
+                rejection_to_persist(&mut pending_rejected, status, rejected_had_screenshots)
+            {
                 // Remembered: later turns send these images as stand-ins
                 // instead of failing and retrying every time.
                 let _ = chat_store::mark_images_vision_rejected(&conn, &images);
@@ -1484,6 +1530,8 @@ async fn run_chat_stream(
                 let new_len = prefix.len();
                 messages = rebase_messages(&messages, prefix_len, prefix);
                 prefix_len = new_len;
+                // This reply's browser screenshots are images too.
+                rejected_had_screenshots = crate::browser::stub_screenshots(&mut messages) > 0;
                 continue;
             }
             match turn::retry_after_400(round, offer_tools, traces_dropped, replayed_traces) {
@@ -1581,18 +1629,43 @@ async fn run_chat_stream(
             "tool_calls": requested,
         }));
         let mut results: Vec<String> = Vec::with_capacity(round_out.tool_calls.len());
+        // In-app browser screenshots, sent after the round's tool messages
+        // as user image parts (a tool message cannot carry an image).
+        let mut screenshots: Vec<String> = Vec::new();
         for call in &round_out.tool_calls {
             let tool_started = std::time::Instant::now();
-            let (content, produced, declared) = run_tool_call(
-                &app,
-                &window,
-                &dir,
-                &profile_id,
-                conversation_id,
-                call,
-                &mut sources,
-            )
-            .await;
+            let (content, produced, declared) =
+                if crate::browser::tools::is_browser_tool(&call.name) {
+                    let _ = window.emit(
+                        "chat://activity",
+                        ActivityPayload {
+                            conversation_id,
+                            activity: Some(activity_for_tool(&call.name)),
+                        },
+                    );
+                    let run = crate::browser::run_model_tool(
+                        &app,
+                        &profile_id,
+                        conversation_id,
+                        &model,
+                        &call.name,
+                        &call.arguments,
+                    )
+                    .await;
+                    screenshots.extend(run.image);
+                    (run.content, Vec::new(), Vec::new())
+                } else {
+                    run_tool_call(
+                        &app,
+                        &window,
+                        &dir,
+                        &profile_id,
+                        conversation_id,
+                        call,
+                        &mut sources,
+                    )
+                    .await
+                };
             tracker.tool_calls += 1;
             // Metadata only: registry name, outcome class, duration. Capped
             // per turn (the rest is counted in `turn_end.tool_calls`).
@@ -1622,6 +1695,9 @@ async fn run_chat_stream(
             }));
             results.push(content);
         }
+        // Live request only (not in the stored trace: images stay out of
+        // the device-local replay).
+        crate::browser::attach_screenshots(&mut messages, &screenshots);
         // The round is complete (every call has its result): keep it for
         // the next turns. Written per round so a stopped turn keeps the
         // rounds that finished; only the newest rounds within the replay
@@ -1722,13 +1798,16 @@ fn request_history(
 /// After the stand-in retry: the images to flag `vision_rejected`. Only
 /// when that retry got past the 400 (any other status) were the images the
 /// cause; a second 400 means something else was wrong, nothing is flagged.
-/// The pending set is consumed either way.
+/// The pending set is consumed either way. When the rejected request also
+/// carried in-app browser screenshots, nothing is flagged: either image
+/// may have caused the 400, and the retry dropped both.
 pub fn rejection_to_persist(
     pending: &mut Option<Vec<(i64, String)>>,
     status: u16,
+    had_screenshots: bool,
 ) -> Option<Vec<(i64, String)>> {
     let images = pending.take()?;
-    (status != 400 && !images.is_empty()).then_some(images)
+    (status != 400 && !images.is_empty() && !had_screenshots).then_some(images)
 }
 
 /// `messages` with its first `prefix_len` entries (system prompt, skill,
@@ -2086,6 +2165,7 @@ pub fn activity_for_tool(name: &str) -> &'static str {
     match name {
         web_search::TOOL_NAME => "searching",
         images::TOOL_NAME => "generating_image",
+        name if crate::browser::tools::is_browser_tool(name) => "browsing",
         _ => "working",
     }
 }
@@ -2684,20 +2764,42 @@ mod tests {
     fn images_are_flagged_rejected_only_when_the_stand_in_retry_gets_past_the_400() {
         let images = vec![(1, "i".to_string())];
         // Nothing pending: nothing to flag.
-        assert_eq!(rejection_to_persist(&mut None, 200), None);
+        assert_eq!(rejection_to_persist(&mut None, 200, false), None);
         // The retry succeeded (or failed for another reason): flag them.
         for status in [200, 429, 500] {
             let mut pending = Some(images.clone());
             assert_eq!(
-                rejection_to_persist(&mut pending, status),
+                rejection_to_persist(&mut pending, status, false),
                 Some(images.clone())
             );
             assert_eq!(pending, None);
         }
         // A second 400: the image was not the cause; nothing flagged.
         let mut pending = Some(images.clone());
-        assert_eq!(rejection_to_persist(&mut pending, 400), None);
+        assert_eq!(rejection_to_persist(&mut pending, 400, false), None);
         assert_eq!(pending, None, "consumed either way");
+    }
+
+    #[test]
+    fn attachment_images_are_not_flagged_when_browser_screenshots_shared_the_400() {
+        let images = vec![(1, "i".to_string())];
+        for status in [200, 400, 500] {
+            let mut pending = Some(images.clone());
+            assert_eq!(
+                rejection_to_persist(&mut pending, status, true),
+                None,
+                "{status}"
+            );
+            assert_eq!(pending, None, "consumed either way");
+        }
+        // The flag comes from the retry: it is true only when screenshots
+        // were actually stubbed out of the rejected request.
+        let mut messages = vec![crate::browser::screenshot_message(
+            "data:image/jpeg;base64,AA",
+        )];
+        assert!(crate::browser::stub_screenshots(&mut messages) > 0);
+        let mut plain = vec![serde_json::json!({ "role": "user", "content": "hola" })];
+        assert_eq!(crate::browser::stub_screenshots(&mut plain), 0);
     }
 
     #[test]
@@ -3070,6 +3172,59 @@ mod tests {
                 .contains("PDF"),
             "the model learns it can build binary artifacts"
         );
+    }
+
+    #[test]
+    fn only_a_new_user_message_ends_the_browser_guards() {
+        assert!(send_starts_new_task(None));
+        assert!(send_starts_new_task(Some(false)));
+        assert!(!send_starts_new_task(Some(true)), "a continue keeps them");
+    }
+
+    #[test]
+    fn a_screenshot_never_reaches_the_stored_trace() {
+        let calls = vec![ToolCall {
+            id: "c1".into(),
+            name: "browser_screenshot".into(),
+            arguments: "{}".into(),
+        }];
+        let result = crate::browser::tools::ok_page(crate::browser::SCREENSHOT_SUMMARY, None);
+        let trace = turn::trace_round(&calls, &[result]);
+        let json = serde_json::to_string(&trace).unwrap();
+        assert!(!json.contains("data:image"));
+        assert!(
+            json.contains("only the newest screenshot")
+                || json.contains("Only the newest screenshot")
+        );
+    }
+
+    #[test]
+    fn browser_tools_are_always_offered_and_screenshots_only_to_vision_models() {
+        let names = |model: &str| -> Vec<String> {
+            offered_tool_definitions(None, model)
+                .iter()
+                .map(|d| d["function"]["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let vision = names("deepseek-v4-flash");
+        let text_only = names("glm5.3");
+        for name in [
+            "web_search",
+            "browser_open",
+            "browser_read",
+            "browser_click",
+            "browser_type",
+        ] {
+            assert!(vision.contains(&name.to_string()), "{name}");
+            assert!(text_only.contains(&name.to_string()), "{name}");
+        }
+        assert!(vision.contains(&"browser_screenshot".to_string()));
+        assert!(!text_only.contains(&"browser_screenshot".to_string()));
+        // File tools still only with a workspace.
+        assert!(!text_only.contains(&"read_file".to_string()));
+        // Browser calls never reach the file-action mapper.
+        assert!(action_from_call("browser_open", r#"{"url":"https://e.com"}"#).is_err());
+        assert!(system_prompt(None).contains("In-app browser"));
     }
 
     #[test]
@@ -3682,6 +3837,7 @@ mod tests {
     #[test]
     fn tool_activities_name_what_the_assistant_is_doing() {
         assert_eq!(activity_for_tool("web_search"), "searching");
+        assert_eq!(activity_for_tool("browser_click"), "browsing");
         assert_eq!(activity_for_tool("generate_image"), "generating_image");
         assert_eq!(activity_for_tool("run_command"), "working");
     }

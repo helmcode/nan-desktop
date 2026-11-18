@@ -996,6 +996,112 @@ pnpm build                # frontend gate
 node test/t8-check.mjs    # drives cargo test + audit JSONL schema
 ```
 
+## In-app browser (computer use, phase 1)
+
+The assistant drives a browser window the user can see. Security model and
+approval policy: SECURITY.md, "In-app browser". Phase 2 design (whole
+computer): [COMPUTER-USE.md](COMPUTER-USE.md).
+
+### Surface: a separate window, not a panel
+
+A second webview inside the chat window needs Tauri's `unstable`
+multi-webview feature, and an `<iframe>` in the app UI would load remote
+pages under the app's own origin and CSP (and most sites refuse to be
+framed). A window of its own (label `browser`) is the stable, isolated
+surface on WKWebView, WebView2 and WebKitGTK alike. The chat window shows a
+**browser bar** above the composer while it is open (`BrowserBar.tsx`):
+read-only address, back / forward / reload, show window, stop the assistant
+(`chat_stop` of the conversation driving it) and close. It follows the
+`browser://state` event and reads `browser_state` once on mount; its
+buttons call `browser_control`; `browser_set_language` gives the core the
+UI language for the window title. The browser window opens beside the chat
+(right, else left, else system placement) without taking the focus, and a
+pending browser card brings the chat window forward. Closing the window
+(bar or window button) stops the reply driving it and the tools refuse
+(`user_closed_browser`) until the user's next message; a blocked download
+is attached to the next tool result (`download_blocked`).
+
+### Modules (`src-tauri/src/browser/`)
+
+| File | Role | Tests |
+|---|---|---|
+| `mod.rs` | `BrowserState` (site approvals per conversation, last read nonce, bar view), window creation (incognito, navigation guard, popups in place, downloads refused, page-load and title hooks), the tool runner, the two UI commands | state, titles, card copy, model errors |
+| `url_policy.rs` | Which addresses load (agent and navigation guard), site key, local-network detection | pure |
+| `page.rs` | Page scripts (read, describe, click, type, scroll, wait, back) as JSON-parameterized expressions, decoding of the native callback, the untrusted-content formatting | pure |
+| `policy.rs` | Field classification (password / code / card), sign-in and payment detection, the site / typing / submit gates | pure |
+| `tools.rs` | OpenAI tool definitions, argument parsing, vision check, results | pure |
+| `screenshot.rs` | Per-platform engine snapshot (`cfg`) | live (see below) |
+
+### The observe, act, observe loop
+
+Every acting tool returns the page AFTER the action (`browser_open`,
+`browser_click`, `browser_type` with `submit`, `browser_scroll`,
+`browser_back`), so the model rarely needs a separate `browser_read`.
+One action runs at a time (a `tokio::Mutex` driver lock). The first
+browser call of a reply marks its conversation as driving the browser; a
+`ReplyGuard` held by `run_chat_stream` clears it when the reply ends,
+however it ends (no per-call flicker in the bar). Element ids belong to the
+read that listed them (a random nonce stored in the page and in the core);
+a navigation start clears the core's nonce, so stale ids fail cleanly and
+the model is told to read again.
+
+Gates per call (`run_call`): parse, then the site gate (approved for the
+conversation? allow mode, re-evaluated every time? local network?), then for clicks and typing a
+`describe` of the target element feeds the typing gate (secret fields are
+refused) and the submit gate (sign-ins and payments ask every time).
+Every page read goes through `read_checked`, which re-runs the site gate
+on the page's FINAL address (after redirects or page-initiated
+navigation) before any content reaches the model. Clicks pass the label
+`describe` saw and the click script refuses when it changed.
+`browser_wait` waits a number of milliseconds (capped at 10,000) or polls a
+CSS selector every 250 ms for up to 10 s. Only the newest screenshot is
+kept in the live request (`attach_screenshots`).
+**Post-browsing guard** (`tools::route_after_browsing`): every browser call
+marks its conversation in `ToolsState::mark_browsed`; while marked (until
+`chat_send` of a real user message clears it) and while
+`GrantsStore::browser_guard` is on (default), an `Auto` route for a command
+or a file change becomes `Inline`, with `after_browsing: true` on the card.
+Setting: `tools_set_browser_guard` (turning off asks natively).
+Approvals reuse the inline approval broker (`tools::AppApprover`), with
+the actions `browser_site`, `browser_local_site`, `browser_login` and
+`browser_payment`.
+
+Chat integration (`chat.rs`): `offered_tool_definitions` adds the browser
+tools to every reply (`browser_screenshot` only when
+`chat_models_config().is_vision(model)`: the single `vision` list of
+`chat-models.json`, the same one attachments use). Browser calls are routed to
+`browser::run_model_tool`; a screenshot comes back as a `data:` URL and is
+sent as a user message with an `image_url` part after the round's tool
+messages (tool messages cannot carry images). Images are never written to
+the tool trace; when a vision model rejects images (400), the attachments
+retry also turns this reply's screenshots into text stubs, and when the
+rejected request carried screenshots no attachment image is flagged
+`vision_rejected` (the culprit is unknown). The activity is `browsing`.
+
+### Command ACL
+
+`build.rs` declares every app command (`APP_COMMANDS`) in an ACL manifest
+and `capabilities/default.json` grants `allow-<command>` to `main` only.
+A test in `lib.rs` asserts that `generate_handler!`, `APP_COMMANDS` and the
+capability list the same commands: **a new command must be added to all
+three**, or it is refused at runtime.
+
+### Platform status
+
+| | macOS (WKWebView) | Windows (WebView2) | Linux (WebKitGTK) |
+|---|---|---|---|
+| Window, guard, incognito, downloads | yes | yes | yes |
+| Read / click / type / scroll / back / wait (`evaluateJavaScript` / `ExecuteScript` / `evaluate_javascript` callbacks) | verified live | CI build | CI build |
+| Screenshot | `takeSnapshotWithConfiguration`, JPEG, verified live | `CapturePreview`, JPEG | `get_snapshot` (visible), PNG |
+
+### Verify
+
+```sh
+cd src-tauri && cargo test browser   # url policy, scripts, gates, tools, state
+cargo test acl                       # command ACL consistency
+pnpm test -- BrowserBar              # the bar
+```
+
 ## T13 device-flow login (with T3b profile lockdown)
 
 Signing in is a browser-based device flow (RFC 8628-style, S11/S4): the user

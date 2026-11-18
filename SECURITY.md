@@ -28,7 +28,7 @@ In scope:
   boundaries, the device login
   flow, markdown/sanitization of model output, the tool executor and its
   permission model, per-user data realms, artifact sharing, the sandboxed
-  website preview, the auto-update pipeline.
+  website preview, the assistant's in-app browser, the auto-update pipeline.
 - Anything that would exfiltrate data, keys or conversations outside the two
   owned services (NaN community, Helmcode enterprise).
 
@@ -42,6 +42,10 @@ through the same private channel; we route them to the right team.
   to the two platforms' own hosts: `api.nan.builders` /
   `cloud-api.nan.builders` and `api.helmcode.com` / `cloud-api.helmcode.com`
   (mock overrides exist solely in debug builds).
+  The one deliberate exception is the assistant's in-app browser: it loads
+  the web pages the user or the assistant opens, like any browser, inside
+  an isolated window (see [In-app browser](#in-app-browser)). The Rust core
+  itself still only talks to the platform hosts.
 - **Telemetry is technical metadata only** (always on, see
   [Telemetry](#telemetry-what-the-app-sends)): it goes to the same platform
   hosts, never to a third party, and never carries conversation content,
@@ -67,6 +71,11 @@ through the same private channel; we route them to the right team.
   allowlist in the Rust core (`src-tauri/src/artifacts.rs`). Helmcode links
   are limited to org members or the whole org; NaN links to NaN members, who
   must sign in to open them. A detected secret needs its own confirmation.
+- **The assistant's browser is isolated and supervised.** Remote pages run
+  in their own window with no access to any app or plugin command, a
+  private non-persistent data store, no downloads, http/https only; the
+  assistant asks before using each site, never types secrets and asks
+  before every sign-in or payment (see [In-app browser](#in-app-browser)).
 - **Crash logs are redacted.** Errors reaching the recovery screen are logged
   with tokens (`sk-`, `hke_`, `nan_`, `Bearer`, JWTs) redacted.
 
@@ -216,6 +225,12 @@ durations and fixed lists; tests pin every builder):
 | `vision_routed` | `from_model`, `to_model` (only ids from the app's built-in model list, else `other`): a reply with images went to the model that can see them because the selected one cannot |
 | `crash` | `source` (`rust_panic`, `renderer`), `location` (Rust: `file:line` where the panic happened, the app's or a library's source file, build-machine path prefixes removed; renderer: the error name, only standard error classes such as `TypeError` or the `typeof` of a non-Error rejection, anything else is sent as `Error`) |
 
+The `tool` list includes the in-app browser tools (`browser_open`,
+`browser_read`, `browser_click`, `browser_type`, `browser_scroll`,
+`browser_back`, `browser_screenshot`, `browser_wait`): only the name,
+outcome and duration are sent, never the address, the site, the page or
+what was typed.
+
 **Never sent:** message text, prompts, replies, file names or contents,
 paths, URLs, command lines, search queries, emails, error or panic
 messages, stack traces. Tool arguments and results are inspected only to
@@ -245,6 +260,160 @@ install (counted in memory, saved at each flush and on exit), and at most
 per 24 h and answer `202` with `dropped`; the app treats any `202` as
 delivered and never retries it. Automatic and "Continue" turns both
 report `continued: true`.
+
+## In-app browser
+
+Implementation: `src-tauri/src/browser/` (design: `mod.rs`; addresses:
+`url_policy.rs`; approvals: `policy.rs`; page scripts: `page.rs`), the
+command ACL in `src-tauri/build.rs` and `capabilities/default.json`. Phase 2
+(whole-computer control) is only a design so far: [docs/COMPUTER-USE.md](docs/COMPUTER-USE.md).
+
+The assistant can drive a browser window inside the app with the
+`browser_*` tools. The user sees that window, can use it at any time, and
+can stop the assistant from the browser bar in the chat window.
+
+**Isolation (what a web page can reach).**
+- **No IPC.** The browser window (label `browser`) is in no capability, and
+  the app declares an ACL manifest for its own commands (`build.rs`), so
+  Tauri checks every app command against the capabilities, which grant
+  them to the `main` window only. Plugin commands (events included) are
+  equally ungranted. Tauri also refuses every app command from a remote
+  origin. Verified live on macOS: a page calling `profiles_load`,
+  `browser_state` or `plugin:event|listen` gets "not allowed on window
+  browser"; a `lib.rs` test keeps the command list, the manifest and the
+  capability identical.
+- **Navigation guard** (`url_policy::navigation_allowed`) on every
+  top-level navigation the engine reports (on Windows, WebView2 does not
+  report sub-frame navigations to it): `http`/`https` only (plus
+  `about:blank`), never `file:`, `data:`, `javascript:`, custom schemes or
+  the app's own origins (`tauri://`, `ipc://`, `asset://`, `nan-site://`,
+  and every `localhost` / `*.localhost` host, which Tauri treats as the app
+  itself). Addresses with `user:password@` are refused. A frame that did
+  load an app origin would still reach no command: the window has no
+  capability at all (above).
+- **First document is `about:blank`.** The window is created on
+  `about:blank` and then navigated, so no page chooses the origin of the
+  window's first document.
+- **Every page permission is refused** (microphone, camera, location,
+  notifications...), on every platform (`on_permission_request` ->
+  `Deny`). Without it WKWebView would grant media capture silently.
+- **Separate, private data store.** The webview is incognito
+  (macOS non-persistent `WKWebsiteDataStore`, WebView2 InPrivate, WebKitGTK
+  ephemeral context): no cookies, storage or cache shared with the app UI,
+  nothing written to disk, everything gone when the window closes. A
+  sign-in made in the browser lasts until the window closes, and it is
+  shared by every conversation that uses the browser meanwhile (one
+  window, one session): close the browser to end it.
+- **No downloads.** Every download is cancelled; the chat window shows a
+  notice and the assistant is told, so it can ask the user to download the
+  file from their own browser. Nothing is saved or opened.
+- **No new windows.** Popups and `target=_blank` links open in the same
+  window, under the same navigation guard.
+- **No file drops.** Files dragged onto the browser window are taken by
+  the app's drop handler (so the page never receives them) and ignored:
+  only the chat window turns dropped files into attachments.
+- **No app data.** The browser has no access to the vault, sessions,
+  realms or files: the tools only read the page and act inside it, and
+  never grant file or command access.
+- **Closing means stop.** When the user closes the browser (bar or window
+  button), the reply driving it stops and the browser tools refuse until
+  the user sends their next message.
+- **Realm switch.** Signing in or out closes the browser and forgets every
+  site approval.
+
+**How the assistant sees and acts.** Page scripts run through the engine's
+native script-evaluation callback (never through IPC), are parameterized
+with JSON literals, and return JSON. A read returns the title, address,
+visible text from the current scroll position (at most 12,000 characters)
+and up to 120 numbered interactive elements. Element numbers are tied to
+that read: after a navigation or another read they are refused as stale.
+Field values are only shown for fields the assistant typed itself (never
+what the user or the page filled in). Each script has an 8 s timeout and a
+navigation 20 s; one action runs at a time, and a conversation never
+waits behind another conversation's pending card (it is told the browser
+is busy).
+
+**Final address check.** Page content reaches the model only after the
+site rule ran on the page's FINAL address: after a redirect, a link or a
+script that moved the page to another site (or to the local network), that
+site needs its own approval first; if the user declines, the model gets no
+content, only "the page navigated to <host>, which the user did not
+allow". After every read and screenshot the core re-reads the window's
+address (never the page's own claim) and drops the result when the page
+moved to another site, or from a public site to a local-network address,
+meanwhile.
+
+**Approval policy.**
+- **Per site, per conversation.** The first action on a site (host, `www.`
+  ignored, subdomains separate) asks with an inline card; a yes covers that
+  site for the rest of the conversation (until the app restarts or the
+  account changes). When EVERY working folder of the conversation is in
+  "allow" mode, public sites run without asking; this is re-evaluated on
+  every action and never remembered, so switching a folder back to "ask"
+  takes effect at once. The chat still shows a "Using <host>" line for each
+  new site. A pending card brings the chat
+  window to the front; the browser opens beside the chat without taking
+  the focus.
+- **Local network asks in every mode** (once per conversation): loopback,
+  RFC 1918, link-local, CGNAT, 198.18.0.0/15, IPv6 ULA and site-local,
+  IPv4-mapped/compatible, NAT64 and 6to4 addresses, single-label and
+  `.local`/`.lan`/`.internal` names. DNS answers are not inspected: a public name that resolves to a
+  private address is treated as public.
+- **Secrets are never typed by the assistant**, in any mode: password,
+  verification-code and card fields (by type, `autocomplete` and
+  name/label) are refused, and the page script refuses password fields a
+  second time. The assistant asks the user to fill them in themselves.
+- **Sign-ins and payments ask every time**, even in allow mode: submitting
+  a form that has a password or card field, pressing a control whose label
+  reads like a payment or purchase, or pressing a sign-in control on a page
+  that shows a password field.
+- **Time of check vs time of use.** The policy checks an element, then a
+  second script acts on it; a hostile page can swap the element in
+  between (the element registry lives in the page). The click script
+  re-reads the element's label and refuses the click as stale when it
+  changed, which closes the honest-page cases; a hostile page can still
+  defeat it, which is why the policy is friction, not isolation.
+- Every answer to a browser card is written to the tools audit log with
+  the host only.
+- **After browsing, commands and changes ask (ON by default).** Page
+  content can carry instructions aimed at the assistant. Once any browser
+  result has been fed to the model in a conversation, `run_command`,
+  `write_file`, `replace_file`, `move_path`, `delete_path` and `save_image`
+  ask with an inline card even in folders set to "allow", until the user
+  sends their next message in that conversation (a "Continue" does not end
+  it). Reads (`read_file`, `list_files`) stay free. Under a whole-computer
+  grant the question is the native dialog (as for every whole-computer
+  approval). The card or dialog says why it asks, and the audit log records
+  "allow mode suspended" (outcome `asked`). The guard ends only once the
+  user's new message has been saved. Opt-out: Settings,
+  Working folders, "Pedir permiso para órdenes y cambios después de navegar
+  por internet" (stored per signed-in user in `tools.json`, like the other
+  folder settings). Turning it off is confirmed by a native dialog the app
+  window cannot fake. Residual: the next message starts a new task, but the
+  tool trace of the last two replies (which may hold page text) is still
+  replayed as earlier data.
+
+**Prompt injection.** Everything a page shows is untrusted. Reads are
+wrapped in a header that says so, between markers with a random nonce that
+is never sent to the page, and page text can never contain `<<<` (it is
+neutralized after cleaning), so no page can open or close a marker; the system prompt tells the model never to follow
+instructions from pages and never to copy private data into them unless
+asked. The page facts that drive the policy (field types, labels) come
+from the page itself: they add friction for honest sites, they do not make
+a hostile site safe. Isolation does that.
+
+**Screenshots** (`browser_screenshot`, offered only to models that can see
+images) are taken by the engine itself (WKWebView snapshot, WebView2
+`CapturePreview`, WebKitGTK snapshot) and show only the browser page,
+never the rest of the screen. Only the newest screenshot is sent with a
+request (earlier ones become a text stub), only to the profile's own
+inference API, and none is stored in the conversation or its tool trace.
+At most 4 MiB; Linux snapshots are scaled to 1280 px wide.
+
+**Known limitations.** Clicks and typing are synthetic DOM events: a few
+sites that only accept real input may ignore them (the user can do that
+step). Cross-origin iframes are not read. Same-OS-account malware is out of
+scope, as everywhere else.
 
 ## Chat attachments
 

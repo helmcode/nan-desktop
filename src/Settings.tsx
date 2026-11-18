@@ -51,6 +51,9 @@ export function Settings({
   // S15: run_command is on by default; the core still asks per action.
   const [runCommand, setRunCommand] = useState(true);
   const [runCommandBusy, setRunCommandBusy] = useState(false);
+  // In-app browser protection: ON by default; turning it off asks natively.
+  const [browserGuard, setBrowserGuard] = useState(true);
+  const [browserGuardBusy, setBrowserGuardBusy] = useState(false);
   const [memoryMode, setMemoryMode] = useState<MemoryMode>("remote");
   const [memoryBusy, setMemoryBusy] = useState(false);
   const [newFolderMode, setNewFolderMode] = useState<GrantMode>(DEFAULT_GRANT_MODE);
@@ -62,7 +65,10 @@ export function Settings({
   useEffect(() => {
     void workspace.refresh();
     invoke<ToolsSettingsView>("tools_settings_get")
-      .then((s) => setRunCommand(s.tools_allow_run_command))
+      .then((s) => {
+        setRunCommand(s.tools_allow_run_command);
+        setBrowserGuard(s.browser_guard !== false);
+      })
       .catch(() => {});
     invoke<MemorySettingsView>("memory_settings_get")
       .then((s) => setMemoryMode(s.mode))
@@ -100,6 +106,19 @@ export function Settings({
       setRunCommand(previous);
     } finally {
       setRunCommandBusy(false);
+    }
+  };
+
+  const toggleBrowserGuard = async (enabled: boolean): Promise<void> => {
+    setBrowserGuardBusy(true);
+    const previous = browserGuard;
+    try {
+      await invoke("tools_set_browser_guard", { enabled });
+      setBrowserGuard(enabled);
+    } catch {
+      setBrowserGuard(previous);
+    } finally {
+      setBrowserGuardBusy(false);
     }
   };
 
@@ -275,6 +294,28 @@ export function Settings({
               {errorText}
             </p>
           )}
+
+          <div className="guard-option">
+            <label className="switch-row">
+              <span className="switch">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={browserGuard}
+                  onChange={(e) => void toggleBrowserGuard(e.currentTarget.checked)}
+                  disabled={browserGuardBusy}
+                  aria-describedby="browser-guard-note"
+                />
+                <span className="switch-track" aria-hidden="true" />
+              </span>
+              <span className="switch-label">
+                <strong>{t.settings.browserGuard.title}</strong>
+              </span>
+            </label>
+            <p className="section-lede" id="browser-guard-note">
+              {t.settings.browserGuard.body}
+            </p>
+          </div>
 
           <div className="danger-option">
             <label className="switch-row">

@@ -56,6 +56,9 @@ export interface ApprovalRequest {
   diff_preview: string | null;
   /// delete_path without a reachable trash: the deletion is permanent.
   permanent: boolean;
+  /// The folder allows this without asking, but the assistant browsed the
+  /// web in this task (in-app browser protection).
+  after_browsing?: boolean;
   expires_in_secs: number;
 }
 
@@ -399,5 +402,112 @@ export function reportRendererCrash(name: unknown): void {
     void invoke("telemetry_renderer_crash", { name: crashName(name) }).catch(() => undefined);
   } catch {
     // No IPC (tests, a torn-down window): nothing to do.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// In-app browser (computer use, phase 1) - src-tauri/src/browser/mod.rs
+// ---------------------------------------------------------------------------
+
+/// Event the core emits (to this window only) whenever the assistant's
+/// browser opens, navigates, loads, changes title, closes, or a reply
+/// starts / stops driving it.
+export const BROWSER_STATE_EVENT = "browser://state";
+/// Event the core emits when a page in the browser tried to download a
+/// file (downloads are always blocked).
+export const BROWSER_DOWNLOAD_BLOCKED_EVENT = "browser://download-blocked";
+
+/// `BrowserView` in the core.
+export interface BrowserView {
+  open: boolean;
+  url: string | null;
+  title: string | null;
+  loading: boolean;
+  /// The conversation whose reply is using the browser right now.
+  agent_conversation: number | null;
+}
+
+export type BrowserControl = "back" | "forward" | "reload" | "show" | "close";
+
+export const CLOSED_BROWSER: BrowserView = {
+  open: false,
+  url: null,
+  title: null,
+  loading: false,
+  agent_conversation: null,
+};
+
+/// A well-formed view from whatever the core sent (anything else reads as
+/// a closed browser).
+export function normalizeBrowserView(raw: unknown): BrowserView {
+  if (!raw || typeof raw !== "object") return CLOSED_BROWSER;
+  const v = raw as Record<string, unknown>;
+  return {
+    open: v.open === true,
+    url: typeof v.url === "string" ? v.url : null,
+    title: typeof v.title === "string" ? v.title : null,
+    loading: v.loading === true,
+    agent_conversation: typeof v.agent_conversation === "number" ? v.agent_conversation : null,
+  };
+}
+
+export async function getBrowserState(): Promise<BrowserView> {
+  return normalizeBrowserView(await invoke<unknown>("browser_state"));
+}
+
+export function controlBrowser(action: BrowserControl): Promise<void> {
+  return invoke("browser_control", { action });
+}
+
+export function onBrowserState(handler: (view: BrowserView) => void): Promise<UnlistenFn> {
+  return listen<unknown>(BROWSER_STATE_EVENT, (event) => handler(normalizeBrowserView(event.payload)));
+}
+
+/// Event the core emits when, in allow mode, the assistant starts using a
+/// new site without asking (the chat shows a one-line notice).
+export const BROWSER_SITE_USED_EVENT = "browser://site-used";
+
+export interface BrowserSiteUsed {
+  conversation_id: number;
+  host: string;
+}
+
+export function onBrowserSiteUsed(handler: (used: BrowserSiteUsed) => void): Promise<UnlistenFn> {
+  return listen<BrowserSiteUsed>(BROWSER_SITE_USED_EVENT, (event) => handler(event.payload));
+}
+
+/// The chat window's language, for the browser window title.
+export function setBrowserLanguage(language: string): Promise<void> {
+  return invoke("browser_set_language", { language });
+}
+
+/// The host of the page the browser shows (for "Using the browser on
+/// <host>…"), or null.
+export function browserHost(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.host : null;
+  } catch {
+    return null;
+  }
+}
+
+export function onBrowserDownloadBlocked(handler: () => void): Promise<UnlistenFn> {
+  return listen(BROWSER_DOWNLOAD_BLOCKED_EVENT, () => handler());
+}
+
+/// What the browser bar shows as the address: scheme-less host + path,
+/// never a username/password, bounded.
+export function displayAddress(url: string | null): string {
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    const path = parsed.pathname === "/" ? "" : parsed.pathname;
+    const text = `${parsed.host}${path}`;
+    return text.length > 90 ? `${text.slice(0, 89)}…` : text;
+  } catch {
+    return "";
   }
 }

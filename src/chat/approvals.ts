@@ -29,6 +29,11 @@ export interface ApprovalCardState {
   anchorIndex: number | null;
   status: ApprovalStatus;
   failed: boolean;
+  /// Asked only because the assistant browsed the web in this task.
+  afterBrowsing?: true;
+  /// An informational line, not a question (in-app browser allow mode:
+  /// "Using <host>"). Always rendered resolved, never answerable.
+  notice?: true;
 }
 
 export type ApprovalEvent =
@@ -36,7 +41,8 @@ export type ApprovalEvent =
   | { type: "sending"; id: string }
   | { type: "resolved"; id: string; granted: boolean }
   | { type: "failed"; id: string }
-  | { type: "clearConversation"; conversationId: number };
+  | { type: "clearConversation"; conversationId: number }
+  | { type: "notice"; id: string; conversationId: number; action: string; target: string; anchorIndex: number | null };
 
 /// Card state from the core's `tools://approval-request` payload.
 export function cardFromRequest(request: ApprovalRequest, anchorIndex: number | null): ApprovalCardState {
@@ -53,6 +59,7 @@ export function cardFromRequest(request: ApprovalRequest, anchorIndex: number | 
     anchorIndex,
     status: "pending",
     failed: false,
+    ...(request.after_browsing === true ? { afterBrowsing: true as const } : {}),
   };
 }
 
@@ -74,6 +81,26 @@ export function approvalsReducer(state: ApprovalCardState[], event: ApprovalEven
       return state.map((card) =>
         card.id === event.id && card.status === "sending" ? { ...card, status: "pending", failed: true } : card,
       );
+    case "notice": {
+      if (state.some((card) => card.id === event.id)) return state;
+      return [
+        ...state,
+        {
+          id: event.id,
+          conversationId: event.conversationId,
+          action: event.action,
+          target: event.target,
+          destination: null,
+          cwd: null,
+          diffPreview: null,
+          permanent: false,
+          anchorIndex: event.anchorIndex,
+          status: "granted",
+          failed: false,
+          notice: true,
+        },
+      ];
+    }
     case "clearConversation":
       return state.filter((card) => card.conversationId !== event.conversationId);
     default:

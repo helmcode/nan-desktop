@@ -47,6 +47,10 @@ very welcome: start with [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Artifacts sharing**: share what the assistant produces as links. Access
   is sign-in-gated, so only the people you share with can open them, and you
   can revoke a link at any time.
+- **Assistant browser**: the assistant can open web pages in a browser
+  window inside the app, read them, click and type, while you watch, take
+  over or stop it. It never types passwords or card details, and sign-ins
+  and payments always ask you first.
 - **Mini-sites**: the `write_website` tool builds small self-contained static
   websites you can preview and share.
 - **Skills**: save reusable instructions as skills; Helmcode organizations
@@ -125,6 +129,9 @@ an account (see `test/mock-*.mjs` and [CONTRIBUTING.md](CONTRIBUTING.md)).
 - Credentials live in an encrypted vault read only by the Rust core; they
   never reach the web layer and are never logged.
 - File access is per folder, and every action needs your approval.
+- The assistant's browser is isolated from the app (no access to its
+  commands, credentials or files, a private data store, downloads blocked)
+  and asks before using each website.
 
 Details in [SECURITY.md](SECURITY.md) and [docs/MEMORY.md](docs/MEMORY.md).
 **Found a vulnerability? Do not open a public issue:** follow

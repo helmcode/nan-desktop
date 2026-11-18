@@ -26,6 +26,7 @@ import {
 } from "./chat/folderSelection";
 import { stripToolMarkup } from "./chat/toolMarkup";
 import { AllowNudgeCard } from "./components/AllowNudgeCard";
+import { BrowserBar, useBrowserView } from "./components/BrowserBar";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { AttachmentTray, MessageAttachments, attachProblemText } from "./components/Attachments";
 import { useComposerAttachments } from "./chat/useComposerAttachments";
@@ -62,6 +63,8 @@ import {
 import {
   discardAttachment,
   onApprovalRequest,
+  onBrowserSiteUsed,
+  browserHost,
   onApprovalResolved,
   onNativeDecision,
   respondToApproval,
@@ -207,7 +210,7 @@ interface ChatError {
 // What the assistant is doing between text deltas.
 interface ChatActivity {
   conversation_id: number;
-  activity: "searching" | "working" | "generating_image" | null;
+  activity: "searching" | "browsing" | "working" | "generating_image" | null;
 }
 interface TtsError {
   kind: string;
@@ -1325,6 +1328,17 @@ function ChatShell({
       onApprovalResolved((resolved) => {
         dispatchApproval({ type: "resolved", id: resolved.approval_id, granted: resolved.granted });
       }),
+      // In-app browser allow mode: a one-line "Using <host>" per new site.
+      onBrowserSiteUsed((used) => {
+        dispatchApproval({
+          type: "notice",
+          id: `site-used:${used.conversation_id}:${used.host}`,
+          conversationId: used.conversation_id,
+          action: "browser_site_used",
+          target: used.host,
+          anchorIndex: activeConvRef.current === used.conversation_id ? messageCountRef.current : null,
+        });
+      }),
     ];
     return () => {
       unlistens.forEach((promise) => {
@@ -1718,6 +1732,8 @@ function ChatShell({
   const activeDraft = activeConvId !== null ? drafts.get(activeConvId) : undefined;
   const visibleDraft = activeDraft !== undefined ? stripToolMarkup(activeDraft, { streaming: true }) : undefined;
   const activeActivity = activeConvId !== null ? activities.get(activeConvId) : undefined;
+  const browser = useBrowserView();
+  const browsingHost = browserHost(browser.view.url);
   const imageGeneratingActive = activeConvId !== null && imageGeneratingIds.has(activeConvId);
   const composerBusy = streamingActive || imageGeneratingActive;
 
@@ -1845,11 +1861,11 @@ function ChatShell({
   }, []);
 
   // Stop: abort the stream; what already arrived stays persisted.
-  const stopGenerating = useCallback(async (): Promise<void> => {
-    const conversationId = activeConvRef.current;
-    if (conversationId === null) return;
-    // Hold the queue first: if the turn ends on its own before the stop
-    // reaches the core (no chat://stopped), nothing goes out by itself.
+  // Stop a conversation's reply: the composer's Stop and the browser bar's
+  // Stop share this one path. The queue is held FIRST: if the turn ends on
+  // its own before the stop reaches the core (no chat://stopped), nothing
+  // goes out by itself.
+  const stopConversation = useCallback(async (conversationId: number): Promise<void> => {
     setQueues((prev) => hold(prev, conversationId, "stopped"));
     try {
       await invoke("chat_stop", { conversationId });
@@ -1857,6 +1873,12 @@ function ChatShell({
       setInlineError(`cmd:${String(err)}`);
     }
   }, []);
+
+  const stopGenerating = useCallback(async (): Promise<void> => {
+    const conversationId = activeConvRef.current;
+    if (conversationId === null) return;
+    await stopConversation(conversationId);
+  }, [stopConversation]);
 
   const cancelImage = useCallback(async (): Promise<void> => {
     const conversationId = activeConvRef.current;
@@ -2901,7 +2923,7 @@ function ChatShell({
                       <TurnIndicator
                         startedAt={activeTurnStart}
                         icon={
-                          activeActivity === "searching" ? (
+                          activeActivity === "searching" || activeActivity === "browsing" ? (
                             <IconGlobe size={15} />
                           ) : activeActivity && activeActivity !== "generating_image" ? (
                             <IconFolder size={15} />
@@ -2910,11 +2932,15 @@ function ChatShell({
                         label={
                           activeActivity === "searching"
                             ? t.chat.searching
-                            : activeActivity === "generating_image"
-                              ? t.chat.generatingImage
-                              : activeActivity
-                                ? t.chat.working
-                                : t.chat.thinking
+                            : activeActivity === "browsing"
+                              ? browsingHost
+                                ? t.chat.browsingOn(browsingHost)
+                                : t.chat.browsing
+                              : activeActivity === "generating_image"
+                                ? t.chat.generatingImage
+                                : activeActivity
+                                  ? t.chat.working
+                                  : t.chat.thinking
                         }
                       />
                     ) : (
@@ -2947,6 +2973,13 @@ function ChatShell({
               </div>
             </div>
 
+            <BrowserBar
+              view={browser.view}
+              activeConversationId={activeConvId}
+              downloadBlocked={browser.downloadBlocked}
+              onDismissDownload={browser.dismissDownload}
+              onStopAssistant={(id) => void stopConversation(id)}
+            />
             <footer className="composer">
               {activeSkill && (
                 <div className="skill-pill-row">

@@ -130,4 +130,39 @@ describe("placeCards", () => {
     expect(placed.after.size).toBe(0);
     expect(placed.tail).toEqual([]);
   });
+
+  it("adds an in-app browser notice once, already resolved", () => {
+    const notice = {
+      type: "notice" as const,
+      id: "site-used:4:example.com",
+      conversationId: 4,
+      action: "browser_site_used",
+      target: "example.com",
+      anchorIndex: 2,
+    };
+    const once = approvalsReducer([], notice);
+    expect(once).toHaveLength(1);
+    expect(once[0]).toMatchObject({ status: "granted", notice: true, conversationId: 4, target: "example.com" });
+    expect(isOpen(once[0])).toBe(false);
+    expect(approvalsReducer(once, notice)).toBe(once);
+  });
+
+  it("carries the browsing-protection reason from the core's request", () => {
+    const base = {
+      approval_id: "a",
+      conversation_id: 1,
+      action: "write_file",
+      title: "",
+      text: "",
+      summary: "s",
+      path: "/a",
+      dest_path: null,
+      command: null,
+      diff_preview: null,
+      permanent: false,
+      expires_in_secs: 300,
+    };
+    expect(cardFromRequest({ ...base, after_browsing: true }, 0).afterBrowsing).toBe(true);
+    expect(cardFromRequest(base, 0).afterBrowsing).toBeUndefined();
+  });
 });

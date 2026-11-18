@@ -4,11 +4,20 @@
 
 ### New
 - Ya puedes escribir mientras el asistente responde. Si envias, el mensaje queda en cola encima del cuadro de texto ("Se enviara cuando termine la respuesta.") y sale solo al terminar, uno detras de otro. Cada mensaje en cola se puede editar o quitar. Si pulsas Detener o algo falla, la cola espera hasta que pulses "Enviar ahora". Un mensaje en cola tiene prioridad sobre la continuacion automatica de una respuesta cortada.
+- Navegador del asistente: el asistente puede abrir paginas web en una ventana de navegador de la app, leerlas, pulsar botones y escribir en formularios. Ves todo lo que hace, puedes usar la ventana tu tambien y pararlo desde la barra del navegador que aparece encima del chat (atras, adelante, recargar, ver ventana, parar, cerrar).
+- Antes de usar cada web, el asistente pide permiso una vez por conversacion (si todas tus carpetas estan en "Permitir sin preguntar", las webs publicas no preguntan). Las direcciones de tu red local preguntan siempre.
+- El asistente nunca escribe contrasenas, codigos de verificacion ni datos de tarjeta: te pide que lo hagas tu en la ventana. Enviar un inicio de sesion o pulsar un boton de pago o compra pide permiso cada vez.
+- Con modelos que ven imagenes, el asistente puede hacer una captura de la pagina.
+- La ventana del navegador se abre al lado del chat sin quitarle el foco, y cuando el asistente pide permiso el chat pasa al frente. Cerrar el navegador detiene al asistente. Si una pagina intenta descargar un archivo, se bloquea y el asistente te dice que lo descargues desde tu navegador habitual.
 - Adjuntar archivos al mensaje: boton de clip en el cuadro de texto, arrastrar archivos a la ventana o pegar una captura. Se ven como fichas que puedes quitar antes de enviar (hasta 10 por mensaje; imagenes de hasta 10 MB y documentos de hasta 20 MB).
 - Los PDF, Word, hojas de calculo (xlsx, xls, csv) y archivos de texto o codigo se leen en tu equipo y el asistente recibe su texto. Si un documento es muy largo, solo se usa el principio y se indica en la ficha.
 - Las imagenes se reducen antes de enviarlas. Si el modelo elegido no puede ver imagenes, esa respuesta la da automaticamente un modelo que si puede; tu eleccion de modelo no cambia y el siguiente mensaje sin imagenes vuelve a tu modelo.
 - Los mensajes enviados muestran sus imagenes y documentos, tambien al volver a abrir la conversacion.
 - Mientras el asistente responde tambien puedes adjuntar archivos: van con el mensaje en cola.
+
+### Security
+- Despues de que el asistente use el navegador, te pide permiso antes de ejecutar ordenes o cambiar archivos hasta tu siguiente mensaje, tambien en carpetas con "Permitir sin preguntar" (leer archivos no pregunta). Se puede desactivar en Ajustes, Carpetas de trabajo.
+- El navegador del asistente no puede llamar a ningun comando de la app, usa un almacen de datos privado que se borra al cerrarlo, bloquea las descargas y solo abre paginas http/https. Los comandos de la app ahora solo se aceptan desde la ventana del chat.
 
 ### Changed
 - Los archivos adjuntos se quedan en este equipo: la memoria de tu cuenta solo guarda una linea con el nombre de cada archivo, nunca su contenido ni la descripcion de las imagenes.
