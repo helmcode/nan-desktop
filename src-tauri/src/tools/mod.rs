@@ -5124,6 +5124,8 @@ mod tests {
     struct FakeApprover {
         answer: bool,
         native_calls: AtomicUsize,
+        /// (title, text) of every native dialog shown.
+        native_texts: Mutex<Vec<(String, String)>>,
         inline_calls: Mutex<Vec<ApprovalRequest>>,
     }
 
@@ -5132,6 +5134,7 @@ mod tests {
             FakeApprover {
                 answer,
                 native_calls: AtomicUsize::new(0),
+                native_texts: Mutex::new(Vec::new()),
                 inline_calls: Mutex::new(Vec::new()),
             }
         }
@@ -5144,8 +5147,9 @@ mod tests {
     }
 
     impl Approver for FakeApprover {
-        fn native(&self, _title: String, _text: String) -> impl Future<Output = bool> + Send {
+        fn native(&self, title: String, text: String) -> impl Future<Output = bool> + Send {
             self.native_calls.fetch_add(1, Ordering::SeqCst);
+            self.native_texts.lock().expect("lock").push((title, text));
             let answer = self.answer;
             async move { answer }
         }
@@ -5480,6 +5484,8 @@ mod tests {
         assert_eq!(route, ApprovalRoute::Native);
         assert_eq!(approver.prompts(), (1, 0));
         assert!(AFTER_BROWSING_NOTE.starts_with("Se pregunta porque"));
+        let (_, text) = approver.native_texts.lock().unwrap()[0].clone();
+        assert!(text.ends_with(AFTER_BROWSING_NOTE), "{text}");
     }
 
     #[test]

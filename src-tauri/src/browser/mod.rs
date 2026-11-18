@@ -1205,13 +1205,28 @@ fn is_screenshot_message(message: &serde_json::Value) -> bool {
 /// Add this round's screenshots to the live request so that only the
 /// NEWEST image is ever sent: every earlier screenshot message (this round
 /// or before) becomes a short text stub. Pure.
-pub fn attach_screenshots(messages: &mut Vec<serde_json::Value>, new: &[String]) {
+/// With `images_allowed` false (the server already rejected images in this
+/// reply) no image is sent at all: the new screenshot becomes a stub too.
+pub fn attach_screenshots(
+    messages: &mut Vec<serde_json::Value>,
+    new: &[String],
+    images_allowed: bool,
+) {
     let Some(last) = new.last() else {
         return;
     };
     stub_screenshots(messages);
-    messages.push(screenshot_message(last));
+    if images_allowed {
+        messages.push(screenshot_message(last));
+    } else {
+        messages.push(serde_json::json!({ "role": "user", "content": SCREENSHOT_REFUSED_STUB }));
+    }
 }
+
+/// What a screenshot becomes after the server rejected images in this
+/// reply.
+const SCREENSHOT_REFUSED_STUB: &str = "(The browser screenshot cannot be shown: the model \
+rejected images in this reply. Use browser_read to see the page as text.)";
 
 /// Replace every screenshot image in `messages` with a text stub (also
 /// used when the server rejects images: the retry must not resend them).
@@ -1559,9 +1574,9 @@ mod tests {
     #[test]
     fn only_the_newest_screenshot_survives_across_rounds() {
         let mut messages = vec![serde_json::json!({ "role": "system", "content": "s" })];
-        attach_screenshots(&mut messages, &[]);
+        attach_screenshots(&mut messages, &[], true);
         assert_eq!(messages.len(), 1, "nothing to attach");
-        attach_screenshots(&mut messages, &["data:image/jpeg;base64,AAA".into()]);
+        attach_screenshots(&mut messages, &["data:image/jpeg;base64,AAA".into()], true);
         messages.push(serde_json::json!({ "role": "tool", "content": SCREENSHOT_SUMMARY }));
         attach_screenshots(
             &mut messages,
@@ -1569,6 +1584,7 @@ mod tests {
                 "data:image/jpeg;base64,BBB".into(),
                 "data:image/jpeg;base64,CCC".into(),
             ],
+            true,
         );
         let json = serde_json::to_string(&messages).unwrap();
         assert_eq!(json.matches("data:image").count(), 1, "{json}");
@@ -1582,6 +1598,11 @@ mod tests {
                 .unwrap()
                 .contains("data:image")
         );
+        // After that, a new screenshot is never sent as an image either.
+        attach_screenshots(&mut messages, &["data:image/jpeg;base64,DDD".into()], false);
+        let json = serde_json::to_string(&messages).unwrap();
+        assert!(!json.contains("data:image"), "{json}");
+        assert!(json.contains("rejected images in this reply"));
     }
 
     #[test]
