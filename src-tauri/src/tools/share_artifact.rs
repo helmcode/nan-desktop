@@ -926,6 +926,12 @@ mod tests {
     const TOKEN: &str = "jwt-canary-ZZ9";
     const LINK: &str = "https://artifacts.helmcode.com/a/tok-CANARY";
 
+    /// An absolute path on every platform ("/x/a.pdf" is not absolute on
+    /// Windows); parsing never touches the disk.
+    fn abs() -> String {
+        std::env::temp_dir().join("a.pdf").display().to_string()
+    }
+
     fn args(json: serde_json::Value) -> String {
         json.to_string()
     }
@@ -937,7 +943,7 @@ mod tests {
         let call = |profile: &str, audience: &str| {
             parse_request(
                 profile,
-                &args(serde_json::json!({ "path": "/x/a.pdf", "audience": audience })),
+                &args(serde_json::json!({ "path": abs(), "audience": audience })),
             )
         };
         assert!(call(NAN, "public").is_ok());
@@ -964,7 +970,7 @@ mod tests {
     fn emails_are_validated_normalized_and_capped() {
         let call = |json: serde_json::Value| parse_request(NAN, &args(json));
         let ok = call(serde_json::json!({
-            "path": "/x/a.pdf", "audience": "emails",
+            "path": abs(), "audience": "emails",
             "emails": [" Ana@Acme.com ", "ana@acme.com", "bo@acme.io"]
         }))
         .expect("ok");
@@ -973,32 +979,32 @@ mod tests {
         assert_eq!(ok.expires_days, 30);
 
         let quiet = call(serde_json::json!({
-            "path": "/x/a.pdf", "audience": "emails", "emails": ["a@b.co"], "notify": false
+            "path": abs(), "audience": "emails", "emails": ["a@b.co"], "notify": false
         }))
         .expect("ok");
         assert!(!quiet.notify);
 
         let bad = call(serde_json::json!({
-            "path": "/x/a.pdf", "audience": "emails", "emails": ["not-an-email"]
+            "path": abs(), "audience": "emails", "emails": ["not-an-email"]
         }))
         .expect_err("bad");
         assert!(bad.contains("not-an-email"));
-        assert!(call(serde_json::json!({ "path": "/x/a.pdf", "audience": "emails" })).is_err());
+        assert!(call(serde_json::json!({ "path": abs(), "audience": "emails" })).is_err());
         assert!(
-            call(serde_json::json!({ "path": "/x/a.pdf", "audience": "emails", "emails": [] }))
-                .is_err()
+            call(serde_json::json!({ "path": abs(), "audience": "emails", "emails": [] })).is_err()
         );
         let many: Vec<String> = (0..21).map(|i| format!("u{i}@acme.com")).collect();
         assert!(
-            call(serde_json::json!({ "path": "/x/a.pdf", "audience": "emails", "emails": many }))
+            call(serde_json::json!({ "path": abs(), "audience": "emails", "emails": many }))
                 .is_err()
         );
         assert!(
-            call(serde_json::json!({ "path": "/x/a.pdf", "audience": "public", "emails": ["a@b.co"] })).is_err(),
+            call(serde_json::json!({ "path": abs(), "audience": "public", "emails": ["a@b.co"] }))
+                .is_err(),
             "a public link names nobody"
         );
         let public =
-            call(serde_json::json!({ "path": "/x/a.pdf", "audience": "public", "notify": true }))
+            call(serde_json::json!({ "path": abs(), "audience": "public", "notify": true }))
                 .expect("ok");
         assert!(!public.notify, "notify only travels with recipients");
     }
@@ -1007,7 +1013,7 @@ mod tests {
     fn expiry_defaults_and_options_follow_the_server() {
         let call = |profile: &str, json: serde_json::Value| parse_request(profile, &args(json));
         let days = |profile: &str, audience: &str, d: Option<i64>| {
-            let mut json = serde_json::json!({ "path": "/x/a.pdf", "audience": audience });
+            let mut json = serde_json::json!({ "path": abs(), "audience": audience });
             if audience == "emails" {
                 json["emails"] = serde_json::json!(["a@b.co"]);
             }
@@ -1041,7 +1047,7 @@ mod tests {
             serde_json::json!({ "member_ids": ["u1"] }),
             serde_json::json!({ "scope": "public" }),
         ] {
-            let mut json = serde_json::json!({ "path": "/x/a.pdf", "audience": "public" });
+            let mut json = serde_json::json!({ "path": abs(), "audience": "public" });
             for (k, v) in extra.as_object().expect("obj") {
                 json[k] = v.clone();
             }
@@ -1074,7 +1080,7 @@ mod tests {
         let r = parse_request(
             NAN,
             &args(serde_json::json!({
-                "path": "/x/a.pdf", "audience": "public", "title": format!("  Mi \n web {long}")
+                "path": abs(), "audience": "public", "title": format!("  Mi \n web {long}")
             })),
         )
         .expect("ok");
@@ -1085,7 +1091,7 @@ mod tests {
     #[test]
     fn risk_per_audience_and_profile() {
         let req = |audience: &str| ShareRequest {
-            path: "/x/a.pdf".into(),
+            path: abs(),
             title: String::new(),
             audience: audience.into(),
             emails: vec![],
