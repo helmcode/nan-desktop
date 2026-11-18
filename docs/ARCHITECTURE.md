@@ -1059,9 +1059,22 @@ kept in the live request (`attach_screenshots`).
 **Post-browsing guard** (`tools::route_after_browsing`): every browser call
 marks its conversation in `ToolsState::mark_browsed`; while marked (until
 `chat_send` of a real user message clears it) and while
-`GrantsStore::browser_guard` is on (default), an `Auto` route for a command
-or a file change becomes `Inline`, with `after_browsing: true` on the card.
-Setting: `tools_set_browser_guard` (turning off asks natively).
+the browser permission does not allow (`tools::browser_allows`:
+`GrantsStore::browser_mode == allow` or `ToolsState::browser_session_allowed`),
+an `Auto` route for a command or a file change becomes `Inline` (`Native`
+under a whole-computer grant), with `after_browsing: true` on the card and
+on the `tools://approval-native` decision.
+**Browser permission mode**: `GrantsStore::browser_mode` (`ask` default,
+`allow`; a legacy `browser_guard: false` migrates to `allow` in
+`grants::parse_store`) plus the in-memory session allow on `ToolsState`
+(cleared by `reset_for_realm_switch` and by choosing `ask`). In allow, the
+site gate skips the card for public sites (`policy::runs_without_site_card`);
+local network, sign-in/payment submits and secret fields are unaffected.
+Commands: `tools_set_browser_mode` (`allow` asks natively) and
+`tools_browser_allow_for_session` (asks natively); `tools_settings_get`
+returns `browser_mode` and `browser_session_allow`. The renderer's
+allow-mode suggestion (`chat/allowNudge.ts`, `browser` target) counts
+granted `browser_site` cards and `after_browsing` approvals and offers both.
 Approvals reuse the inline approval broker (`tools::AppApprover`), with
 the actions `browser_site`, `browser_local_site`, `browser_login` and
 `browser_payment`.

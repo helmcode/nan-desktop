@@ -344,13 +344,30 @@ moved to another site, or from a public site to a local-network address,
 meanwhile.
 
 **Approval policy.**
-- **Per site, per conversation.** The first action on a site (host, `www.`
-  ignored, subdomains separate) asks with an inline card; a yes covers that
-  site for the rest of the conversation (until the app restarts or the
-  account changes). When EVERY working folder of the conversation is in
-  "allow" mode, public sites run without asking; this is re-evaluated on
-  every action and never remembered, so switching a folder back to "ask"
-  takes effect at once. The chat still shows a "Using <host>" line for each
+- **Browser permission mode.** One setting (Settings, Working folders,
+  "Navegador": "Preguntar siempre" / "Permitir sin preguntar", stored per
+  signed-in user as `browser_mode` in `tools.json`, default `ask`) decides
+  the two browser questions below that are about convenience: the per-site
+  card and the post-browsing guard. `allow` turns both off. Switching to
+  `allow` is confirmed by a native dialog the app window cannot fake (and
+  audited); switching back to `ask` needs nothing. The chat may suggest it
+  after three browser approvals in a conversation (new-site cards and
+  post-browsing approvals; any denial resets; once per conversation) with
+  "Permitir siempre" (stores `allow`) or "Solo en esta sesión" (an
+  in-memory allow, never persisted, cleared when the app quits, on every
+  sign-in/sign-out and when the user picks "Preguntar siempre"); both go
+  through the same native confirmation. A store written by 0.2.14 with the
+  old guard switch turned off migrates to `allow`. The mode NEVER changes
+  the rules that ask or refuse in every mode: local-network addresses,
+  sign-ins and payments, and secret fields (below).
+- **Per site, per conversation.** In `ask` mode the first action on a site
+  (host, `www.` ignored, subdomains separate) asks with an inline card; a
+  yes covers that site for the rest of the conversation (until the app
+  restarts or the account changes). Public sites run without asking when
+  the browser permission mode allows (stored or for this session) or when
+  EVERY working folder of the conversation is in "allow" mode; this is
+  re-evaluated on every action and never remembered, so switching back to
+  "ask" takes effect at once. The chat still shows a "Using <host>" line for each
   new site. A pending card brings the chat
   window to the front; the browser opens beside the chat without taking
   the focus.
@@ -375,7 +392,7 @@ meanwhile.
   defeat it, which is why the policy is friction, not isolation.
 - Every answer to a browser card is written to the tools audit log with
   the host only.
-- **After browsing, commands and changes ask (ON by default).** Page
+- **After browsing, commands and changes ask (in `ask` mode).** Page
   content can carry instructions aimed at the assistant. Once any browser
   result has been fed to the model in a conversation, `run_command`,
   `write_file`, `replace_file`, `move_path`, `delete_path` and `save_image`
@@ -385,11 +402,8 @@ meanwhile.
   grant the question is the native dialog (as for every whole-computer
   approval). The card or dialog says why it asks, and the audit log records
   "allow mode suspended" (outcome `asked`). The guard ends only once the
-  user's new message has been saved. Opt-out: Settings,
-  Working folders, "Pedir permiso para órdenes y cambios después de navegar
-  por internet" (stored per signed-in user in `tools.json`, like the other
-  folder settings). Turning it off is confirmed by a native dialog the app
-  window cannot fake. Residual: the next message starts a new task, but the
+  user's new message has been saved. The browser permission mode `allow`
+  (stored or for this session) turns this guard off. Residual: the next message starts a new task, but the
   tool trace of the last two replies (which may hold page text) is still
   replayed as earlier data.
 
