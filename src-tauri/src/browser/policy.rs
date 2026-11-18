@@ -5,11 +5,11 @@
 //!    after it is approved for the conversation. In `ask` mode the first
 //!    action on each site shows an inline card; approving remembers the
 //!    site for that conversation (until the app restarts or the account
-//!    changes). When every working folder of the conversation is in
-//!    `allow` mode, public sites run without a prompt (re-evaluated on every
-//!    action, never remembered, so a folder switched back to `ask` takes
-//!    effect at once). Local-network addresses ask in every mode, once per
-//!    conversation.
+//!    changes). Only the browser permission mode decides it: in `allow`
+//!    (stored, or for this session) public sites run without a prompt
+//!    (re-evaluated on every action, never remembered, so switching back
+//!    to `ask` takes effect at once); folder modes play no part.
+//!    Local-network addresses ask in every mode, once per conversation.
 //! 2. **Secrets are never typed by the agent.** Password, verification
 //!    code and payment-card fields are blocked for `browser_type` in every
 //!    mode: the user fills them in themselves in the visible window.
@@ -250,12 +250,11 @@ pub fn site_gate(site_approved: bool, allow_mode: bool, private: bool) -> Gate {
     }
 }
 
-/// Whether a site may run without its card because the user chose not to
-/// be asked (the browser permission mode, stored or for this session, or
-/// every folder of the conversation in allow mode). A local-network
-/// address never does. Pure.
-pub fn runs_without_site_card(private: bool, browser_allows: bool, folders_allow: bool) -> bool {
-    !private && (browser_allows || folders_allow)
+/// Whether a site may run without its card: only the browser permission
+/// mode (stored or for this session) decides it, never the folder modes.
+/// A local-network address never does. Pure.
+pub fn runs_without_site_card(private: bool, browser_allows: bool) -> bool {
+    !private && browser_allows
 }
 
 /// The typing rule, checked before anything else for `browser_type`.
@@ -485,17 +484,20 @@ mod tests {
 
     #[test]
     fn the_browser_permission_skips_only_public_site_cards() {
-        // ask (no folder allow): every new site asks.
-        assert!(!runs_without_site_card(false, false, false));
-        // allow (stored or this session) or every folder allows: public
-        // sites run without the card.
-        assert!(runs_without_site_card(false, true, false));
-        assert!(runs_without_site_card(false, false, true));
+        // ask: every new public site asks once per conversation, whatever
+        // the folder modes (they are not an input).
+        assert!(!runs_without_site_card(false, false));
+        assert_eq!(
+            site_gate(false, runs_without_site_card(false, false), false),
+            Gate::AskSite { private: false }
+        );
+        // allow (stored or this session): public sites run without the card.
+        assert!(runs_without_site_card(false, true));
         // A local-network address asks in every mode.
-        for (browser, folders) in [(true, false), (false, true), (true, true)] {
-            assert!(!runs_without_site_card(true, browser, folders));
+        for browser in [false, true] {
+            assert!(!runs_without_site_card(true, browser));
             assert_eq!(
-                site_gate(false, runs_without_site_card(true, browser, folders), true),
+                site_gate(false, runs_without_site_card(true, browser), true),
                 Gate::AskSite { private: true }
             );
         }

@@ -363,11 +363,11 @@ meanwhile.
 - **Per site, per conversation.** In `ask` mode the first action on a site
   (host, `www.` ignored, subdomains separate) asks with an inline card; a
   yes covers that site for the rest of the conversation (until the app
-  restarts or the account changes). Public sites run without asking when
-  the browser permission mode allows (stored or for this session) or when
-  EVERY working folder of the conversation is in "allow" mode; this is
-  re-evaluated on every action and never remembered, so switching back to
-  "ask" takes effect at once. The chat still shows a "Using <host>" line for each
+  restarts or the account changes). This holds whatever the folder modes
+  are: only the browser permission mode decides it. Public sites run
+  without asking only when that mode allows (stored or for this session);
+  this is re-evaluated on every action and never remembered, so switching
+  back to "ask" takes effect at once. The chat still shows a "Using <host>" line for each
   new site. A pending card brings the chat
   window to the front; the browser opens beside the chat without taking
   the focus.
