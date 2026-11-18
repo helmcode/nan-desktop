@@ -95,6 +95,7 @@ export function ApprovalCard({
           </span>
         )}
         {detail && <span className="approval-detail">{detail}</span>}
+        {card.afterBrowsing && <span className="approval-detail">{t.approval.afterBrowsing}</span>}
         {card.permanent && <span className="approval-permanent">{t.approval.permanent}</span>}
         {card.diffPreview && (
           <details className="approval-diff">

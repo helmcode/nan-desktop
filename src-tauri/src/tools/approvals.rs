@@ -47,6 +47,9 @@ pub struct ApprovalRequest {
     /// delete_path without a reachable trash.
     pub permanent: bool,
     pub expires_in_secs: u64,
+    /// The folder allows this action without asking, but the assistant
+    /// browsed the web in this task (in-app browser protection).
+    pub after_browsing: bool,
 }
 
 /// `tools://approval-resolved` payload: the request is closed (answered,

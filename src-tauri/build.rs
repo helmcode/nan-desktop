@@ -60,6 +60,7 @@ const APP_COMMANDS: &[&str] = &[
     "tools_approval_respond",
     "tools_settings_get",
     "tools_set_run_command_enabled",
+    "tools_set_browser_guard",
     "preview_read_file",
     "preview_release_site",
     "preview_reveal_location",

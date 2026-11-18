@@ -298,6 +298,7 @@ export const es: Strings = {
       browser_login: "Revisa la ventana del navegador antes de permitirlo.",
       browser_payment: "Revisa la ventana del navegador antes de permitirlo.",
     } as Record<string, string>,
+    afterBrowsing: "Te lo pregunto porque el asistente ha visitado páginas web en esta tarea.",
     to: "a",
     inFolder: "en",
     changes: "Ver los cambios",
@@ -353,6 +354,10 @@ export const es: Strings = {
       modeAllow: "Permitir sin preguntar",
       modeAllowHint: "Las acciones cubiertas se hacen sin preguntar, también los borrados.",
       newFolderMode: "Carpetas nuevas",
+    },
+    browserGuard: {
+      title: "Pedir permiso para comandos y cambios después de navegar por internet",
+      body: "Si el asistente ha usado el navegador, te pregunta antes de ejecutar órdenes o cambiar archivos hasta tu siguiente mensaje, también en carpetas con \"Permitir sin preguntar\". Leer archivos sigue sin preguntar.",
     },
     commands: {
       title: "Ejecutar órdenes",

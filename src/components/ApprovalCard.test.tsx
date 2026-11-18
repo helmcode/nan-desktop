@@ -151,4 +151,12 @@ describe("ApprovalCard (S14)", () => {
     expect(screen.getByRole("status").textContent).toBe("Usingexample.com");
     expect(screen.queryByRole("button")).toBeNull();
   });
+
+  it("says why it asks when only the browsing protection made it ask", () => {
+    renderCard({ action: "write_file", target: "/Users/ana/a.txt", afterBrowsing: true });
+    expect(screen.getByText("Asking because the assistant visited web pages in this task.")).toBeTruthy();
+    cleanup();
+    renderCard({ action: "write_file", target: "/Users/ana/a.txt" });
+    expect(screen.queryByText(/visited web pages/)).toBeNull();
+  });
 });

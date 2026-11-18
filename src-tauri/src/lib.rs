@@ -341,6 +341,7 @@ pub fn run() {
             tools::tools_approval_respond,
             tools::tools_settings_get,
             tools::tools_set_run_command_enabled,
+            tools::tools_set_browser_guard,
             preview::preview_read_file,
             preview::preview_release_site,
             preview::preview_reveal_location,

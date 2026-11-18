@@ -296,6 +296,7 @@ export const en = {
       browser_login: "Check the browser window before allowing it.",
       browser_payment: "Check the browser window before allowing it.",
     } as Record<string, string>,
+    afterBrowsing: "Asking because the assistant visited web pages in this task.",
     to: "to",
     inFolder: "in",
     changes: "See the changes",
@@ -351,6 +352,10 @@ export const en = {
       modeAllow: "Allow without asking",
       modeAllowHint: "Covered actions run without asking, including deletes.",
       newFolderMode: "New folders",
+    },
+    browserGuard: {
+      title: "Ask before commands and changes after browsing the web",
+      body: "If the assistant used the browser, it asks before running commands or changing files until your next message, also in folders set to \"Allow without asking\". Reading files still does not ask.",
     },
     commands: {
       title: "Run commands",

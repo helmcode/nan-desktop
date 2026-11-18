@@ -748,6 +748,7 @@ async fn ask_user(caller: &Caller<'_>, ask: Ask, host: &str) -> bool {
         diff_preview: None,
         permanent: false,
         expires_in_secs: crate::tools::PROPOSAL_TTL.as_secs(),
+        after_browsing: false,
     };
     let approver = crate::tools::AppApprover {
         app: caller.app.clone(),
@@ -924,6 +925,10 @@ pub(crate) async fn run_model_tool(
         profile_id,
         conversation_id,
     };
+    // From here on page content may reach the model: commands and file
+    // changes of this conversation ask until the user's next message.
+    app.state::<crate::tools::ToolsState>()
+        .mark_browsed(conversation_id);
     let mut run = match run_call(&caller, call).await {
         Ok(run) => run,
         Err(content) => ToolRun::text(content),

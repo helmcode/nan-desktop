@@ -1037,6 +1037,9 @@ pub fn chat_send(
     // closed may be used again.
     if continuation != Some(true) {
         crate::browser::user_message_sent(&app);
+        // ...and the browsing guard of this conversation's task ends.
+        app.state::<tools::ToolsState>()
+            .clear_browsed(conversation_id);
     }
     // Privacy fix: the active user's realm only.
     let dir = crate::realm::active_dir(&app)?;

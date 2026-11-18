@@ -29,6 +29,8 @@ export interface ApprovalCardState {
   anchorIndex: number | null;
   status: ApprovalStatus;
   failed: boolean;
+  /// Asked only because the assistant browsed the web in this task.
+  afterBrowsing?: true;
   /// An informational line, not a question (in-app browser allow mode:
   /// "Using <host>"). Always rendered resolved, never answerable.
   notice?: true;
@@ -57,6 +59,7 @@ export function cardFromRequest(request: ApprovalRequest, anchorIndex: number | 
     anchorIndex,
     status: "pending",
     failed: false,
+    ...(request.after_browsing === true ? { afterBrowsing: true as const } : {}),
   };
 }
 

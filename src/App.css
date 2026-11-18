@@ -4015,3 +4015,18 @@ button:disabled {
     white-space: nowrap;
   }
 }
+
+/* In-app browser protection toggle (calm, not a danger zone). */
+.guard-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+}
+
+.guard-option .section-lede {
+  margin: 0;
+}

@@ -970,6 +970,12 @@ navigation) before any content reaches the model. Clicks pass the label
 `browser_wait` waits a number of milliseconds (capped at 10,000) or polls a
 CSS selector every 250 ms for up to 10 s. Only the newest screenshot is
 kept in the live request (`attach_screenshots`).
+**Post-browsing guard** (`tools::route_after_browsing`): every browser call
+marks its conversation in `ToolsState::mark_browsed`; while marked (until
+`chat_send` of a real user message clears it) and while
+`GrantsStore::browser_guard` is on (default), an `Auto` route for a command
+or a file change becomes `Inline`, with `after_browsing: true` on the card.
+Setting: `tools_set_browser_guard` (turning off asks natively).
 Approvals reuse the inline approval broker (`tools::AppApprover`), with
 the actions `browser_site`, `browser_local_site`, `browser_login` and
 `browser_payment`.

@@ -146,4 +146,23 @@ describe("placeCards", () => {
     expect(isOpen(once[0])).toBe(false);
     expect(approvalsReducer(once, notice)).toBe(once);
   });
+
+  it("carries the browsing-protection reason from the core's request", () => {
+    const base = {
+      approval_id: "a",
+      conversation_id: 1,
+      action: "write_file",
+      title: "",
+      text: "",
+      summary: "s",
+      path: "/a",
+      dest_path: null,
+      command: null,
+      diff_preview: null,
+      permanent: false,
+      expires_in_secs: 300,
+    };
+    expect(cardFromRequest({ ...base, after_browsing: true }, 0).afterBrowsing).toBe(true);
+    expect(cardFromRequest(base, 0).afterBrowsing).toBeUndefined();
+  });
 });

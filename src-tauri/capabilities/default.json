@@ -58,6 +58,7 @@
     "allow-tools-approval-respond",
     "allow-tools-settings-get",
     "allow-tools-set-run-command-enabled",
+    "allow-tools-set-browser-guard",
     "allow-preview-read-file",
     "allow-preview-release-site",
     "allow-preview-reveal-location",

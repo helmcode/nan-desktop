@@ -89,6 +89,8 @@ export interface GrantView {
 
 export interface ToolsSettingsView {
   tools_allow_run_command: boolean;
+  /// In-app browser protection (ON by default; older cores omit it).
+  browser_guard?: boolean;
 }
 
 export type MemoryMode = "remote" | "local";

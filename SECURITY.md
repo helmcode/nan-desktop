@@ -367,6 +367,20 @@ allow".
   defeat it, which is why the policy is friction, not isolation.
 - Every answer to a browser card is written to the tools audit log with
   the host only.
+- **After browsing, commands and changes ask (ON by default).** Page
+  content can carry instructions aimed at the assistant. Once any browser
+  result has been fed to the model in a conversation, `run_command`,
+  `write_file`, `replace_file`, `move_path`, `delete_path` and `save_image`
+  ask with an inline card even in folders set to "allow", until the user
+  sends their next message in that conversation (a "Continue" does not end
+  it). Reads (`read_file`, `list_files`) stay free. The card says why it
+  asks, and the audit log records "allow mode suspended". Opt-out: Settings,
+  Working folders, "Pedir permiso para comandos y cambios después de navegar
+  por internet" (stored per signed-in user in `tools.json`, like the other
+  folder settings). Turning it off is confirmed by a native dialog the app
+  window cannot fake. Residual: the next message starts a new task, but the
+  tool trace of the last two replies (which may hold page text) is still
+  replayed as earlier data.
 
 **Prompt injection.** Everything a page shows is untrusted. Reads are
 wrapped in a header that says so, between markers with a random nonce that

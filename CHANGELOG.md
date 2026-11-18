@@ -11,6 +11,7 @@
 - La ventana del navegador se abre al lado del chat sin quitarle el foco, y cuando el asistente pide permiso el chat pasa al frente. Cerrar el navegador detiene al asistente. Si una pagina intenta descargar un archivo, se bloquea y el asistente te dice que lo descargues desde tu navegador habitual.
 
 ### Security
+- Despues de que el asistente use el navegador, te pide permiso antes de ejecutar ordenes o cambiar archivos hasta tu siguiente mensaje, tambien en carpetas con "Permitir sin preguntar" (leer archivos no pregunta). Se puede desactivar en Ajustes, Carpetas de trabajo.
 - El navegador del asistente no puede llamar a ningun comando de la app, usa un almacen de datos privado que se borra al cerrarlo, bloquea las descargas y solo abre paginas http/https. Los comandos de la app ahora solo se aceptan desde la ventana del chat.
 
 ## 0.2.13 - 2026-11-17 - El asistente termina lo que empieza

@@ -56,6 +56,9 @@ export interface ApprovalRequest {
   diff_preview: string | null;
   /// delete_path without a reachable trash: the deletion is permanent.
   permanent: boolean;
+  /// The folder allows this without asking, but the assistant browsed the
+  /// web in this task (in-app browser protection).
+  after_browsing?: boolean;
   expires_in_secs: number;
 }
 

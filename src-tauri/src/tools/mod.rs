@@ -276,6 +276,9 @@ pub struct ToolsState {
     /// user's own .html, a website-*.html another tool overwrote) keeps the
     /// whitelist renderer. Cleared on every realm switch.
     websites: Mutex<HashMap<PathBuf, [u8; 32]>>,
+    /// In-app browser protection: conversations whose current task fed
+    /// browser results to the model (cleared by the user's next message).
+    browsed: Mutex<std::collections::HashSet<i64>>,
 }
 
 impl Default for ToolsState {
@@ -288,6 +291,7 @@ impl Default for ToolsState {
             session_id: Mutex::new(uuid::Uuid::new_v4().to_string()),
             scratch_base: std::env::temp_dir(),
             websites: Mutex::new(HashMap::new()),
+            browsed: Mutex::new(std::collections::HashSet::new()),
         }
     }
 }
@@ -350,6 +354,36 @@ impl ToolsState {
         if let Ok(mut websites) = self.websites.lock() {
             websites.clear();
         }
+        if let Ok(mut browsed) = self.browsed.lock() {
+            browsed.clear();
+        }
+    }
+
+    /// A browser result was fed to the model in this conversation.
+    pub fn mark_browsed(&self, conversation_id: i64) {
+        if let Ok(mut browsed) = self.browsed.lock() {
+            browsed.insert(conversation_id);
+        }
+    }
+
+    /// The user sent a new message: the browsing guard of that
+    /// conversation ends.
+    pub fn clear_browsed(&self, conversation_id: i64) {
+        if let Ok(mut browsed) = self.browsed.lock() {
+            browsed.remove(&conversation_id);
+        }
+    }
+
+    /// Did the current task of this conversation browse the web? A
+    /// poisoned lock reads as "yes" (fail closed).
+    pub fn browsed(&self, conversation_id: Option<i64>) -> bool {
+        let Some(id) = conversation_id else {
+            return false;
+        };
+        self.browsed
+            .lock()
+            .map(|set| set.contains(&id))
+            .unwrap_or(true)
     }
 
     /// Record that `write_website` wrote these validated `bytes` at the
@@ -512,6 +546,8 @@ pub struct ToolOutcome {
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolsSettingsView {
     pub tools_allow_run_command: bool,
+    /// In-app browser protection (ON by default).
+    pub browser_guard: bool,
 }
 
 // -------------------------------------------------------- output roles --
@@ -2564,7 +2600,53 @@ pub fn tools_settings_get(app: AppHandle) -> Result<ToolsSettingsView, String> {
     let store = grants::load_or_seed(&dir)?;
     Ok(ToolsSettingsView {
         tools_allow_run_command: store.tools_allow_run_command,
+        browser_guard: store.browser_guard,
     })
+}
+
+/// Turn the in-app browser protection on or off. Turning it OFF lowers a
+/// safety default, so it is confirmed by a NATIVE dialog the renderer
+/// cannot fake; turning it on needs nothing.
+#[tauri::command]
+pub async fn tools_set_browser_guard(app: AppHandle, enabled: bool) -> Result<(), String> {
+    if !enabled {
+        let dialog_app = app.clone();
+        let confirmed = off_main_thread(move || {
+            native_confirm(
+                &dialog_app,
+                "Permiso después de navegar",
+                "Después de que el asistente visite páginas web, las órdenes y los cambios en \
+                 tus archivos se harán sin preguntar en las carpetas que tengas en \
+                 \"Permitir sin preguntar\".\n\nLas páginas web pueden contener texto pensado \
+                 para engañar al asistente; por eso esta protección viene activada."
+                    .to_string(),
+                "Desactivar",
+                "Cancelar",
+            )
+        })
+        .await
+        .unwrap_or(false);
+        if !confirmed {
+            return Err("declined".into());
+        }
+    }
+    let dir = data_dir(&app)?;
+    let mut store = grants::load_or_seed(&dir)?;
+    store.browser_guard = enabled;
+    grants::save(&dir, &store)?;
+    audit::append(
+        &dir,
+        &AuditEntry {
+            ts: audit::timestamp_now_rfc3339(),
+            event: "settings".into(),
+            action: "browser_guard".into(),
+            outcome: "ok".into(),
+            grant_id: None,
+            profile_id: None,
+            detail: Some(if enabled { "enabled" } else { "disabled" }.to_string()),
+        },
+    )?;
+    Ok(())
 }
 
 /// `async` on purpose (P0-3): enabling shows a native dialog — see the
@@ -2829,6 +2911,32 @@ pub fn approval_route(store: &GrantsStore, proposal: &PendingProposal) -> Approv
     }
 }
 
+/// Actions the browsing guard covers: commands and every change to files.
+/// Reads (`read_file`, `list_files`) stay free.
+pub fn guarded_after_browsing(action_kind: &str) -> bool {
+    matches!(
+        action_kind,
+        "run_command" | "write_file" | "replace_file" | "move_path" | "delete_path" | "save_image"
+    )
+}
+
+/// The in-app browser protection on top of [`approval_route`]: once the
+/// conversation's current task browsed the web (page content may carry
+/// instructions), an action that would run without a prompt asks inline
+/// instead, while the guard setting is on. Pure.
+pub fn route_after_browsing(
+    route: ApprovalRoute,
+    action_kind: &str,
+    browsed: bool,
+    guard_on: bool,
+) -> ApprovalRoute {
+    if route == ApprovalRoute::Auto && browsed && guard_on && guarded_after_browsing(action_kind) {
+        ApprovalRoute::Inline
+    } else {
+        route
+    }
+}
+
 /// The approval request card for a stored proposal (built by the core).
 pub fn approval_request(proposal: &PendingProposal) -> ApprovalRequest {
     let (title, text) = confirmation_text(
@@ -2866,6 +2974,7 @@ pub fn approval_request(proposal: &PendingProposal) -> ApprovalRequest {
             .map(diff_preview),
         permanent: proposal.permanent_delete,
         expires_in_secs: PROPOSAL_TTL.as_secs(),
+        after_browsing: false,
     }
 }
 
@@ -2901,7 +3010,15 @@ pub(crate) async fn approve_proposal<A: Approver>(
     approver: &A,
     proposal: &PendingProposal,
 ) -> Result<ApprovalRoute, Rejection> {
-    let route = approval_route(&load_store(dir)?, proposal);
+    let store = load_store(dir)?;
+    let base = approval_route(&store, proposal);
+    let route = route_after_browsing(
+        base,
+        proposal.action.kind(),
+        state.browsed(proposal.conversation_id),
+        store.browser_guard,
+    );
+    let after_browsing = base != route;
     let approved = match route {
         ApprovalRoute::Auto => {
             audit_event(
@@ -2928,7 +3045,29 @@ pub(crate) async fn approve_proposal<A: Approver>(
             approver.native_decided(&approval_request(proposal), granted);
             granted
         }
-        ApprovalRoute::Inline => approver.inline(approval_request(proposal)).await,
+        ApprovalRoute::Inline => {
+            let mut request = approval_request(proposal);
+            // The card says why it asks although the folder allows.
+            request.after_browsing = after_browsing;
+            if after_browsing {
+                audit_event(
+                    dir,
+                    AuditEntry {
+                        ts: audit::timestamp_now_rfc3339(),
+                        event: "approve".into(),
+                        action: proposal.action.kind().into(),
+                        outcome: "ignored".into(),
+                        grant_id: proposal.grant_id.clone(),
+                        profile_id: Some(proposal.profile_id.clone()),
+                        detail: Some(
+                            "allow mode suspended: the assistant browsed the web in this task"
+                                .into(),
+                        ),
+                    },
+                )?;
+            }
+            approver.inline(request).await
+        }
     };
     if !approved {
         deny(dir, state, &proposal.id).map_err(|msg| Rejection::new("io", msg))?;
@@ -5007,6 +5146,113 @@ mod tests {
 
     fn path_str(path: &Path) -> String {
         path.display().to_string()
+    }
+
+    #[test]
+    fn the_browsing_guard_routes_only_commands_and_changes_and_only_when_on() {
+        use ApprovalRoute::*;
+        for kind in [
+            "run_command",
+            "write_file",
+            "replace_file",
+            "move_path",
+            "delete_path",
+            "save_image",
+        ] {
+            assert_eq!(
+                route_after_browsing(Auto, kind, true, true),
+                Inline,
+                "{kind}"
+            );
+            assert_eq!(
+                route_after_browsing(Auto, kind, true, false),
+                Auto,
+                "{kind}: guard off"
+            );
+            assert_eq!(
+                route_after_browsing(Auto, kind, false, true),
+                Auto,
+                "{kind}: not browsed"
+            );
+        }
+        for kind in ["read_file", "list_files"] {
+            assert_eq!(
+                route_after_browsing(Auto, kind, true, true),
+                Auto,
+                "{kind} stays free"
+            );
+        }
+        // Asking routes are never relaxed.
+        assert_eq!(
+            route_after_browsing(Native, "run_command", true, false),
+            Native
+        );
+        assert_eq!(
+            route_after_browsing(Inline, "write_file", false, false),
+            Inline
+        );
+    }
+
+    #[test]
+    fn after_browsing_allow_mode_asks_for_changes_until_the_next_message() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let st = state();
+        let write = ToolAction::WriteFile {
+            path: path_str(&root.join("a.txt")),
+            content: "uno".into(),
+        };
+        let read = ToolAction::ReadFile {
+            path: path_str(&root.join("a.txt")),
+        };
+        // The assistant browsed in conversation 1 (run_with uses it).
+        st.mark_browsed(1);
+        assert!(st.browsed(Some(1)) && !st.browsed(Some(2)) && !st.browsed(None));
+        let approver = FakeApprover::answering(true);
+        let (route, _) = run_with(&dir, &st, &approver, &write).expect("asked, then allowed");
+        assert_eq!(route, ApprovalRoute::Inline);
+        assert_eq!(approver.prompts(), (0, 1));
+        let request = approver.inline_calls.lock().unwrap()[0].clone();
+        assert!(request.after_browsing, "the card says why it asks");
+        // Reads stay free.
+        let (route, _) = run_with(&dir, &st, &approver, &read).expect("read");
+        assert_eq!(route, ApprovalRoute::Auto);
+        // A decline executes nothing.
+        let deny = FakeApprover::answering(false);
+        assert!(run_with(&dir, &st, &deny, &write).is_err());
+        // The user's next message ends the guard.
+        st.clear_browsed(1);
+        let silent = FakeApprover::answering(false);
+        let (route, _) = run_with(&dir, &st, &silent, &write).expect("allow mode again");
+        assert_eq!(route, ApprovalRoute::Auto);
+        assert_eq!(silent.prompts(), (0, 0));
+    }
+
+    #[test]
+    fn with_the_browsing_guard_off_allow_mode_runs_without_asking_after_browsing() {
+        let (folder, _guard) = tempdir();
+        let root = canon(&folder);
+        let (dir, _guard2) = granted_dir(&folder);
+        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        let mut store = grants::load_or_seed(&dir).unwrap();
+        assert!(store.browser_guard, "ON by default");
+        store.browser_guard = false;
+        grants::save(&dir, &store).unwrap();
+        let st = state();
+        st.mark_browsed(1);
+        let approver = FakeApprover::answering(false);
+        let write = ToolAction::WriteFile {
+            path: path_str(&root.join("a.txt")),
+            content: "uno".into(),
+        };
+        let (route, _) = run_with(&dir, &st, &approver, &write).expect("no prompt");
+        assert_eq!(route, ApprovalRoute::Auto);
+        assert_eq!(approver.prompts(), (0, 0));
+        // A realm switch forgets every browsed conversation.
+        st.reset_for_realm_switch();
+        assert!(!st.browsed(Some(1)));
     }
 
     #[test]
