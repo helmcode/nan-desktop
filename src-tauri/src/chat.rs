@@ -1465,6 +1465,10 @@ async fn run_chat_stream(
             }
             if !images_dropped && crate::attachments::has_media_parts(&messages) {
                 images_dropped = true;
+                // Remembered: later turns send these images as stand-ins
+                // instead of failing and retrying every time.
+                let _ =
+                    chat_store::mark_images_vision_rejected(&conn, &turn::real_image_ids(&rows));
                 plain_history = request_history(&rows, false, None);
                 let history = if traces_dropped {
                     plain_history.clone()
@@ -2630,6 +2634,7 @@ mod tests {
                 text: None,
                 truncated: false,
                 description: Some("A receipt.".into()),
+                vision_rejected: false,
             }],
         };
         let rows = vec![row];

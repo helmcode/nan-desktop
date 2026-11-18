@@ -454,6 +454,25 @@ fn parse_trace(raw: &str) -> Option<Vec<serde_json::Value>> {
     (valid && !messages.is_empty()).then_some(messages)
 }
 
+/// The images a vision request sends as IMAGES: the newest
+/// [`crate::attachments::MAX_IMAGES_PER_REQUEST`] of the user messages,
+/// leaving out any a vision model already rejected (those travel as their
+/// stand-in). `(message id, attachment id)`, newest first.
+pub fn real_image_ids(rows: &[ChatMessageRow]) -> Vec<(i64, String)> {
+    rows.iter()
+        .rev()
+        .filter(|row| row.role == "user")
+        .flat_map(|row| {
+            row.attachments
+                .iter()
+                .rev()
+                .filter(|r| r.kind.is_image() && !r.vision_rejected)
+                .map(move |r| (row.id, r.id.clone()))
+        })
+        .take(crate::attachments::MAX_IMAGES_PER_REQUEST)
+        .collect()
+}
+
 /// The request history for a new turn: every stored row as `{role,
 /// content}` (assistant text sanitized of leaked tool markup, S16) and,
 /// for the [`REPLAY_TURNS`] most recent assistant replies, their tool
@@ -473,17 +492,11 @@ pub fn history_messages(
     image_url: Option<crate::attachments::ImageLoader<'_>>,
 ) -> Vec<serde_json::Value> {
     // The newest images (row id, attachment id) that may travel as images.
-    let mut real_images: std::collections::HashSet<(i64, &str)> = std::collections::HashSet::new();
-    if image_url.is_some() {
-        'newest: for row in rows.iter().rev().filter(|row| row.role == "user") {
-            for record in row.attachments.iter().rev().filter(|r| r.kind.is_image()) {
-                if real_images.len() >= crate::attachments::MAX_IMAGES_PER_REQUEST {
-                    break 'newest;
-                }
-                real_images.insert((row.id, record.id.as_str()));
-            }
-        }
-    }
+    let real_images: std::collections::HashSet<(i64, String)> = if image_url.is_some() {
+        real_image_ids(rows).into_iter().collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let mut replay: HashMap<i64, Vec<serde_json::Value>> = HashMap::new();
     if replay_traces {
         let mut budget = REPLAY_BUDGET_BYTES;
@@ -515,7 +528,7 @@ pub fn history_messages(
             serde_json::Value::String(row.content.clone())
         } else {
             crate::attachments::user_content(&row.content, &row.attachments, &mut |record| {
-                if !real_images.contains(&(row.id, record.id.as_str())) {
+                if !real_images.contains(&(row.id, record.id.clone())) {
                     return None;
                 }
                 image_url.and_then(|load| load(record))
@@ -1012,6 +1025,7 @@ mod tests {
             text: None,
             truncated: false,
             description: description.map(str::to_string),
+            vision_rejected: false,
         }
     }
 
@@ -1078,6 +1092,28 @@ mod tests {
     }
 
     #[test]
+    fn an_image_a_vision_model_rejected_travels_as_its_stand_in() {
+        let mut bad = image("bad", "bad.png", Some("Noise."));
+        bad.vision_rejected = true;
+        let rows = vec![with_attachments(
+            msg(1, "user", "look", None),
+            vec![bad, image("ok", "ok.png", None)],
+        )];
+        assert_eq!(real_image_ids(&rows), vec![(1, "ok".to_string())]);
+        let load = |r: &crate::attachments::AttachmentRecord| Some(format!("data:{}", r.id));
+        let history = history_messages(&rows, true, Some(&load));
+        let parts = history[0]["content"].as_array().expect("parts");
+        assert_eq!(parts.len(), 2);
+        assert!(
+            parts[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[Image: bad.png.")
+        );
+        assert_eq!(parts[1]["image_url"]["url"], "data:ok");
+    }
+
+    #[test]
     fn documents_replay_their_extracted_text() {
         let doc = crate::attachments::AttachmentRecord {
             id: "d".into(),
@@ -1088,6 +1124,7 @@ mod tests {
             text: Some("Step one.".into()),
             truncated: false,
             description: None,
+            vision_rejected: false,
         };
         let rows = vec![with_attachments(msg(1, "user", "read", None), vec![doc])];
         let history = history_messages(&rows, false, None);

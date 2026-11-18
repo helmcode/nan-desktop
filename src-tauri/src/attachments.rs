@@ -783,6 +783,10 @@ pub struct AttachmentRecord {
     /// used as its text stand-in for text-only models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// A vision model answered 400 to a request carrying this image: later
+    /// requests send its text stand-in instead of the image.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vision_rejected: bool,
 }
 
 /// What the renderer sees of a stored attachment: never the extracted text.
@@ -888,6 +892,7 @@ pub fn commit(
             text: None,
             truncated: false,
             description: None,
+            vision_rejected: false,
         };
         if entry.kind.is_image() {
             record.path = Some(entry.path.display().to_string());
@@ -1534,6 +1539,7 @@ mod tests {
             text: None,
             truncated: false,
             description: None,
+            vision_rejected: false,
         }
     }
 

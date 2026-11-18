@@ -734,6 +734,33 @@ pub fn set_attachment_description(
     Ok(true)
 }
 
+/// Flag images a vision model rejected (400): later requests send their
+/// stand-in. Unknown messages or attachments are skipped.
+pub fn mark_images_vision_rejected(
+    conn: &Connection,
+    images: &[(i64, String)],
+) -> Result<(), rusqlite::Error> {
+    for (message_id, attachment_id) in images {
+        let raw: Option<Option<String>> = conn
+            .query_row(
+                "SELECT attachments FROM messages WHERE id = ?1",
+                [message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut records = crate::attachments::decode_records(raw.flatten());
+        let Some(record) = records.iter_mut().find(|r| &r.id == attachment_id) else {
+            continue;
+        };
+        record.vision_rejected = true;
+        conn.execute(
+            "UPDATE messages SET attachments = ?1 WHERE id = ?2",
+            rusqlite::params![crate::attachments::encode_records(&records), message_id],
+        )?;
+    }
+    Ok(())
+}
+
 /// Insert an assistant image message (T5): `content` is the generation
 /// prompt, `model` the image model, `media_path` the saved file's absolute
 /// path. Written directly as `status='complete'` (no streaming lifecycle).
@@ -2437,6 +2464,7 @@ mod tests {
             text: (!kind.is_image()).then(|| "PRIVATE EXTRACTED TEXT".to_string()),
             truncated: false,
             description: None,
+            vision_rejected: false,
         }
     }
 
@@ -2492,6 +2520,26 @@ mod tests {
         assert_eq!(views[0].last_message.as_deref(), Some("plan.pdf"));
         // The orphan sweep sees attachment files as referenced.
         assert!(references_file_name(&conn, "i1.jpg").expect("refs"));
+    }
+
+    #[test]
+    fn rejected_images_are_remembered() {
+        use crate::attachments::AttachmentKind;
+        let dir = TempDir::new().expect("temp dir");
+        let conn = open_temp_db(&dir);
+        let conv = insert_conversation(&conn, "nan", "t").expect("insert");
+        let records = vec![
+            attached(AttachmentKind::Image, "i1", "a.jpg"),
+            attached(AttachmentKind::Image, "i2", "b.jpg"),
+        ];
+        let row = insert_user_message_with_attachments(&conn, conv, "x", &records).expect("insert");
+        mark_images_vision_rejected(&conn, &[(row, "i2".into()), (999, "zz".into())])
+            .expect("mark");
+        let listed = list_messages(&conn, conv).expect("list");
+        assert!(!listed[0].attachments[0].vision_rejected);
+        assert!(listed[0].attachments[1].vision_rejected);
+        let json = serde_json::to_string(&listed[0]).expect("json");
+        assert!(!json.contains("vision_rejected"), "device-local detail");
     }
 
     #[test]
