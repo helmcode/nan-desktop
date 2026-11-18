@@ -59,6 +59,8 @@ function handlers(extra: Record<string, (args: Record<string, unknown> | undefin
     attachments_pick: () => PICKED,
     attachment_read: () => new TextEncoder().encode("# Lista\n- pan").buffer,
     attachment_discard: () => undefined,
+    attachments_set_accepting: () => undefined,
+    attachments_internal_drag: () => undefined,
     chat_send: () => undefined,
     ...extra,
   };
@@ -294,5 +296,36 @@ describe("composer attachments", () => {
     await screen.findByText(
       "No se encontró texto en «notas.md». Si es un documento escaneado, adjunta una captura como imagen.",
     );
+  });
+  it("tells the core when the composer accepts drops and when an in-page drag runs", async () => {
+    resetTauri(handlers());
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    await waitFor(() => expect(invokedWith("attachments_set_accepting")).toContainEqual({ accepting: true }));
+    act(() => {
+      window.dispatchEvent(new Event("dragstart"));
+    });
+    await waitFor(() => expect(invokedWith("attachments_internal_drag")).toEqual([{ active: true }]));
+    act(() => {
+      window.dispatchEvent(new Event("dragend"));
+    });
+    await waitFor(() =>
+      expect(invokedWith("attachments_internal_drag")).toEqual([{ active: true }, { active: false }]),
+    );
+    cleanup();
+    await waitFor(() =>
+      expect(invokedWith("attachments_set_accepting").at(-1)).toEqual({ accepting: false }),
+    );
+  });
+
+  it("the just-sent bubble already says when only the beginning of a document is used", async () => {
+    resetTauri(handlers({ attachment_read: () => new TextEncoder().encode("z".repeat(60_000)).buffer }));
+    renderApp();
+    await screen.findByText("¿Qué tal?");
+    fireEvent.click(screen.getByRole("button", { name: "Adjuntar archivos" }));
+    await screen.findByText("notas.md");
+    await waitFor(() => expect(screen.queryByText("Leyendo…")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Enviar" }));
+    await screen.findByText("Solo se ha usado el principio");
   });
 });

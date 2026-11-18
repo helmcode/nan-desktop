@@ -139,11 +139,15 @@ paste ─ attachments_stage_bytes (images only) ───┘ caps, classify by c
         │
         ├─ image → prepare_image (≤1568 px JPEG q85) → images/attachments/<id>.jpg
         └─ document → attachments/staged/<id>.bin → attachment_read (raw bytes)
-                       → renderer extracts text (pdf.js / mammoth / SheetJS)
+                       → renderer extracts text (pdf.js; mammoth / SheetJS in
+                         src/chat/extractWorker.ts, terminated after 30 s)
 chat_send(..., attachments: [{id, text?}])
    → commit: count/size/text caps → messages.attachments (JSON, device-local)
+   → consume (only after the row is stored: a failed send stays re-sendable)
    → route_model: images + text-only selection → vision_fallback
    → describe_images: side request (vision_fallback, non-streaming) → description
+     (eager when the selection is text-only, else lazily on the first
+     text-only request; device-local, never synced)
 ```
 
 **Why extraction runs in the renderer.** The renderer already ships (and
@@ -176,8 +180,13 @@ description). `NAN_KEY=<member key> node test/vision-check.mjs --real`
 sends the same tiny image to every model in `chat-models.json` on
 `api.nan.builders` and checks each one behaves as the file says.
 
+**Continue.** A "Continuar" turn whose last reply came from the vision
+fallback keeps going on the fallback (`attachments::route_continuation`),
+so a routed image task does not continue blind on the text-only model.
+
 **Sync.** `chat_store::export_messages` uploads `attachments::sync_content`
-(text + placeholders). `write_remote_conversation` matches a local row
+(text + `[Attached file: <name>]` / `[Image: <name>]`, never the
+description). `write_remote_conversation` matches a local row
 with attachments by role, timestamp and text prefix, and keeps its local
 text and attachments.
 

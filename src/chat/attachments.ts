@@ -16,6 +16,8 @@ export const MAX_ATTACHMENTS = 10;
 /// Extracted characters kept per document (mirrors `MAX_DOC_CHARS`); the
 /// renderer stops one past it so the core can mark the cut.
 export const MAX_DOC_CHARS = 50_000;
+/// Extracted characters kept per message (mirrors `MAX_TOTAL_DOC_CHARS`).
+export const MAX_DOC_CHARS_PER_MESSAGE = 120_000;
 
 /// A composer chip: a staged file and, for documents, its extracted text.
 export interface PendingAttachment {
@@ -63,14 +65,6 @@ export function capForCore(text: string, max = MAX_DOC_CHARS): string {
   return text.length > max + 1 ? text.slice(0, max + 1) : text;
 }
 
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-}
-
-export function decodeUtf8(bytes: Uint8Array): string {
-  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-}
-
 interface PdfTextItem {
   str?: string;
   hasEOL?: boolean;
@@ -112,49 +106,48 @@ async function pdfText(bytes: Uint8Array, max: number): Promise<string> {
   }
 }
 
-interface MammothRaw {
-  extractRawText: (input: { arrayBuffer: ArrayBuffer }) => Promise<{ value: string }>;
-}
-
-async function docxText(bytes: Uint8Array): Promise<string> {
-  const mod = (await import("mammoth")) as unknown as MammothRaw & { default?: MammothRaw };
-  const mammoth = mod.default ?? mod;
-  const result = await mammoth.extractRawText({ arrayBuffer: toArrayBuffer(bytes) });
-  return result.value;
-}
-
-async function sheetText(bytes: Uint8Array, max: number): Promise<string> {
-  const XLSX = await import("xlsx");
-  const workbook = XLSX.read(bytes, { type: "array" });
-  const blocks: string[] = [];
-  let length = 0;
-  for (const name of workbook.SheetNames) {
-    if (length > max) break;
-    const csv = XLSX.utils.sheet_to_csv(workbook.Sheets[name], { blankrows: false });
-    const block = workbook.SheetNames.length > 1 ? `## Sheet: ${name}\n${csv}` : csv;
-    blocks.push(block);
-    length += block.length + 2;
+/// DOCX and spreadsheets are parsed in a Web Worker that is terminated
+/// after `timeoutMs` (a zip bomb cannot hang the window). Without Worker
+/// support (tests) they run inline.
+async function inWorker(kind: "docx" | "sheet", bytes: Uint8Array, max: number, timeoutMs: number): Promise<string> {
+  if (typeof Worker === "undefined") {
+    const core = await import("./extractCore");
+    return withTimeout(core.extractInWorkerKinds(kind, bytes, max), timeoutMs);
   }
-  return blocks.join("\n\n");
+  const worker = new Worker(new URL("./extractWorker.ts", import.meta.url), { type: "module" });
+  try {
+    const reply = new Promise<string>((resolve, reject) => {
+      worker.onmessage = (event: MessageEvent<{ ok: boolean; text?: string }>) =>
+        event.data.ok ? resolve(event.data.text ?? "") : reject(new Error("extract"));
+      worker.onerror = () => reject(new Error("extract"));
+    });
+    worker.postMessage({ kind, bytes, max });
+    return await withTimeout(reply, timeoutMs);
+  } finally {
+    worker.terminate();
+  }
 }
 
 /// The text of a staged document, extracted locally and capped for the core.
-export async function extractText(kind: AttachmentKind, bytes: Uint8Array, max = MAX_DOC_CHARS): Promise<string> {
+export async function extractText(
+  kind: AttachmentKind,
+  bytes: Uint8Array,
+  max = MAX_DOC_CHARS,
+  timeoutMs = EXTRACTION_TIMEOUT_MS,
+): Promise<string> {
   let text: string;
   switch (kind) {
     case "pdf":
-      text = await pdfText(bytes, max);
+      text = await withTimeout(pdfText(bytes, max), timeoutMs);
       break;
     case "docx":
-      text = await docxText(bytes);
-      break;
     case "sheet":
-      text = await sheetText(bytes, max);
+      text = await inWorker(kind, bytes, max, timeoutMs);
       break;
     case "image":
       return "";
     default:
-      text = decodeUtf8(bytes);
+      text = (await import("./extractCore")).decodeText(bytes);
   }
   return capForCore(text.replace(/\u0000/g, ""), max);
 }

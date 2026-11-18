@@ -94,4 +94,29 @@ describe("attachment helpers", () => {
       vi.useRealTimers();
     }
   });
+
+  it("decodes CSV and text as UTF-8 without a BOM, or Windows-1252, never mojibake", async () => {
+    const utf8 = new TextEncoder().encode("Nombre;Ciudad\nJosé;Cádiz\n");
+    expect(await extractText("sheet", utf8)).toBe("Nombre,Ciudad\nJosé,Cádiz");
+    // "José;Cádiz" in Windows-1252 (é = 0xE9, á = 0xE1).
+    const cp1252 = new Uint8Array([0x4a, 0x6f, 0x73, 0xe9, 0x3b, 0x43, 0xe1, 0x64, 0x69, 0x7a]);
+    expect(await extractText("sheet", cp1252)).toBe("José,Cádiz");
+    expect(await extractText("text", cp1252)).toBe("José;Cádiz");
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("añadir")]);
+    expect(await extractText("text", bom)).toBe("añadir");
+  });
+
+  it("reads only the first rows and columns of a huge sheet", async () => {
+    const { MAX_SHEET_ROWS, MAX_SHEET_COLS } = await import("./extractCore");
+    const rows = Array.from({ length: MAX_SHEET_ROWS + 50 }, (_, r) =>
+      Array.from({ length: MAX_SHEET_COLS + 5 }, (_, c) => (c === 0 ? `r${r}` : 1)),
+    );
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(rows), "Big");
+    const bytes = new Uint8Array(XLSX.write(book, { type: "array", bookType: "xlsx" }) as ArrayBuffer);
+    const text = await extractText("sheet", bytes, 10_000_000);
+    const lines = text.split("\n");
+    expect(lines).toHaveLength(MAX_SHEET_ROWS);
+    expect(lines[0].split(",")).toHaveLength(MAX_SHEET_COLS);
+  });
 });

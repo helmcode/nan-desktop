@@ -6,6 +6,7 @@
 import { listen } from "@tauri-apps/api/event";
 import type { ClipboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   discardAttachment,
   onAttachmentsDropped,
@@ -19,6 +20,8 @@ import type { MessageAttachment } from "../types";
 import {
   EXTRACTION_TIMEOUT_MS,
   MAX_ATTACHMENTS,
+  MAX_DOC_CHARS,
+  MAX_DOC_CHARS_PER_MESSAGE,
   clipboardImages,
   extractText,
   withTimeout,
@@ -127,6 +130,28 @@ export function useComposerAttachments({
     [readDocument],
   );
 
+  // The core stages native drops only while the composer accepts them, and
+  // never while a drag that started inside the page is running (WebKitGTK
+  // can report an in-page drag of a file link as a file drop).
+  useEffect(() => {
+    void invoke("attachments_set_accepting", { accepting: enabled }).catch(() => {});
+  }, [enabled]);
+  useEffect(() => {
+    const internal = (active: boolean) => () =>
+      void invoke("attachments_internal_drag", { active }).catch(() => {});
+    const start = internal(true);
+    const end = internal(false);
+    window.addEventListener("dragstart", start);
+    window.addEventListener("dragend", end);
+    window.addEventListener("drop", end);
+    return () => {
+      window.removeEventListener("dragstart", start);
+      window.removeEventListener("dragend", end);
+      window.removeEventListener("drop", end);
+      void invoke("attachments_set_accepting", { accepting: false }).catch(() => {});
+    };
+  }, []);
+
   // Drops: the core stages them from the native event and announces them.
   useEffect(() => {
     const unlisten: Array<Promise<() => void>> = [
@@ -193,18 +218,28 @@ export function useComposerAttachments({
     [],
   );
 
-  const asMessageAttachments = useCallback(
-    (): MessageAttachment[] =>
-      itemsRef.current.map((item) => ({
+  // Mirrors the core's caps (per file, then per message) so the just-sent
+  // bubble already says when only the beginning of a document is used.
+  const asMessageAttachments = useCallback((): MessageAttachment[] => {
+    let budget = MAX_DOC_CHARS_PER_MESSAGE;
+    return itemsRef.current.map((item) => {
+      let truncated = false;
+      if (item.kind !== "image") {
+        const length = (item.text ?? "").trimEnd().length;
+        const limit = Math.min(MAX_DOC_CHARS, budget);
+        truncated = length > limit;
+        budget -= Math.min(length, limit);
+      }
+      return {
         id: item.id,
         kind: item.kind,
         name: item.name,
         size: item.size,
         path: item.previewPath,
-        truncated: false,
-      })),
-    [],
-  );
+        truncated,
+      };
+    });
+  }, []);
 
   const takeAll = useCallback((): PendingAttachment[] => {
     const taken = itemsRef.current;
