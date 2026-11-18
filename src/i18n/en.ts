@@ -252,6 +252,12 @@ export const en = {
     dismiss: "Dismiss suggestion",
     switching: "Waiting for your confirmation…",
     allowed: (name: string) => `Actions in ${name} are now always allowed.`,
+    // In-app browser variant (many browser approvals in one conversation).
+    browser: "You are approving many browser actions. Stop asking?",
+    browserAlways: "Always allow",
+    browserSession: "Only this session",
+    browserAllowed: "The browser no longer asks. You can change this in Settings.",
+    browserSessionAllowed: "The browser will not ask until you quit the app.",
   },
   computerWide: {
     title: "Give access to your whole computer?",
@@ -353,9 +359,15 @@ export const en = {
       modeAllowHint: "Covered actions run without asking, including deletes.",
       newFolderMode: "New folders",
     },
-    browserGuard: {
-      title: "Ask before commands and changes after browsing the web",
-      body: "If the assistant used the browser, it asks before running commands or changing files until your next message, also in folders set to \"Allow without asking\". Reading files still does not ask.",
+    // In-app browser permission mode (one selector like "New folders").
+    browserMode: {
+      label: "Browser",
+      askHint:
+        "Asks before using each new website in a conversation and, after browsing, before running commands or changing files.",
+      allowHint:
+        "The assistant uses websites without asking and, after browsing, acts without asking in folders set to Allow without asking. Signing in, paying and your local network still ask.",
+      session: "Allowed without asking for this session, until you quit the app.",
+      askAgain: "Ask again",
     },
     commands: {
       title: "Run commands",

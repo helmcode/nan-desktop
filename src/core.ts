@@ -79,6 +79,8 @@ export interface NativeDecision {
   action: ApprovalAction;
   path: string | null;
   granted: boolean;
+  /// Asked only because the assistant browsed the web in this task.
+  after_browsing?: boolean;
 }
 
 export function onNativeDecision(handler: (decision: NativeDecision) => void): Promise<UnlistenFn> {
@@ -209,6 +211,19 @@ export async function getGrantMode(grantId: string): Promise<GrantMode> {
 /// must trust the returned grant, not the requested mode.
 export function setGrantMode(grantId: string, mode: GrantMode): Promise<GrantView> {
   return invoke<GrantView>("tools_grant_set_mode", { grantId, mode });
+}
+
+/// Set the in-app browser permission mode. `allow` shows a native
+/// confirmation in the core and rejects (`declined`) when the user cancels;
+/// `ask` also ends a session allow. Resolves to the stored mode.
+export async function setBrowserMode(mode: GrantMode): Promise<GrantMode> {
+  return normalizeGrantMode(await invoke<unknown>("tools_set_browser_mode", { mode }));
+}
+
+/// Let the in-app browser work without asking until the app quits (the
+/// core confirms natively and rejects when the user cancels).
+export function allowBrowserForSession(): Promise<void> {
+  return invoke<void>("tools_browser_allow_for_session");
 }
 
 /// Open the native folder picker and grant the chosen folder with `mode`

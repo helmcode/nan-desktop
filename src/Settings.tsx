@@ -8,7 +8,7 @@ import { BrandMark } from "./brand";
 import type { SettingsSection } from "./components/UserMenu";
 import { UpdateAction } from "./components/UpdateAction";
 import { VOICES, folderName, grantErrorLabel, profileTitle } from "./copy";
-import { DEFAULT_GRANT_MODE, type GrantMode } from "./core";
+import { DEFAULT_GRANT_MODE, normalizeGrantMode, setBrowserMode, type GrantMode } from "./core";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { VOICE_UI } from "./flags";
 import { LOCALES, useI18n } from "./i18n";
@@ -51,9 +51,10 @@ export function Settings({
   // S15: run_command is on by default; the core still asks per action.
   const [runCommand, setRunCommand] = useState(true);
   const [runCommandBusy, setRunCommandBusy] = useState(false);
-  // In-app browser protection: ON by default; turning it off asks natively.
-  const [browserGuard, setBrowserGuard] = useState(true);
-  const [browserGuardBusy, setBrowserGuardBusy] = useState(false);
+  // In-app browser permission mode: ask by default; allow asks natively.
+  const [browserMode, setBrowserModeState] = useState<GrantMode>("ask");
+  const [browserSession, setBrowserSession] = useState(false);
+  const [browserBusy, setBrowserBusy] = useState(false);
   const [memoryMode, setMemoryMode] = useState<MemoryMode>("remote");
   const [memoryBusy, setMemoryBusy] = useState(false);
   const [newFolderMode, setNewFolderMode] = useState<GrantMode>(DEFAULT_GRANT_MODE);
@@ -67,7 +68,8 @@ export function Settings({
     invoke<ToolsSettingsView>("tools_settings_get")
       .then((s) => {
         setRunCommand(s.tools_allow_run_command);
-        setBrowserGuard(s.browser_guard !== false);
+        setBrowserModeState(normalizeGrantMode(s.browser_mode));
+        setBrowserSession(s.browser_session_allow === true);
       })
       .catch(() => {});
     invoke<MemorySettingsView>("memory_settings_get")
@@ -109,16 +111,18 @@ export function Settings({
     }
   };
 
-  const toggleBrowserGuard = async (enabled: boolean): Promise<void> => {
-    setBrowserGuardBusy(true);
-    const previous = browserGuard;
+  // The core confirms `allow` natively; a cancel keeps the shown mode.
+  // Choosing `ask` also ends a session allow.
+  const chooseBrowserMode = async (mode: GrantMode): Promise<void> => {
+    setBrowserBusy(true);
     try {
-      await invoke("tools_set_browser_guard", { enabled });
-      setBrowserGuard(enabled);
+      const stored = await setBrowserMode(mode);
+      setBrowserModeState(stored);
+      if (stored === "ask") setBrowserSession(false);
     } catch {
-      setBrowserGuard(previous);
+      // Declined or failed: nothing changed.
     } finally {
-      setBrowserGuardBusy(false);
+      setBrowserBusy(false);
     }
   };
 
@@ -295,26 +299,30 @@ export function Settings({
             </p>
           )}
 
-          <div className="guard-option">
-            <label className="switch-row">
-              <span className="switch">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  checked={browserGuard}
-                  onChange={(e) => void toggleBrowserGuard(e.currentTarget.checked)}
-                  disabled={browserGuardBusy}
-                  aria-describedby="browser-guard-note"
-                />
-                <span className="switch-track" aria-hidden="true" />
-              </span>
-              <span className="switch-label">
-                <strong>{t.settings.browserGuard.title}</strong>
-              </span>
-            </label>
-            <p className="section-lede" id="browser-guard-note">
-              {t.settings.browserGuard.body}
+          <div className="browser-mode">
+            <ModeSwitch
+              label={t.settings.browserMode.label}
+              showLabel
+              value={browserMode}
+              disabled={browserBusy}
+              onChange={(mode) => void chooseBrowserMode(mode)}
+            />
+            <p className={`browser-mode-hint${browserMode === "allow" ? " warn" : ""}`}>
+              {browserMode === "allow" ? t.settings.browserMode.allowHint : t.settings.browserMode.askHint}
             </p>
+            {browserSession && browserMode === "ask" && (
+              <p className="browser-mode-session" role="status">
+                <span>{t.settings.browserMode.session}</span>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={browserBusy}
+                  onClick={() => void chooseBrowserMode("ask")}
+                >
+                  {t.settings.browserMode.askAgain}
+                </button>
+              </p>
+            )}
           </div>
 
           <div className="danger-option">

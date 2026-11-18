@@ -9,10 +9,10 @@ vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).
 import App from "./App";
 import { I18nProvider, type Locale } from "./i18n";
 import { LOCALE_STORAGE_KEY } from "./i18n/locale";
-import { APPROVAL_REQUEST_EVENT, APPROVAL_RESOLVED_EVENT, type ApprovalRequest } from "./core";
+import { APPROVAL_NATIVE_EVENT, APPROVAL_REQUEST_EVENT, APPROVAL_RESOLVED_EVENT, type ApprovalRequest } from "./core";
 import type { ChatMessageRow } from "./types";
 import { FOLDER_SELECTION_STORAGE_KEY } from "./chat/folderSelection";
-import { NUDGE_SHOWN_STORAGE_KEY } from "./chat/allowNudge";
+import { BROWSER_NUDGE_SHOWN_STORAGE_KEY, NUDGE_SHOWN_STORAGE_KEY } from "./chat/allowNudge";
 import { openChipSections } from "./test/chips";
 
 const PROFILES = {
@@ -642,6 +642,89 @@ describe("folder selection and allow-mode suggestion", () => {
     });
     await screen.findAllByText(/Allowed: Delete a file/);
     expect(screen.queryByText(/You are approving many actions/)).toBeNull();
+  });
+});
+
+describe("in-app browser suggestion", () => {
+  const suggestion = "You are approving many browser actions. Stop asking?";
+
+  // Two new-site cards and one native dialog asked only after browsing.
+  function approveBrowserActions(prefix: string, answers: boolean[]): void {
+    answers.forEach((granted, n) => {
+      if (n === 2) {
+        act(() => {
+          emit(APPROVAL_NATIVE_EVENT, {
+            conversation_id: 7,
+            action: "write_file",
+            path: "/Users/ana/notes.txt",
+            granted,
+            after_browsing: true,
+          });
+        });
+        return;
+      }
+      act(() => {
+        emit(
+          APPROVAL_REQUEST_EVENT,
+          approvalPayload({ approval_id: `${prefix}-${n}`, action: "browser_site", path: `site${n}.example` }),
+        );
+      });
+      act(() => {
+        emit(APPROVAL_RESOLVED_EVENT, { approval_id: `${prefix}-${n}`, granted });
+      });
+    });
+  }
+
+  it("offers to stop asking after three browser approvals; 'only this session' asks the core", async () => {
+    resetTauri({ ...chatHandlers([row(1, "user", "Find flights")]), tools_browser_allow_for_session: () => undefined });
+    renderApp("en");
+    await screen.findByText("Find flights");
+    approveBrowserActions("pb", [true, true, true]);
+    expect(await screen.findByText(suggestion)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Only this session" }));
+    await waitFor(() => expect(invokedWith("tools_browser_allow_for_session")).toHaveLength(1));
+    expect(await screen.findByText("The browser will not ask until you quit the app.")).toBeTruthy();
+    expect(JSON.parse(window.localStorage.getItem(BROWSER_NUDGE_SHOWN_STORAGE_KEY) ?? "[]")).toEqual([7]);
+    expect(JSON.parse(window.localStorage.getItem(NUDGE_SHOWN_STORAGE_KEY) ?? "[]")).toEqual([]);
+  });
+
+  it("'always' stores allow through the core; a declined confirmation drops the card", async () => {
+    resetTauri({ ...chatHandlers([row(1, "user", "Find flights")]), tools_set_browser_mode: () => "allow" });
+    renderApp("en");
+    await screen.findByText("Find flights");
+    approveBrowserActions("pa", [true, true, true]);
+    fireEvent.click(await screen.findByRole("button", { name: "Always allow" }));
+    await waitFor(() => expect(invokedWith("tools_set_browser_mode")).toEqual([{ mode: "allow" }]));
+    expect(await screen.findByText("The browser no longer asks. You can change this in Settings.")).toBeTruthy();
+  });
+
+  it("a declined native confirmation removes the suggestion", async () => {
+    resetTauri({
+      ...chatHandlers([row(1, "user", "Find flights")]),
+      tools_browser_allow_for_session: () => {
+        throw new Error("declined");
+      },
+    });
+    renderApp("en");
+    await screen.findByText("Find flights");
+    approveBrowserActions("pc", [true, true, true]);
+    fireEvent.click(await screen.findByRole("button", { name: "Only this session" }));
+    await waitFor(() => expect(screen.queryByText(suggestion)).toBeNull());
+    expect(screen.queryByText(/The browser will not ask/)).toBeNull();
+  });
+
+  it("a denial resets the count", async () => {
+    resetTauri(chatHandlers([row(1, "user", "Find flights")]));
+    renderApp("en");
+    await screen.findByText("Find flights");
+    // 2 approvals, a denial, then 2 more: never 3 in a row.
+    approveBrowserActions("pd", [true, true]);
+    approveBrowserActions("pe", [false, true, true]);
+    await screen.findAllByText(/site1.example/);
+    expect(screen.queryByText(suggestion)).toBeNull();
+    // One more approval reaches 3 since the denial.
+    approveBrowserActions("pf", [true]);
+    expect(await screen.findByText(suggestion)).toBeTruthy();
   });
 });
 

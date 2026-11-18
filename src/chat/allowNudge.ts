@@ -14,6 +14,15 @@
 // own native confirmation). The whole-computer variant points to Settings
 // instead: switching the whole computer to allow is a decision the user
 // makes there, never one click away in the chat.
+//
+// In-app browser variant ("browser" target, its own family): approvals of
+// a new-site card (`browser_site`) and approvals asked only because the
+// assistant browsed (`after_browsing`) count towards it; sign-in, payment
+// and local-network cards always ask and never count (a denial still
+// resets). It offers "always" (`tools_set_browser_mode`) or "only this
+// session" (`tools_browser_allow_for_session`), both confirmed natively by
+// the core. It is shown once per conversation independently of the folder
+// suggestion (separate remembered list).
 
 import type { GrantView } from "../types";
 import { isInsideRoots } from "./filePaths";
@@ -21,12 +30,21 @@ import { realmScopedKey } from "./realmStorage";
 
 export const NUDGE_THRESHOLD = 3;
 export const NUDGE_SHOWN_STORAGE_KEY = "helmcode.allowNudgeShown.v1";
+export const BROWSER_NUDGE_SHOWN_STORAGE_KEY = "helmcode.browserNudgeShown.v1";
 
 export type NudgeTarget =
   | { kind: "folder"; grantId: string; path: string }
-  | { kind: "computer_wide" };
+  | { kind: "computer_wide" }
+  | { kind: "browser" };
+
+/// Folder/computer suggestions and the browser suggestion are remembered
+/// and shown independently (at most one of each per conversation).
+export type NudgeFamily = "grant" | "browser";
 
 export type NudgeStatus = "open" | "switching" | "allowed";
+
+/// What the user chose on a browser suggestion.
+export type NudgeScope = "always" | "session";
 
 export interface Nudge {
   conversationId: number;
@@ -34,14 +52,18 @@ export interface Nudge {
   /// Messages before the card when it appeared (renders after them).
   anchorIndex: number;
   status: NudgeStatus;
+  /// Browser suggestion: what was allowed (set with `allowed`).
+  scope?: NudgeScope;
 }
 
 export interface NudgeState {
   /// conversation id -> target key -> approvals in a row.
   counts: Record<number, Record<string, number>>;
-  /// Conversations that already showed their one suggestion.
+  /// Conversations that already showed their one folder suggestion.
   shown: number[];
-  /// Visible suggestions (at most one per conversation).
+  /// Conversations that already showed their one browser suggestion.
+  shownBrowser: number[];
+  /// Visible suggestions (at most one per conversation and family).
   active: Nudge[];
 }
 
@@ -54,17 +76,27 @@ export type NudgeEvent =
       granted: boolean;
       anchorIndex: number;
     }
-  | { type: "switching"; conversationId: number }
-  | { type: "allowed"; conversationId: number }
-  | { type: "dismiss"; conversationId: number }
+  // `family` defaults to "grant" (the folder/computer suggestion).
+  | { type: "switching"; conversationId: number; family?: NudgeFamily }
+  | { type: "allowed"; conversationId: number; family?: NudgeFamily; scope?: NudgeScope }
+  | { type: "dismiss"; conversationId: number; family?: NudgeFamily }
   | { type: "clearConversation"; conversationId: number };
 
 export function targetKey(target: NudgeTarget): string {
-  return target.kind === "folder" ? `folder:${target.grantId}` : "computer_wide";
+  if (target.kind === "folder") return `folder:${target.grantId}`;
+  return target.kind;
 }
 
-export function initialNudgeState(shown: number[] = []): NudgeState {
-  return { counts: {}, shown, active: [] };
+export function nudgeFamily(target: NudgeTarget): NudgeFamily {
+  return target.kind === "browser" ? "browser" : "grant";
+}
+
+function isOf(nudge: Nudge, conversationId: number, family: NudgeFamily): boolean {
+  return nudge.conversationId === conversationId && nudgeFamily(nudge.target) === family;
+}
+
+export function initialNudgeState(shown: number[] = [], shownBrowser: number[] = []): NudgeState {
+  return { counts: {}, shown, shownBrowser, active: [] };
 }
 
 export function nudgeReducer(state: NudgeState, event: NudgeEvent): NudgeState {
@@ -77,20 +109,28 @@ export function nudgeReducer(state: NudgeState, event: NudgeEvent): NudgeState {
         delete counts[conversationId];
         return { ...state, counts };
       }
-      if (!event.target || state.shown.includes(conversationId)) return state;
+      if (!event.target) return state;
+      const family = nudgeFamily(event.target);
+      const shownKey = family === "browser" ? "shownBrowser" : "shown";
+      if (state[shownKey].includes(conversationId)) return state;
       const key = targetKey(event.target);
       const current = state.counts[conversationId] ?? {};
       const count = (current[key] ?? 0) + 1;
       if (count < NUDGE_THRESHOLD) {
         return { ...state, counts: { ...state.counts, [conversationId]: { ...current, [key]: count } } };
       }
-      const counts = { ...state.counts };
-      delete counts[conversationId];
+      // Only this family's counts restart; the other keeps counting.
+      const rest = Object.fromEntries(
+        Object.entries(current).filter(([other]) => (other === "browser") !== (family === "browser")),
+      );
+      const counts = { ...state.counts, [conversationId]: rest };
+      if (Object.keys(rest).length === 0) delete counts[conversationId];
       return {
+        ...state,
         counts,
-        shown: [...state.shown, conversationId],
+        [shownKey]: [...state[shownKey], conversationId],
         active: [
-          ...state.active.filter((nudge) => nudge.conversationId !== conversationId),
+          ...state.active.filter((nudge) => !isOf(nudge, conversationId, family)),
           { conversationId, target: event.target, anchorIndex: event.anchorIndex, status: "open" },
         ],
       };
@@ -98,21 +138,26 @@ export function nudgeReducer(state: NudgeState, event: NudgeEvent): NudgeState {
     case "switching":
     case "allowed": {
       const status: NudgeStatus = event.type;
+      const family = event.family ?? "grant";
+      const scope = event.type === "allowed" ? event.scope : undefined;
       return {
         ...state,
         active: state.active.map((nudge) =>
-          nudge.conversationId === event.conversationId ? { ...nudge, status } : nudge,
+          isOf(nudge, event.conversationId, family) ? { ...nudge, status, ...(scope ? { scope } : {}) } : nudge,
         ),
       };
     }
-    case "dismiss":
-      return { ...state, active: state.active.filter((nudge) => nudge.conversationId !== event.conversationId) };
+    case "dismiss": {
+      const family = event.family ?? "grant";
+      return { ...state, active: state.active.filter((nudge) => !isOf(nudge, event.conversationId, family)) };
+    }
     case "clearConversation": {
       const counts = { ...state.counts };
       delete counts[event.conversationId];
       return {
         counts,
         shown: state.shown.filter((id) => id !== event.conversationId),
+        shownBrowser: state.shownBrowser.filter((id) => id !== event.conversationId),
         active: state.active.filter((nudge) => nudge.conversationId !== event.conversationId),
       };
     }
@@ -144,10 +189,38 @@ export function targetForPath(
   return null;
 }
 
+/// Approval card actions that count towards the browser suggestion when
+/// granted (a new public site). Sign-in, payment and local-network cards
+/// always ask and never count.
+const BROWSER_COUNTED_ACTIONS = new Set(["browser_site"]);
+
+/// Whether an answered approval counts towards the browser suggestion:
+/// a new-site card, or any card/dialog asked only because the assistant
+/// browsed the web in this task.
+export function isBrowserApproval(action: string, afterBrowsing: boolean | undefined): boolean {
+  return afterBrowsing === true || BROWSER_COUNTED_ACTIONS.has(action);
+}
+
+/// What an answered approval counts towards: the browser suggestion for
+/// browser approvals, nothing for the other in-app browser cards (sign-in,
+/// payment, local network: not folder actions), else the folder covering
+/// `path` (see [`targetForPath`]).
+export function decisionTarget(
+  action: string,
+  afterBrowsing: boolean | undefined,
+  path: string | null,
+  folders: GrantView[],
+  computerWide: GrantView | null,
+): NudgeTarget | null {
+  if (isBrowserApproval(action, afterBrowsing)) return { kind: "browser" };
+  if (action.startsWith("browser_")) return null;
+  return targetForPath(path, folders, computerWide);
+}
+
 /// `realm` scopes the stored ids to the signed-in user (see realmStorage).
-export function loadShownNudges(realm = ""): number[] {
+export function loadShownNudges(realm = "", key = NUDGE_SHOWN_STORAGE_KEY): number[] {
   try {
-    const raw = window.localStorage.getItem(realmScopedKey(NUDGE_SHOWN_STORAGE_KEY, realm));
+    const raw = window.localStorage.getItem(realmScopedKey(key, realm));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((id): id is number => typeof id === "number") : [];
   } catch {
@@ -155,9 +228,9 @@ export function loadShownNudges(realm = ""): number[] {
   }
 }
 
-export function saveShownNudges(shown: number[], realm = ""): void {
+export function saveShownNudges(shown: number[], realm = "", key = NUDGE_SHOWN_STORAGE_KEY): void {
   try {
-    window.localStorage.setItem(realmScopedKey(NUDGE_SHOWN_STORAGE_KEY, realm), JSON.stringify(shown));
+    window.localStorage.setItem(realmScopedKey(key, realm), JSON.stringify(shown));
   } catch {
     // Unavailable storage: the suggestion may show again next run.
   }
