@@ -1446,6 +1446,9 @@ async fn run_chat_stream(
     // The images of that request: flagged only once the stand-in retry
     // gets past the 400 (otherwise the image was not the cause).
     let mut pending_rejected: Option<Vec<(i64, String)>> = None;
+    // That request also carried browser screenshots (then the culprit is
+    // unknown and no attachment image is flagged).
+    let mut rejected_had_screenshots = false;
 
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
@@ -1500,7 +1503,9 @@ async fn run_chat_stream(
                 }
             };
             let status = response.status().as_u16();
-            if let Some(images) = rejection_to_persist(&mut pending_rejected, status) {
+            if let Some(images) =
+                rejection_to_persist(&mut pending_rejected, status, rejected_had_screenshots)
+            {
                 // Remembered: later turns send these images as stand-ins
                 // instead of failing and retrying every time.
                 let _ = chat_store::mark_images_vision_rejected(&conn, &images);
@@ -1526,7 +1531,7 @@ async fn run_chat_stream(
                 messages = rebase_messages(&messages, prefix_len, prefix);
                 prefix_len = new_len;
                 // This reply's browser screenshots are images too.
-                crate::browser::stub_screenshots(&mut messages);
+                rejected_had_screenshots = crate::browser::stub_screenshots(&mut messages) > 0;
                 continue;
             }
             match turn::retry_after_400(round, offer_tools, traces_dropped, replayed_traces) {
@@ -1793,13 +1798,16 @@ fn request_history(
 /// After the stand-in retry: the images to flag `vision_rejected`. Only
 /// when that retry got past the 400 (any other status) were the images the
 /// cause; a second 400 means something else was wrong, nothing is flagged.
-/// The pending set is consumed either way.
+/// The pending set is consumed either way. When the rejected request also
+/// carried in-app browser screenshots, nothing is flagged: either image
+/// may have caused the 400, and the retry dropped both.
 pub fn rejection_to_persist(
     pending: &mut Option<Vec<(i64, String)>>,
     status: u16,
+    had_screenshots: bool,
 ) -> Option<Vec<(i64, String)>> {
     let images = pending.take()?;
-    (status != 400 && !images.is_empty()).then_some(images)
+    (status != 400 && !images.is_empty() && !had_screenshots).then_some(images)
 }
 
 /// `messages` with its first `prefix_len` entries (system prompt, skill,
@@ -2756,20 +2764,42 @@ mod tests {
     fn images_are_flagged_rejected_only_when_the_stand_in_retry_gets_past_the_400() {
         let images = vec![(1, "i".to_string())];
         // Nothing pending: nothing to flag.
-        assert_eq!(rejection_to_persist(&mut None, 200), None);
+        assert_eq!(rejection_to_persist(&mut None, 200, false), None);
         // The retry succeeded (or failed for another reason): flag them.
         for status in [200, 429, 500] {
             let mut pending = Some(images.clone());
             assert_eq!(
-                rejection_to_persist(&mut pending, status),
+                rejection_to_persist(&mut pending, status, false),
                 Some(images.clone())
             );
             assert_eq!(pending, None);
         }
         // A second 400: the image was not the cause; nothing flagged.
         let mut pending = Some(images.clone());
-        assert_eq!(rejection_to_persist(&mut pending, 400), None);
+        assert_eq!(rejection_to_persist(&mut pending, 400, false), None);
         assert_eq!(pending, None, "consumed either way");
+    }
+
+    #[test]
+    fn attachment_images_are_not_flagged_when_browser_screenshots_shared_the_400() {
+        let images = vec![(1, "i".to_string())];
+        for status in [200, 400, 500] {
+            let mut pending = Some(images.clone());
+            assert_eq!(
+                rejection_to_persist(&mut pending, status, true),
+                None,
+                "{status}"
+            );
+            assert_eq!(pending, None, "consumed either way");
+        }
+        // The flag comes from the retry: it is true only when screenshots
+        // were actually stubbed out of the rejected request.
+        let mut messages = vec![crate::browser::screenshot_message(
+            "data:image/jpeg;base64,AA",
+        )];
+        assert!(crate::browser::stub_screenshots(&mut messages) > 0);
+        let mut plain = vec![serde_json::json!({ "role": "user", "content": "hola" })];
+        assert_eq!(crate::browser::stub_screenshots(&mut plain), 0);
     }
 
     #[test]

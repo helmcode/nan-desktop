@@ -1074,7 +1074,9 @@ tools to every reply (`browser_screenshot` only when
 sent as a user message with an `image_url` part after the round's tool
 messages (tool messages cannot carry images). Images are never written to
 the tool trace; when a vision model rejects images (400), the attachments
-retry also turns this reply's screenshots into text stubs. The activity is `browsing`.
+retry also turns this reply's screenshots into text stubs, and when the
+rejected request carried screenshots no attachment image is flagged
+`vision_rejected` (the culprit is unknown). The activity is `browsing`.
 
 ### Command ACL
 
