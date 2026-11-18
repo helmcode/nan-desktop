@@ -120,4 +120,18 @@ describe("ApprovalCard (S14)", () => {
     expect(screen.getByText("Usar tus archivos")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Permitir" })).toBeTruthy();
   });
+
+  it("names browser approvals in plain words and flags payments", () => {
+    renderCard({ action: "browser_site", target: "example.com" });
+    expect(screen.getByText("Use this website in the browser")).toBeTruthy();
+    expect(screen.getByText("example.com")).toBeTruthy();
+    cleanup();
+    renderCard({ action: "browser_payment", target: "shop.example" });
+    expect(screen.getByText("Pay or buy on this website")).toBeTruthy();
+    expect(screen.getByRole("group").className).toContain("danger");
+    cleanup();
+    renderCard({ action: "browser_login", target: "mail.example" });
+    expect(screen.getByText("Send a sign-in")).toBeTruthy();
+    expect(screen.getByRole("group").className).not.toContain("danger");
+  });
 });

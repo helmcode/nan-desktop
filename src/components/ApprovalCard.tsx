@@ -20,6 +20,10 @@ function actionIcon(action: string): ReactNode {
     case "save_image":
       return <IconImage size={16} />;
     case "write_website":
+    case "browser_site":
+    case "browser_local_site":
+    case "browser_login":
+    case "browser_payment":
       return <IconGlobe size={16} />;
     case "read_file":
     case "list_files":
@@ -38,7 +42,11 @@ export function ApprovalCard({
 }) {
   const t = useT();
   const summary = t.approval.actions[card.action] ?? t.approval.actions.unknown;
-  const danger = card.action === "delete_path" || card.action === "run_command";
+  const danger =
+    card.action === "delete_path" ||
+    card.action === "run_command" ||
+    card.action === "browser_payment" ||
+    card.action === "browser_local_site";
 
   if (!isOpen(card)) {
     const granted = card.status === "granted";

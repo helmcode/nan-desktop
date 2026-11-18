@@ -26,6 +26,7 @@ import {
 } from "./chat/folderSelection";
 import { stripToolMarkup } from "./chat/toolMarkup";
 import { AllowNudgeCard } from "./components/AllowNudgeCard";
+import { BrowserBar, useBrowserView } from "./components/BrowserBar";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { ChatImage } from "./components/ChatImage";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -182,7 +183,7 @@ interface ChatError {
 // What the assistant is doing between text deltas.
 interface ChatActivity {
   conversation_id: number;
-  activity: "searching" | "working" | "generating_image" | null;
+  activity: "searching" | "browsing" | "working" | "generating_image" | null;
 }
 interface TtsError {
   kind: string;
@@ -1763,6 +1764,17 @@ function ChatShell({
     }
   }, []);
 
+  // In-app browser: the bar's state, and its "stop the assistant" button
+  // (stops the reply that drives the browser, whatever conversation it is).
+  const browser = useBrowserView();
+  const stopBrowserAgent = useCallback(async (conversationId: number): Promise<void> => {
+    try {
+      await invoke("chat_stop", { conversationId });
+    } catch (err) {
+      setInlineError(`cmd:${String(err)}`);
+    }
+  }, []);
+
   const cancelImage = useCallback(async (): Promise<void> => {
     const conversationId = activeConvRef.current;
     if (conversationId === null) return;
@@ -2666,7 +2678,7 @@ function ChatShell({
                       <TurnIndicator
                         startedAt={activeTurnStart}
                         icon={
-                          activeActivity === "searching" ? (
+                          activeActivity === "searching" || activeActivity === "browsing" ? (
                             <IconGlobe size={15} />
                           ) : activeActivity && activeActivity !== "generating_image" ? (
                             <IconFolder size={15} />
@@ -2675,11 +2687,13 @@ function ChatShell({
                         label={
                           activeActivity === "searching"
                             ? t.chat.searching
-                            : activeActivity === "generating_image"
-                              ? t.chat.generatingImage
-                              : activeActivity
-                                ? t.chat.working
-                                : t.chat.thinking
+                            : activeActivity === "browsing"
+                              ? t.chat.browsing
+                              : activeActivity === "generating_image"
+                                ? t.chat.generatingImage
+                                : activeActivity
+                                  ? t.chat.working
+                                  : t.chat.thinking
                         }
                       />
                     ) : (
@@ -2712,6 +2726,12 @@ function ChatShell({
               </div>
             </div>
 
+            <BrowserBar
+              view={browser.view}
+              downloadBlocked={browser.downloadBlocked}
+              onDismissDownload={browser.dismissDownload}
+              onStopAssistant={(id) => void stopBrowserAgent(id)}
+            />
             <footer className="composer">
               {activeSkill && (
                 <div className="skill-pill-row">

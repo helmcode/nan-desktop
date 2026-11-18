@@ -334,3 +334,80 @@ export function reportRendererCrash(name: unknown): void {
     // No IPC (tests, a torn-down window): nothing to do.
   }
 }
+
+// ---------------------------------------------------------------------------
+// In-app browser (computer use, phase 1) - src-tauri/src/browser/mod.rs
+// ---------------------------------------------------------------------------
+
+/// Event the core emits (to this window only) whenever the assistant's
+/// browser opens, navigates, loads, changes title, closes, or a reply
+/// starts / stops driving it.
+export const BROWSER_STATE_EVENT = "browser://state";
+/// Event the core emits when a page in the browser tried to download a
+/// file (downloads are always blocked).
+export const BROWSER_DOWNLOAD_BLOCKED_EVENT = "browser://download-blocked";
+
+/// `BrowserView` in the core.
+export interface BrowserView {
+  open: boolean;
+  url: string | null;
+  title: string | null;
+  loading: boolean;
+  /// The conversation whose reply is using the browser right now.
+  agent_conversation: number | null;
+}
+
+export type BrowserControl = "back" | "forward" | "reload" | "show" | "close";
+
+export const CLOSED_BROWSER: BrowserView = {
+  open: false,
+  url: null,
+  title: null,
+  loading: false,
+  agent_conversation: null,
+};
+
+/// A well-formed view from whatever the core sent (anything else reads as
+/// a closed browser).
+export function normalizeBrowserView(raw: unknown): BrowserView {
+  if (!raw || typeof raw !== "object") return CLOSED_BROWSER;
+  const v = raw as Record<string, unknown>;
+  return {
+    open: v.open === true,
+    url: typeof v.url === "string" ? v.url : null,
+    title: typeof v.title === "string" ? v.title : null,
+    loading: v.loading === true,
+    agent_conversation: typeof v.agent_conversation === "number" ? v.agent_conversation : null,
+  };
+}
+
+export async function getBrowserState(): Promise<BrowserView> {
+  return normalizeBrowserView(await invoke<unknown>("browser_state"));
+}
+
+export function controlBrowser(action: BrowserControl): Promise<void> {
+  return invoke("browser_control", { action });
+}
+
+export function onBrowserState(handler: (view: BrowserView) => void): Promise<UnlistenFn> {
+  return listen<unknown>(BROWSER_STATE_EVENT, (event) => handler(normalizeBrowserView(event.payload)));
+}
+
+export function onBrowserDownloadBlocked(handler: () => void): Promise<UnlistenFn> {
+  return listen(BROWSER_DOWNLOAD_BLOCKED_EVENT, () => handler());
+}
+
+/// What the browser bar shows as the address: scheme-less host + path,
+/// never a username/password, bounded.
+export function displayAddress(url: string | null): string {
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    const path = parsed.pathname === "/" ? "" : parsed.pathname;
+    const text = `${parsed.host}${path}`;
+    return text.length > 90 ? `${text.slice(0, 89)}…` : text;
+  } catch {
+    return "";
+  }
+}
