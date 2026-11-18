@@ -76,6 +76,8 @@ describe("browser permission mode setting", () => {
     expect(radio(group, "Permitir sin preguntar").getAttribute("aria-checked")).toBe("false");
     const hint = document.querySelector(".browser-mode-hint");
     expect(hint?.textContent).toMatch(/Pregunta antes de usar cada web nueva/);
+    // The selector is described by its hint.
+    expect(document.getElementById(group.getAttribute("aria-describedby") ?? "")).toBe(hint);
     expect(hint?.classList.contains("warn")).toBe(false);
     // The old guard switch is gone.
     expect(screen.queryByRole("switch", { name: /después de navegar/ })).toBeNull();

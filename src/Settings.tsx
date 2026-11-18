@@ -304,10 +304,11 @@ export function Settings({
               label={t.settings.browserMode.label}
               showLabel
               value={browserMode}
+              describedBy="browser-mode-hint"
               disabled={browserBusy}
               onChange={(mode) => void chooseBrowserMode(mode)}
             />
-            <p className={`browser-mode-hint${browserMode === "allow" ? " warn" : ""}`}>
+            <p id="browser-mode-hint" className={`browser-mode-hint${browserMode === "allow" ? " warn" : ""}`}>
               {browserMode === "allow" ? t.settings.browserMode.allowHint : t.settings.browserMode.askHint}
             </p>
             {browserSession && browserMode === "ask" && (

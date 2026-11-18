@@ -646,7 +646,7 @@ describe("folder selection and allow-mode suggestion", () => {
 });
 
 describe("in-app browser suggestion", () => {
-  const suggestion = "You are approving many browser actions. Stop asking?";
+  const suggestion = "You are approving many permissions while the assistant browses. Should the browser stop asking?";
 
   // Two new-site cards and one native dialog asked only after browsing.
   function approveBrowserActions(prefix: string, answers: boolean[]): void {

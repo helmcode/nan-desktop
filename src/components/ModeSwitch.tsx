@@ -11,12 +11,15 @@ export function ModeSwitch({
   onChange,
   disabled,
   showLabel = false,
+  describedBy,
 }: {
   label: string;
   value: GrantMode;
   onChange: (mode: GrantMode) => void;
   disabled?: boolean;
   showLabel?: boolean;
+  /// Id of a hint that describes the choice (`aria-describedby`).
+  describedBy?: string;
 }) {
   const { t } = useI18n();
   const options: Array<{ id: GrantMode; text: string }> = [
@@ -26,7 +29,7 @@ export function ModeSwitch({
   return (
     <div className="mode-switch-wrap">
       {showLabel && <span className="mode-switch-label">{label}</span>}
-      <div className="mode-switch" role="radiogroup" aria-label={label}>
+      <div className="mode-switch" role="radiogroup" aria-label={label} aria-describedby={describedBy}>
         {options.map((option) => (
           <button
             key={option.id}

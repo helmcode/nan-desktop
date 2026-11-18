@@ -1415,7 +1415,8 @@ function ChatShell({
     [workspace],
   );
 
-  // Browser suggestion: the core confirms natively; a cancel keeps the card.
+  // Browser suggestion: the core confirms natively; a cancel (or any
+  // failure) dismisses the card.
   const allowBrowserFromNudge = useCallback(async (nudge: Nudge, scope: NudgeScope): Promise<void> => {
     const conversationId = nudge.conversationId;
     dispatchNudge({ type: "switching", conversationId, family: "browser" });

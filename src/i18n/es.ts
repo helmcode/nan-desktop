@@ -256,7 +256,7 @@ export const es: Strings = {
     switching: "Esperando tu confirmación…",
     allowed: (name: string) => `Ahora se permite siempre en ${name}.`,
     // In-app browser variant (many browser approvals in one conversation).
-    browser: "Estás aprobando muchas acciones del navegador. ¿Quieres que deje de preguntar?",
+    browser: "Estás aprobando muchos permisos mientras el asistente navega. ¿Quieres que el navegador deje de preguntar?",
     browserAlways: "Permitir siempre",
     browserSession: "Solo en esta sesión",
     browserAllowed: "El navegador ya no pregunta. Puedes cambiarlo en Ajustes.",

@@ -67,7 +67,7 @@ describe("AllowNudgeCard", () => {
     it("asks whether to stop asking, in Spanish, with both choices and the X", () => {
       renderNudge(browserNudge, "es");
       expect(
-        screen.getByText("Estás aprobando muchas acciones del navegador. ¿Quieres que deje de preguntar?"),
+        screen.getByText("Estás aprobando muchos permisos mientras el asistente navega. ¿Quieres que el navegador deje de preguntar?"),
       ).toBeTruthy();
       expect(screen.getByRole("button", { name: "Permitir siempre" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Solo en esta sesión" })).toBeTruthy();

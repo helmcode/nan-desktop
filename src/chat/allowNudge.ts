@@ -5,7 +5,8 @@
 // - every approval the user GRANTS in a conversation counts towards the
 //   folder that covers the action (longest matching folder grant; actions
 //   under the computer-wide grant count towards "computer_wide");
-// - any DENIAL in the conversation resets every count;
+// - any DENIAL in the conversation (folder or browser) clears every count
+//   of that conversation, for both families;
 // - at NUDGE_THRESHOLD approvals without a denial ONE suggestion is shown,
 //   once per conversation (remembered across restarts), and the counts
 //   reset;

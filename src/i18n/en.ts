@@ -253,7 +253,7 @@ export const en = {
     switching: "Waiting for your confirmation…",
     allowed: (name: string) => `Actions in ${name} are now always allowed.`,
     // In-app browser variant (many browser approvals in one conversation).
-    browser: "You are approving many browser actions. Stop asking?",
+    browser: "You are approving many permissions while the assistant browses. Should the browser stop asking?",
     browserAlways: "Always allow",
     browserSession: "Only this session",
     browserAllowed: "The browser no longer asks. You can change this in Settings.",
