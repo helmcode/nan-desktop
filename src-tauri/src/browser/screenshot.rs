@@ -33,6 +33,28 @@ fn once(sender: Reply) -> Responder {
     })
 }
 
+/// Largest screenshot sent to the model.
+pub const MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// The `data:` URL the model receives, or why not. Pure.
+pub fn to_data_url(shot: &Shot) -> Result<String, &'static str> {
+    if shot.data.is_empty() {
+        return Err("screenshot_empty");
+    }
+    if shot.data.len() > MAX_BYTES {
+        return Err("screenshot_too_large");
+    }
+    if !matches!(shot.mime, "image/jpeg" | "image/png") {
+        return Err("screenshot_format");
+    }
+    use base64::Engine as _;
+    Ok(format!(
+        "data:{};base64,{}",
+        shot.mime,
+        base64::engine::general_purpose::STANDARD.encode(&shot.data)
+    ))
+}
+
 /// Capture the visible page.
 pub async fn capture(window: &WebviewWindow) -> Result<Shot, String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -187,6 +209,32 @@ mod platform {
     use super::Shot;
     use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
 
+    /// Snapshot width cap in pixels: a HiDPI PNG of a full window would
+    /// often pass the 4 MiB limit; at this width it stays well under.
+    const MAX_WIDTH: i32 = 1280;
+
+    fn downscale(image: cairo::ImageSurface) -> Result<cairo::ImageSurface, String> {
+        let (width, height) = (image.width(), image.height());
+        if width <= MAX_WIDTH || width <= 0 {
+            return Ok(image);
+        }
+        let factor = f64::from(MAX_WIDTH) / f64::from(width);
+        let new_height = ((f64::from(height) * factor).round() as i32).max(1);
+        let target = cairo::ImageSurface::create(cairo::Format::ARgb32, MAX_WIDTH, new_height)
+            .map_err(|_| "the snapshot could not be scaled".to_string())?;
+        let context = cairo::Context::new(&target)
+            .map_err(|_| "the snapshot could not be scaled".to_string())?;
+        context.scale(factor, factor);
+        context
+            .set_source_surface(&image, 0.0, 0.0)
+            .map_err(|_| "the snapshot could not be scaled".to_string())?;
+        context
+            .paint()
+            .map_err(|_| "the snapshot could not be scaled".to_string())?;
+        drop(context);
+        Ok(target)
+    }
+
     pub fn capture(webview: tauri::webview::PlatformWebview, send: super::Responder) {
         webview.inner().snapshot(
             SnapshotRegion::Visible,
@@ -198,6 +246,7 @@ mod platform {
                     .and_then(|surface| {
                         let image = cairo::ImageSurface::try_from(surface)
                             .map_err(|_| "the snapshot is not an image".to_string())?;
+                        let image = downscale(image)?;
                         let mut data = Vec::new();
                         image
                             .write_to_png(&mut data)
@@ -219,5 +268,57 @@ mod platform {
 
     pub fn capture(_webview: tauri::webview::PlatformWebview, send: super::Responder) {
         send(Err("screenshots are not available on this system".into()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_responder_answers_once_and_ignores_later_calls() {
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        let respond = once(sender);
+        let again = respond.clone();
+        respond(Ok(Shot {
+            mime: "image/png",
+            data: vec![1],
+        }));
+        again(Err("late".into()));
+        let first = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(first.data, vec![1]);
+    }
+
+    #[test]
+    fn data_urls_carry_the_mime_and_respect_the_size_cap() {
+        let jpeg = Shot {
+            mime: "image/jpeg",
+            data: vec![0xff, 0xd8],
+        };
+        assert_eq!(to_data_url(&jpeg).unwrap(), "data:image/jpeg;base64,/9g=");
+        let png = Shot {
+            mime: "image/png",
+            data: vec![0x89],
+        };
+        assert!(
+            to_data_url(&png)
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+        let huge = Shot {
+            mime: "image/png",
+            data: vec![0; MAX_BYTES + 1],
+        };
+        assert_eq!(to_data_url(&huge), Err("screenshot_too_large"));
+        let empty = Shot {
+            mime: "image/png",
+            data: vec![],
+        };
+        assert_eq!(to_data_url(&empty), Err("screenshot_empty"));
+        let other = Shot {
+            mime: "image/gif",
+            data: vec![1],
+        };
+        assert_eq!(to_data_url(&other), Err("screenshot_format"));
     }
 }

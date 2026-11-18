@@ -189,6 +189,10 @@ fn is_private_name(host: &str) -> bool {
 
 fn is_private_v4(ip: Ipv4Addr) -> bool {
     let [a, b, ..] = ip.octets();
+    // 198.18.0.0/15 (benchmarking, used by some proxies/VPNs locally)
+    if a == 198 && (b == 18 || b == 19) {
+        return true;
+    }
     ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
@@ -204,13 +208,25 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_private_v4(v4);
     }
-    let first = ip.segments()[0];
+    let seg = ip.segments();
+    // ::a.b.c.d (deprecated IPv4-compatible), 64:ff9b::/96 (NAT64) and
+    // 2002::/16 (6to4) all carry an IPv4 address that may be local: treat
+    // them as local network outright.
+    if (seg[..6] == [0, 0, 0, 0, 0, 0] && !ip.is_loopback() && !ip.is_unspecified())
+        || seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0]
+        || seg[0] == 0x2002
+    {
+        return true;
+    }
+    let first = seg[0];
     ip.is_loopback()
         || ip.is_unspecified()
         // fc00::/7 unique local
         || (first & 0xfe00) == 0xfc00
         // fe80::/10 link local
         || (first & 0xffc0) == 0xfe80
+        // fec0::/10 deprecated site local
+        || (first & 0xffc0) == 0xfec0
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
@@ -327,6 +343,12 @@ mod tests {
             "http://[fd00::1]",
             "http://[fe80::1]",
             "http://[::ffff:192.168.0.1]",
+            "http://[::192.168.0.1]",
+            "http://[64:ff9b::c0a8:1]",
+            "http://[2002:c0a8:101::1]",
+            "http://[fec0::1]",
+            "http://198.18.0.1",
+            "http://198.19.255.1",
             "http://router",
             "http://nas.local",
             "http://printer.lan",

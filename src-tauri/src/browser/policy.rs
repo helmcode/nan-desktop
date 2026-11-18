@@ -6,8 +6,10 @@
 //!    action on each site shows an inline card; approving remembers the
 //!    site for that conversation (until the app restarts or the account
 //!    changes). When every working folder of the conversation is in
-//!    `allow` mode, public sites run without a prompt. Local-network
-//!    addresses ALWAYS ask once, in every mode.
+//!    `allow` mode, public sites run without a prompt (re-evaluated on every
+//!    action, never remembered, so a folder switched back to `ask` takes
+//!    effect at once). Local-network addresses ask in every mode, once per
+//!    conversation.
 //! 2. **Secrets are never typed by the agent.** Password, verification
 //!    code and payment-card fields are blocked for `browser_type` in every
 //!    mode: the user fills them in themselves in the visible window.
@@ -218,7 +220,9 @@ pub fn sensitive_action(description: &Description, submits: bool) -> Option<Sens
     if label_says(label, PAY_LABELS) {
         return Some(Sensitive::Payment);
     }
-    if submits && label_says(label, LOGIN_LABELS) {
+    // A sign-in button on a page with a password field asks even when it
+    // is not a form submit (sign-in buttons wired with scripts).
+    if (submits || description.page_has_password) && label_says(label, LOGIN_LABELS) {
         return Some(Sensitive::Login);
     }
     None
@@ -425,6 +429,15 @@ mod tests {
             ),
             Gate::AskSensitive(Sensitive::Login)
         );
+        // A scripted sign-in button on a page with a password field asks.
+        let scripted = Description {
+            page_has_password: true,
+            ..description("Sign in", false, vec![])
+        };
+        assert_eq!(
+            submit_gate(&scripted, false),
+            Gate::AskSensitive(Sensitive::Login)
+        );
         // Plain search submit: no prompt.
         assert_eq!(
             submit_gate(
@@ -447,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn sites_ask_once_per_conversation_and_private_ones_always_ask() {
+    fn sites_ask_once_per_conversation_and_local_network_asks_in_every_mode() {
         assert_eq!(
             site_gate(false, false, false),
             Gate::AskSite { private: false }

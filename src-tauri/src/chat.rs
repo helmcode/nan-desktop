@@ -1451,9 +1451,7 @@ async fn run_chat_stream(
         }
         // Live request only (not in the stored trace: images stay out of
         // the device-local replay).
-        for image in &screenshots {
-            messages.push(crate::browser::screenshot_message(image));
-        }
+        crate::browser::attach_screenshots(&mut messages, &screenshots);
         // The round is complete (every call has its result): keep it for
         // the next turns. Written per round so a stopped turn keeps the
         // rounds that finished; only the newest rounds within the replay
@@ -2655,6 +2653,23 @@ mod tests {
                 .unwrap_or_default()
                 .contains("PDF"),
             "the model learns it can build binary artifacts"
+        );
+    }
+
+    #[test]
+    fn a_screenshot_never_reaches_the_stored_trace() {
+        let calls = vec![ToolCall {
+            id: "c1".into(),
+            name: "browser_screenshot".into(),
+            arguments: "{}".into(),
+        }];
+        let result = crate::browser::tools::ok_page(crate::browser::SCREENSHOT_SUMMARY, None);
+        let trace = turn::trace_round(&calls, &[result]);
+        let json = serde_json::to_string(&trace).unwrap();
+        assert!(!json.contains("data:image"));
+        assert!(
+            json.contains("only the newest screenshot")
+                || json.contains("Only the newest screenshot")
         );
     }
 

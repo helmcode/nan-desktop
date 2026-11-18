@@ -247,9 +247,10 @@ impl ToolOutcome {
 }
 
 /// Classify a tool result (the JSON fed back to the model) WITHOUT keeping
-/// any of it: `{"ok": false, "error": "declined"}` is `denied`, any other
-/// `ok: false` is `error`, `timed_out: true` is `timeout`, anything else
-/// (including web search's result list) is `ok`.
+/// any of it, checked in this order: `timed_out: true` is `timeout` (even
+/// with `ok: false`, as browser timeouts report), then
+/// `{"ok": false, "error": "declined"}` is `denied`, any other `ok: false`
+/// is `error`, anything else (including web search's result list) is `ok`.
 pub fn tool_outcome_from_result(content: &str) -> ToolOutcome {
     let Ok(Value::Object(map)) = serde_json::from_str::<Value>(content) else {
         return ToolOutcome::Ok;
