@@ -1402,6 +1402,9 @@ async fn run_chat_stream(
     // A vision model rejected an image itself (400): retried once with the
     // text stand-ins instead of the image parts.
     let mut images_dropped = false;
+    // The images of that request: flagged only once the stand-in retry
+    // gets past the 400 (otherwise the image was not the cause).
+    let mut pending_rejected: Option<Vec<(i64, String)>> = None;
 
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
@@ -1456,6 +1459,11 @@ async fn run_chat_stream(
                 }
             };
             let status = response.status().as_u16();
+            if let Some(images) = rejection_to_persist(&mut pending_rejected, status) {
+                // Remembered: later turns send these images as stand-ins
+                // instead of failing and retrying every time.
+                let _ = chat_store::mark_images_vision_rejected(&conn, &images);
+            }
             if status != 400 {
                 if !(200..300).contains(&status) {
                     failed = Some(classify_chat_status(status));
@@ -1465,10 +1473,7 @@ async fn run_chat_stream(
             }
             if !images_dropped && crate::attachments::has_media_parts(&messages) {
                 images_dropped = true;
-                // Remembered: later turns send these images as stand-ins
-                // instead of failing and retrying every time.
-                let _ =
-                    chat_store::mark_images_vision_rejected(&conn, &turn::real_image_ids(&rows));
+                pending_rejected = Some(turn::real_image_ids(&rows));
                 plain_history = request_history(&rows, false, None);
                 let history = if traces_dropped {
                     plain_history.clone()
@@ -1712,6 +1717,18 @@ fn request_history(
         );
     }
     history
+}
+
+/// After the stand-in retry: the images to flag `vision_rejected`. Only
+/// when that retry got past the 400 (any other status) were the images the
+/// cause; a second 400 means something else was wrong, nothing is flagged.
+/// The pending set is consumed either way.
+pub fn rejection_to_persist(
+    pending: &mut Option<Vec<(i64, String)>>,
+    status: u16,
+) -> Option<Vec<(i64, String)>> {
+    let images = pending.take()?;
+    (status != 400 && !images.is_empty()).then_some(images)
 }
 
 /// `messages` with its first `prefix_len` entries (system prompt, skill,
@@ -2661,6 +2678,26 @@ mod tests {
                 .contains("[Image: scan.png.")
         );
         assert_eq!(retried[4]["tool_call_id"], "c1");
+    }
+
+    #[test]
+    fn images_are_flagged_rejected_only_when_the_stand_in_retry_gets_past_the_400() {
+        let images = vec![(1, "i".to_string())];
+        // Nothing pending: nothing to flag.
+        assert_eq!(rejection_to_persist(&mut None, 200), None);
+        // The retry succeeded (or failed for another reason): flag them.
+        for status in [200, 429, 500] {
+            let mut pending = Some(images.clone());
+            assert_eq!(
+                rejection_to_persist(&mut pending, status),
+                Some(images.clone())
+            );
+            assert_eq!(pending, None);
+        }
+        // A second 400: the image was not the cause; nothing flagged.
+        let mut pending = Some(images.clone());
+        assert_eq!(rejection_to_persist(&mut pending, 400), None);
+        assert_eq!(pending, None, "consumed either way");
     }
 
     #[test]
