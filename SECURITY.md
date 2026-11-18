@@ -212,6 +212,8 @@ durations and fixed lists; tests pin every builder):
 | `turn_end` | `reason` (`completed`, `tool_cap`, `stream_cut`, `length`, `interrupted`, `user_stop`, `error`), `error_kind` (the classified kind for `error` and `interrupted`, else null), `rounds`, `tool_calls`, `duration_ms`, `model` (only ids from the app's built-in model list, else `other`), `continued` (bool) |
 | `tool_call` | `tool` (only names from the app's fixed tool list, else `unknown`), `outcome` (`ok`, `error`, `timeout`, `denied`), `duration_ms` |
 | `error_shown` | `surface` (`chat`, `images`, `sign_in`, `memory`), `kind` (the classified error kind, e.g. `rate_limited`, `network`) |
+| `attachment_added` | `kind` (`image`, `pdf`, `docx`, `sheet`, `text`, `other`), `count` (how many files of that kind one sent message carried; one event per kind) |
+| `vision_routed` | `from_model`, `to_model` (only ids from the app's built-in model list, else `other`): a reply with images went to the model that can see them because the selected one cannot |
 | `crash` | `source` (`rust_panic`, `renderer`), `location` (Rust: `file:line` where the panic happened, the app's or a library's source file, build-machine path prefixes removed; renderer: the error name, only standard error classes such as `TypeError` or the `typeof` of a non-Error rejection, anything else is sent as `Error`) |
 
 **Never sent:** message text, prompts, replies, file names or contents,
@@ -243,6 +245,40 @@ install (counted in memory, saved at each flush and on exit), and at most
 per 24 h and answer `202` with `dropped`; the app treats any `202` as
 delivered and never retries it. Automatic and "Continue" turns both
 report `continued: true`.
+
+## Chat attachments
+
+Files attached to a message (`src-tauri/src/attachments.rs`):
+
+- **Who chooses the file.** The paperclip opens the native file dialog
+  from the Rust core, and files dropped on the window are read from the
+  window's own drop event in the core; the renderer never names a path.
+  A pasted image is bytes the renderer already holds (images only).
+  Any file the user explicitly picks or drops can be attached, except the
+  app's own data folder and the always-refused sensitive locations
+  (credential stores, key files, shell startup files), whatever the folder
+  permissions say. Size caps are checked before reading.
+- **Images** are decoded with a pixel cap (decompression bombs are
+  refused), downscaled to 1568 px on the long side and re-encoded as JPEG
+  under the app's images folder. They are sent to the model as images only
+  when the model accepts images (`src-tauri/chat-models.json`, `vision`);
+  every request body is checked right before it is sent and a model that
+  does not accept images never receives an image part. For text-only
+  models an image becomes `[Image: <name> (<description>)]`; the short
+  description comes from one small request to the vision model when the
+  image is sent, using the same inference key as the chat.
+- **Documents** are copied to a private staging folder (outside the
+  folder the window can load files from), read back once by the window to
+  extract their text locally (pdf.js, mammoth, SheetJS) and deleted when
+  the message is sent. The extracted text is capped (50,000 characters per
+  file, 120,000 per message, with a note to the model when cut) and stored
+  with the message on this device so the history can replay it. The window
+  never receives the stored text again.
+- **Account memory** never uploads attachment bytes or extracted text: the
+  synced copy of the message is its text plus one placeholder line per
+  attachment (`[Attached file: <name>]`, `[Image: <name> (<description>)]`).
+- **Cleanup.** Unsent staged documents are deleted after 24 h; unsent or
+  deleted images go with the startup sweep of unreferenced images.
 
 ## Tool output kept for continuity
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### New
+- Adjuntar archivos al mensaje: boton de clip en el cuadro de texto, arrastrar archivos a la ventana o pegar una captura. Se ven como fichas que puedes quitar antes de enviar (hasta 10 por mensaje; imagenes de hasta 10 MB y documentos de hasta 20 MB).
+- Los PDF, Word, hojas de calculo (xlsx, xls, csv) y archivos de texto o codigo se leen en tu equipo y el asistente recibe su texto. Si un documento es muy largo, solo se usa el principio y se indica en la ficha.
+- Las imagenes se reducen antes de enviarlas. Si el modelo elegido no puede ver imagenes, esa respuesta la da automaticamente un modelo que si puede; tu eleccion de modelo no cambia y el siguiente mensaje sin imagenes vuelve a tu modelo.
+- Los mensajes enviados muestran sus imagenes y documentos, tambien al volver a abrir la conversacion.
+
+### Changed
+- Los archivos adjuntos se quedan en este equipo: la memoria de tu cuenta solo guarda una linea con el nombre de cada archivo (y una descripcion breve de cada imagen), nunca su contenido.
+- Telemetria: dos eventos nuevos sin contenido, `attachment_added` (tipo de archivo y cuantos) y `vision_routed` (de que modelo a que modelo se envio una respuesta con imagenes). Detalle en SECURITY.md.
+
 ## 0.2.13 - 2026-11-17 - El asistente termina lo que empieza
 
 ### Fixes

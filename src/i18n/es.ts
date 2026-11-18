@@ -671,4 +671,35 @@ export const es: Strings = {
       revoked_notice: (title: string) => `${title} ya no está compartido.`,
     },
   },
+  attachments: {
+    attach: "Adjuntar archivos",
+    trayLabel: "Archivos adjuntos a este mensaje",
+    sentLabel: "Archivos adjuntos",
+    remove: (name: string) => `Quitar ${name}`,
+    reading: "Leyendo…",
+    dropHint: "Suelta los archivos aquí para adjuntarlos",
+    pastedImage: "Imagen pegada",
+    truncated: "Solo se ha usado el principio",
+    kinds: {
+      image: "Imagen",
+      pdf: "PDF",
+      docx: "Word",
+      sheet: "Hoja de cálculo",
+      text: "Texto",
+      other: "Archivo",
+    },
+    errors: {
+      too_many: "Puedes adjuntar hasta 10 archivos por mensaje.",
+      too_large: (name: string) =>
+        `«${name}» es demasiado grande. Las imágenes pueden ocupar hasta 10 MB y los documentos hasta 20 MB.`,
+      total_too_large: "Estos archivos ocupan demasiado juntos. Quita alguno y vuelve a intentarlo.",
+      unsupported: (name: string) =>
+        `No puedo leer «${name}». Prueba con una imagen, un PDF, un Word, una hoja de cálculo o un archivo de texto.`,
+      unreadable: (name: string) => `No he podido abrir «${name}». Puede que esté dañado.`,
+      not_allowed: (name: string) => `«${name}» no se puede adjuntar, para proteger tu equipo.`,
+      read_failed: (name: string) => `No he podido leer el texto de «${name}».`,
+      no_text: (name: string) => `No he encontrado texto en «${name}». Se enviará sin él.`,
+      generic: "No se pudo adjuntar el archivo. Vuelve a intentarlo.",
+    },
+  },
 };

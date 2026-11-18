@@ -27,6 +27,8 @@ import {
 import { stripToolMarkup } from "./chat/toolMarkup";
 import { AllowNudgeCard } from "./components/AllowNudgeCard";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { AttachmentTray, MessageAttachments, attachProblemText } from "./components/Attachments";
+import { useComposerAttachments } from "./chat/useComposerAttachments";
 import { ChatImage } from "./components/ChatImage";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FolderPicker } from "./components/FolderPicker";
@@ -75,6 +77,7 @@ import {
   IconGlobe,
   IconMemory,
   IconMic,
+  IconPaperclip,
   IconPanel,
   IconPencil,
   IconImage,
@@ -914,6 +917,17 @@ function ChatShell({
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Composer attachments (paperclip, drop on the window, pasted images).
+  // Attaching leaves image mode: files go with a chat message.
+  const attach = useComposerAttachments({
+    enabled: view === "chat",
+    pastedImageName: t.attachments.pastedImage,
+    onAdded: () => {
+      const key = activeConvRef.current ?? NEW_CHAT_KEY;
+      setImageModes((prev) => (prev.has(key) ? withoutKey(prev, key) : prev));
+    },
+  });
 
   const refreshConversations = useCallback(async (): Promise<ConversationView[]> => {
     const profileId = activeProfileRef.current;
@@ -1814,7 +1828,13 @@ function ChatShell({
   // `continuation` marks the "Continue" button of an unfinished turn.
   const send = useCallback(async (override?: string, continuation = false): Promise<boolean> => {
     const text = (override ?? composer).trim();
-    if (!text || streamingActive) return false;
+    // Attachments go with what the user typed, never with a fixed text.
+    const withFiles = override === undefined && attach.items.length > 0;
+    if ((!text && !withFiles) || streamingActive) return false;
+    if (withFiles && attach.reading) return false;
+    const attachments = withFiles ? attach.payload() : [];
+    const shownAttachments = withFiles ? attach.asMessageAttachments() : [];
+    const takenAttachments = withFiles ? attach.takeAll() : [];
     // Any send replaces a pending automatic continuation.
     setAutoRetryConvId(null);
     setSessionExpired(false);
@@ -1841,6 +1861,7 @@ function ChatShell({
           partial: false,
           media_path: null,
           sources: [],
+          attachments: shownAttachments,
         },
       ]);
       if (override === undefined) setComposer("");
@@ -1850,7 +1871,9 @@ function ChatShell({
       // Round 5: a new chat is listed (streaming) right away, so switching
       // away mid-reply never hides it; the refresh after `chat_send` swaps
       // in the core's stored title and ordering.
-      setConversations((prev) => withConversation(prev, id, titleFromFirstMessage(text)));
+      setConversations((prev) =>
+        withConversation(prev, id, titleFromFirstMessage(text || (shownAttachments[0]?.name ?? ""))),
+      );
       await sendChat({
         conversationId: id,
         model,
@@ -1858,10 +1881,33 @@ function ChatShell({
         grantIds,
         ...(skillId ? { skillId } : {}),
         ...(continuation ? { continuation: true } : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
       });
       void refreshConversations();
       return true;
     } catch (err) {
+      // Nothing was sent: give the files back to the composer.
+      if (takenAttachments.length > 0) {
+        const refused = String(err).startsWith("attachments:");
+        attach.restore(takenAttachments, refused ? String(err).slice("attachments:".length) : undefined);
+        // The core refused the files before storing anything: the text
+        // comes back too and the optimistic bubble goes away.
+        if (refused) {
+          if (override === undefined) setComposer(text);
+          if (conversationId !== null) {
+            const id = conversationId;
+            setStreamingIds((prev) => withoutKey(prev, id));
+            setDrafts((prev) => {
+              const next = new Map(prev);
+              next.delete(id);
+              return next;
+            });
+            void loadMessages(id);
+          }
+          void refreshConversations();
+          return false;
+        }
+      }
       // The skill was deleted elsewhere: nothing was sent or stored. Turn it
       // off and give the text back so the user can resend.
       if (skillId && String(err).startsWith("skill:")) {
@@ -1902,7 +1948,7 @@ function ChatShell({
       void refreshConversations();
       return false;
     }
-  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary]);
+  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary, attach]);
 
   const sendImage = useCallback(async (): Promise<void> => {
     const prompt = composer.trim();
@@ -2209,7 +2255,8 @@ function ChatShell({
     if (m.role !== "assistant") {
       return (
         <article className="msg msg-user">
-          <p className="msg-user-text">{m.content}</p>
+          {m.attachments && m.attachments.length > 0 && <MessageAttachments attachments={m.attachments} />}
+          {m.content.trim().length > 0 && <p className="msg-user-text">{m.content}</p>}
         </article>
       );
     }
@@ -2741,7 +2788,15 @@ function ChatShell({
                   />
                 </div>
               )}
-              <div className={`composer-box${imageMode ? " image-mode" : ""}`}>
+              <div
+                className={`composer-box${imageMode ? " image-mode" : ""}${attach.dragging ? " drop-target" : ""}`}
+              >
+                {attach.dragging && (
+                  <p className="drop-hint" role="status">
+                    {t.attachments.dropHint}
+                  </p>
+                )}
+                <AttachmentTray items={attach.items} onRemove={attach.remove} disabled={composerBusy} />
                 <textarea
                   ref={composerRef}
                   className="composer-input"
@@ -2752,6 +2807,7 @@ function ChatShell({
                     setPickerIndex(0);
                     if (!value.startsWith("/")) setSlashDismissed(false);
                   }}
+                  onPaste={attach.paste}
                   onKeyDown={(e) => {
                     if (pickerKey(e)) return;
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -2790,6 +2846,18 @@ function ChatShell({
                           ))}
                         </select>
                       </label>
+                    )}
+                    {!imageMode && (
+                      <button
+                        type="button"
+                        className="icon-btn attach-btn"
+                        aria-label={t.attachments.attach}
+                        title={t.attachments.attach}
+                        onClick={() => void attach.pick()}
+                        disabled={composerBusy}
+                      >
+                        <IconPaperclip size={18} />
+                      </button>
                     )}
                     {!imageMode && (
                       <button
@@ -2849,7 +2917,11 @@ function ChatShell({
                         type="button"
                         className="send-btn"
                         onClick={submit}
-                        disabled={composer.trim().length === 0}
+                        disabled={
+                          imageMode
+                            ? composer.trim().length === 0
+                            : (composer.trim().length === 0 && attach.items.length === 0) || attach.reading
+                        }
                         aria-label={imageMode ? t.chat.createImage : t.chat.send}
                         title={imageMode ? t.chat.createImage : t.chat.send}
                       >
@@ -2859,6 +2931,19 @@ function ChatShell({
                   </div>
                 </div>
               </div>
+              {attach.problem && (
+                <p className="composer-hint attach-problem" role="alert">
+                  {attachProblemText(t, attach.problem)}
+                  <button
+                    type="button"
+                    className="attach-problem-x"
+                    aria-label={t.app.cancel}
+                    onClick={attach.dismissProblem}
+                  >
+                    <IconX size={12} />
+                  </button>
+                </p>
+              )}
               {(sttHint || workspaceError) && (
                 <p className="composer-hint" role="status">
                   {sttHint || workspaceError}

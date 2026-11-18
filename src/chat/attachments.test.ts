@@ -1,0 +1,83 @@
+import { describe, expect, it, vi } from "vitest";
+
+const pdf = vi.hoisted(() => ({ destroy: vi.fn(async () => {}) }));
+vi.mock("pdfjs-dist", () => ({
+  GlobalWorkerOptions: {},
+  getDocument: () => ({
+    promise: Promise.resolve({
+      numPages: 2,
+      getPage: async (n: number) => ({
+        getTextContent: async () => ({
+          items: [{ str: `Page ${n} line`, hasEOL: true }, { str: "end" }],
+        }),
+      }),
+    }),
+    destroy: pdf.destroy,
+  }),
+}));
+vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?url", () => ({ default: "/pdf.worker.js" }));
+vi.mock("mammoth", () => {
+  const api = { extractRawText: async () => ({ value: "Word body text" }) };
+  return { ...api, default: api };
+});
+
+import * as XLSX from "xlsx";
+import {
+  MAX_DOC_CHARS,
+  capForCore,
+  clipboardImages,
+  extractText,
+  fileToBase64,
+  formatSize,
+  pastedName,
+} from "./attachments";
+
+describe("attachment helpers", () => {
+  it("formats sizes in plain units with the locale's decimal separator", () => {
+    expect(formatSize(512, "es")).toBe("512 B");
+    expect(formatSize(820 * 1024, "es")).toBe("820 KB");
+    expect(formatSize(3.4 * 1024 * 1024, "es")).toBe("3,4 MB");
+    expect(formatSize(3.4 * 1024 * 1024, "en")).toBe("3.4 MB");
+  });
+
+  it("hands the core at most one character past the cap", () => {
+    expect(capForCore("abc", 5)).toBe("abc");
+    expect(capForCore("abcdefgh", 5)).toBe("abcdef");
+  });
+
+  it("extracts plain text, PDF pages, Word text and every sheet locally", async () => {
+    const enc = new TextEncoder();
+    expect(await extractText("text", enc.encode("hola\u0000 mundo"))).toBe("hola mundo");
+    expect(await extractText("other", enc.encode("{\"a\":1}"))).toBe('{"a":1}');
+    expect(await extractText("pdf", new Uint8Array([1]))).toBe("Page 1 line\nend\n\nPage 2 line\nend");
+    expect(pdf.destroy).toHaveBeenCalled();
+    expect(await extractText("docx", new Uint8Array([1]))).toBe("Word body text");
+    expect(await extractText("image", new Uint8Array([1]))).toBe("");
+
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([["Mes", "Total"], ["Enero", 10]]), "Ventas");
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([["x"]]), "Notas");
+    const bytes = new Uint8Array(XLSX.write(book, { type: "array", bookType: "xlsx" }) as ArrayBuffer);
+    expect(await extractText("sheet", bytes)).toBe("## Sheet: Ventas\nMes,Total\nEnero,10\n\n## Sheet: Notas\nx");
+    expect(await extractText("sheet", enc.encode("a,b\n1,2"))).toBe("a,b\n1,2");
+  });
+
+  it("caps long documents for the core", async () => {
+    const long = new TextEncoder().encode("z".repeat(MAX_DOC_CHARS * 2));
+    expect((await extractText("text", long)).length).toBe(MAX_DOC_CHARS + 1);
+  });
+
+  it("finds pasted images and names them when the clipboard gives no name", async () => {
+    const png = new File([new Uint8Array([137, 80, 78, 71])], "image.png", { type: "image/png" });
+    const txt = new File(["hi"], "a.txt", { type: "text/plain" });
+    const data = { files: [png, txt] } as unknown as DataTransfer;
+    expect(clipboardImages(data)).toEqual([png]);
+    expect(clipboardImages(null)).toEqual([]);
+    expect(pastedName(png, "Imagen pegada")).toBe("Imagen pegada.png");
+    const jpeg = new File([new Uint8Array([1])], "", { type: "image/jpeg" });
+    expect(pastedName(jpeg, "Pasted image")).toBe("Pasted image.jpg");
+    const named = new File([new Uint8Array([1])], "captura.png", { type: "image/png" });
+    expect(pastedName(named, "x")).toBe("captura.png");
+    expect(await fileToBase64(png)).toBe(btoa(String.fromCharCode(137, 80, 78, 71)));
+  });
+});
