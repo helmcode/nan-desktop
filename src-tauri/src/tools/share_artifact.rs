@@ -613,6 +613,21 @@ pub fn display_safe(text: &str) -> String {
     out
 }
 
+/// A Windows verbatim path (`\\?\C:\x`, `\\?\UNC\srv\share\x`, what
+/// `fs::canonicalize` returns there) in its everyday form (`C:\x`,
+/// `\\srv\share\x`), so the approval shows the path the user knows and
+/// it compares with the plain home and temp folders. Other paths unchanged.
+pub fn without_verbatim_prefix(path: &Path) -> std::path::PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    match raw.strip_prefix(r"\\?\") {
+        Some(rest) => std::path::PathBuf::from(rest),
+        None => path.to_path_buf(),
+    }
+}
+
 /// Where a file is, for the approval: see [`ShareAsk::source`]. `canonical`
 /// is the resolved path; the home folder is shown as `~`. Pure.
 pub fn location_of(
@@ -621,6 +636,11 @@ pub fn location_of(
     scratch: Option<&Path>,
     generated: bool,
 ) -> (String, String) {
+    let canonical = &without_verbatim_prefix(canonical);
+    let home = home.map(without_verbatim_prefix);
+    let home = home.as_deref();
+    let scratch = scratch.map(without_verbatim_prefix);
+    let scratch = scratch.as_deref();
     let name = canonical
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -915,6 +935,35 @@ pub(crate) async fn run_model_share(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn windows_verbatim_paths_are_shown_in_their_everyday_form() {
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"\\?\C:\Users\ana\plan.pdf")),
+            PathBuf::from(r"C:\Users\ana\plan.pdf")
+        );
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"\\?\UNC\srv\share\plan.pdf")),
+            PathBuf::from(r"\\srv\share\plan.pdf")
+        );
+        assert_eq!(
+            without_verbatim_prefix(Path::new("/Users/ana/plan.pdf")),
+            PathBuf::from("/Users/ana/plan.pdf")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_canonical_path_still_shows_home_as_tilde() {
+        let (kind, shown) = location_of(
+            Path::new(r"\\?\C:\Users\ana\docs\plan.pdf"),
+            Some(Path::new(r"C:\Users\ana")),
+            None,
+            false,
+        );
+        assert_eq!(kind, "folder");
+        assert_eq!(shown, r"~\docs\plan.pdf");
+    }
     use super::*;
     use crate::tools::grants::{self, ApprovalMode};
     use std::fs;
