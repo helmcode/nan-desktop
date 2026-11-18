@@ -250,6 +250,14 @@ pub fn site_gate(site_approved: bool, allow_mode: bool, private: bool) -> Gate {
     }
 }
 
+/// Whether a site may run without its card because the user chose not to
+/// be asked (the browser permission mode, stored or for this session, or
+/// every folder of the conversation in allow mode). A local-network
+/// address never does. Pure.
+pub fn runs_without_site_card(private: bool, browser_allows: bool, folders_allow: bool) -> bool {
+    !private && (browser_allows || folders_allow)
+}
+
 /// The typing rule, checked before anything else for `browser_type`.
 pub fn typing_gate(field: &FieldFacts) -> Gate {
     match classify_field(field) {
@@ -473,5 +481,29 @@ mod tests {
             Gate::AskSite { private: true }
         );
         assert_eq!(site_gate(true, true, true), Gate::Run);
+    }
+
+    #[test]
+    fn the_browser_permission_skips_only_public_site_cards() {
+        // ask (no folder allow): every new site asks.
+        assert!(!runs_without_site_card(false, false, false));
+        // allow (stored or this session) or every folder allows: public
+        // sites run without the card.
+        assert!(runs_without_site_card(false, true, false));
+        assert!(runs_without_site_card(false, false, true));
+        // A local-network address asks in every mode.
+        for (browser, folders) in [(true, false), (false, true), (true, true)] {
+            assert!(!runs_without_site_card(true, browser, folders));
+            assert_eq!(
+                site_gate(false, runs_without_site_card(true, browser, folders), true),
+                Gate::AskSite { private: true }
+            );
+        }
+        // Typing and submit rules take no mode at all: passwords are never
+        // typed and sign-in still asks, whatever the browser permission.
+        assert_eq!(
+            typing_gate(&field("input", "password")),
+            Gate::Block(FieldClass::Password)
+        );
     }
 }

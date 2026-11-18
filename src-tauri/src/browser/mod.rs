@@ -768,12 +768,18 @@ async fn ask_user(caller: &Caller<'_>, ask: Ask, host: &str) -> bool {
 async fn gate_site(caller: &Caller<'_>, parsed: &url_policy::ParsedUrl) -> bool {
     let state = caller.app.state::<BrowserState>();
     let approved = state.site_approved(caller.conversation_id, &parsed.site);
-    let allow_mode = !parsed.private
-        && crate::tools::conversation_allows_without_asking(
+    // Public sites run without the card when the browser permission mode
+    // (stored or for this session) allows, or when every folder of the
+    // conversation allows. A local-network address always asks.
+    let allow_mode = policy::runs_without_site_card(
+        parsed.private,
+        crate::tools::browser_allows_without_asking(caller.app),
+        crate::tools::conversation_allows_without_asking(
             caller.app,
             caller.profile_id,
             caller.conversation_id,
-        );
+        ),
+    );
     match policy::site_gate(approved, allow_mode, parsed.private) {
         Gate::Run => {
             // Allow mode is NOT remembered: it is re-evaluated on every
