@@ -333,7 +333,10 @@ site rule ran on the page's FINAL address: after a redirect, a link or a
 script that moved the page to another site (or to the local network), that
 site needs its own approval first; if the user declines, the model gets no
 content, only "the page navigated to <host>, which the user did not
-allow".
+allow". After every read and screenshot the core re-reads the window's
+address (never the page's own claim) and drops the result when the page
+moved to another site, or from a public site to a local-network address,
+meanwhile.
 
 **Approval policy.**
 - **Per site, per conversation.** The first action on a site (host, `www.`
@@ -373,9 +376,12 @@ allow".
   `write_file`, `replace_file`, `move_path`, `delete_path` and `save_image`
   ask with an inline card even in folders set to "allow", until the user
   sends their next message in that conversation (a "Continue" does not end
-  it). Reads (`read_file`, `list_files`) stay free. The card says why it
-  asks, and the audit log records "allow mode suspended". Opt-out: Settings,
-  Working folders, "Pedir permiso para comandos y cambios después de navegar
+  it). Reads (`read_file`, `list_files`) stay free. Under a whole-computer
+  grant the question is the native dialog (as for every whole-computer
+  approval). The card or dialog says why it asks, and the audit log records
+  "allow mode suspended" (outcome `asked`). The guard ends only once the
+  user's new message has been saved. Opt-out: Settings,
+  Working folders, "Pedir permiso para órdenes y cambios después de navegar
   por internet" (stored per signed-in user in `tools.json`, like the other
   folder settings). Turning it off is confirmed by a native dialog the app
   window cannot fake. Residual: the next message starts a new task, but the

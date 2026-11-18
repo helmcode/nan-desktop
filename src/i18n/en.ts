@@ -296,7 +296,7 @@ export const en = {
       browser_login: "Check the browser window before allowing it.",
       browser_payment: "Check the browser window before allowing it.",
     } as Record<string, string>,
-    afterBrowsing: "Asking because the assistant visited web pages in this task.",
+    afterBrowsing: "Asked because the assistant visited web pages in this task.",
     to: "to",
     inFolder: "in",
     changes: "See the changes",

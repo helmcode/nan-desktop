@@ -846,7 +846,43 @@ async fn read_checked(caller: &Caller<'_>, summary: &str) -> String {
     if !gate_site(caller, &parsed).await {
         return navigated_unapproved(&parsed.host);
     }
-    page_result(summary, read_page(caller.app, &window).await)
+    let page = read_page(caller.app, &window).await;
+    // The page may have moved while it was being read: only content of the
+    // site that was gated is returned (the window's URL, never the page's
+    // own claim).
+    if let Err(error) = still_on(caller.app, &parsed) {
+        return error;
+    }
+    page_result(summary, page)
+}
+
+/// Same site and same network class (a public site that moved to a
+/// local-network address is a different site). Pure.
+pub fn same_site(before: &url_policy::ParsedUrl, after: &url_policy::ParsedUrl) -> bool {
+    before.site == after.site && before.private == after.private
+}
+
+/// The page moved to another site while it was being read: its content
+/// is dropped. Pure.
+pub fn moved_during_read(host: &str) -> String {
+    tools::error(
+        "page_moved",
+        &format!(
+            "The page moved to {host} while it was being read, so its content is not shown. \
+             Call browser_read to look at it (it may need the user's approval)."
+        ),
+    )
+}
+
+/// Check, from the window itself, that the browser still shows the gated
+/// site after a read or a screenshot.
+fn still_on(app: &AppHandle, gated: &url_policy::ParsedUrl) -> Result<(), String> {
+    let (_, now) = current_page(app)?;
+    if same_site(gated, &now) {
+        Ok(())
+    } else {
+        Err(moved_during_read(&now.host))
+    }
 }
 
 /// Read the page and format it for the model.
@@ -901,7 +937,37 @@ pub(crate) async fn run_model_tool(
             "This model cannot see images. Use browser_read to read the page as text.",
         ));
     }
-    let state = app.state::<BrowserState>();
+    let caller = Caller {
+        app,
+        profile_id,
+        conversation_id,
+    };
+    drive(
+        &app.state::<BrowserState>(),
+        &app.state::<crate::tools::ToolsState>(),
+        conversation_id,
+        || emit_state(app),
+        async {
+            match run_call(&caller, call).await {
+                Ok(run) => run,
+                Err(content) => ToolRun::text(content),
+            }
+        },
+    )
+    .await
+}
+
+/// The frame of every browser call, without the window (testable): the
+/// user-closed check, one action at a time, the driving marker, the
+/// post-browsing mark (set BEFORE the action, so a call that fails still
+/// counts) and the blocked-download note.
+async fn drive(
+    state: &BrowserState,
+    tools_state: &crate::tools::ToolsState,
+    conversation_id: i64,
+    on_driving: impl FnOnce(),
+    action: impl std::future::Future<Output = ToolRun>,
+) -> ToolRun {
     if state.closed_by_user() {
         return ToolRun::text(user_closed_error());
     }
@@ -918,21 +984,12 @@ pub(crate) async fn run_model_tool(
         },
     };
     if state.set_agent(conversation_id) {
-        emit_state(app);
+        on_driving();
     }
-    let caller = Caller {
-        app,
-        profile_id,
-        conversation_id,
-    };
     // From here on page content may reach the model: commands and file
     // changes of this conversation ask until the user's next message.
-    app.state::<crate::tools::ToolsState>()
-        .mark_browsed(conversation_id);
-    let mut run = match run_call(&caller, call).await {
-        Ok(run) => run,
-        Err(content) => ToolRun::text(content),
-    };
+    tools_state.mark_browsed(conversation_id);
+    let mut run = action.await;
     if state.take_download_blocked() {
         run.content = with_download_note(&run.content);
     }
@@ -1096,6 +1153,7 @@ async fn run_call(caller: &Caller<'_>, call: BrowserCall) -> Result<ToolRun, Str
                 .await
                 .map_err(|_| BrowserError::Timeout.for_model())?
                 .map_err(|message| tools::error("screenshot_unavailable", &message))?;
+            still_on(app, &parsed)?;
             let url = screenshot::to_data_url(&bytes).map_err(|kind| {
                 tools::error(
                     kind,
@@ -1300,6 +1358,52 @@ mod tests {
         state.set_awaiting(None);
         assert!(!state.awaiting_other(2));
         assert!(busy_error().contains("browser_busy"));
+    }
+
+    #[test]
+    fn a_failed_browser_call_still_marks_the_conversation_as_browsed() {
+        let state = BrowserState::default();
+        let tools_state = crate::tools::ToolsState::default();
+        let mut driving = false;
+        let run = tauri::async_runtime::block_on(drive(
+            &state,
+            &tools_state,
+            7,
+            || driving = true,
+            async { ToolRun::text(tools::error("timeout", "slow page")) },
+        ));
+        assert!(run.content.contains("timeout"));
+        assert!(driving);
+        assert!(tools_state.browsed(Some(7)), "a failed call still counts");
+        // A user-closed browser refuses before anything runs.
+        state.closed();
+        let refused =
+            tauri::async_runtime::block_on(drive(&state, &tools_state, 8, || {}, async {
+                unreachable!("must not run")
+            }));
+        assert!(refused.content.contains("user_closed_browser"));
+        assert!(!tools_state.browsed(Some(8)));
+    }
+
+    #[test]
+    fn a_page_that_moves_while_being_read_is_dropped() {
+        let public = final_page("https://example.com/a").unwrap();
+        assert!(same_site(
+            &public,
+            &final_page("https://www.example.com/b").unwrap()
+        ));
+        assert!(
+            !same_site(&public, &final_page("http://192.168.1.1/").unwrap()),
+            "public to private"
+        );
+        assert!(!same_site(
+            &public,
+            &final_page("https://evil.example/").unwrap()
+        ));
+        let moved: serde_json::Value =
+            serde_json::from_str(&moved_during_read("evil.example")).unwrap();
+        assert_eq!(moved["error"], "page_moved");
+        assert!(moved.get("page").is_none());
     }
 
     #[test]

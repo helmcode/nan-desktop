@@ -419,6 +419,12 @@ pub fn tool_definitions(workspace: Option<&tools::Workspace>) -> Vec<serde_json:
     defs
 }
 
+/// Whether a send is a new message from the user (it ends the in-app
+/// browser guards) rather than a "continue" of the previous reply. Pure.
+pub fn send_starts_new_task(continuation: Option<bool>) -> bool {
+    continuation != Some(true)
+}
+
 /// Every tool offered for one reply with `model`: [`tool_definitions`]
 /// plus the in-app browser tools (`browser_screenshot` only for a model
 /// that can see images).
@@ -1033,14 +1039,6 @@ pub fn chat_send(
     if content.trim().is_empty() {
         return Err("message is empty".to_string());
     }
-    // A new message from the user (not a "continue"): a browser they
-    // closed may be used again.
-    if continuation != Some(true) {
-        crate::browser::user_message_sent(&app);
-        // ...and the browsing guard of this conversation's task ends.
-        app.state::<tools::ToolsState>()
-            .clear_browsed(conversation_id);
-    }
     // Privacy fix: the active user's realm only.
     let dir = crate::realm::active_dir(&app)?;
     let conn = chat_store::open_db(&dir)?;
@@ -1082,6 +1080,15 @@ pub fn chat_send(
     chat_store::insert_message(&conn, conversation_id, "user", &content, None)
         .map_err(|err| err.to_string())?;
     chat_store::touch_conversation(&conn, conversation_id).map_err(|err| err.to_string())?;
+    // Only once the user's message is persisted (a send that failed before
+    // this point changes nothing): a new message (not a "continue") lets a
+    // browser the user closed be used again and ends this conversation's
+    // post-browsing guard.
+    if send_starts_new_task(continuation) {
+        crate::browser::user_message_sent(&app);
+        app.state::<tools::ToolsState>()
+            .clear_browsed(conversation_id);
+    }
 
     let state = app.state::<ChatState>();
     // Cancel-safe: reserve (aborting the previous stream for this
@@ -2657,6 +2664,13 @@ mod tests {
                 .contains("PDF"),
             "the model learns it can build binary artifacts"
         );
+    }
+
+    #[test]
+    fn only_a_new_user_message_ends_the_browser_guards() {
+        assert!(send_starts_new_task(None));
+        assert!(send_starts_new_task(Some(false)));
+        assert!(!send_starts_new_task(Some(true)), "a continue keeps them");
     }
 
     #[test]

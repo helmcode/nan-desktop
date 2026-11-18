@@ -34,7 +34,7 @@ const workspace: Workspace = {
   removeGrant: vi.fn(async () => {}),
 };
 
-const TITLE = "Pedir permiso para comandos y cambios después de navegar por internet";
+const TITLE = "Pedir permiso para órdenes y cambios después de navegar por internet";
 
 async function mount(settings: Record<string, unknown>, setGuard: () => unknown = () => undefined) {
   resetTauri({

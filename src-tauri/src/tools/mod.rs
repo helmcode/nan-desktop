@@ -2929,13 +2929,37 @@ pub fn route_after_browsing(
     action_kind: &str,
     browsed: bool,
     guard_on: bool,
+    computer_wide: bool,
 ) -> ApprovalRoute {
     if route == ApprovalRoute::Auto && browsed && guard_on && guarded_after_browsing(action_kind) {
-        ApprovalRoute::Inline
+        // Same rule as `approval_route`: a whole-computer grant asks
+        // through the native dialog the renderer cannot fake.
+        if computer_wide {
+            ApprovalRoute::Native
+        } else {
+            ApprovalRoute::Inline
+        }
     } else {
         route
     }
 }
+
+/// Whether any end of the proposal is governed by a computer-wide grant.
+fn touches_computer_wide(store: &GrantsStore, proposal: &PendingProposal) -> bool {
+    [
+        proposal.grant_id.as_deref(),
+        proposal.dest_grant_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|id| store.grant_by_id(id))
+    .any(|grant| grant.scope == GrantScope::ComputerWide)
+}
+
+/// The sentence the native dialog adds when only the browsing guard made
+/// it ask.
+pub const AFTER_BROWSING_NOTE: &str =
+    "Se pregunta porque el asistente ha visitado páginas web en esta tarea.";
 
 /// The approval request card for a stored proposal (built by the core).
 pub fn approval_request(proposal: &PendingProposal) -> ApprovalRequest {
@@ -3017,6 +3041,7 @@ pub(crate) async fn approve_proposal<A: Approver>(
         proposal.action.kind(),
         state.browsed(proposal.conversation_id),
         store.browser_guard,
+        touches_computer_wide(&store, proposal),
     );
     let after_browsing = base != route;
     let approved = match route {
@@ -3036,11 +3061,15 @@ pub(crate) async fn approve_proposal<A: Approver>(
             true
         }
         ApprovalRoute::Native => {
-            let (title, text) = confirmation_text(
+            let (title, mut text) = confirmation_text(
                 &proposal.action,
                 &proposal.summary,
                 proposal.diff.as_deref(),
             );
+            if after_browsing {
+                audit_after_browsing(dir, proposal)?;
+                text = format!("{text}\n\n{AFTER_BROWSING_NOTE}");
+            }
             let granted = approver.native(title, text).await;
             approver.native_decided(&approval_request(proposal), granted);
             granted
@@ -3050,21 +3079,7 @@ pub(crate) async fn approve_proposal<A: Approver>(
             // The card says why it asks although the folder allows.
             request.after_browsing = after_browsing;
             if after_browsing {
-                audit_event(
-                    dir,
-                    AuditEntry {
-                        ts: audit::timestamp_now_rfc3339(),
-                        event: "approve".into(),
-                        action: proposal.action.kind().into(),
-                        outcome: "ignored".into(),
-                        grant_id: proposal.grant_id.clone(),
-                        profile_id: Some(proposal.profile_id.clone()),
-                        detail: Some(
-                            "allow mode suspended: the assistant browsed the web in this task"
-                                .into(),
-                        ),
-                    },
-                )?;
+                audit_after_browsing(dir, proposal)?;
             }
             approver.inline(request).await
         }
@@ -3077,6 +3092,22 @@ pub(crate) async fn approve_proposal<A: Approver>(
         ));
     }
     Ok(route)
+}
+
+/// Audit that allow mode was suspended by the post-browsing guard.
+fn audit_after_browsing(dir: &Path, proposal: &PendingProposal) -> Result<(), Rejection> {
+    audit_event(
+        dir,
+        AuditEntry {
+            ts: audit::timestamp_now_rfc3339(),
+            event: "approve".into(),
+            action: proposal.action.kind().into(),
+            outcome: "asked".into(),
+            grant_id: proposal.grant_id.clone(),
+            profile_id: Some(proposal.profile_id.clone()),
+            detail: Some("allow mode suspended: the assistant browsed the web in this task".into()),
+        },
+    )
 }
 
 /// Production approver: native dialogs through the dialog plugin, inline
@@ -5160,35 +5191,35 @@ mod tests {
             "save_image",
         ] {
             assert_eq!(
-                route_after_browsing(Auto, kind, true, true),
+                route_after_browsing(Auto, kind, true, true, false),
                 Inline,
                 "{kind}"
             );
             assert_eq!(
-                route_after_browsing(Auto, kind, true, false),
+                route_after_browsing(Auto, kind, true, false, false),
                 Auto,
                 "{kind}: guard off"
             );
             assert_eq!(
-                route_after_browsing(Auto, kind, false, true),
+                route_after_browsing(Auto, kind, false, true, false),
                 Auto,
                 "{kind}: not browsed"
             );
         }
         for kind in ["read_file", "list_files"] {
             assert_eq!(
-                route_after_browsing(Auto, kind, true, true),
+                route_after_browsing(Auto, kind, true, true, false),
                 Auto,
                 "{kind} stays free"
             );
         }
         // Asking routes are never relaxed.
         assert_eq!(
-            route_after_browsing(Native, "run_command", true, false),
+            route_after_browsing(Native, "run_command", true, false, false),
             Native
         );
         assert_eq!(
-            route_after_browsing(Inline, "write_file", false, false),
+            route_after_browsing(Inline, "write_file", false, false, false),
             Inline
         );
     }
@@ -5420,6 +5451,35 @@ mod tests {
         ToolAction::ReadFile {
             path: path_str(path),
         }
+    }
+
+    #[test]
+    fn after_browsing_a_computer_wide_allow_asks_through_the_native_dialog() {
+        assert_eq!(
+            route_after_browsing(ApprovalRoute::Auto, "write_file", true, true, true),
+            ApprovalRoute::Native
+        );
+        assert_eq!(
+            route_after_browsing(ApprovalRoute::Auto, "read_file", true, true, true),
+            ApprovalRoute::Auto
+        );
+        let (home, app_data, _guard) = mixed_computer_wide_layout();
+        let st = state();
+        st.mark_browsed(1);
+        let approver = FakeApprover::answering(true);
+        let (route, _) = run_with(
+            &app_data,
+            &st,
+            &approver,
+            &ToolAction::WriteFile {
+                path: path_str(&home.join("new.txt")),
+                content: "x".into(),
+            },
+        )
+        .expect("asked natively, allowed");
+        assert_eq!(route, ApprovalRoute::Native);
+        assert_eq!(approver.prompts(), (1, 0));
+        assert!(AFTER_BROWSING_NOTE.starts_with("Se pregunta porque"));
     }
 
     #[test]
