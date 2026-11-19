@@ -61,7 +61,7 @@ base64 = "0.23"
 icu_normalizer = "2"
 # Shared skills (S4): content hash of a bundle (share link + the offline
 # cache file name). Already in the tree transitively.
-sha2 = "0.10"
+sha2 = "0.11"
 # Chat attachments (vision): decode PNG/JPEG/WebP/GIF (first frame), downscale
 # to the long-side cap and re-encode as JPEG before an image is sent to the
 # model. Pure Rust codecs only; no default features (no TIFF/AVIF/EXR...).
