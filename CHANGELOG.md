@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- "Permitir sin preguntar" pasa a ser el modo por defecto, a peticion de los primeros testers: preguntar en cada accion resultaba pesado y prefieren activar ellos que les pregunte.
+- Carpetas: en Ajustes el selector "Carpetas nuevas" empieza en "Permitir sin preguntar", y una carpeta anadida desde el chat se anade en ese modo. Despues de elegir la carpeta, el sistema pide una confirmacion. Si la cancelas, la carpeta queda en "Preguntar siempre". Volver a elegir una carpeta que ya tenias no cambia su modo. Las carpetas que ya tenias conservan su modo, y "Todo el equipo" sigue empezando en "Preguntar siempre".
+- Navegador: el selector "Navegador" pasa a "Permitir sin preguntar" en las instalaciones nuevas y, una sola vez, en las que ya existian. Si lo vuelves a poner en "Preguntar siempre", se respeta.
+- En cualquier modo siguen preguntando las direcciones de tu red local, los inicios de sesion, los pagos y compartir enlaces, y el asistente nunca escribe contrasenas, codigos ni datos de tarjeta.
+
 ## 0.2.15 - 2026-11-18 - Comparte hablando y navega sin tantas preguntas
 
 ### New

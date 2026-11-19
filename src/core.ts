@@ -219,7 +219,14 @@ export function onApprovalResolved(handler: (res: ApprovalResolved) => void): Pr
 /// in `tools_grant_list`, the whole-computer grant included (R22).
 export type GrantMode = "ask" | "allow";
 
+/// What a stored grant without a known mode means (the core's default):
+/// always the safe `ask`. Also the whole-computer dialog's starting choice.
 export const DEFAULT_GRANT_MODE: GrantMode = "ask";
+
+/// The starting mode for a folder the user is about to add (0.2.16): early
+/// testers found approving every action tiring and prefer to opt in to
+/// asking. The core still confirms `allow` natively after the picker.
+export const NEW_FOLDER_MODE: GrantMode = "allow";
 
 export function normalizeGrantMode(value: unknown): GrantMode {
   return value === "allow" ? "allow" : "ask";

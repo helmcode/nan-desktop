@@ -156,4 +156,19 @@ describe("workspace modes", () => {
     expect(invokedWith("tools_grant_add")).toEqual([{ profileId: "nan", mode: "allow" }]);
     expect(invokedWith("tools_grant_set_mode")).toEqual([]);
   });
+
+  it("0.2.16: a folder added without a mode (chat picker, Settings default) asks for allow", async () => {
+    resetTauri({ tools_grant_list: () => [], tools_grant_add: () => grant({ id: "g2", mode: "allow" }) });
+    const { result } = renderHook(() => useWorkspace("nan"));
+    await act(async () => {
+      await result.current.pickFolder();
+      await result.current.addFolder();
+      await result.current.addFolder("ask");
+    });
+    expect(invokedWith("tools_grant_add")).toEqual([
+      { profileId: "nan", mode: "allow" },
+      { profileId: "nan", mode: "allow" },
+      { profileId: "nan", mode: "ask" },
+    ]);
+  });
 });

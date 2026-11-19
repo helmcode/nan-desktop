@@ -127,3 +127,18 @@ describe("R22 whole-computer approval mode in Settings", () => {
     expect(within(card).getByText("El asistente puede usar cualquier archivo de tu usuario sin preguntarte.")).toBeTruthy();
   });
 });
+
+describe("0.2.16 new folders allow by default", () => {
+  it("starts the New folders selector on Allow without asking and adds with it", () => {
+    const ws = workspace({ cw: "ask", s: "ask", o: "allow" });
+    renderSettings(ws);
+    const group = screen.getByRole("radiogroup", { name: "New folders" });
+    expect(within(group).getByRole("radio", { name: "Allow without asking" }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: /Add folder/ }));
+    expect(ws.addFolder).toHaveBeenCalledWith("allow");
+    // Choosing ask is still one click away and is what gets sent.
+    fireEvent.click(within(group).getByRole("radio", { name: "Ask every time" }));
+    fireEvent.click(screen.getByRole("button", { name: /Add folder/ }));
+    expect(ws.addFolder).toHaveBeenLastCalledWith("ask");
+  });
+});

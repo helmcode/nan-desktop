@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { grantErrorKind, isComputerWide, type GrantErrorKind } from "./copy";
-import { addGrant, DEFAULT_GRANT_MODE, normalizeGrantMode, setGrantMode, type GrantMode } from "./core";
+import { addGrant, DEFAULT_GRANT_MODE, NEW_FOLDER_MODE, normalizeGrantMode, setGrantMode, type GrantMode } from "./core";
 import type { GrantView } from "./types";
 
 export interface Workspace {
@@ -106,7 +106,7 @@ export function useWorkspace(profileId: string | null): Workspace {
   );
 
   const pickFolder = useCallback(
-    async (mode: GrantMode = DEFAULT_GRANT_MODE): Promise<GrantView | null> => {
+    async (mode: GrantMode = NEW_FOLDER_MODE): Promise<GrantView | null> => {
       if (!profileId) return null;
       // One call: the core applies `mode` (and confirms allow natively).
       return run(() => addGrant(profileId, mode), null);
@@ -115,7 +115,7 @@ export function useWorkspace(profileId: string | null): Workspace {
   );
 
   const addFolder = useCallback(
-    async (mode: GrantMode = DEFAULT_GRANT_MODE): Promise<boolean> => (await pickFolder(mode)) !== null,
+    async (mode: GrantMode = NEW_FOLDER_MODE): Promise<boolean> => (await pickFolder(mode)) !== null,
     [pickFolder],
   );
 

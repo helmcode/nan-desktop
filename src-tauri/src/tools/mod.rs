@@ -2270,9 +2270,11 @@ fn native_confirm(app: &AppHandle, title: &str, text: String, ok: &str, cancel: 
 /// path never crosses the renderer, so a compromised renderer cannot add a
 /// grant by typing a path. Returns None when the user cancels the picker.
 ///
-/// `mode` (S13, optional, default `ask`) picks the approval mode at grant
-/// time; `allow` additionally requires the native confirmation of
-/// [`confirm_allow_mode`] and falls back to `ask` when declined.
+/// `mode` (S13, optional; `ask` when absent, although the UI sends `allow`
+/// for new folders since 0.2.16) picks the approval mode at grant time;
+/// `allow` additionally requires the native confirmation of
+/// [`confirm_allow_mode`] and falls back to `ask` when declined. A folder
+/// that was already granted keeps its stored mode.
 ///
 /// `async` on purpose (P0-3): see the regression note above.
 #[tauri::command]
@@ -2323,6 +2325,12 @@ pub async fn tools_grant_add(
         std::env::home_dir().as_deref(),
     )?;
     let mut store = load_store(&dir)?;
+    // Re-picking a folder that is already granted returns it unchanged: its
+    // stored mode is the user's choice and is never switched from here.
+    let already_granted = store
+        .grants
+        .iter()
+        .any(|grant| grant.profile_id == profile_id && grant.canonical_path == canonical);
     let grant_id = uuid::Uuid::new_v4().to_string();
     let grant = store
         .add_grant(
@@ -2345,7 +2353,7 @@ pub async fn tools_grant_add(
             detail: Some(format!("granted folder {}", canonical.display())),
         },
     )?;
-    if requested_mode == ApprovalMode::Allow {
+    if requested_mode == ApprovalMode::Allow && !already_granted {
         return apply_mode(&app, &dir, &grant.id, ApprovalMode::Allow)
             .await
             .map(Some);
@@ -2694,6 +2702,7 @@ pub(crate) fn apply_browser_mode(
 ) -> Result<(), String> {
     let mut store = grants::load_or_seed(dir)?;
     store.browser_mode = mode;
+    store.browser_mode_promoted = true;
     grants::save(dir, &store)?;
     if mode == ApprovalMode::Ask {
         state.set_browser_session_allow(false);
@@ -3823,6 +3832,14 @@ mod tests {
     }
 
     /// App-data-style dir with one grant "g1" (profile nan) on `folder`.
+    /// Opt this store into the browser's `ask` mode (the default is `allow`
+    /// since 0.2.16): the after-browsing guard only runs there.
+    fn browser_asks(dir: &Path) {
+        let mut store = grants::load_or_seed(dir).expect("load");
+        store.browser_mode = ApprovalMode::Ask;
+        grants::save(dir, &store).expect("save");
+    }
+
     fn granted_dir(folder: &Path) -> (PathBuf, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut store = grants::default_store();
@@ -5304,6 +5321,7 @@ mod tests {
         let (dir, _guard2) = granted_dir(&folder);
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         let st = state();
+        browser_asks(&dir);
         let write = ToolAction::WriteFile {
             path: path_str(&root.join("a.txt")),
             content: "uno".into(),
@@ -5343,9 +5361,10 @@ mod tests {
         let st = state();
         assert_eq!(
             grants::load_or_seed(&dir).unwrap().browser_mode,
-            ApprovalMode::Ask,
-            "ask by default"
+            ApprovalMode::Allow,
+            "allow by default since 0.2.16"
         );
+        browser_asks(&dir);
         apply_browser_mode(&dir, &st, ApprovalMode::Allow).expect("stored");
         st.mark_browsed(1);
         let approver = FakeApprover::answering(false);
@@ -5380,6 +5399,7 @@ mod tests {
         let (dir, _guard2) = granted_dir(&folder);
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         let st = state();
+        browser_asks(&dir);
         let write = ToolAction::WriteFile {
             path: path_str(&root.join("a.txt")),
             content: "uno".into(),
@@ -5608,6 +5628,7 @@ mod tests {
         );
         let (home, app_data, _guard) = mixed_computer_wide_layout();
         let st = state();
+        browser_asks(&app_data);
         st.mark_browsed(1);
         let approver = FakeApprover::answering(true);
         let (route, _) = run_with(
@@ -6873,6 +6894,7 @@ mod tests {
         let (home, app_data, _guard) = computer_wide_layout();
         set_grant_mode(&app_data, "cw", ApprovalMode::Allow);
         let st = state();
+        browser_asks(&app_data);
         st.mark_browsed(4);
         let proposal = propose(
             &app_data,

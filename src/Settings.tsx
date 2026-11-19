@@ -8,7 +8,7 @@ import { BrandMark } from "./brand";
 import type { SettingsSection } from "./components/UserMenu";
 import { UpdateAction } from "./components/UpdateAction";
 import { VOICES, folderName, grantErrorLabel, profileTitle } from "./copy";
-import { DEFAULT_GRANT_MODE, normalizeGrantMode, setBrowserMode, type GrantMode } from "./core";
+import { DEFAULT_GRANT_MODE, NEW_FOLDER_MODE, normalizeGrantMode, setBrowserMode, type GrantMode } from "./core";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { VOICE_UI } from "./flags";
 import { LOCALES, useI18n } from "./i18n";
@@ -57,7 +57,7 @@ export function Settings({
   const [browserBusy, setBrowserBusy] = useState(false);
   const [memoryMode, setMemoryMode] = useState<MemoryMode>("remote");
   const [memoryBusy, setMemoryBusy] = useState(false);
-  const [newFolderMode, setNewFolderMode] = useState<GrantMode>(DEFAULT_GRANT_MODE);
+  const [newFolderMode, setNewFolderMode] = useState<GrantMode>(NEW_FOLDER_MODE);
   const [version, setVersion] = useState("");
   const foldersRef = useRef<HTMLElement | null>(null);
   const memoryRef = useRef<HTMLElement | null>(null);
