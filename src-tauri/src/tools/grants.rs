@@ -132,9 +132,10 @@ pub struct GrantsStore {
     /// are switched to `allow` once on load; a later explicit `ask` sticks.
     #[serde(default)]
     pub browser_mode_promoted: bool,
-    /// Legacy (<= 0.2.14) switch: `browser_guard: false` was "do not ask
-    /// after browsing". Read once by [`parse_store`] to migrate a store with
-    /// no `browser_mode` to `allow`; never written again.
+    /// Legacy (<= 0.2.14) switch (`browser_guard: false` was "do not ask
+    /// after browsing"). Accepted on read and dropped by [`parse_store`]:
+    /// the 0.2.16 promotion to `allow` covers both of its values. Never
+    /// written again.
     #[serde(default, rename = "browser_guard", skip_serializing)]
     pub legacy_browser_guard: Option<bool>,
     #[serde(default)]

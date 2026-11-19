@@ -2270,9 +2270,11 @@ fn native_confirm(app: &AppHandle, title: &str, text: String, ok: &str, cancel: 
 /// path never crosses the renderer, so a compromised renderer cannot add a
 /// grant by typing a path. Returns None when the user cancels the picker.
 ///
-/// `mode` (S13, optional, default `ask`) picks the approval mode at grant
-/// time; `allow` additionally requires the native confirmation of
-/// [`confirm_allow_mode`] and falls back to `ask` when declined.
+/// `mode` (S13, optional; `ask` when absent, although the UI sends `allow`
+/// for new folders since 0.2.16) picks the approval mode at grant time;
+/// `allow` additionally requires the native confirmation of
+/// [`confirm_allow_mode`] and falls back to `ask` when declined. A folder
+/// that was already granted keeps its stored mode.
 ///
 /// `async` on purpose (P0-3): see the regression note above.
 #[tauri::command]
@@ -2323,6 +2325,12 @@ pub async fn tools_grant_add(
         std::env::home_dir().as_deref(),
     )?;
     let mut store = load_store(&dir)?;
+    // Re-picking a folder that is already granted returns it unchanged: its
+    // stored mode is the user's choice and is never switched from here.
+    let already_granted = store
+        .grants
+        .iter()
+        .any(|grant| grant.profile_id == profile_id && grant.canonical_path == canonical);
     let grant_id = uuid::Uuid::new_v4().to_string();
     let grant = store
         .add_grant(
@@ -2345,7 +2353,7 @@ pub async fn tools_grant_add(
             detail: Some(format!("granted folder {}", canonical.display())),
         },
     )?;
-    if requested_mode == ApprovalMode::Allow {
+    if requested_mode == ApprovalMode::Allow && !already_granted {
         return apply_mode(&app, &dir, &grant.id, ApprovalMode::Allow)
             .await
             .map(Some);
