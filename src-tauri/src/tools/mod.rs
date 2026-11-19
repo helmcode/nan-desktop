@@ -2694,6 +2694,7 @@ pub(crate) fn apply_browser_mode(
 ) -> Result<(), String> {
     let mut store = grants::load_or_seed(dir)?;
     store.browser_mode = mode;
+    store.browser_mode_promoted = true;
     grants::save(dir, &store)?;
     if mode == ApprovalMode::Ask {
         state.set_browser_session_allow(false);
@@ -3823,6 +3824,14 @@ mod tests {
     }
 
     /// App-data-style dir with one grant "g1" (profile nan) on `folder`.
+    /// Opt this store into the browser's `ask` mode (the default is `allow`
+    /// since 0.2.16): the after-browsing guard only runs there.
+    fn browser_asks(dir: &Path) {
+        let mut store = grants::load_or_seed(dir).expect("load");
+        store.browser_mode = ApprovalMode::Ask;
+        grants::save(dir, &store).expect("save");
+    }
+
     fn granted_dir(folder: &Path) -> (PathBuf, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut store = grants::default_store();
@@ -5304,6 +5313,7 @@ mod tests {
         let (dir, _guard2) = granted_dir(&folder);
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         let st = state();
+        browser_asks(&dir);
         let write = ToolAction::WriteFile {
             path: path_str(&root.join("a.txt")),
             content: "uno".into(),
@@ -5343,9 +5353,10 @@ mod tests {
         let st = state();
         assert_eq!(
             grants::load_or_seed(&dir).unwrap().browser_mode,
-            ApprovalMode::Ask,
-            "ask by default"
+            ApprovalMode::Allow,
+            "allow by default since 0.2.16"
         );
+        browser_asks(&dir);
         apply_browser_mode(&dir, &st, ApprovalMode::Allow).expect("stored");
         st.mark_browsed(1);
         let approver = FakeApprover::answering(false);
@@ -5380,6 +5391,7 @@ mod tests {
         let (dir, _guard2) = granted_dir(&folder);
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         let st = state();
+        browser_asks(&dir);
         let write = ToolAction::WriteFile {
             path: path_str(&root.join("a.txt")),
             content: "uno".into(),
@@ -5608,6 +5620,7 @@ mod tests {
         );
         let (home, app_data, _guard) = mixed_computer_wide_layout();
         let st = state();
+        browser_asks(&app_data);
         st.mark_browsed(1);
         let approver = FakeApprover::answering(true);
         let (route, _) = run_with(
@@ -6873,6 +6886,7 @@ mod tests {
         let (home, app_data, _guard) = computer_wide_layout();
         set_grant_mode(&app_data, "cw", ApprovalMode::Allow);
         let st = state();
+        browser_asks(&app_data);
         st.mark_browsed(4);
         let proposal = propose(
             &app_data,
