@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.16 - 2026-11-19 - Permitir sin preguntar por defecto
 
 ### Changed
 - "Permitir sin preguntar" pasa a ser el modo por defecto, a peticion de los primeros testers: preguntar en cada accion resultaba pesado y prefieren activar ellos que les pregunte.
