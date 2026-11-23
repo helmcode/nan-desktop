@@ -11,14 +11,18 @@
 //!   project, served through the `nan-site` scheme (`crate::site_preview`).
 //! - [`tool`]: the model's `create_video` / `edit_video`.
 //! - [`templates`]: the bundled gallery of example videos.
+//! - [`editor`]: the simple editor (values, scenes, audio, picked files).
+//! - [`render`]: MP4 export through the platform's render service.
 //!
 //! The renderer never names a filesystem path: projects are ids, files are
 //! paths from a closed set, and the core resolves both inside the active
 //! user's realm.
 
+pub mod editor;
 pub mod library;
 pub mod preview;
 pub mod project;
+pub mod render;
 pub mod templates;
 pub mod tool;
 
@@ -274,4 +278,334 @@ pub fn create_from_template_in(
         return Err(err);
     }
     Ok(id)
+}
+
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, Rejection> + Send + 'static,
+) -> Result<T, Rejection> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|_| Rejection::new("io", "interrupted"))?
+}
+
+/// The editor's view of a project.
+#[tauri::command]
+pub async fn video_get(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+) -> Result<editor::ProjectView, Rejection> {
+    let realm = realm_dir(&app, &profile_id)?;
+    blocking(move || {
+        let dir = library::project_dir(&realm, &project_id)?;
+        editor::view(&dir, &project_id)
+    })
+    .await
+}
+
+/// Apply an editor change; returns the new view.
+#[tauri::command]
+pub async fn video_update(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+    patch: editor::EditorPatch,
+) -> Result<editor::ProjectView, Rejection> {
+    let realm = realm_dir(&app, &profile_id)?;
+    blocking(move || {
+        let dir = library::project_dir(&realm, &project_id)?;
+        editor::apply_patch(&dir, &patch)?;
+        editor::view(&dir, &project_id)
+    })
+    .await
+}
+
+/// Pick a file in the NATIVE dialog for a slot (logo/image field, music,
+/// voice-over). `None` when the user cancelled. The renderer never sends a
+/// path.
+#[tauri::command]
+pub async fn video_pick_asset(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+    slot: editor::Slot,
+) -> Result<Option<editor::ProjectView>, Rejection> {
+    use tauri_plugin_dialog::DialogExt;
+    let realm = realm_dir(&app, &profile_id)?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| Rejection::new("io", "cannot locate the app data folder"))?;
+    let (name, extensions) = slot.filter();
+    let dialog_app = app.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        dialog_app
+            .dialog()
+            .file()
+            .add_filter(name, extensions)
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|_| Rejection::new("io", "interrupted"))?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|_| Rejection::new("not_allowed", "this file cannot be used"))?;
+    blocking(move || {
+        let dir = library::project_dir(&realm, &project_id)?;
+        let home = std::env::home_dir();
+        let bytes =
+            editor::read_picked(&app_data, home.as_deref(), &path, library::MAX_ASSET_BYTES)?;
+        editor::import_picked(&dir, &slot, &path, bytes)?;
+        editor::view(&dir, &project_id).map(Some)
+    })
+    .await
+}
+
+/// Delete a project (the renderer confirms with the user first).
+#[tauri::command]
+pub async fn video_delete(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+) -> Result<(), Rejection> {
+    let realm = realm_dir(&app, &profile_id)?;
+    blocking(move || library::delete_project(&realm, &project_id)).await
+}
+
+// ------------------------------------------------------------- export --
+
+/// Emitted while an MP4 downloads: `{project_id, received, total}`.
+pub const DOWNLOAD_EVENT: &str = "video://download";
+
+#[derive(Debug, Clone, Serialize)]
+struct DownloadProgress {
+    project_id: String,
+    received: u64,
+    total: Option<u64>,
+}
+
+/// The platform base and session JWT of the active profile (core only).
+fn platform(profile_id: &str) -> Result<(String, String), render::ExportError> {
+    if !crate::profile::is_known_profile_id(profile_id) {
+        return Err(render::ExportError::new("invalid"));
+    }
+    let base = crate::device_flow::platform_base(profile_id)
+        .ok_or_else(|| render::ExportError::new("unavailable"))?;
+    let token = crate::chat::read_session_token(profile_id)
+        .ok_or_else(|| render::ExportError::new("no_session"))?;
+    Ok((base, token))
+}
+
+fn export_realm(
+    app: &AppHandle,
+    profile_id: &str,
+) -> Result<std::path::PathBuf, render::ExportError> {
+    realm_dir(app, profile_id).map_err(|_| render::ExportError::new("no_session"))
+}
+
+/// Debug builds pointed at the local mock platform may download its
+/// loopback http URL; release builds: https only.
+fn mock_download_allowed() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("NAN_DESKTOP_MOCK_PLATFORM").is_ok_and(|m| !m.trim().is_empty())
+}
+
+/// Zip the project, check the 90 MiB cap, and start a server render.
+#[tauri::command]
+pub async fn video_export_start(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+    quality: String,
+) -> Result<render::Started, render::ExportError> {
+    let realm = export_realm(&app, &profile_id)?;
+    let (base, token) = platform(&profile_id)?;
+    let (meta, bundle) = tauri::async_runtime::spawn_blocking(move || {
+        let dir = library::project_dir(&realm, &project_id)?;
+        render::prepare(&dir, &quality)
+    })
+    .await
+    .map_err(|_| render::ExportError::new("io"))??;
+    render::start(&base, &token, &meta, bundle).await
+}
+
+/// A render's status (never its download URL).
+#[tauri::command]
+pub async fn video_export_status(
+    profile_id: String,
+    render_id: String,
+) -> Result<render::Status, render::ExportError> {
+    let (base, token) = platform(&profile_id)?;
+    render::status(&base, &token, &render_id)
+        .await
+        .map(|(status, _)| status)
+}
+
+#[tauri::command]
+pub async fn video_export_cancel(
+    profile_id: String,
+    render_id: String,
+) -> Result<(), render::ExportError> {
+    let (base, token) = platform(&profile_id)?;
+    render::cancel(&base, &token, &render_id).await
+}
+
+#[tauri::command]
+pub async fn video_export_quota(profile_id: String) -> Result<render::Quota, render::ExportError> {
+    let (base, token) = platform(&profile_id)?;
+    render::quota(&base, &token).await
+}
+
+/// Download a finished render into the project's `exports/` folder (a
+/// fresh status gives the presigned URL, which never leaves the core).
+#[tauri::command]
+pub async fn video_export_download(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+    render_id: String,
+) -> Result<editor::ExportView, render::ExportError> {
+    let realm = export_realm(&app, &profile_id)?;
+    let (base, token) = platform(&profile_id)?;
+    let (status, url) = render::status(&base, &token, &render_id).await?;
+    let url = match (status.status.as_str(), url) {
+        ("done", Some(url)) => url,
+        ("done", None) => return Err(render::ExportError::new("expired")),
+        _ => return Err(render::ExportError::new("not_ready")),
+    };
+    let dir = library::project_dir(&realm, &project_id)?;
+    let title = library::read_meta(&dir)?.title;
+    let name = render::export_name(&dir, &title);
+    let emitter = app.clone();
+    let pid = project_id.clone();
+    let size = render::download(
+        &url,
+        &dir,
+        &name,
+        mock_download_allowed(),
+        move |received, total| {
+            let _ = emitter.emit(
+                DOWNLOAD_EVENT,
+                DownloadProgress {
+                    project_id: pid.clone(),
+                    received,
+                    total,
+                },
+            );
+        },
+    )
+    .await?;
+    Ok(editor::ExportView { name, size })
+}
+
+/// The absolute path of an exported MP4 (validated name, real file).
+fn export_path(
+    app: &AppHandle,
+    profile_id: &str,
+    project_id: &str,
+    name: &str,
+) -> Result<std::path::PathBuf, Rejection> {
+    if !library::valid_export_name(name) {
+        return Err(Rejection::new("invalid", "unknown file"));
+    }
+    let realm = realm_dir(app, profile_id)?;
+    let dir = library::project_dir(&realm, project_id)?;
+    let path = dir.join("exports").join(name);
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+        return Err(Rejection::new("not_found", "the file no longer exists"));
+    }
+    Ok(path)
+}
+
+/// Open an exported MP4 with the system's video player.
+#[tauri::command]
+pub fn video_export_open(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+    name: String,
+) -> Result<(), Rejection> {
+    let path = export_path(&app, &profile_id, &project_id, &name)?;
+    tauri_plugin_opener::open_path(&path, None::<&str>)
+        .map_err(|_| Rejection::new("io", "the video could not be opened"))
+}
+
+/// Show an exported MP4 selected in Finder / Explorer / the file manager.
+#[tauri::command]
+pub fn video_export_reveal(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+    name: String,
+) -> Result<(), Rejection> {
+    let path = export_path(&app, &profile_id, &project_id, &name)?;
+    tauri_plugin_opener::reveal_item_in_dir(&path)
+        .map_err(|_| Rejection::new("io", "the folder could not be shown"))
+}
+
+/// "Save a copy as...": the native save dialog, then a plain copy.
+#[tauri::command]
+pub async fn video_export_save_as(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+    name: String,
+) -> Result<bool, Rejection> {
+    use tauri_plugin_dialog::DialogExt;
+    let source = export_path(&app, &profile_id, &project_id, &name)?;
+    let dialog_app = app.clone();
+    let suggested = name.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        dialog_app
+            .dialog()
+            .file()
+            .add_filter("MP4", &["mp4"])
+            .set_file_name(&suggested)
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|_| Rejection::new("io", "interrupted"))?;
+    let Some(dest) = picked.and_then(|p| p.into_path().ok()) else {
+        return Ok(false);
+    };
+    blocking(move || {
+        std::fs::copy(&source, &dest)
+            .map(|_| true)
+            .map_err(|_| Rejection::new("io", "the copy could not be saved"))
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn using_a_template_creates_a_complete_project_in_the_chosen_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let realm = tmp.path().join("realm");
+        std::fs::create_dir(&realm).unwrap();
+        let id = create_from_template_in(&realm, "product-promo", Some(project::Aspect::Portrait), "en")
+            .unwrap();
+        let dir = library::project_dir(&realm, &id).unwrap();
+        let meta = library::read_meta(&dir).unwrap();
+        assert_eq!(meta.template.as_deref(), Some("product-promo"));
+        assert_eq!(meta.aspect, project::Aspect::Portrait);
+        assert_eq!(meta.title, "Product promo");
+        let assets = library::list_assets(&dir);
+        assert!(assets.contains_key("assets/logo.svg"));
+        assert!(assets.contains_key("assets/fonts/inter-900.woff2"));
+        let intro = library::read_text(&dir, "compositions/intro.html", 1 << 20)
+            .unwrap()
+            .unwrap();
+        assert!(intro.contains("data-width=\"1080\" data-height=\"1920\""));
+        // Ready to preview and to export.
+        preview::assemble_project(&dir).unwrap();
+        render::prepare(&dir, "standard").unwrap();
+        assert!(create_from_template_in(&realm, "nope", None, "es").is_err());
+        assert_eq!(library::list_projects(&realm).len(), 1);
+    }
 }

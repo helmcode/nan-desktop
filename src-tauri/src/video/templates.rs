@@ -300,9 +300,7 @@ mod tests {
                     let low = m.theme.to_ascii_lowercase();
                     for (at, _) in low.match_indices("assets/fonts/") {
                         let rest = &low[at..];
-                        let end = rest
-                            .find(|c: char| c == ')' || c == '"' || c == '\'')
-                            .unwrap_or(rest.len());
+                        let end = rest.find([')', '"', '\'']).unwrap_or(rest.len());
                         assert!(
                             has(&rest[..end]),
                             "{id}: theme uses {} without shipping it",

@@ -181,6 +181,7 @@ import { QueuedMessages } from "./chat/QueuedMessages";
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
 // So does the Image Studio (its own view).
 const ImageStudio = lazy(() => import("./studio/ImageStudio").then((m) => ({ default: m.ImageStudio })));
+const VideosSurface = lazy(() => import("./video/VideosSurface").then((m) => ({ default: m.VideosSurface })));
 
 // The renderer never sees profile URLs, API keys or session tokens (S4/S12):
 // profiles arrive as {id, name, has_key, key_mask} from the Rust core, and
@@ -768,7 +769,9 @@ function ChatShell({
   const activeProfile: ProfileView | undefined = overview.profiles.find((p) => p.id === overview.active_profile);
   const workspace = useWorkspace(overview.active_profile);
 
-  const [view, setView] = useState<"chat" | "settings" | "studio">("chat");
+  const [view, setView] = useState<"chat" | "settings" | "studio" | "videos">("chat");
+  // R-V1: the project the Videos surface shows in its editor (null: the lists).
+  const [videoProject, setVideoProject] = useState<string | null>(null);
   const viewRef = useRef(view);
   useEffect(() => {
     viewRef.current = view;
@@ -2197,6 +2200,20 @@ function ChatShell({
     focusChatOnReturn.current = settingsReturn === "chat";
     setView(settingsReturn);
   }, [settingsReturn]);
+  // R-V1: the Videos surface (library, templates, editor). "Edit video" in
+  // the side panel opens the editor on that project.
+  const openVideos = useCallback((projectId: string | null): void => {
+    setVideoProject(projectId);
+    setView("videos");
+  }, []);
+  // "Ask for a change in this scene" / "Ask the assistant to fix it": back
+  // to the chat with the request in the composer, ready to complete.
+  const askAssistantAboutVideo = useCallback((text: string): void => {
+    setComposer(text);
+    focusChatOnReturn.current = true;
+    setView("chat");
+  }, []);
+
   useEffect(() => {
     if (view !== "chat" || !focusChatOnReturn.current) return;
     focusChatOnReturn.current = false;
@@ -2666,6 +2683,15 @@ function ChatShell({
                 <IconImage size={16} />
                 {t.sidebar.studio}
               </button>
+              <button
+                type="button"
+                className={`sidebar-link${view === "videos" ? " active" : ""}`}
+                aria-current={view === "videos" ? "page" : undefined}
+                onClick={() => openVideos(view === "videos" ? null : videoProject)}
+              >
+                <IconFilm size={16} />
+                {t.video.sidebar}
+              </button>
             </>
           )}
         </div>
@@ -2829,7 +2855,30 @@ function ChatShell({
           </section>
         }
       >
-      {view === "studio" ? null : view === "settings" ? (
+      {view === "videos" && overview.active_profile && (
+        <ErrorBoundary
+          resetKey={`videos|${videoProject ?? ""}`}
+          fallback={
+            <section className="studio">
+              <p className="inline-error" role="alert">
+                {t.settings.surfaceCrashed}
+              </p>
+            </section>
+          }
+        >
+          <Suspense fallback={<section className="studio" aria-busy="true" />}>
+            <VideosSurface
+              profileId={overview.active_profile}
+              active
+              projectId={videoProject}
+              onOpenProject={openVideos}
+              onClose={() => setView("chat")}
+              onAskAssistant={askAssistantAboutVideo}
+            />
+          </Suspense>
+        </ErrorBoundary>
+      )}
+      {view === "studio" || view === "videos" ? null : view === "settings" ? (
         // The surface shows one section at a time; the section list in the
         // sidebar picks it. `data-section` is what App.css keys the visible
         // section off (see .settings-surface there).
@@ -3313,6 +3362,7 @@ function ChatShell({
                   onEditImage={editFromPreview}
                   onRemove={removeFromPreview}
                   onShare={artifactsOn ? openShare : undefined}
+                  onOpenVideo={openVideos}
                 />
               </Suspense>
             )}

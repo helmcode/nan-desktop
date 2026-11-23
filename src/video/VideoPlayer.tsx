@@ -49,7 +49,7 @@ export function VideoPlayer({
   info: VideoPreviewInfo;
   handle?: Ref<PlayerHandle>;
   onTime?: (seconds: number) => void;
-  /// Hides the meta line (gallery thumbnails).
+  /// Gallery thumbnail: no meta line, no controls, plays muted in a loop.
   compact?: boolean;
 }) {
   const t = useT();
@@ -121,7 +121,11 @@ export function VideoPlayer({
             src={info.url}
             width={info.width}
             height={info.height}
-            controls
+            controls={!compact}
+            muted={compact}
+            loop={compact}
+            autoplay={compact}
+            disable-click-to-play={compact}
             aria-label={t.video.playerLabel(info.title)}
           />
         ) : null}

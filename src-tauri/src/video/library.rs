@@ -562,6 +562,12 @@ pub fn list_projects(realm: &Path) -> Vec<ProjectSummary> {
     out
 }
 
+/// Delete a whole project folder (the editor asks the user first).
+pub fn delete_project(realm: &Path, id: &str) -> Result<(), Rejection> {
+    let dir = project_dir(realm, id)?;
+    std::fs::remove_dir_all(dir).map_err(|_| io("cannot delete the video"))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -779,6 +785,15 @@ pub(crate) mod tests {
         ));
         assert!(!sniff_asset("assets/x.svg", b"<html></html>"));
         assert!(sniff_asset("assets/fonts/x.woff2", b"wOF2\0\x01"));
+    }
+
+    #[test]
+    fn delete_removes_only_that_project() {
+        let (_tmp, realm, id, _dir) = fresh_project();
+        assert!(delete_project(&realm, "../../etc").is_err());
+        delete_project(&realm, &id).unwrap();
+        assert!(list_projects(&realm).is_empty());
+        assert!(project_dir(&realm, &id).is_err());
     }
 
     #[cfg(unix)]

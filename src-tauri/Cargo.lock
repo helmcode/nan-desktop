@@ -2703,6 +2703,7 @@ dependencies = [
  "base64 0.23.1",
  "block2",
  "cairo-rs",
+ "crc32fast",
  "futures-util",
  "getrandom 0.4.3",
  "icu_normalizer",
@@ -2730,6 +2731,7 @@ dependencies = [
  "webkit2gtk",
  "webview2-com",
  "windows",
+ "zip",
 ]
 
 [[package]]
