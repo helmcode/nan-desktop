@@ -456,6 +456,49 @@ pub fn validate_scene(id: &str, html: &str) -> Result<String, String> {
     Ok(normalized)
 }
 
+/// The scene root's opening tag: `(start, end)` byte range (end at `>`).
+fn root_tag_range(html: &str, id: &str) -> Option<(usize, usize)> {
+    let low = html.to_ascii_lowercase();
+    let at = ['"', '\'']
+        .iter()
+        .find_map(|quote| low.find(&format!("data-composition-id={quote}{id}{quote}")))?;
+    let start = low[..at].rfind('<')?;
+    let end = low[at..].find('>').map(|e| at + e)?;
+    Some((start, end))
+}
+
+/// The scene with its root's `data-width` / `data-height` set to the
+/// project canvas (a template or a scene written for another aspect fits
+/// the current one; HyperFrames sizes the scene from these).
+pub fn with_root_canvas(html: &str, id: &str, width: u32, height: u32) -> String {
+    let Some((start, end)) = root_tag_range(html, id) else {
+        return html.to_string();
+    };
+    let mut tag = html[start..end].to_string();
+    for (name, value) in [("data-width", width), ("data-height", height)] {
+        let low = tag.to_ascii_lowercase();
+        let found = low
+            .match_indices(&format!("{name}="))
+            .map(|(at, _)| at)
+            .find(|&at| at > 0 && low.as_bytes()[at - 1].is_ascii_whitespace());
+        match found {
+            Some(at) => {
+                let value_start = at + name.len() + 1;
+                let rest = &tag[value_start..];
+                let len = match rest.chars().next() {
+                    Some(q @ ('"' | '\'')) => rest[1..].find(q).map_or(rest.len(), |e| e + 2),
+                    _ => rest
+                        .find(|c: char| c.is_ascii_whitespace() || c == '/')
+                        .unwrap_or(rest.len()),
+                };
+                tag.replace_range(value_start..value_start + len, &format!("\"{value}\""));
+            }
+            None => tag.push_str(&format!(" {name}=\"{value}\"")),
+        }
+    }
+    format!("{}{tag}{}", &html[..start], &html[end..])
+}
+
 /// The text checks shared by every file.
 fn check_text<'a>(text: &'a str, cap: usize, what: &str) -> Result<&'a str, String> {
     if text.trim().is_empty() {
@@ -1232,6 +1275,61 @@ mod tests {
             ..meta()
         };
         assert!(!generate_index(&titled, "").contains("<script>x"));
+    }
+
+    #[test]
+    fn scene_roots_follow_the_project_canvas() {
+        let html = validate_scene("intro", SCENE).unwrap();
+        let portrait = with_root_canvas(&html, "intro", 1080, 1920);
+        assert!(portrait.contains("data-composition-id=\"intro\" data-no-timeline data-width=\"1080\" data-height=\"1920\">"));
+        assert_eq!(
+            with_root_canvas(&portrait, "intro", 1080, 1920),
+            portrait,
+            "idempotent"
+        );
+        // Missing attributes are added; other elements are untouched.
+        let bare = "<template id=\"a-template\"><div id=\"root\" data-composition-id='a'><p data-width=\"5\">x</p></div></template>";
+        let out = with_root_canvas(bare, "a", 1080, 1080);
+        assert!(out.contains("data-composition-id='a' data-width=\"1080\" data-height=\"1080\">"));
+        assert!(out.contains("<p data-width=\"5\">"));
+        assert_eq!(
+            with_root_canvas("<p>no root</p>", "a", 1, 1),
+            "<p>no root</p>"
+        );
+    }
+
+    /// The composition root the core generates is linted by the official
+    /// `@hyperframes/lint` in `src/video/templates.lint.test.ts` through this
+    /// golden file. Regenerate with `UPDATE_GOLDEN=1 cargo test --lib golden`.
+    #[test]
+    fn the_golden_index_is_current() {
+        let mut m = meta();
+        m.audio.voice = Some(AudioTrack {
+            file: "assets/voice.wav".into(),
+            volume: 1.0,
+            duration: Some(4.0),
+        });
+        m.audio.music = Some(AudioTrack {
+            file: "assets/music.mp3".into(),
+            volume: 0.4,
+            duration: None,
+        });
+        let html = generate_index(
+            &m,
+            "@font-face{font-family:'Inter';src:url(assets/fonts/inter-400.woff2) format('woff2')}",
+        );
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/video/testdata/index.golden.html"
+        );
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            std::fs::write(path, &html).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap_or_default(),
+            html,
+            "run with UPDATE_GOLDEN=1"
+        );
     }
 
     #[test]

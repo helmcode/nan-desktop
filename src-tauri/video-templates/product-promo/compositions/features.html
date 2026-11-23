@@ -1,0 +1,21 @@
+<template id="features-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .features-stage { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 0 10vmin; gap: 5vmin; }
+    .features-item { display: flex; align-items: center; gap: 4vmin; font-size: 6.5vmin; font-weight: 700; letter-spacing: -0.02em; animation: features-in 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .features-dot { flex: none; width: 3.2vmin; height: 3.2vmin; border-radius: 50%; background: var(--accent); }
+    .features-item:nth-child(2) { animation-delay: 0.45s; }
+    .features-item:nth-child(3) { animation-delay: 0.9s; }
+    .features-bar { position: absolute; left: 0; bottom: 0; height: 1.2vmin; width: 100%; background: var(--accent); transform-origin: left center; animation: features-bar 4.5s linear both; }
+    @keyframes features-in { from { opacity: 0; transform: translateX(-8vmin); } to { opacity: 1; transform: none; } }
+    @keyframes features-bar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  </style>
+  <div id="root" data-composition-id="features" data-width="1920" data-height="1080">
+    <div id="features-stage" class="clip features-stage" data-start="0" data-duration="4.5">
+      <p id="features-1" class="features-item"><span class="features-dot"></span><span data-var-text="feature-1">Listo en dos minutos</span></p>
+      <p id="features-2" class="features-item"><span class="features-dot"></span><span data-var-text="feature-2">Funciona sin conexión</span></p>
+      <p id="features-3" class="features-item"><span class="features-dot"></span><span data-var-text="feature-3">Hecho para equipos</span></p>
+      <div id="features-bar" class="features-bar"></div>
+    </div>
+  </div>
+</template>

@@ -1,0 +1,19 @@
+<template id="cta-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .cta-stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5vmin; text-align: center; padding: 0 8vmin; }
+    .cta-logo { width: 12vmin; height: 12vmin; object-fit: contain; animation: cta-fade 0.6s ease both; }
+    .cta-title { margin: 0; font-size: 10vmin; font-weight: 900; letter-spacing: -0.03em; animation: cta-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 0.2s both; }
+    .cta-pill { padding: 2vmin 5vmin; border-radius: 999px; background: var(--accent); color: var(--bg); font-size: 4.5vmin; font-weight: 700; animation: cta-pop 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.3) 0.7s both; }
+    @keyframes cta-fade { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes cta-up { from { opacity: 0; transform: translateY(5vmin); } to { opacity: 1; transform: none; } }
+    @keyframes cta-pop { from { opacity: 0; transform: scale(0.7); } to { opacity: 1; transform: none; } }
+  </style>
+  <div id="root" data-composition-id="cta" data-width="1920" data-height="1080">
+    <div id="cta-stage" class="clip cta-stage" data-start="0" data-duration="4">
+      <img id="cta-logo" class="cta-logo" src="assets/logo.svg" data-var-src="logo" alt="">
+      <h2 id="cta-title" class="cta-title" data-var-text="cta">Pruébalo hoy</h2>
+      <p id="cta-url" class="cta-pill" data-var-text="url">tuweb.com</p>
+    </div>
+  </div>
+</template>

@@ -1,0 +1,17 @@
+<template id="message-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--accent); color: var(--bg); font-family: "Inter", system-ui, sans-serif; }
+    .message-stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 0 10vmin; text-align: center; }
+    .message-text { margin: 0; font-size: 11vmin; font-weight: 900; letter-spacing: -0.04em; line-height: 1; animation: message-in 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) both, message-drift 3.5s linear both; }
+    .message-wipe { position: absolute; inset: 0; background: var(--bg); transform-origin: right center; animation: message-wipe 0.6s cubic-bezier(0.7, 0, 0.3, 1) both; }
+    @keyframes message-in { from { opacity: 0; filter: blur(2vmin); } to { opacity: 1; filter: blur(0); } }
+    @keyframes message-drift { from { scale: 1; } to { scale: 1.06; } }
+    @keyframes message-wipe { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+  </style>
+  <div id="root" data-composition-id="message" data-width="1920" data-height="1080">
+    <div id="message-stage" class="clip message-stage" data-start="0" data-duration="3.5">
+      <h2 id="message-text" class="message-text" data-var-text="message">Menos pasos. Más resultados.</h2>
+      <div id="message-wipe" class="message-wipe"></div>
+    </div>
+  </div>
+</template>

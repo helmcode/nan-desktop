@@ -69,6 +69,9 @@ const APP_COMMANDS: &[&str] = &[
     "artifact_link_preview",
     "video_list",
     "video_preview",
+    "video_templates",
+    "video_template_preview",
+    "video_create_from_template",
     "open_external",
     "telemetry_renderer_crash",
     "update_check",
@@ -84,7 +87,57 @@ const APP_COMMANDS: &[&str] = &[
     "browser_set_language",
 ];
 
+/// R-V1: embed every file under `video-templates/` (the bundled template
+/// gallery and its shared OFL fonts) into the binary as
+/// `$OUT_DIR/video_templates.rs`: `(relative path, bytes)` pairs, sorted.
+fn embed_video_templates() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("video-templates");
+    println!("cargo:rerun-if-changed={}", root.display());
+    let mut files = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        println!("cargo:rerun-if-changed={}", dir.display());
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&root)
+                    .expect("inside root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                println!("cargo:rerun-if-changed={}", path.display());
+                files.push((rel, path));
+            }
+        }
+    }
+    files.sort();
+    let mut out = String::from("pub static FILES: &[(&str, &[u8])] = &[\n");
+    for (rel, path) in files {
+        out.push_str(&format!(
+            "    ({rel:?}, include_bytes!({:?})),\n",
+            path.display().to_string()
+        ));
+    }
+    out.push_str("];\n");
+    let dest = std::path::Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR"))
+        .join("video_templates.rs");
+    std::fs::write(dest, out).expect("write video_templates.rs");
+}
+
 fn main() {
+    embed_video_templates();
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(APP_COMMANDS)),

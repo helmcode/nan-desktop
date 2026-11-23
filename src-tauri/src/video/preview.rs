@@ -72,7 +72,8 @@ pub fn assemble(parts: &Parts) -> Result<String, Rejection> {
         })?;
         let html = project::validate_scene(&scene.id, html)
             .map_err(|message| Rejection::new("invalid", message))?;
-        templates.push_str(&html);
+        let (width, height) = parts.meta.aspect.size();
+        templates.push_str(&project::with_root_canvas(&html, &scene.id, width, height));
         templates.push('\n');
     }
     let theme = project::validate_theme(parts.theme).map_err(|m| Rejection::new("invalid", m))?;

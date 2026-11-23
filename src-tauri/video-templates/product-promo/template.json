@@ -1,0 +1,32 @@
+{
+  "id": "product-promo",
+  "title": { "es": "Promo de producto", "en": "Product promo" },
+  "description": {
+    "es": "Presenta un producto en cuatro escenas: marca, ventajas, mensaje y llamada a la acción.",
+    "en": "Introduce a product in four scenes: brand, benefits, message and call to action."
+  },
+  "category": "marketing",
+  "aspect": "16:9",
+  "fps": 30,
+  "fonts": ["inter-400.woff2", "inter-700.woff2", "inter-900.woff2"],
+  "scenes": [
+    { "id": "intro", "title": { "es": "Marca", "en": "Brand" }, "duration": 3 },
+    { "id": "features", "title": { "es": "Ventajas", "en": "Benefits" }, "duration": 4.5 },
+    { "id": "message", "title": { "es": "Mensaje", "en": "Message" }, "duration": 3.5 },
+    { "id": "cta", "title": { "es": "Llamada a la acción", "en": "Call to action" }, "duration": 4 }
+  ],
+  "variables": [
+    { "id": "product", "type": "text", "label": { "es": "Nombre del producto", "en": "Product name" }, "value": { "es": "Nova", "en": "Nova" } },
+    { "id": "kicker", "type": "text", "label": { "es": "Frase corta", "en": "Short line" }, "value": { "es": "Nuevo", "en": "New" } },
+    { "id": "feature-1", "type": "text", "label": { "es": "Ventaja 1", "en": "Benefit 1" }, "value": { "es": "Listo en dos minutos", "en": "Ready in two minutes" } },
+    { "id": "feature-2", "type": "text", "label": { "es": "Ventaja 2", "en": "Benefit 2" }, "value": { "es": "Funciona sin conexión", "en": "Works offline" } },
+    { "id": "feature-3", "type": "text", "label": { "es": "Ventaja 3", "en": "Benefit 3" }, "value": { "es": "Hecho para equipos", "en": "Built for teams" } },
+    { "id": "message", "type": "text", "label": { "es": "Mensaje principal", "en": "Main message" }, "value": { "es": "Menos pasos. Más resultados.", "en": "Fewer steps. More results." } },
+    { "id": "cta", "type": "text", "label": { "es": "Llamada a la acción", "en": "Call to action" }, "value": { "es": "Pruébalo hoy", "en": "Try it today" } },
+    { "id": "url", "type": "text", "label": { "es": "Web o usuario", "en": "Website or handle" }, "value": { "es": "tuweb.com", "en": "yoursite.com" } },
+    { "id": "logo", "type": "image", "label": { "es": "Logo", "en": "Logo" }, "value": { "es": "assets/logo.svg", "en": "assets/logo.svg" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#0e0f13", "en": "#0e0f13" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto", "en": "Text" }, "value": { "es": "#f5f5f7", "en": "#f5f5f7" } },
+    { "id": "accent", "type": "color", "label": { "es": "Color de acento", "en": "Accent color" }, "value": { "es": "#7c6cff", "en": "#7c6cff" } }
+  ]
+}

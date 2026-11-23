@@ -458,8 +458,20 @@ pub fn apply(dir: &Path, change: Change) -> Result<VideoMeta, Rejection> {
     for (rel, bytes) in &change.assets {
         write_file(dir, rel, bytes)?;
     }
-    for (id, html) in &change.scenes {
-        write_file(dir, &format!("compositions/{id}.html"), html.as_bytes())?;
+    // Every scene root follows the canvas (new scenes, and all of them
+    // when the aspect changed).
+    let (width, height) = meta.aspect.size();
+    for scene in &meta.scenes {
+        let rel = format!("compositions/{}.html", scene.id);
+        let html = match change.scenes.iter().find(|(id, _)| id == &scene.id) {
+            Some((_, html)) => html.clone(),
+            None => read_text(dir, &rel, project::MAX_SCENE_BYTES as u64)?.unwrap_or_default(),
+        };
+        let fitted = project::with_root_canvas(&html, &scene.id, width, height);
+        let written = change.scenes.iter().any(|(id, _)| id == &scene.id);
+        if written || fitted != html {
+            write_file(dir, &rel, fitted.as_bytes())?;
+        }
     }
     if change.theme.is_some() {
         if theme.trim().is_empty() {

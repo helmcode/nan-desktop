@@ -1,0 +1,20 @@
+<!doctype html>
+<html data-composition-variables="[{&quot;default&quot;:&quot;Hola &amp; \&quot;adiós\&quot;&quot;,&quot;id&quot;:&quot;headline&quot;,&quot;label&quot;:&quot;Titular&quot;,&quot;type&quot;:&quot;string&quot;},{&quot;default&quot;:&quot;#101820&quot;,&quot;id&quot;:&quot;bg&quot;,&quot;label&quot;:&quot;Fondo&quot;,&quot;type&quot;:&quot;color&quot;},{&quot;default&quot;:&quot;assets/logo.png&quot;,&quot;id&quot;:&quot;logo&quot;,&quot;label&quot;:&quot;Logo&quot;,&quot;type&quot;:&quot;image&quot;}]">
+<head>
+<meta charset="utf-8">
+<title>Lanzamiento</title>
+<style id="hf-base">html,body{margin:0;padding:0;background:#000;width:1920px;height:1080px;overflow:hidden}#root{position:relative;width:1920px;height:1080px;overflow:hidden}</style>
+<style id="hf-vars">:root{--bg:#101820;}</style>
+<style id="hf-theme">
+@font-face{font-family:'Inter';src:url(assets/fonts/inter-400.woff2) format('woff2')}
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="main" data-start="0" data-duration="5.5" data-width="1920" data-height="1080" data-fps="30" data-no-timeline>
+    <div id="intro" data-composition-id="intro" data-composition-src="compositions/intro.html" data-start="0" data-duration="3" data-track-index="0" data-width="1920" data-height="1080" data-variable-values="{&quot;bg&quot;:&quot;#101820&quot;,&quot;headline&quot;:&quot;Hola &amp; \&quot;adiós\&quot;&quot;,&quot;logo&quot;:&quot;assets/logo.png&quot;}"></div>
+    <div id="outro" data-composition-id="outro" data-composition-src="compositions/outro.html" data-start="3" data-duration="2.5" data-track-index="0" data-width="1920" data-height="1080" data-variable-values="{&quot;bg&quot;:&quot;#101820&quot;,&quot;headline&quot;:&quot;Hola &amp; \&quot;adiós\&quot;&quot;,&quot;logo&quot;:&quot;assets/logo.png&quot;}"></div>
+    <audio id="voiceover" class="clip" src="assets/voice.wav" data-start="0" data-duration="4" data-track-index="1" data-volume="1"></audio>
+    <audio id="music" class="clip" src="assets/music.mp3" data-start="0" data-duration="5.5" data-track-index="2" data-volume="0.4"></audio>
+  </div>
+</body>
+</html>

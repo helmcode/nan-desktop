@@ -10,6 +10,7 @@
 //! - [`preview`]: one self-contained, network-free preview document per
 //!   project, served through the `nan-site` scheme (`crate::site_preview`).
 //! - [`tool`]: the model's `create_video` / `edit_video`.
+//! - [`templates`]: the bundled gallery of example videos.
 //!
 //! The renderer never names a filesystem path: projects are ids, files are
 //! paths from a closed set, and the core resolves both inside the active
@@ -18,6 +19,7 @@
 pub mod library;
 pub mod preview;
 pub mod project;
+pub mod templates;
 pub mod tool;
 
 use serde::Serialize;
@@ -179,4 +181,97 @@ pub async fn video_preview(
         .ok_or_else(|| Rejection::new("io", "preview unavailable"))?;
     let token = registry.register_video(doc.into_bytes());
     Ok(preview::info(&meta, crate::site_preview::site_url(&token)))
+}
+
+fn locale(raw: &str) -> &'static str {
+    if raw == "en" { "en" } else { "es" }
+}
+
+fn aspect(raw: Option<String>) -> Result<Option<project::Aspect>, Rejection> {
+    raw.map(|a| {
+        project::Aspect::parse(&a).ok_or_else(|| Rejection::new("invalid", "unknown aspect"))
+    })
+    .transpose()
+}
+
+/// The template gallery in the user's language.
+#[tauri::command]
+pub fn video_templates(locale: String) -> Vec<templates::TemplateSummary> {
+    templates::list(self::locale(&locale))
+}
+
+/// A template's sandboxed preview (the gallery's live thumbnail and
+/// detail view), in `aspect` and the user's language.
+#[tauri::command]
+pub async fn video_template_preview(
+    app: AppHandle,
+    template_id: String,
+    aspect: Option<String>,
+    locale: String,
+) -> Result<preview::PreviewInfo, Rejection> {
+    let aspect = self::aspect(aspect)?;
+    let (meta, doc) = tauri::async_runtime::spawn_blocking(move || {
+        let m = templates::materialize(&template_id, aspect, self::locale(&locale))?;
+        let asset = |rel: &str| {
+            m.assets
+                .iter()
+                .find(|(p, _)| p == rel)
+                .map(|(_, b)| b.clone())
+        };
+        let doc = preview::assemble(&preview::Parts {
+            meta: &m.meta,
+            theme: &m.theme,
+            scenes: &m.scenes,
+            asset: &asset,
+        })?;
+        Ok::<_, Rejection>((m.meta, doc))
+    })
+    .await
+    .map_err(|_| Rejection::new("io", "interrupted"))??;
+    let registry = app
+        .try_state::<crate::site_preview::SiteRegistry>()
+        .ok_or_else(|| Rejection::new("io", "preview unavailable"))?;
+    let token = registry.register_video(doc.into_bytes());
+    Ok(preview::info(&meta, crate::site_preview::site_url(&token)))
+}
+
+/// "Use this template": a new project from it; returns the project id.
+#[tauri::command]
+pub async fn video_create_from_template(
+    app: AppHandle,
+    profile_id: String,
+    template_id: String,
+    aspect: Option<String>,
+    locale: String,
+) -> Result<String, Rejection> {
+    let realm = realm_dir(&app, &profile_id)?;
+    let aspect = self::aspect(aspect)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        create_from_template_in(&realm, &template_id, aspect, self::locale(&locale))
+    })
+    .await
+    .map_err(|_| Rejection::new("io", "interrupted"))?
+}
+
+/// [`video_create_from_template`] without the app (testable).
+pub fn create_from_template_in(
+    realm: &std::path::Path,
+    template_id: &str,
+    aspect: Option<project::Aspect>,
+    locale: &str,
+) -> Result<String, Rejection> {
+    let m = templates::materialize(template_id, aspect, locale)?;
+    let id = library::new_project_id();
+    let dir = library::create_project_dir(realm, &id)?;
+    let change = library::Change {
+        meta: Some(m.meta),
+        theme: Some(m.theme),
+        scenes: m.scenes.into_iter().collect(),
+        assets: m.assets,
+    };
+    if let Err(err) = library::apply(&dir, change) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(err);
+    }
+    Ok(id)
 }
