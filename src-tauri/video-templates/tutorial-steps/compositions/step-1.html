@@ -1,0 +1,44 @@
+<template id="step-1-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .step-1-stage { position: absolute; inset: 0; display: flex; align-items: center; gap: 7vmin; padding: 0 10vmin 8vmin; }
+    .step-1-num { flex: none; margin: 0; font-family: "Montserrat", sans-serif; font-weight: 800; font-size: 52vmin; line-height: 0.8; letter-spacing: -0.06em; color: var(--accent); animation: step-1-num 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .step-1-body { display: flex; flex-direction: column; gap: 3vmin; min-width: 0; }
+    .step-1-count { margin: 0; font-size: 3vmin; font-weight: 700; letter-spacing: 0.2em; opacity: 0.55; animation: step-1-fade 0.5s ease 0.3s both; }
+    .step-1-title { margin: 0; font-size: 10.5vmin; font-weight: 900; line-height: 1; letter-spacing: -0.035em; animation: step-1-in 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 0.35s both; }
+    .step-1-line { width: 12vmin; height: 0.8vmin; border-radius: 1vmin; background: var(--accent); transform-origin: left center; animation: step-1-bar 0.6s cubic-bezier(0.7, 0, 0.3, 1) 0.7s both; }
+    .step-1-text { margin: 0; max-width: 30ch; font-size: 4.6vmin; line-height: 1.3; opacity: 0.75; animation: step-1-in 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 0.8s both; }
+    .step-1-progress { position: absolute; left: 10vmin; right: 10vmin; bottom: 7vmin; display: flex; gap: 1.6vmin; }
+    .step-1-seg { flex: 1; height: 0.9vmin; border-radius: 1vmin; background: var(--fg); opacity: 0.12; overflow: hidden; }
+    .step-1-seg.step-1-done { opacity: 1; background: var(--accent); }
+    .step-1-seg.step-1-now { opacity: 1; background: color-mix(in srgb, var(--fg) 12%, transparent); }
+    .step-1-fill { width: 100%; height: 100%; background: var(--accent); transform-origin: left center; animation: step-1-fill 3.5s linear both; }
+    @media (max-aspect-ratio: 5/4) {
+      .step-1-stage { flex-direction: column; align-items: flex-start; justify-content: center; gap: 5vmin; }
+      .step-1-num { font-size: 34vmin; }
+      .step-1-title { font-size: 10vmin; }
+      .step-1-text { font-size: 4.6vmin; }
+    }
+    @keyframes step-1-num { from { opacity: 0; transform: translateY(10vmin) scale(0.9); } to { opacity: 1; transform: none; } }
+    @keyframes step-1-fade { from { opacity: 0; } to { opacity: 0.55; } }
+    @keyframes step-1-in { from { opacity: 0; transform: translateX(6vmin); } to { opacity: 1; transform: none; } }
+    @keyframes step-1-bar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes step-1-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  </style>
+  <div id="root" data-composition-id="step-1" data-width="1920" data-height="1080">
+    <div id="step-1-stage" class="clip step-1-stage" data-start="0" data-duration="3.5">
+      <p id="step-1-num" class="step-1-num">01</p>
+      <div id="step-1-body" class="step-1-body">
+        <p id="step-1-count" class="step-1-count">01 / 03</p>
+        <h2 id="step-1-title" class="step-1-title" data-var-text="step-1-title">Crea tu cuenta</h2>
+        <div id="step-1-line" class="step-1-line"></div>
+        <p id="step-1-text" class="step-1-text" data-var-text="step-1-text">Regístrate con tu correo en menos de un minuto.</p>
+      </div>
+      <div id="step-1-progress" class="step-1-progress">
+        <div class="step-1-seg step-1-now"><div class="step-1-fill"></div></div>
+        <div class="step-1-seg"></div>
+        <div class="step-1-seg"></div>
+      </div>
+    </div>
+  </div>
+</template>

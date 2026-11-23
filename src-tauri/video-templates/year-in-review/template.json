@@ -1,0 +1,44 @@
+{
+  "id": "year-in-review",
+  "title": { "es": "Resumen del año", "en": "Year in review" },
+  "description": {
+    "es": "Repasa el año con cifras destacadas, momentos clave y un agradecimiento final.",
+    "en": "Look back on the year with standout numbers, key moments and a closing thank-you."
+  },
+  "category": "brand",
+  "aspect": "16:9",
+  "fps": 30,
+  "fonts": ["inter-400.woff2", "inter-700.woff2", "playfair-display-700.woff2"],
+  "scenes": [
+    { "id": "title", "title": { "es": "Año", "en": "Year" }, "duration": 3.5 },
+    { "id": "stats", "title": { "es": "Cifras", "en": "Numbers" }, "duration": 5.5 },
+    { "id": "moments", "title": { "es": "Momentos", "en": "Moments" }, "duration": 5 },
+    { "id": "thanks", "title": { "es": "Gracias", "en": "Thank you" }, "duration": 3.5 }
+  ],
+  "variables": [
+    { "id": "year", "type": "text", "label": { "es": "Año", "en": "Year" }, "value": { "es": "2026", "en": "2026" } },
+    { "id": "subtitle", "type": "text", "label": { "es": "Subtítulo", "en": "Subtitle" }, "value": { "es": "Nuestro año en resumen", "en": "Our year in review" } },
+    { "id": "stats-title", "type": "text", "label": { "es": "Título de las cifras", "en": "Numbers heading" }, "value": { "es": "Un año en cifras", "en": "A year in numbers" } },
+    { "id": "stat-1-value", "type": "text", "label": { "es": "Cifra 1", "en": "Number 1" }, "value": { "es": "1.240", "en": "1,240" } },
+    { "id": "stat-1-label", "type": "text", "label": { "es": "Cifra 1: texto", "en": "Number 1: text" }, "value": { "es": "proyectos entregados", "en": "projects delivered" } },
+    { "id": "stat-2-value", "type": "text", "label": { "es": "Cifra 2", "en": "Number 2" }, "value": { "es": "38", "en": "38" } },
+    { "id": "stat-2-label", "type": "text", "label": { "es": "Cifra 2: texto", "en": "Number 2: text" }, "value": { "es": "personas en el equipo", "en": "people on the team" } },
+    { "id": "stat-3-value", "type": "text", "label": { "es": "Cifra 3", "en": "Number 3" }, "value": { "es": "12", "en": "12" } },
+    { "id": "stat-3-label", "type": "text", "label": { "es": "Cifra 3: texto", "en": "Number 3: text" }, "value": { "es": "países con clientes", "en": "countries with clients" } },
+    { "id": "stat-4-value", "type": "text", "label": { "es": "Cifra 4", "en": "Number 4" }, "value": { "es": "98 %", "en": "98%" } },
+    { "id": "stat-4-label", "type": "text", "label": { "es": "Cifra 4: texto", "en": "Number 4: text" }, "value": { "es": "de clientes satisfechos", "en": "happy clients" } },
+    { "id": "moments-title", "type": "text", "label": { "es": "Título de los momentos", "en": "Moments heading" }, "value": { "es": "Momentos clave", "en": "Key moments" } },
+    { "id": "moment-1-date", "type": "text", "label": { "es": "Momento 1: fecha", "en": "Moment 1: date" }, "value": { "es": "Marzo", "en": "March" } },
+    { "id": "moment-1-text", "type": "text", "label": { "es": "Momento 1: texto", "en": "Moment 1: text" }, "value": { "es": "Abrimos nuestra segunda oficina", "en": "We opened our second office" } },
+    { "id": "moment-2-date", "type": "text", "label": { "es": "Momento 2: fecha", "en": "Moment 2: date" }, "value": { "es": "Julio", "en": "July" } },
+    { "id": "moment-2-text", "type": "text", "label": { "es": "Momento 2: texto", "en": "Moment 2: text" }, "value": { "es": "Lanzamos la nueva aplicación", "en": "We launched the new app" } },
+    { "id": "moment-3-date", "type": "text", "label": { "es": "Momento 3: fecha", "en": "Moment 3: date" }, "value": { "es": "Noviembre", "en": "November" } },
+    { "id": "moment-3-text", "type": "text", "label": { "es": "Momento 3: texto", "en": "Moment 3: text" }, "value": { "es": "Superamos los mil clientes", "en": "We passed one thousand clients" } },
+    { "id": "thanks", "type": "text", "label": { "es": "Agradecimiento", "en": "Thank-you line" }, "value": { "es": "Gracias por este año", "en": "Thank you for this year" } },
+    { "id": "next", "type": "text", "label": { "es": "Despedida", "en": "Sign-off" }, "value": { "es": "Nos vemos el año que viene", "en": "See you next year" } },
+    { "id": "logo", "type": "image", "label": { "es": "Logo", "en": "Logo" }, "value": { "es": "assets/logo.svg", "en": "assets/logo.svg" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#0d1321", "en": "#0d1321" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto", "en": "Text" }, "value": { "es": "#f6f1e7", "en": "#f6f1e7" } },
+    { "id": "accent", "type": "color", "label": { "es": "Color de acento", "en": "Accent color" }, "value": { "es": "#f2b84b", "en": "#f2b84b" } }
+  ]
+}

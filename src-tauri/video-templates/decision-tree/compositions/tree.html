@@ -1,0 +1,123 @@
+<template id="tree-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background-color: var(--bg); background-image: radial-gradient(color-mix(in srgb, var(--fg) 18%, transparent) 0.14vmin, transparent 0.16vmin); background-size: 2vmin 2vmin; color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .tree-stage { position: absolute; inset: 0; }
+    .tree-map { position: absolute; left: 6vmin; right: 6vmin; top: 9vmin; bottom: 11vmin; }
+    .tree-seg { position: absolute; background: var(--fg); }
+    .tree-v { width: 0.3vmin; margin-left: -0.15vmin; transform-origin: center top; animation: tree-sy 0.17s linear both; }
+    .tree-h { height: 0.3vmin; margin-top: -0.15vmin; animation: tree-sx 0.17s linear both; }
+    .tree-hl { transform-origin: right center; }
+    .tree-hr { transform-origin: left center; }
+    .tree-pick { background: var(--accent); z-index: 1; }
+    .tree-pick.tree-v { width: 0.7vmin; margin-left: -0.35vmin; }
+    .tree-pick.tree-h { height: 0.7vmin; margin-top: -0.35vmin; }
+    .tree-label { position: absolute; top: 26%; transform: translate(-50%, -50%); padding: 0.3vmin 1vmin; border-radius: 0.6vmin; background: var(--bg); z-index: 3; font-size: 2vmin; font-weight: 700; white-space: nowrap; animation: tree-fade 0.2s ease 1.25s both; }
+    .tree-label-yes { left: 37.5%; }
+    .tree-label-no { left: 62.5%; }
+    .tree-node { position: absolute; transform: translate(-50%, -50%); z-index: 2; }
+    .tree-note { position: relative; display: flex; align-items: center; justify-content: center; text-align: center; padding: 1.6vmin 2.4vmin; border-radius: 1.2vmin; font-size: 2.4vmin; font-weight: 400; line-height: 1.25; color: var(--fg); box-shadow: 0 0.4vmin 1.2vmin rgba(0, 0, 0, 0.12); animation: tree-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+    .tree-root { left: 50%; top: 10%; width: max-content; max-width: 46%; }
+    .tree-root .tree-note { font-size: 3vmin; font-weight: 700; padding: 2vmin 3vmin; background: var(--note-1); animation-timing-function: cubic-bezier(0.2, 0.8, 0.3, 1); }
+    .tree-branch { top: 42%; width: max-content; max-width: 34%; }
+    .tree-branch .tree-note { font-weight: 700; }
+    .tree-branch-yes { left: 25%; }
+    .tree-branch-yes .tree-note { background: var(--note-2); animation-delay: 1.4s; }
+    .tree-branch-no { left: 75%; }
+    .tree-branch-no .tree-note { background: var(--note-3); animation-delay: 1.6s; }
+    .tree-leaf { top: 80%; width: max-content; max-width: 22%; }
+    .tree-leaf-1 { left: 12.5%; }
+    .tree-leaf-2 { left: 37.5%; }
+    .tree-leaf-3 { left: 62.5%; }
+    .tree-leaf-4 { left: 87.5%; }
+    .tree-leaf-1 .tree-note { background: var(--note-4); animation-delay: 2.8s; }
+    .tree-leaf-2 .tree-note { background: var(--note-5); animation-delay: 2.95s; }
+    .tree-leaf-3 .tree-note { background: var(--note-6); animation-delay: 3.1s; }
+    .tree-leaf-4 .tree-note { background: var(--note-4); animation-delay: 3.25s; }
+    .tree-dim .tree-note::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--bg); animation: tree-dim 0.5s ease 6.4s both; }
+    .tree-select { position: absolute; inset: -0.7vmin; border: 0.3vmin solid var(--accent); border-radius: 1.6vmin; pointer-events: none; animation: tree-select 2.1s linear 5s both; }
+    .tree-badge { position: absolute; top: -2.2vmin; right: -2.2vmin; width: 4.4vmin; height: 4.4vmin; border-radius: 50%; background: var(--accent); display: flex; align-items: center; justify-content: center; box-shadow: 0 0.4vmin 1vmin rgba(0, 0, 0, 0.2); animation: tree-badge 0.35s cubic-bezier(0.34, 2, 0.64, 1) 6.4s both; }
+    .tree-badge svg { width: 2.6vmin; height: 2.6vmin; }
+    .tree-cursor { position: absolute; z-index: 5; display: flex; align-items: flex-start; animation: tree-cursor 3s linear 4s both; }
+    .tree-click-a { display: flex; align-items: flex-start; transform-origin: top left; animation: tree-click 0.15s ease 5s both; }
+    .tree-click-b { display: flex; align-items: flex-start; transform-origin: top left; animation: tree-click 0.15s ease 7s both; }
+    .tree-arrow { width: 3.2vmin; height: 3.2vmin; }
+    .tree-tag { margin: 1.6vmin 0 0 0.5vmin; padding: 0.3vmin 1vmin; border-radius: 0.5vmin; background: var(--accent); color: #ffffff; font-size: 1.7vmin; font-weight: 700; white-space: nowrap; }
+    .tree-fadeout { position: absolute; inset: 0; z-index: 10; background: var(--bg); animation: tree-out 0.6s ease 10.3s both; }
+    @media (min-aspect-ratio: 5/4) {
+      .tree-note { font-size: 2.8vmin; }
+      .tree-root .tree-note { font-size: 3.6vmin; }
+      .tree-label { font-size: 2.4vmin; }
+      .tree-tag { font-size: 2vmin; }
+    }
+    @media (max-aspect-ratio: 4/5) {
+      .tree-map { top: 14vmin; bottom: 18vmin; }
+      .tree-note { font-size: 2.9vmin; padding: 2vmin 1.8vmin; }
+      .tree-root .tree-note { font-size: 3.8vmin; }
+      .tree-root { max-width: 80%; }
+      .tree-branch { max-width: 44%; }
+      .tree-leaf { max-width: 23%; }
+      .tree-label { font-size: 2.6vmin; }
+    }
+    @media (min-aspect-ratio: 4/5) and (max-aspect-ratio: 5/4) {
+      .tree-note { font-size: 2.2vmin; padding: 1.4vmin 1.4vmin; }
+      .tree-leaf { max-width: 23%; }
+      .tree-root { max-width: 70%; }
+      .tree-branch { max-width: 44%; }
+    }
+    @keyframes tree-sy { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+    @keyframes tree-sx { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes tree-fade { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes tree-pop { from { transform: scale(0); } to { transform: scale(1); } }
+    @keyframes tree-dim { from { opacity: 0; } to { opacity: 0.6; } }
+    @keyframes tree-select { 0% { opacity: 0; } 1% { opacity: 1; } 95% { opacity: 1; } 100% { opacity: 0; } }
+    @keyframes tree-badge { from { transform: scale(0); } to { transform: scale(1); } }
+    @keyframes tree-click { 0% { transform: scale(1); } 50% { transform: scale(0.8); } 100% { transform: scale(1); } }
+    @keyframes tree-cursor {
+      0% { left: 108%; top: 118%; animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1); }
+      33.33% { left: 66%; top: 83%; }
+      90% { left: 66%; top: 83%; animation-timing-function: cubic-bezier(0.3, 0, 0.3, 1); }
+      100% { left: 70%; top: 92%; }
+    }
+    @keyframes tree-out { from { opacity: 0; } to { opacity: 1; } }
+  </style>
+  <div id="root" data-composition-id="tree" data-width="1920" data-height="1080">
+    <div id="tree-stage" class="clip tree-stage" data-start="0" data-duration="11">
+      <div id="tree-map" class="tree-map">
+        <div class="tree-seg tree-v" style="left: 50%; top: 10%; height: 16%; animation-delay: 1.0s; animation-duration: 0.17s"></div>
+        <div class="tree-seg tree-h tree-hl" style="left: calc(25% - 0.15vmin); width: calc(25% + 0.3vmin); top: 26%; animation-delay: 1.17s; animation-duration: 0.17s"></div>
+        <div class="tree-seg tree-v" style="left: 25%; top: 26%; height: 16%; animation-delay: 1.34s; animation-duration: 0.16s"></div>
+        <div class="tree-seg tree-h tree-hr" style="left: calc(50% - 0.15vmin); width: calc(25% + 0.3vmin); top: 26%; animation-delay: 1.17s; animation-duration: 0.17s"></div>
+        <div class="tree-seg tree-v" style="left: 75%; top: 26%; height: 16%; animation-delay: 1.34s; animation-duration: 0.16s"></div>
+        <div class="tree-seg tree-v" style="left: 25%; top: 42%; height: 19%; animation-delay: 2.5s; animation-duration: 0.13s"></div>
+        <div class="tree-seg tree-h tree-hl" style="left: calc(12.5% - 0.15vmin); width: calc(12.5% + 0.3vmin); top: 61%; animation-delay: 2.63s; animation-duration: 0.13s"></div>
+        <div class="tree-seg tree-v" style="left: 12.5%; top: 61%; height: 19%; animation-delay: 2.76s; animation-duration: 0.14s"></div>
+        <div class="tree-seg tree-h tree-hr" style="left: calc(25% - 0.15vmin); width: calc(12.5% + 0.3vmin); top: 61%; animation-delay: 2.63s; animation-duration: 0.13s"></div>
+        <div class="tree-seg tree-v" style="left: 37.5%; top: 61%; height: 19%; animation-delay: 2.76s; animation-duration: 0.14s"></div>
+        <div class="tree-seg tree-v" style="left: 75%; top: 42%; height: 19%; animation-delay: 2.5s; animation-duration: 0.13s"></div>
+        <div class="tree-seg tree-h tree-hl" style="left: calc(62.5% - 0.15vmin); width: calc(12.5% + 0.3vmin); top: 61%; animation-delay: 2.63s; animation-duration: 0.13s"></div>
+        <div class="tree-seg tree-v" style="left: 62.5%; top: 61%; height: 19%; animation-delay: 2.76s; animation-duration: 0.14s"></div>
+        <div class="tree-seg tree-h tree-hr" style="left: calc(75% - 0.15vmin); width: calc(12.5% + 0.3vmin); top: 61%; animation-delay: 2.63s; animation-duration: 0.13s"></div>
+        <div class="tree-seg tree-v" style="left: 87.5%; top: 61%; height: 19%; animation-delay: 2.76s; animation-duration: 0.14s"></div>
+        <div class="tree-seg tree-v tree-pick" style="left: 50%; top: 10%; height: 16%; animation-delay: 5.3s; animation-duration: 0.18s"></div>
+        <div class="tree-seg tree-h tree-hr tree-pick" style="left: calc(50% - 0.15vmin); width: calc(25% + 0.3vmin); top: 26%; animation-delay: 5.48s; animation-duration: 0.22s"></div>
+        <div class="tree-seg tree-v tree-pick" style="left: 75%; top: 26%; height: 35%; animation-delay: 5.7s; animation-duration: 0.3s"></div>
+        <div class="tree-seg tree-h tree-hl tree-pick" style="left: calc(62.5% - 0.15vmin); width: calc(12.5% + 0.3vmin); top: 61%; animation-delay: 6.0s; animation-duration: 0.12s"></div>
+        <div class="tree-seg tree-v tree-pick" style="left: 62.5%; top: 61%; height: 19%; animation-delay: 6.12s; animation-duration: 0.18s"></div>
+        <div id="tree-label-yes" class="tree-label tree-label-yes" data-var-text="answer-yes">Sí</div>
+        <div id="tree-label-no" class="tree-label tree-label-no" data-var-text="answer-no">Todavía no</div>
+        <div id="tree-root" class="tree-node tree-root"><div class="tree-note" data-var-text="question">¿Has programado antes?</div></div>
+        <div id="tree-branch-yes" class="tree-node tree-branch tree-branch-yes tree-dim"><div class="tree-note" data-var-text="branch-yes">Elige un proyecto real</div></div>
+        <div id="tree-branch-no" class="tree-node tree-branch tree-branch-no"><div class="tree-note" data-var-text="branch-no">Empieza por lo básico</div></div>
+        <div id="tree-leaf-1" class="tree-node tree-leaf tree-leaf-1 tree-dim"><div class="tree-note" data-var-text="leaf-1">Crea una herramienta propia</div></div>
+        <div id="tree-leaf-2" class="tree-node tree-leaf tree-leaf-2 tree-dim"><div class="tree-note" data-var-text="leaf-2">Colabora en código abierto</div></div>
+        <div id="tree-leaf-3" class="tree-node tree-leaf tree-leaf-3"><div class="tree-note"><span data-var-text="leaf-3">Sigue un curso gratuito</span><span class="tree-select"></span><span class="tree-badge"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div></div>
+        <div id="tree-leaf-4" class="tree-node tree-leaf tree-leaf-4 tree-dim"><div class="tree-note" data-var-text="leaf-4">Prueba herramientas sin código</div></div>
+        <div id="tree-cursor" class="tree-cursor"><div class="tree-click-a"><div class="tree-click-b">
+          <svg class="tree-arrow" viewBox="0 0 24 24"><path d="M3 2 L3 20 L8 15.5 L11.5 22 L14.5 20.6 L11 14 L18 14 Z" fill="#ffffff" stroke="#111111" stroke-width="1.2" stroke-linejoin="round"/></svg>
+          <span class="tree-tag" data-var-text="cursor-name">Tú</span>
+        </div></div></div>
+      </div>
+      <div id="tree-fadeout" class="tree-fadeout"></div>
+    </div>
+  </div>
+</template>

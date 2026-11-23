@@ -1,0 +1,34 @@
+<template id="title-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .title-stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3vmin; text-align: center; padding: 0 8vmin; }
+    .title-glow { position: absolute; left: 50%; top: 50%; width: 110vmin; height: 110vmin; margin: -55vmin 0 0 -55vmin; border-radius: 50%; background: radial-gradient(circle, var(--accent) 0%, transparent 60%); opacity: 0.18; animation: title-glow 3.5s ease-out both; }
+    .title-ring { position: absolute; left: 50%; top: 50%; width: 80vmin; height: 80vmin; margin: -40vmin 0 0 -40vmin; }
+    .title-ring circle { fill: none; stroke: var(--accent); stroke-width: 0.25; stroke-dasharray: 1; stroke-dashoffset: 1; opacity: 0.6; animation: title-draw 2.4s cubic-bezier(0.6, 0, 0.2, 1) both; }
+    .title-ring circle + circle { stroke-width: 0.15; opacity: 0.35; animation-delay: 0.3s; }
+    .title-logo { width: 9vmin; height: 9vmin; object-fit: contain; animation: title-fade 0.6s ease 0.2s both; }
+    .title-year { margin: 0; font-family: "Playfair Display", serif; font-weight: 700; font-size: 30vmin; line-height: 0.95; letter-spacing: -0.02em; background: linear-gradient(180deg, var(--fg) 30%, var(--accent) 120%); -webkit-background-clip: text; background-clip: text; color: transparent; animation: title-rise 1.1s cubic-bezier(0.2, 0.8, 0.2, 1) 0.3s both; }
+    .title-rule { width: 14vmin; height: 0.5vmin; background: var(--accent); transform-origin: center; animation: title-bar 0.7s cubic-bezier(0.7, 0, 0.3, 1) 1s both; }
+    .title-sub { margin: 0; font-size: 4vmin; font-weight: 700; letter-spacing: 0.2em; text-transform: uppercase; animation: title-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 1.2s both; }
+    @media (max-aspect-ratio: 4/5) {
+      .title-year { font-size: 34vmin; }
+      .title-sub { font-size: 4.6vmin; letter-spacing: 0.14em; }
+    }
+    @keyframes title-glow { from { transform: scale(0.5); opacity: 0; } to { transform: scale(1); opacity: 0.18; } }
+    @keyframes title-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+    @keyframes title-fade { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes title-rise { from { opacity: 0; transform: translateY(10vmin) scale(0.92); filter: blur(1.5vmin); } to { opacity: 1; transform: none; filter: blur(0); } }
+    @keyframes title-bar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes title-up { from { opacity: 0; transform: translateY(4vmin); } to { opacity: 1; transform: none; } }
+  </style>
+  <div id="root" data-composition-id="title" data-width="1920" data-height="1080">
+    <div id="title-stage" class="clip title-stage" data-start="0" data-duration="3.5">
+      <div id="title-glow" class="title-glow"></div>
+      <svg id="title-ring" class="title-ring" viewBox="0 0 100 100"><circle pathLength="1" cx="50" cy="50" r="49" transform="rotate(-90 50 50)"/><circle pathLength="1" cx="50" cy="50" r="45" transform="rotate(90 50 50)"/></svg>
+      <img id="title-logo" class="title-logo" src="assets/logo.svg" data-var-src="logo" alt="">
+      <h1 id="title-year" class="title-year" data-var-text="year">2026</h1>
+      <div id="title-rule" class="title-rule"></div>
+      <p id="title-sub" class="title-sub" data-var-text="subtitle">Nuestro año en resumen</p>
+    </div>
+  </div>
+</template>

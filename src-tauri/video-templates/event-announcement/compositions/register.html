@@ -1,0 +1,37 @@
+<template id="register-template">
+  <style>
+    @font-face { font-family: "Libre Franklin"; font-weight: 400; src: url("assets/fonts/libre-franklin-400.woff2") format("woff2"); }
+    @font-face { font-family: "Libre Franklin"; font-weight: 600; src: url("assets/fonts/libre-franklin-600.woff2") format("woff2"); }
+    @font-face { font-family: "Libre Baskerville"; font-weight: 700; src: url("assets/fonts/libre-baskerville-700.woff2") format("woff2"); }
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--accent); color: var(--bg); font-family: "Libre Franklin", system-ui, sans-serif; }
+    .register-stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4.5vmin; padding: 0 9vmin; text-align: center; }
+    .register-iris { position: absolute; left: 50%; top: 50%; width: 160vmax; height: 160vmax; margin: -80vmax 0 0 -80vmax; border-radius: 50%; background: var(--fg); animation: register-iris 0.7s cubic-bezier(0.7, 0, 0.3, 1) both; }
+    .register-logo { position: relative; width: 12vmin; height: 12vmin; object-fit: contain; border-radius: 50%; background: var(--bg); animation: register-pop 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.3) 0.4s both; }
+    .register-cta { position: relative; margin: 0; font-family: "Libre Baskerville", serif; font-size: 11vmin; font-weight: 700; line-height: 1.05; letter-spacing: -0.02em; animation: register-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 0.55s both; }
+    .register-url { position: relative; margin: 0; padding: 2vmin 5vmin; border-radius: 999px; background: var(--bg); color: var(--fg); font-size: 4.4vmin; font-weight: 600; letter-spacing: 0.02em; animation: register-pop 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.3) 1.1s both; }
+    .register-note { position: relative; margin: 0; font-size: 3.2vmin; font-weight: 600; animation: register-up 0.6s ease 1.6s both; }
+    @keyframes register-iris { from { transform: scale(1); } to { transform: scale(0); } }
+    @keyframes register-pop { from { opacity: 0; transform: scale(0.5); } to { opacity: 1; transform: none; } }
+    @keyframes register-up { from { opacity: 0; transform: translateY(4vmin); } to { opacity: 1; transform: none; } }
+    @media (max-aspect-ratio: 3/4) {
+      .register-cta { font-size: 10vmin; }
+      .register-url { font-size: 4vmin; }
+    }
+    @media (max-aspect-ratio: 3/4) {
+      .register-stage { gap: 6vmin; }
+      .register-cta { font-size: 13vmin; }
+      .register-logo { width: 16vmin; height: 16vmin; }
+      .register-url { font-size: 5vmin; }
+      .register-note { font-size: 4vmin; }
+    }
+  </style>
+  <div id="root" data-composition-id="register" data-width="1920" data-height="1080">
+    <div id="register-stage" class="clip register-stage" data-start="0" data-duration="3.5">
+      <div id="register-iris" class="register-iris"></div>
+      <img id="register-logo" class="register-logo" src="assets/logo.svg" data-var-src="logo" alt="">
+      <h2 id="register-cta" class="register-cta" data-var-text="cta">Reserva tu plaza</h2>
+      <p id="register-url" class="register-url" data-var-text="url">tuweb.com/jornada</p>
+      <p id="register-note" class="register-note" data-var-text="note">Entrada gratuita. Plazas limitadas.</p>
+    </div>
+  </div>
+</template>

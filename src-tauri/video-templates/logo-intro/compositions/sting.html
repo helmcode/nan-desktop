@@ -1,0 +1,54 @@
+<template id="sting-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .sting-stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4vmin; padding: 0 8vmin; text-align: center; }
+    .sting-mark { position: relative; width: 30vmin; height: 30vmin; flex: none; margin-bottom: 2vmin; }
+    .sting-shape { position: absolute; left: 50%; top: 50%; }
+    .sting-circle { width: 12vmin; height: 12vmin; margin: -6vmin 0 0 -6vmin; border-radius: 50%; background: var(--accent); animation: sting-circle 1.3s cubic-bezier(0.6, 0, 0.2, 1) both; }
+    .sting-square { width: 10vmin; height: 10vmin; margin: -5vmin 0 0 -5vmin; background: var(--accent-2); animation: sting-square 1.3s cubic-bezier(0.6, 0, 0.2, 1) 0.1s both; }
+    .sting-tri { width: 12vmin; height: 11vmin; margin: -5.5vmin 0 0 -6vmin; background: var(--fg); clip-path: polygon(50% 0, 100% 100%, 0 100%); animation: sting-tri 1.3s cubic-bezier(0.6, 0, 0.2, 1) 0.2s both; }
+    .sting-ring { position: absolute; inset: -4vmin; border-radius: 50%; border: 0.6vmin solid var(--accent); animation: sting-ring 1s cubic-bezier(0.2, 0.8, 0.2, 1) 1.45s both; }
+    .sting-flash { position: absolute; inset: 0; border-radius: 50%; background: var(--fg); animation: sting-flash 0.6s ease-out 1.35s both; }
+    .sting-logo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; animation: sting-logo 0.8s cubic-bezier(0.2, 0.9, 0.3, 1.25) 1.4s both; }
+    .sting-name { margin: 0; font-family: "Montserrat", "Inter", system-ui, sans-serif; font-size: 11vmin; font-weight: 800; letter-spacing: -0.02em; line-height: 1; animation: sting-name 1s cubic-bezier(0.2, 0.8, 0.2, 1) 2s both; }
+    .sting-tagline { margin: 0; font-size: 3.8vmin; font-weight: 400; letter-spacing: 0.3em; text-transform: uppercase; opacity: 0.8; animation: sting-tag 1s cubic-bezier(0.2, 0.8, 0.2, 1) 2.6s both; }
+    .sting-bar { width: 14vmin; height: 0.6vmin; background: var(--accent); transform-origin: center; animation: sting-bar 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 2.4s both; }
+    .sting-out { position: absolute; inset: 0; background: var(--bg); animation: sting-out 0.5s ease-in 5s both; }
+    @keyframes sting-circle { 0% { transform: translate(-60vmin, -20vmin) scale(1.6); opacity: 0; } 30% { opacity: 1; } 75% { transform: translate(0, 0) scale(1); } 100% { transform: translate(0, 0) scale(0); } }
+    @keyframes sting-square { 0% { transform: translate(55vmin, 25vmin) rotate(180deg) scale(1.6); opacity: 0; } 30% { opacity: 1; } 75% { transform: translate(0, 0) rotate(45deg) scale(1); } 100% { transform: translate(0, 0) rotate(45deg) scale(0); } }
+    @keyframes sting-tri { 0% { transform: translate(10vmin, -55vmin) rotate(-120deg) scale(1.6); opacity: 0; } 30% { opacity: 1; } 75% { transform: translate(0, 0) rotate(0deg) scale(1); } 100% { transform: translate(0, 0) rotate(0deg) scale(0); } }
+    @keyframes sting-ring { 0% { transform: scale(0.4); opacity: 0; } 10% { opacity: 1; } 100% { transform: scale(1.35); opacity: 0; } }
+    @keyframes sting-flash { 0% { transform: scale(0.2); opacity: 0; } 10% { opacity: 0.9; } 100% { transform: scale(1.4); opacity: 0; } }
+    @keyframes sting-logo { from { transform: scale(0) rotate(-90deg); opacity: 0; } to { transform: scale(1) rotate(0deg); opacity: 1; } }
+    @keyframes sting-name { from { opacity: 0; transform: scale(1.25); clip-path: inset(0 50% 0 50%); filter: blur(1vmin); } to { opacity: 1; transform: none; clip-path: inset(0 -5% 0 -5%); filter: blur(0); } }
+    @keyframes sting-tag { from { opacity: 0; transform: translateY(3vmin); } to { opacity: 0.8; transform: none; } }
+    @keyframes sting-bar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes sting-out { from { opacity: 0; } to { opacity: 1; } }
+    @media (max-aspect-ratio: 3/4) {
+      .sting-name { font-size: 10vmin; }
+      .sting-tagline { font-size: 3.2vmin; letter-spacing: 0.2em; }
+    }
+    @media (max-aspect-ratio: 3/4) {
+      .sting-stage { gap: 6vmin; }
+      .sting-mark { width: 34vmin; height: 34vmin; }
+      .sting-name { font-size: 12vmin; }
+      .sting-tagline { font-size: 4vmin; }
+    }
+  </style>
+  <div id="root" data-composition-id="sting" data-width="1920" data-height="1080">
+    <div id="sting-stage" class="clip sting-stage" data-start="0" data-duration="5.5">
+      <div id="sting-mark" class="sting-mark">
+        <div id="sting-circle" class="sting-shape sting-circle"></div>
+        <div id="sting-square" class="sting-shape sting-square"></div>
+        <div id="sting-tri" class="sting-shape sting-tri"></div>
+        <div id="sting-ring" class="sting-ring"></div>
+        <div id="sting-flash" class="sting-flash"></div>
+        <img id="sting-logo" class="sting-logo" src="assets/logo.svg" data-var-src="logo" alt="">
+      </div>
+      <h1 id="sting-name" class="sting-name" data-var-text="brand">Estudio Faro</h1>
+      <div id="sting-bar" class="sting-bar"></div>
+      <p id="sting-tagline" class="sting-tagline" data-var-text="tagline">Ideas que se ven de lejos</p>
+      <div id="sting-out" class="sting-out"></div>
+    </div>
+  </div>
+</template>

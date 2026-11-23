@@ -1,0 +1,28 @@
+{
+  "id": "launch-countdown",
+  "title": { "es": "Cuenta atrás de lanzamiento", "en": "Launch countdown" },
+  "description": {
+    "es": "Cuenta atrás de 3, 2, 1 que desemboca en el anuncio del producto, su fecha y dónde conseguirlo.",
+    "en": "A 3, 2, 1 countdown that lands on the product reveal, its date and where to get it."
+  },
+  "category": "marketing",
+  "aspect": "16:9",
+  "fps": 30,
+  "fonts": ["inter-400.woff2", "inter-900.woff2", "jetbrains-mono-500.woff2"],
+  "scenes": [
+    { "id": "count", "title": { "es": "Cuenta atrás", "en": "Countdown" }, "duration": 3.6 },
+    { "id": "reveal", "title": { "es": "Lanzamiento", "en": "Launch" }, "duration": 5 }
+  ],
+  "variables": [
+    { "id": "teaser", "type": "text", "label": { "es": "Texto de la cuenta atrás", "en": "Countdown text" }, "value": { "es": "Algo nuevo está a punto de llegar", "en": "Something new is about to land" } },
+    { "id": "status", "type": "text", "label": { "es": "Estado", "en": "Status" }, "value": { "es": "Ya disponible", "en": "Available now" } },
+    { "id": "product", "type": "text", "label": { "es": "Producto", "en": "Product" }, "value": { "es": "Nova 2", "en": "Nova 2" } },
+    { "id": "date", "type": "text", "label": { "es": "Fecha", "en": "Date" }, "value": { "es": "Desde el 12 de marzo", "en": "From March 12" } },
+    { "id": "url", "type": "text", "label": { "es": "Web o usuario", "en": "Website or handle" }, "value": { "es": "nova.app", "en": "nova.app" } },
+    { "id": "logo", "type": "image", "label": { "es": "Logo", "en": "Logo" }, "value": { "es": "assets/logo.svg", "en": "assets/logo.svg" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#120b2e", "en": "#120b2e" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto", "en": "Text" }, "value": { "es": "#ffffff", "en": "#ffffff" } },
+    { "id": "accent", "type": "color", "label": { "es": "Color de acento", "en": "Accent color" }, "value": { "es": "#ff4fa3", "en": "#ff4fa3" } },
+    { "id": "accent-2", "type": "color", "label": { "es": "Segundo acento", "en": "Second accent" }, "value": { "es": "#5b8cff", "en": "#5b8cff" } }
+  ]
+}

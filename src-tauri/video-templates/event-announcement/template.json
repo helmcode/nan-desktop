@@ -1,0 +1,283 @@
+{
+  "id": "event-announcement",
+  "title": {
+    "es": "Anuncio de evento",
+    "en": "Event announcement"
+  },
+  "description": {
+    "es": "Anuncia un evento: título, fecha, hora y lugar, ponentes y programa, y un cierre para reservar plaza.",
+    "en": "Announce an event: title, date, time and place, speakers and agenda, and a closing to register."
+  },
+  "category": "events",
+  "aspect": "16:9",
+  "fps": 30,
+  "fonts": [
+    "libre-baskerville-700.woff2",
+    "libre-franklin-400.woff2",
+    "libre-franklin-600.woff2"
+  ],
+  "scenes": [
+    {
+      "id": "title",
+      "title": {
+        "es": "Título",
+        "en": "Title"
+      },
+      "duration": 3.5
+    },
+    {
+      "id": "details",
+      "title": {
+        "es": "Cuándo y dónde",
+        "en": "When and where"
+      },
+      "duration": 4.5
+    },
+    {
+      "id": "speakers",
+      "title": {
+        "es": "Ponentes y programa",
+        "en": "Speakers and agenda"
+      },
+      "duration": 3.5
+    },
+    {
+      "id": "register",
+      "title": {
+        "es": "Inscripción",
+        "en": "Registration"
+      },
+      "duration": 3.5
+    }
+  ],
+  "variables": [
+    {
+      "id": "kicker",
+      "type": "text",
+      "label": {
+        "es": "Antetítulo",
+        "en": "Kicker"
+      },
+      "value": {
+        "es": "Encuentro anual · 3.ª edición",
+        "en": "Annual meetup · 3rd edition"
+      }
+    },
+    {
+      "id": "event",
+      "type": "text",
+      "label": {
+        "es": "Nombre del evento",
+        "en": "Event name"
+      },
+      "value": {
+        "es": "Jornada de Diseño Abierto",
+        "en": "Open Design Day"
+      }
+    },
+    {
+      "id": "subtitle",
+      "type": "text",
+      "label": {
+        "es": "Subtítulo",
+        "en": "Subtitle"
+      },
+      "value": {
+        "es": "Un día para aprender, construir y conocerse",
+        "en": "A day to learn, build and meet"
+      }
+    },
+    {
+      "id": "date",
+      "type": "text",
+      "label": {
+        "es": "Fecha",
+        "en": "Date"
+      },
+      "value": {
+        "es": "Jueves 14 de mayo",
+        "en": "Thursday, May 14"
+      }
+    },
+    {
+      "id": "time",
+      "type": "text",
+      "label": {
+        "es": "Horario",
+        "en": "Time"
+      },
+      "value": {
+        "es": "De 9:30 a 18:00",
+        "en": "9:30 am to 6:00 pm"
+      }
+    },
+    {
+      "id": "place",
+      "type": "text",
+      "label": {
+        "es": "Lugar",
+        "en": "Place"
+      },
+      "value": {
+        "es": "Auditorio Faro, Valencia",
+        "en": "Faro Auditorium, Valencia"
+      }
+    },
+    {
+      "id": "label-date",
+      "type": "text",
+      "label": {
+        "es": "Etiqueta de fecha",
+        "en": "Date label"
+      },
+      "value": {
+        "es": "Fecha",
+        "en": "Date"
+      }
+    },
+    {
+      "id": "label-time",
+      "type": "text",
+      "label": {
+        "es": "Etiqueta de hora",
+        "en": "Time label"
+      },
+      "value": {
+        "es": "Hora",
+        "en": "Time"
+      }
+    },
+    {
+      "id": "label-place",
+      "type": "text",
+      "label": {
+        "es": "Etiqueta de lugar",
+        "en": "Place label"
+      },
+      "value": {
+        "es": "Lugar",
+        "en": "Place"
+      }
+    },
+    {
+      "id": "label-speakers",
+      "type": "text",
+      "label": {
+        "es": "Etiqueta de ponentes",
+        "en": "Speakers label"
+      },
+      "value": {
+        "es": "Con",
+        "en": "With"
+      }
+    },
+    {
+      "id": "speakers",
+      "type": "text",
+      "label": {
+        "es": "Ponentes",
+        "en": "Speakers"
+      },
+      "value": {
+        "es": "Laura Gómez, Daniel Ruiz y Marta Ibáñez",
+        "en": "Laura Gómez, Daniel Ruiz and Marta Ibáñez"
+      }
+    },
+    {
+      "id": "agenda",
+      "type": "text",
+      "label": {
+        "es": "Programa",
+        "en": "Agenda"
+      },
+      "value": {
+        "es": "Charlas · Talleres prácticos · Networking",
+        "en": "Talks · Hands-on workshops · Networking"
+      }
+    },
+    {
+      "id": "cta",
+      "type": "text",
+      "label": {
+        "es": "Llamada a la acción",
+        "en": "Call to action"
+      },
+      "value": {
+        "es": "Reserva tu plaza",
+        "en": "Save your seat"
+      }
+    },
+    {
+      "id": "url",
+      "type": "text",
+      "label": {
+        "es": "Web de inscripción",
+        "en": "Registration link"
+      },
+      "value": {
+        "es": "tuweb.com/jornada",
+        "en": "yoursite.com/day"
+      }
+    },
+    {
+      "id": "note",
+      "type": "text",
+      "label": {
+        "es": "Nota",
+        "en": "Note"
+      },
+      "value": {
+        "es": "Entrada gratuita. Plazas limitadas.",
+        "en": "Free entry. Limited seats."
+      }
+    },
+    {
+      "id": "logo",
+      "type": "image",
+      "label": {
+        "es": "Logo",
+        "en": "Logo"
+      },
+      "value": {
+        "es": "assets/logo.svg",
+        "en": "assets/logo.svg"
+      }
+    },
+    {
+      "id": "bg",
+      "type": "color",
+      "label": {
+        "es": "Fondo",
+        "en": "Background"
+      },
+      "value": {
+        "es": "#0f2a24",
+        "en": "#0f2a24"
+      }
+    },
+    {
+      "id": "fg",
+      "type": "color",
+      "label": {
+        "es": "Texto",
+        "en": "Text"
+      },
+      "value": {
+        "es": "#f3efe4",
+        "en": "#f3efe4"
+      }
+    },
+    {
+      "id": "accent",
+      "type": "color",
+      "label": {
+        "es": "Color de acento",
+        "en": "Accent color"
+      },
+      "value": {
+        "es": "#f5b942",
+        "en": "#f5b942"
+      }
+    }
+  ]
+}

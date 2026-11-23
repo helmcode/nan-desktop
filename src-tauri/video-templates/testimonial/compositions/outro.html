@@ -1,0 +1,31 @@
+<template id="outro-template">
+  <style>
+    @font-face { font-family: "Libre Franklin"; font-weight: 400; src: url("assets/fonts/libre-franklin-400.woff2") format("woff2"); }
+    @font-face { font-family: "Libre Franklin"; font-weight: 600; src: url("assets/fonts/libre-franklin-600.woff2") format("woff2"); }
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--fg); color: var(--bg); font-family: "Libre Franklin", system-ui, sans-serif; }
+    .outro-stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5vmin; padding: 0 9vmin; text-align: center; }
+    .outro-curtain { position: absolute; inset: 0; background: var(--bg); transform-origin: bottom center; animation: outro-curtain 0.6s cubic-bezier(0.7, 0, 0.3, 1) both; }
+    .outro-logo { width: 14vmin; height: 14vmin; object-fit: contain; border-radius: 50%; background: var(--bg); animation: outro-pop 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.3) 0.5s both; }
+    .outro-line { margin: 0; max-width: 120vmin; font-family: "Playfair Display", serif; font-size: 7.5vmin; font-weight: 700; line-height: 1.15; animation: outro-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 0.7s both; }
+    .outro-url { margin: 0; padding: 1.6vmin 4vmin; border-radius: 999px; border: 0.3vmin solid var(--accent); color: var(--accent); font-size: 3.6vmin; font-weight: 600; letter-spacing: 0.04em; animation: outro-up 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) 1.2s both; }
+    @keyframes outro-curtain { from { transform: scaleY(1); } to { transform: scaleY(0); } }
+    @keyframes outro-pop { from { opacity: 0; transform: scale(0.4); } to { opacity: 1; transform: none; } }
+    @keyframes outro-up { from { opacity: 0; transform: translateY(4vmin); } to { opacity: 1; transform: none; } }
+    @media (max-aspect-ratio: 3/4) {
+      .outro-line { font-size: 7vmin; max-width: 84vmin; }
+    }
+    @media (max-aspect-ratio: 3/4) {
+      .outro-line { font-size: 8.5vmin; }
+      .outro-logo { width: 18vmin; height: 18vmin; }
+      .outro-url { font-size: 4.4vmin; }
+    }
+  </style>
+  <div id="root" data-composition-id="outro" data-width="1920" data-height="1080">
+    <div id="outro-stage" class="clip outro-stage" data-start="0" data-duration="3">
+      <img id="outro-logo" class="outro-logo" src="assets/logo.svg" data-var-src="logo" alt="">
+      <p id="outro-line" class="outro-line" data-var-text="closing">Únete a los equipos que ya trabajan con calma.</p>
+      <p id="outro-url" class="outro-url" data-var-text="url">tuweb.com</p>
+      <div id="outro-curtain" class="outro-curtain"></div>
+    </div>
+  </div>
+</template>

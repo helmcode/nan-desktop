@@ -1,0 +1,29 @@
+{
+  "id": "testimonial",
+  "title": { "es": "Testimonio", "en": "Testimonial" },
+  "description": {
+    "es": "Tarjeta con la cita de un cliente, su valoración, nombre y cargo, y un cierre con tu marca.",
+    "en": "A customer quote card with rating, name and role, closing on your brand."
+  },
+  "category": "marketing",
+  "aspect": "1:1",
+  "fps": 30,
+  "fonts": ["playfair-display-700.woff2", "libre-franklin-400.woff2", "libre-franklin-600.woff2"],
+  "scenes": [
+    { "id": "quote", "title": { "es": "Cita", "en": "Quote" }, "duration": 6.5 },
+    { "id": "outro", "title": { "es": "Cierre", "en": "Closing" }, "duration": 3 }
+  ],
+  "variables": [
+    { "id": "quote", "type": "text", "label": { "es": "Cita", "en": "Quote" }, "value": { "es": "En dos semanas pasamos de perseguir correos a tener todo el equipo en la misma página.", "en": "In two weeks we went from chasing emails to having the whole team on the same page." } },
+    { "id": "name", "type": "text", "label": { "es": "Nombre", "en": "Name" }, "value": { "es": "Laura Gómez", "en": "Laura Gómez" } },
+    { "id": "initials", "type": "text", "label": { "es": "Iniciales", "en": "Initials" }, "value": { "es": "LG", "en": "LG" } },
+    { "id": "role", "type": "text", "label": { "es": "Cargo y empresa", "en": "Role and company" }, "value": { "es": "Directora de operaciones, Estudio Faro", "en": "Head of Operations, Faro Studio" } },
+    { "id": "closing", "type": "text", "label": { "es": "Frase de cierre", "en": "Closing line" }, "value": { "es": "Únete a los equipos que ya trabajan con calma.", "en": "Join the teams already working calmly." } },
+    { "id": "url", "type": "text", "label": { "es": "Web o usuario", "en": "Website or handle" }, "value": { "es": "tuweb.com", "en": "yoursite.com" } },
+    { "id": "logo", "type": "image", "label": { "es": "Logo", "en": "Logo" }, "value": { "es": "assets/logo.svg", "en": "assets/logo.svg" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#f3ede2", "en": "#f3ede2" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto", "en": "Text" }, "value": { "es": "#1d1a16", "en": "#1d1a16" } },
+    { "id": "accent", "type": "color", "label": { "es": "Color de acento", "en": "Accent color" }, "value": { "es": "#d2551e", "en": "#d2551e" } },
+    { "id": "card", "type": "color", "label": { "es": "Tarjeta", "en": "Card" }, "value": { "es": "#fffaf2", "en": "#fffaf2" } }
+  ]
+}

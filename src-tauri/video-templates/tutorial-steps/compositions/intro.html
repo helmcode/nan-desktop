@@ -1,0 +1,35 @@
+<template id="intro-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .intro-stage { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 4vmin; padding: 0 10vmin; }
+    .intro-logo { position: absolute; top: 7vmin; left: 10vmin; width: 9vmin; height: 9vmin; object-fit: contain; animation: intro-fade 0.6s ease both; }
+    .intro-kicker { margin: 0; padding: 1.2vmin 3vmin; border-radius: 999px; background: var(--fg); color: var(--bg); font-size: 2.8vmin; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; animation: intro-pop 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.3) 0.2s both; }
+    .intro-title { margin: 0; max-width: 16ch; font-size: 10vmin; font-weight: 900; line-height: 1; letter-spacing: -0.035em; animation: intro-rise 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.4s both; }
+    .intro-dots { display: flex; gap: 2.4vmin; }
+    .intro-dot { display: flex; align-items: center; justify-content: center; width: 8vmin; height: 8vmin; border-radius: 50%; border: 0.5vmin solid var(--accent); color: var(--accent); font-family: "Montserrat", sans-serif; font-weight: 800; font-size: 3.6vmin; animation: intro-pop 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.4) both; }
+    .intro-dot:nth-child(1) { animation-delay: 1.1s; }
+    .intro-dot:nth-child(2) { animation-delay: 1.3s; }
+    .intro-dot:nth-child(3) { animation-delay: 1.5s; background: var(--accent); color: var(--bg); }
+    .intro-shape { position: absolute; right: -14vmin; bottom: -14vmin; width: 60vmin; height: 60vmin; border-radius: 50%; background: var(--accent); opacity: 0.14; animation: intro-grow 3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    @media (min-aspect-ratio: 5/4) {
+      .intro-title { font-size: 12vmin; }
+    }
+    @media (max-aspect-ratio: 4/5) {
+      .intro-title { font-size: 12vmin; }
+      .intro-shape { width: 80vmin; height: 80vmin; }
+    }
+    @keyframes intro-fade { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes intro-pop { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: none; } }
+    @keyframes intro-rise { from { opacity: 0; transform: translateY(6vmin); } to { opacity: 1; transform: none; } }
+    @keyframes intro-grow { from { transform: scale(0.4); opacity: 0; } to { transform: scale(1); opacity: 0.14; } }
+  </style>
+  <div id="root" data-composition-id="intro" data-width="1920" data-height="1080">
+    <div id="intro-stage" class="clip intro-stage" data-start="0" data-duration="3">
+      <div id="intro-shape" class="intro-shape"></div>
+      <img id="intro-logo" class="intro-logo" src="assets/logo.svg" data-var-src="logo" alt="">
+      <p id="intro-kicker" class="intro-kicker" data-var-text="kicker">Guía rápida</p>
+      <h1 id="intro-title" class="intro-title" data-var-text="title">Cómo crear tu primer proyecto</h1>
+      <div id="intro-dots" class="intro-dots"><span class="intro-dot">1</span><span class="intro-dot">2</span><span class="intro-dot">3</span></div>
+    </div>
+  </div>
+</template>

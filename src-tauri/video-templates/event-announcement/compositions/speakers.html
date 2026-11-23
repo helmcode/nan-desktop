@@ -1,0 +1,43 @@
+<template id="speakers-template">
+  <style>
+    @font-face { font-family: "Libre Franklin"; font-weight: 400; src: url("assets/fonts/libre-franklin-400.woff2") format("woff2"); }
+    @font-face { font-family: "Libre Franklin"; font-weight: 600; src: url("assets/fonts/libre-franklin-600.woff2") format("woff2"); }
+    @font-face { font-family: "Libre Baskerville"; font-weight: 700; src: url("assets/fonts/libre-baskerville-700.woff2") format("woff2"); }
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--fg); color: var(--bg); font-family: "Libre Franklin", system-ui, sans-serif; }
+    .speakers-stage { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 5vmin; padding: 0 12vmin; }
+    .speakers-wipe { position: absolute; inset: 0; background: var(--bg); transform-origin: right center; animation: speakers-wipe 0.6s cubic-bezier(0.7, 0, 0.3, 1) both; }
+    .speakers-faces { display: flex; animation: speakers-fade 0.5s ease 0.4s both; }
+    .speakers-face { width: 12vmin; height: 12vmin; margin-right: -2.5vmin; border-radius: 50%; border: 0.8vmin solid var(--fg); background: var(--accent); animation: speakers-pop 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.4) both; }
+    .speakers-face:nth-child(1) { animation-delay: 0.5s; }
+    .speakers-face:nth-child(2) { animation-delay: 0.65s; background: var(--bg); }
+    .speakers-face:nth-child(3) { animation-delay: 0.8s; background: color-mix(in srgb, var(--accent) 55%, var(--bg)); }
+    .speakers-label { margin: 0; font-size: 3vmin; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase; opacity: 0.7; animation: speakers-fade 0.5s ease 0.6s both; }
+    .speakers-names { margin: 0; max-width: 140vmin; font-family: "Libre Baskerville", serif; font-size: 7.4vmin; font-weight: 700; line-height: 1.15; animation: speakers-up 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.8s both; }
+    .speakers-agenda { margin: 0; padding-top: 3.5vmin; border-top: 0.4vmin solid currentColor; font-size: 4.2vmin; font-weight: 600; animation: speakers-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 1.4s both; }
+    @keyframes speakers-wipe { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+    @keyframes speakers-fade { from { opacity: 0; } to { opacity: 0.7; } }
+    @keyframes speakers-pop { from { transform: scale(0); } to { transform: scale(1); } }
+    @keyframes speakers-up { from { opacity: 0; transform: translateY(4vmin); } to { opacity: 1; transform: none; } }
+    @media (max-aspect-ratio: 3/4) {
+      .speakers-stage { padding: 0 7vmin; gap: 4vmin; }
+      .speakers-names { font-size: 6.6vmin; max-width: 86vmin; }
+      .speakers-agenda { font-size: 3.8vmin; }
+    }
+    @media (max-aspect-ratio: 3/4) {
+      .speakers-stage { gap: 6vmin; }
+      .speakers-face { width: 16vmin; height: 16vmin; }
+      .speakers-names { font-size: 8.5vmin; }
+      .speakers-agenda { font-size: 4.8vmin; }
+      .speakers-label { font-size: 3.6vmin; }
+    }
+  </style>
+  <div id="root" data-composition-id="speakers" data-width="1920" data-height="1080">
+    <div id="speakers-stage" class="clip speakers-stage" data-start="0" data-duration="3.5">
+      <div id="speakers-faces" class="speakers-faces"><span class="speakers-face"></span><span class="speakers-face"></span><span class="speakers-face"></span></div>
+      <p id="speakers-label" class="speakers-label" data-var-text="label-speakers">Con</p>
+      <h2 id="speakers-names" class="speakers-names" data-var-text="speakers">Laura Gómez, Daniel Ruiz y Marta Ibáñez</h2>
+      <p id="speakers-agenda" class="speakers-agenda" data-var-text="agenda">Charlas · Talleres prácticos · Networking</p>
+      <div id="speakers-wipe" class="speakers-wipe"></div>
+    </div>
+  </div>
+</template>

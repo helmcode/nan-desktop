@@ -1,0 +1,40 @@
+{
+  "id": "data-explainer",
+  "title": { "es": "Dato explicado", "en": "Data explainer" },
+  "description": {
+    "es": "Explica una cifra: la pregunta, el número en grande, un gráfico de tres barras y la conclusión.",
+    "en": "Explain one number: the question, the big figure, a three-bar chart and the takeaway."
+  },
+  "category": "data",
+  "aspect": "16:9",
+  "fps": 30,
+  "fonts": ["inter-400.woff2", "inter-700.woff2", "inter-900.woff2", "jetbrains-mono-500.woff2"],
+  "scenes": [
+    { "id": "question", "title": { "es": "Pregunta", "en": "Question" }, "duration": 3.5 },
+    { "id": "number", "title": { "es": "La cifra", "en": "The figure" }, "duration": 4.5 },
+    { "id": "chart", "title": { "es": "Gráfico", "en": "Chart" }, "duration": 4.5 },
+    { "id": "takeaway", "title": { "es": "Conclusión", "en": "Takeaway" }, "duration": 3.5 }
+  ],
+  "variables": [
+    { "id": "kicker", "type": "text", "label": { "es": "Antetítulo", "en": "Kicker" }, "value": { "es": "Dato de la semana", "en": "Stat of the week" } },
+    { "id": "question", "type": "text", "label": { "es": "Pregunta", "en": "Question" }, "value": { "es": "¿Cuánto tiempo ahorra un equipo al automatizar sus informes?", "en": "How much time does a team save by automating its reports?" } },
+    { "id": "stat", "type": "text", "label": { "es": "Cifra", "en": "Figure" }, "value": { "es": "62%", "en": "62%" } },
+    { "id": "stat-label", "type": "text", "label": { "es": "Qué mide la cifra", "en": "What the figure means" }, "value": { "es": "menos horas dedicadas a informes", "en": "fewer hours spent on reports" } },
+    { "id": "chart-title", "type": "text", "label": { "es": "Título del gráfico", "en": "Chart title" }, "value": { "es": "Horas por semana en informes", "en": "Hours per week on reports" } },
+    { "id": "bar-1-label", "type": "text", "label": { "es": "Barra 1: etiqueta", "en": "Bar 1: label" }, "value": { "es": "A mano", "en": "Manual" } },
+    { "id": "bar-1-value", "type": "text", "label": { "es": "Barra 1: valor", "en": "Bar 1: value" }, "value": { "es": "10 h", "en": "10 h" } },
+    { "id": "bar-2-label", "type": "text", "label": { "es": "Barra 2: etiqueta", "en": "Bar 2: label" }, "value": { "es": "En parte", "en": "Partial" } },
+    { "id": "bar-2-value", "type": "text", "label": { "es": "Barra 2: valor", "en": "Bar 2: value" }, "value": { "es": "6,5 h", "en": "6.5 h" } },
+    { "id": "bar-3-label", "type": "text", "label": { "es": "Barra 3: etiqueta", "en": "Bar 3: label" }, "value": { "es": "Automatizado", "en": "Automated" } },
+    { "id": "bar-3-value", "type": "text", "label": { "es": "Barra 3: valor", "en": "Bar 3: value" }, "value": { "es": "3,8 h", "en": "3.8 h" } },
+    { "id": "bar-1-amount", "type": "number", "label": { "es": "Barra 1: longitud (número)", "en": "Bar 1: length (number)" }, "value": { "es": "10", "en": "10" } },
+    { "id": "bar-2-amount", "type": "number", "label": { "es": "Barra 2: longitud (número)", "en": "Bar 2: length (number)" }, "value": { "es": "6.5", "en": "6.5" } },
+    { "id": "bar-3-amount", "type": "number", "label": { "es": "Barra 3: longitud (número)", "en": "Bar 3: length (number)" }, "value": { "es": "3.8", "en": "3.8" } },
+    { "id": "takeaway", "type": "text", "label": { "es": "Conclusión", "en": "Takeaway" }, "value": { "es": "Automatiza lo repetitivo. Dedica el tiempo a decidir.", "en": "Automate the repetitive. Spend the time deciding." } },
+    { "id": "source", "type": "text", "label": { "es": "Fuente", "en": "Source" }, "value": { "es": "Fuente: encuesta interna a 120 equipos", "en": "Source: internal survey of 120 teams" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#0b1020", "en": "#0b1020" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto", "en": "Text" }, "value": { "es": "#e8ecf8", "en": "#e8ecf8" } },
+    { "id": "accent", "type": "color", "label": { "es": "Color de acento", "en": "Accent color" }, "value": { "es": "#38d6ff", "en": "#38d6ff" } },
+    { "id": "muted", "type": "color", "label": { "es": "Color secundario", "en": "Secondary color" }, "value": { "es": "#3a4566", "en": "#3a4566" } }
+  ]
+}

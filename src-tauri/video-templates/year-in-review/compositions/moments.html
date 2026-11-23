@@ -1,0 +1,54 @@
+<template id="moments-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .moments-stage { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 8vmin; padding: 7vmin 8vmin; box-sizing: border-box; }
+    .moments-title { margin: 0; font-family: "Playfair Display", serif; font-weight: 700; font-size: 7vmin; line-height: 1.05; animation: moments-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .moments-track { position: relative; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5vmin; padding-top: 5vmin; }
+    .moments-rail { position: absolute; top: 1.2vmin; left: 0; right: 0; height: 0.4vmin; background: color-mix(in srgb, var(--fg) 30%, transparent); transform-origin: left center; animation: moments-rail 1.6s cubic-bezier(0.6, 0, 0.3, 1) 0.4s both; }
+    .moments-item { position: relative; display: flex; flex-direction: column; gap: 1.8vmin; min-width: 0; }
+    .moments-dot { position: absolute; top: -5vmin; left: 0; width: 2.8vmin; height: 2.8vmin; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 1vmin color-mix(in srgb, var(--accent) 25%, transparent); animation: moments-dot 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.5) both; }
+    .moments-date { margin: 0; font-size: 3vmin; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); animation: moments-up 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .moments-text { margin: 0; font-family: "Playfair Display", serif; font-weight: 700; font-size: 4.6vmin; line-height: 1.2; animation: moments-up 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .moments-item:nth-child(2) .moments-dot { animation-delay: 0.6s; }
+    .moments-item:nth-child(2) > p { animation-delay: 0.75s; }
+    .moments-item:nth-child(3) .moments-dot { animation-delay: 1.1s; }
+    .moments-item:nth-child(3) > p { animation-delay: 1.25s; }
+    .moments-item:nth-child(4) .moments-dot { animation-delay: 1.6s; }
+    .moments-item:nth-child(4) > p { animation-delay: 1.75s; }
+    @media (min-aspect-ratio: 5/4) {
+      .moments-title { font-size: 8.5vmin; }
+      .moments-text { font-size: 5.6vmin; }
+      .moments-date { font-size: 3.4vmin; }
+      .moments-stage { gap: 10vmin; }
+    }
+    @media (max-aspect-ratio: 5/4) {
+      .moments-track { grid-template-columns: minmax(0, 1fr); gap: 7vmin; padding-top: 0; padding-left: 9vmin; }
+      .moments-rail { top: 0; bottom: 0; left: 1.2vmin; right: auto; width: 0.4vmin; height: auto; transform-origin: center top; animation-name: moments-rail-v; }
+      .moments-dot { top: 0.6vmin; left: -9vmin; }
+      .moments-text { font-size: 6vmin; }
+      .moments-date { font-size: 3.6vmin; }
+    }
+    @media (max-aspect-ratio: 4/5) {
+      .moments-title { font-size: 10vmin; }
+      .moments-track { gap: 14vmin; }
+      .moments-text { font-size: 7.4vmin; }
+      .moments-date { font-size: 4.4vmin; }
+      .moments-stage { gap: 14vmin; }
+    }
+    @keyframes moments-up { from { opacity: 0; transform: translateY(4vmin); } to { opacity: 1; transform: none; } }
+    @keyframes moments-rail { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes moments-rail-v { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+    @keyframes moments-dot { from { opacity: 0; transform: scale(0); } to { opacity: 1; transform: scale(1); } }
+  </style>
+  <div id="root" data-composition-id="moments" data-width="1920" data-height="1080">
+    <div id="moments-stage" class="clip moments-stage" data-start="0" data-duration="5">
+      <h2 id="moments-title" class="moments-title" data-var-text="moments-title">Momentos clave</h2>
+      <div id="moments-track" class="moments-track">
+        <div id="moments-rail" class="moments-rail"></div>
+        <div id="moments-item-1" class="moments-item"><span class="moments-dot"></span><p class="moments-date" data-var-text="moment-1-date">Marzo</p><p class="moments-text" data-var-text="moment-1-text">Abrimos nuestra segunda oficina</p></div>
+        <div id="moments-item-2" class="moments-item"><span class="moments-dot"></span><p class="moments-date" data-var-text="moment-2-date">Julio</p><p class="moments-text" data-var-text="moment-2-text">Lanzamos la nueva aplicación</p></div>
+        <div id="moments-item-3" class="moments-item"><span class="moments-dot"></span><p class="moments-date" data-var-text="moment-3-date">Noviembre</p><p class="moments-text" data-var-text="moment-3-text">Superamos los mil clientes</p></div>
+      </div>
+    </div>
+  </div>
+</template>

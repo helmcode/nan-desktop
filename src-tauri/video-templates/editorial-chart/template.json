@@ -1,0 +1,40 @@
+{
+  "id": "editorial-chart",
+  "title": { "es": "Gráfico editorial", "en": "Editorial chart" },
+  "description": {
+    "es": "Un gráfico de barras y línea con estilo de prensa: titular, subtítulo, leyenda y fuente.",
+    "en": "A print-style bar and line chart: headline, subtitle, key and source line."
+  },
+  "category": "data",
+  "aspect": "16:9",
+  "fps": 30,
+  "fonts": ["libre-baskerville-700.woff2", "libre-franklin-400.woff2", "libre-franklin-600.woff2"],
+  "scenes": [
+    { "id": "chart", "title": { "es": "Gráfico", "en": "Chart" }, "duration": 12 }
+  ],
+  "variables": [
+    { "id": "headline", "type": "text", "label": { "es": "Titular", "en": "Headline" }, "value": { "es": "Ingresos mensuales frente a clientes nuevos", "en": "Monthly revenue vs. new customers" } },
+    { "id": "subtitle", "type": "text", "label": { "es": "Subtítulo", "en": "Subtitle" }, "value": { "es": "De enero a junio, ingresos en miles de euros", "en": "January to June, revenue in thousands of euros" } },
+    { "id": "key-bars", "type": "text", "label": { "es": "Leyenda de las barras", "en": "Bars key" }, "value": { "es": "Ingresos", "en": "Revenue" } },
+    { "id": "key-line", "type": "text", "label": { "es": "Leyenda de la línea", "en": "Line key" }, "value": { "es": "Clientes nuevos", "en": "New customers" } },
+    { "id": "source", "type": "text", "label": { "es": "Fuente", "en": "Source" }, "value": { "es": "Fuente: datos internos de ejemplo", "en": "Source: sample internal data" } },
+    { "id": "label-1", "type": "text", "label": { "es": "Columna 1", "en": "Column 1" }, "value": { "es": "Ene", "en": "Jan" } },
+    { "id": "label-2", "type": "text", "label": { "es": "Columna 2", "en": "Column 2" }, "value": { "es": "Feb", "en": "Feb" } },
+    { "id": "label-3", "type": "text", "label": { "es": "Columna 3", "en": "Column 3" }, "value": { "es": "Mar", "en": "Mar" } },
+    { "id": "label-4", "type": "text", "label": { "es": "Columna 4", "en": "Column 4" }, "value": { "es": "Abr", "en": "Apr" } },
+    { "id": "label-5", "type": "text", "label": { "es": "Columna 5", "en": "Column 5" }, "value": { "es": "May", "en": "May" } },
+    { "id": "label-6", "type": "text", "label": { "es": "Columna 6", "en": "Column 6" }, "value": { "es": "Jun", "en": "Jun" } },
+    { "id": "value-1", "type": "text", "label": { "es": "Valor de la barra 1 (texto)", "en": "Bar 1 value (text)" }, "value": { "es": "8 k€", "en": "€8K" } },
+    { "id": "value-2", "type": "text", "label": { "es": "Valor de la barra 2 (texto)", "en": "Bar 2 value (text)" }, "value": { "es": "12 k€", "en": "€12K" } },
+    { "id": "value-3", "type": "text", "label": { "es": "Valor de la barra 3 (texto)", "en": "Bar 3 value (text)" }, "value": { "es": "15 k€", "en": "€15K" } },
+    { "id": "value-4", "type": "text", "label": { "es": "Valor de la barra 4 (texto)", "en": "Bar 4 value (text)" }, "value": { "es": "11 k€", "en": "€11K" } },
+    { "id": "value-5", "type": "text", "label": { "es": "Valor de la barra 5 (texto)", "en": "Bar 5 value (text)" }, "value": { "es": "18 k€", "en": "€18K" } },
+    { "id": "value-6", "type": "text", "label": { "es": "Valor de la barra 6 (texto)", "en": "Bar 6 value (text)" }, "value": { "es": "22 k€", "en": "€22K" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#faf9f6", "en": "#faf9f6" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto", "en": "Text" }, "value": { "es": "#222222", "en": "#222222" } },
+    { "id": "muted", "type": "color", "label": { "es": "Texto secundario", "en": "Secondary text" }, "value": { "es": "#737373", "en": "#737373" } },
+    { "id": "bars", "type": "color", "label": { "es": "Color de las barras", "en": "Bar color" }, "value": { "es": "#5c5c5c", "en": "#5c5c5c" } },
+    { "id": "accent", "type": "color", "label": { "es": "Color de la línea", "en": "Line color" }, "value": { "es": "#326fa8", "en": "#326fa8" } }
+  ],
+  "attribution": "Based on the HyperFrames \"NYT Graph\" example by HeyGen, Inc. (Apache-2.0)"
+}

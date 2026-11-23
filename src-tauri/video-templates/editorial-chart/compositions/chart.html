@@ -1,0 +1,124 @@
+<template id="chart-template">
+  <style>
+    @font-face { font-family: "Libre Baskerville"; font-weight: 700; src: url("assets/fonts/libre-baskerville-700.woff2") format("woff2"); }
+    @font-face { font-family: "Libre Franklin"; font-weight: 400; src: url("assets/fonts/libre-franklin-400.woff2") format("woff2"); }
+    @font-face { font-family: "Libre Franklin"; font-weight: 600; src: url("assets/fonts/libre-franklin-600.woff2") format("woff2"); }
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Libre Franklin", system-ui, sans-serif; }
+    .chart-stage { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 7vmin 9vmin 6vmin; box-sizing: border-box; }
+    .chart-rule { height: 0.35vmin; background: var(--fg); transform-origin: left center; animation: chart-grow 0.8s cubic-bezier(0.6, 0, 0.3, 1) both; }
+    .chart-header { display: flex; flex-direction: column; gap: 1.4vmin; padding-top: 2.6vmin; }
+    .chart-headline { margin: 0; font-family: "Libre Baskerville", serif; font-weight: 700; font-size: 5vmin; line-height: 1.2; clip-path: inset(0 100% 0 0); animation: chart-wipe 1.2s cubic-bezier(0.45, 0, 0.55, 1) both; }
+    .chart-subtitle { margin: 0; font-size: 2.5vmin; color: var(--muted); clip-path: inset(0 100% 0 0); animation: chart-wipe 1.2s cubic-bezier(0.45, 0, 0.55, 1) 0.2s both; }
+    .chart-key { display: flex; flex-wrap: wrap; gap: 1vmin 3.4vmin; margin-top: 0.6vmin; animation: chart-fade 0.4s ease-out 1s both; }
+    .chart-key-item { display: flex; align-items: center; gap: 1.1vmin; font-size: 2.1vmin; color: var(--muted); }
+    .chart-key-box { width: 1.4vmin; height: 1.4vmin; background: var(--bars); }
+    .chart-key-line { width: 2.6vmin; height: 0.35vmin; background: var(--accent); }
+    .chart-plot { position: relative; flex: 1; margin: 5vmin 0 6vmin; }
+    .chart-grid { position: absolute; left: 0; right: 0; height: 0; border-top: 0.12vmin solid color-mix(in srgb, var(--muted) 35%, transparent); animation: chart-fade 0.5s ease-out both; }
+    .chart-g1 { bottom: 20%; animation-delay: 0.5s; }
+    .chart-g2 { bottom: 40%; animation-delay: 0.75s; }
+    .chart-g3 { bottom: 60%; animation-delay: 1s; }
+    .chart-g4 { bottom: 80%; animation-delay: 1.25s; }
+    .chart-g5 { bottom: 100%; animation-delay: 1.5s; }
+    .chart-base { position: absolute; left: 0; right: 0; bottom: 0; height: 0.2vmin; background: var(--fg); }
+    .chart-col { position: absolute; bottom: 0; width: 9%; margin-left: -4.5%; }
+    .chart-c1 { left: 8.333%; }
+    .chart-c2 { left: 25%; }
+    .chart-c3 { left: 41.667%; }
+    .chart-c4 { left: 58.333%; }
+    .chart-c5 { left: 75%; }
+    .chart-c6 { left: 91.667%; }
+    .chart-bar { height: 100%; background: var(--bars); transform-origin: center bottom; animation: chart-bar 0.8s cubic-bezier(0.2, 0.7, 0.3, 1) both; }
+    .chart-h1 { height: 26.667%; }
+    .chart-h2 { height: 40%; }
+    .chart-h3 { height: 50%; }
+    .chart-h4 { height: 36.667%; }
+    .chart-h5 { height: 60%; }
+    .chart-h6 { height: 73.333%; }
+    .chart-value { position: absolute; left: -40%; right: -40%; bottom: 100%; margin: 0 0 1vmin; text-align: center; font-size: 2.2vmin; white-space: nowrap; animation: chart-fade 0.3s ease-out both; }
+    .chart-month { position: absolute; left: -40%; right: -40%; top: 100%; margin: 1.8vmin 0 0; text-align: center; font-size: 2.2vmin; color: var(--muted); white-space: nowrap; }
+    .chart-c1 .chart-bar { animation-delay: 1.5s; } .chart-c1 .chart-value { animation-delay: 2.3s; }
+    .chart-c2 .chart-bar { animation-delay: 2s; } .chart-c2 .chart-value { animation-delay: 2.8s; }
+    .chart-c3 .chart-bar { animation-delay: 2.5s; } .chart-c3 .chart-value { animation-delay: 3.3s; }
+    .chart-c4 .chart-bar { animation-delay: 3s; } .chart-c4 .chart-value { animation-delay: 3.8s; }
+    .chart-c5 .chart-bar { animation-delay: 3.5s; } .chart-c5 .chart-value { animation-delay: 4.3s; }
+    .chart-c6 .chart-bar { animation-delay: 4s; } .chart-c6 .chart-value { animation-delay: 4.8s; }
+    .chart-months { position: absolute; inset: 0; animation: chart-fade 0.5s ease-out 1.2s both; }
+    .chart-line { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+    .chart-line-path { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+    .chart-reveal { position: absolute; inset: 0; clip-path: inset(-5% 91.667% -5% 0); animation: chart-reveal 3s linear 4.5s both, chart-fade 0.1s linear 4.5s both; }
+    .chart-dot { position: absolute; width: 1.4vmin; height: 1.4vmin; margin: -0.7vmin 0 0 -0.7vmin; border-radius: 50%; background: var(--accent); animation: chart-dot 3s linear 4.5s both, chart-fade 0.1s linear 4.5s both; }
+    .chart-num { position: absolute; width: 10%; margin: 0 0 0 -5%; text-align: center; font-size: 2.2vmin; font-weight: 600; color: var(--accent); animation: chart-num 0.4s ease-out both; }
+    .chart-n1 { left: 8.333%; bottom: calc(43.75% + 2.2vmin); animation-delay: 4.7s; }
+    .chart-n2 { left: 25%; bottom: calc(58.333% + 2.2vmin); animation-delay: 5.3s; }
+    .chart-n3 { left: 41.667%; bottom: calc(66.667% + 2.2vmin); animation-delay: 5.9s; }
+    .chart-n4 { left: 58.333%; bottom: calc(60.417% + 2.2vmin); animation-delay: 6.5s; }
+    .chart-n5 { left: 75%; bottom: calc(79.167% + 2.2vmin); animation-delay: 7.1s; }
+    .chart-n6 { left: 91.667%; bottom: calc(87.5% + 2.2vmin); animation-delay: 7.7s; }
+    .chart-source { margin: 0; font-size: 1.8vmin; color: var(--muted); animation: chart-fade 0.5s ease-out 8.2s both; }
+    @media (max-aspect-ratio: 4/5) {
+      .chart-stage { padding: 10vmin 7vmin 9vmin; }
+      .chart-headline { font-size: 6.4vmin; }
+      .chart-subtitle { font-size: 3.2vmin; }
+      .chart-key-item { font-size: 2.8vmin; }
+      .chart-plot { margin: 10vmin 0 8vmin; }
+      .chart-value, .chart-month, .chart-num { font-size: 2.6vmin; }
+      .chart-source { font-size: 2.4vmin; }
+    }
+    @media (min-aspect-ratio: 4/5) and (max-aspect-ratio: 5/4) {
+      .chart-headline { font-size: 5.4vmin; }
+      .chart-value, .chart-month, .chart-num { font-size: 2.3vmin; }
+    }
+    @keyframes chart-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes chart-wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+    @keyframes chart-fade { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes chart-bar { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+    @keyframes chart-reveal { from { clip-path: inset(-5% 91.667% -5% 0); } 99.9% { clip-path: inset(-5% 8.333% -5% 0); } to { clip-path: inset(-5% 0 -5% 0); } }
+    @keyframes chart-dot {
+      0% { left: 8.333%; top: 56.25%; }
+      20% { left: 25%; top: 41.667%; }
+      40% { left: 41.667%; top: 33.333%; }
+      60% { left: 58.333%; top: 39.583%; }
+      80% { left: 75%; top: 20.833%; }
+      100% { left: 91.667%; top: 12.5%; }
+    }
+    @keyframes chart-num { from { opacity: 0; transform: translateY(1vmin); } to { opacity: 1; transform: none; } }
+  </style>
+  <div id="root" data-composition-id="chart" data-width="1920" data-height="1080">
+    <div id="chart-stage" class="clip chart-stage" data-start="0" data-duration="12">
+      <div id="chart-rule" class="chart-rule"></div>
+      <div id="chart-header" class="chart-header">
+        <h1 id="chart-headline" class="chart-headline" data-var-text="headline">Ingresos mensuales frente a clientes nuevos</h1>
+        <p id="chart-subtitle" class="chart-subtitle" data-var-text="subtitle">De enero a junio, ingresos en miles de euros</p>
+        <div id="chart-key" class="chart-key">
+          <span class="chart-key-item"><span class="chart-key-box"></span><span data-var-text="key-bars">Ingresos</span></span>
+          <span class="chart-key-item"><span class="chart-key-line"></span><span data-var-text="key-line">Clientes nuevos</span></span>
+        </div>
+      </div>
+      <div id="chart-plot" class="chart-plot">
+        <div class="chart-grid chart-g1"></div><div class="chart-grid chart-g2"></div><div class="chart-grid chart-g3"></div><div class="chart-grid chart-g4"></div><div class="chart-grid chart-g5"></div>
+        <div id="chart-c1" class="chart-col chart-c1 chart-h1"><div class="chart-bar"></div><p class="chart-value" data-var-text="value-1">8 k€</p></div>
+        <div id="chart-c2" class="chart-col chart-c2 chart-h2"><div class="chart-bar"></div><p class="chart-value" data-var-text="value-2">12 k€</p></div>
+        <div id="chart-c3" class="chart-col chart-c3 chart-h3"><div class="chart-bar"></div><p class="chart-value" data-var-text="value-3">15 k€</p></div>
+        <div id="chart-c4" class="chart-col chart-c4 chart-h4"><div class="chart-bar"></div><p class="chart-value" data-var-text="value-4">11 k€</p></div>
+        <div id="chart-c5" class="chart-col chart-c5 chart-h5"><div class="chart-bar"></div><p class="chart-value" data-var-text="value-5">18 k€</p></div>
+        <div id="chart-c6" class="chart-col chart-c6 chart-h6"><div class="chart-bar"></div><p class="chart-value" data-var-text="value-6">22 k€</p></div>
+        <div id="chart-months" class="chart-months">
+          <div class="chart-col chart-c1"><p class="chart-month" data-var-text="label-1">Ene</p></div>
+          <div class="chart-col chart-c2"><p class="chart-month" data-var-text="label-2">Feb</p></div>
+          <div class="chart-col chart-c3"><p class="chart-month" data-var-text="label-3">Mar</p></div>
+          <div class="chart-col chart-c4"><p class="chart-month" data-var-text="label-4">Abr</p></div>
+          <div class="chart-col chart-c5"><p class="chart-month" data-var-text="label-5">May</p></div>
+          <div class="chart-col chart-c6"><p class="chart-month" data-var-text="label-6">Jun</p></div>
+        </div>
+        <div class="chart-base"></div>
+        <div id="chart-reveal" class="chart-reveal">
+          <svg id="chart-line" class="chart-line" viewBox="0 0 100 100" preserveAspectRatio="none"><polyline class="chart-line-path" points="8.333,56.25 25,41.667 41.667,33.333 58.333,39.583 75,20.833 91.667,12.5"/></svg>
+        </div>
+        <div id="chart-dot" class="chart-dot"></div>
+        <p class="chart-num chart-n1">21</p><p class="chart-num chart-n2">28</p><p class="chart-num chart-n3">32</p><p class="chart-num chart-n4">29</p><p class="chart-num chart-n5">38</p><p class="chart-num chart-n6">42</p>
+      </div>
+      <p id="chart-source" class="chart-source" data-var-text="source">Fuente: datos internos de ejemplo</p>
+    </div>
+  </div>
+</template>
