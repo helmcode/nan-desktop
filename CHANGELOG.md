@@ -4,6 +4,7 @@
 
 ### Fixed
 - Los enlaces de archivos compartidos (artifacts.nan.builders y artifacts.helmcode.com) muestran el archivo en la vista previa lateral, no solo sus datos: las webs se abren aisladas y sin red, y los PDF, imagenes, textos, hojas y documentos con su visor. Si el enlace es privado o no se puede mostrar, ofrece abrirlo en el navegador.
+- Windows: cerrar el navegador desde la barra del chat ya no deja la ventana de la app en blanco. El navegador usa ahora un motor separado del de la app, asi que cerrarlo no afecta al chat.
 
 ## 0.2.16 - 2026-11-19 - Permitir sin preguntar por defecto
 
