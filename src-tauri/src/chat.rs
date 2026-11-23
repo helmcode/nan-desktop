@@ -413,6 +413,8 @@ pub fn tool_definitions(workspace: Option<&tools::Workspace>) -> Vec<serde_json:
         tools::save_skill::tool_definition(),
         tools::website::tool_definition(),
     ];
+    // R-V1: videos are always offered (they live in the app's library).
+    defs.extend(crate::video::tool::tool_definitions());
     if let Some(workspace) = workspace {
         defs.extend(file_tool_definitions(workspace.run_command));
     }
@@ -461,9 +463,10 @@ working folders; for any other place, ask the user to add that folder first.";
 /// workspace description when the user set one up.
 pub fn system_prompt(workspace: Option<&tools::Workspace>) -> String {
     let rules = format!(
-        "{ASSISTANT_RULES}\n\n{}\n\n{}\n\n{}",
+        "{ASSISTANT_RULES}\n\n{}\n\n{}\n\n{}\n\n{}",
         tools::save_skill::GUIDANCE,
         tools::website::GUIDANCE,
+        crate::video::tool::GUIDANCE,
         crate::browser::tools::GUIDANCE
     );
     match workspace {
@@ -2330,6 +2333,29 @@ async fn run_tool_call(
         let declared = declared_outputs(tools::website::TOOL_NAME, &outcome);
         return (outcome_for_model(outcome), produced, declared);
     }
+    if call.name == crate::video::tool::CREATE || call.name == crate::video::tool::EDIT {
+        // R-V1: validated and written into the user's video library (the
+        // app's own storage, like generated images); the project opens in
+        // the side panel and stays as a chip on the reply.
+        let (result, project) = crate::video::run_model_tool(
+            app,
+            app_data,
+            profile_id,
+            conversation_id,
+            &call.name,
+            &call.arguments,
+        )
+        .await;
+        let produced = project
+            .map(|id| {
+                vec![chat_store::Artifact {
+                    path: id,
+                    kind: chat_store::ArtifactKind::Video,
+                }]
+            })
+            .unwrap_or_default();
+        return (result, produced, Vec::new());
+    }
     if call.name == images::TOOL_NAME {
         let Some((prompt, size)) = images::parse_tool_args(&call.arguments) else {
             return (
@@ -3221,11 +3247,14 @@ mod tests {
                 "web_search",
                 "generate_image",
                 "save_chat_as_skill",
-                "write_website"
+                "write_website",
+                "create_video",
+                "edit_video"
             ],
             "round 3: the model can create images without a workspace; round 15: \
              it can always distill the chat into a skill draft; R20-D: it can always \
-             build a website (it lands in the session folder)"
+             build a website (it lands in the session folder); R-V1: videos live \
+             in the app's own library"
         );
         let ws = tools::Workspace {
             roots: vec![std::path::PathBuf::from("/Users/me/Proyecto")],
@@ -3240,6 +3269,8 @@ mod tests {
                 "generate_image",
                 "save_chat_as_skill",
                 "write_website",
+                "create_video",
+                "edit_video",
                 "list_files",
                 "read_file",
                 "write_file",
@@ -3766,6 +3797,8 @@ mod tests {
         assert!(bare.contains(tools::save_skill::GUIDANCE));
         // R20-D: so does how to build a self-contained website.
         assert!(bare.contains(tools::website::GUIDANCE));
+        // R-V1: and how to author a deterministic video.
+        assert!(bare.contains(crate::video::tool::GUIDANCE));
         assert!(
             !bare.contains("Workspace folders"),
             "no workspace, no folders"

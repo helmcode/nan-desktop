@@ -69,6 +69,12 @@ pub const MAX_SITES: usize = 4;
 /// 8 MiB preview cap.
 pub const MAX_DOCUMENTS: usize = 4;
 
+/// R-V1: how many assembled video previews the registry keeps at once (the
+/// side panel's and the Videos editor's). Each is at most
+/// `crate::video::preview::MAX_PREVIEW_BYTES`; the renderer releases each
+/// one when its player unmounts, the ring is the backstop.
+pub const MAX_VIDEOS: usize = 3;
+
 type Ring = Mutex<VecDeque<(String, Arc<Vec<u8>>)>>;
 
 /// Bytes registered for the sandboxed preview, by random token. Two
@@ -78,6 +84,7 @@ type Ring = Mutex<VecDeque<(String, Arc<Vec<u8>>)>>;
 pub struct SiteRegistry {
     sites: Ring,
     documents: Ring,
+    videos: Ring,
 }
 
 fn push(ring: &Ring, bytes: Vec<u8>, max: usize) -> String {
@@ -114,25 +121,36 @@ impl SiteRegistry {
         push(&self.documents, bytes, MAX_DOCUMENTS)
     }
 
-    /// R22: forget a document token (its preview closed). Only the
-    /// ephemeral class is affected: a tool site's token is left alone.
-    /// Returns whether a document was dropped.
+    /// R-V1: register an assembled video preview (the core built it from
+    /// a validated project) in its own ephemeral class; returns its token.
+    pub fn register_video(&self, bytes: Vec<u8>) -> String {
+        push(&self.videos, bytes, MAX_VIDEOS)
+    }
+
+    /// R22: forget a document token (its preview closed); R-V1: or a video
+    /// preview's. Only the ephemeral classes are affected: a tool site's
+    /// token is left alone. Returns whether something was dropped.
     pub fn release_document(&self, token: &str) -> bool {
-        let Ok(mut entries) = self.documents.lock() else {
-            return false;
-        };
-        let before = entries.len();
-        entries.retain(|(known, _)| known != token);
-        entries.len() != before
+        let mut dropped = false;
+        for ring in [&self.documents, &self.videos] {
+            if let Ok(mut entries) = ring.lock() {
+                let before = entries.len();
+                entries.retain(|(known, _)| known != token);
+                dropped |= entries.len() != before;
+            }
+        }
+        dropped
     }
 
     fn get(&self, token: &str) -> Option<Arc<Vec<u8>>> {
-        find(&self.sites, token).or_else(|| find(&self.documents, token))
+        find(&self.sites, token)
+            .or_else(|| find(&self.documents, token))
+            .or_else(|| find(&self.videos, token))
     }
 
-    /// Forget every site and document (a realm switch).
+    /// Forget every site, document and video (a realm switch).
     pub fn clear(&self) {
-        for ring in [&self.sites, &self.documents] {
+        for ring in [&self.sites, &self.documents, &self.videos] {
             if let Ok(mut entries) = ring.lock() {
                 entries.clear();
             }
@@ -490,5 +508,42 @@ mod tests {
         } else {
             assert_eq!(url, "nan-site://localhost/abc");
         }
+    }
+
+    #[test]
+    fn video_previews_are_served_like_sites_released_on_close_and_bounded() {
+        let registry = SiteRegistry::default();
+        let site = registry.register(SITE.as_bytes().to_vec());
+        let video = registry.register_video(b"<p>film</p>".to_vec());
+        let response = respond(&registry, "GET", &format!("/{video}"));
+        assert_eq!(response.status(), 200);
+        let csp = response.headers()["Content-Security-Policy"]
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("connect-src 'none'") && csp.ends_with("sandbox allow-scripts"));
+        assert!(registry.release_document(&video));
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{video}")).status(),
+            404
+        );
+        // Releasing never drops a tool website.
+        assert!(!registry.release_document(&site));
+        let tokens: Vec<String> = (0..MAX_VIDEOS + 2)
+            .map(|i| registry.register_video(format!("<p>{i}</p>").into_bytes()))
+            .collect();
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{}", tokens[0])).status(),
+            404
+        );
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{}", tokens[MAX_VIDEOS + 1])).status(),
+            200
+        );
+        assert_eq!(respond(&registry, "GET", &format!("/{site}")).status(), 200);
+        registry.clear();
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{}", tokens[MAX_VIDEOS + 1])).status(),
+            404
+        );
     }
 }

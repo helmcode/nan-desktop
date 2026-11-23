@@ -65,6 +65,8 @@
     "allow-preview-reveal-location",
     "allow-web-preview-fetch",
     "allow-artifact-link-preview",
+    "allow-video-list",
+    "allow-video-preview",
     "allow-open-external",
     "allow-telemetry-renderer-crash",
     "allow-update-check",

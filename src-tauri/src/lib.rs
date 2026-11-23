@@ -66,6 +66,9 @@ mod tools;
 mod tts;
 // Turn continuity: end reasons, step budget, tool-trace replay, summary.
 mod turn;
+// R-V1: videos (HyperFrames projects): library, model tools, sandboxed
+// preview, server-side MP4 export.
+mod video;
 // Auto-update (round 7): silent check, install only on the user's click.
 mod updater;
 // Built-in web search the model can call (proxied by the platform API).
@@ -381,6 +384,8 @@ pub fn run() {
             preview::preview_reveal_location,
             preview::web_preview_fetch,
             artifact_link::artifact_link_preview,
+            video::video_list,
+            video::video_preview,
             links::open_external,
             telemetry::telemetry_renderer_crash,
             updater::update_check,
