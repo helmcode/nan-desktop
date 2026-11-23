@@ -101,8 +101,9 @@ export interface StagedEditSource {
 }
 
 export interface Artifact {
+  /// A file path; for `video`, the video project id (R-V1).
   path: string;
-  kind: "file" | "image";
+  kind: "file" | "image" | "video";
 }
 
 export type GrantScope = "folder" | "computer_wide";

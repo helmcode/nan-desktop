@@ -79,6 +79,7 @@ import {
   DEFAULT_GRANT_MODE,
   type GrantMode,
 } from "./core";
+import { onVideoChanged } from "./video/api";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { useEscape } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
@@ -89,6 +90,7 @@ import {
   IconBolt,
   IconChevronDown,
   IconFile,
+  IconFilm,
   IconFolder,
   IconGlobe,
   IconMemory,
@@ -363,6 +365,25 @@ function FileChips({
           </li>
         ))}
       </ChipSection>
+  );
+}
+
+/// R-V1: the videos a reply created or changed. Each opens in the preview
+/// pane (the sandboxed player); the pane offers the editor.
+function VideoChips({ ids, onOpen }: { ids: string[]; onOpen: (projectId: string) => void }) {
+  const t = useT();
+  if (ids.length === 0) return null;
+  return (
+    <ChipSection label={t.video.previewTitle} count={ids.length}>
+      {ids.map((id) => (
+        <li key={id}>
+          <button type="button" className="source-chip file-chip" onClick={() => onOpen(id)}>
+            <IconFilm size={13} />
+            <span className="source-title">{t.video.chipOpen}</span>
+          </button>
+        </li>
+      ))}
+    </ChipSection>
   );
 }
 
@@ -1334,6 +1355,16 @@ function ChatShell({
       onApprovalResolved((resolved) => {
         dispatchApproval({ type: "resolved", id: resolved.approval_id, granted: resolved.granted });
       }),
+      // R-V1: a video the assistant just created or changed opens in that
+      // conversation's preview pane right away (before the turn ends).
+      onVideoChanged((changed) => {
+        setPreviews((prev) =>
+          new Map(prev).set(changed.conversation_id, {
+            target: { kind: "video", ref: changed.project_id },
+            open: true,
+          }),
+        );
+      }),
       // In-app browser allow mode: a one-line "Using <host>" per new site.
       onBrowserSiteUsed((used) => {
         dispatchApproval({
@@ -1772,6 +1803,7 @@ function ChatShell({
   }, []);
   const openWebPreview = useCallback((url: string) => openPreview({ kind: "web", ref: url }), [openPreview]);
   const openFilePreview = useCallback((path: string) => openPreview({ kind: "file", ref: path }), [openPreview]);
+  const openVideoPreview = useCallback((id: string) => openPreview({ kind: "video", ref: id }), [openPreview]);
   const setPreviewOpen = useCallback((open: boolean): void => {
     const key = activeConvRef.current ?? NEW_CHAT_KEY;
     setPreviews((prev) => {
@@ -2548,7 +2580,8 @@ function ChatShell({
       (m.sources ?? []).length === 0 &&
       (m.shares ?? []).length === 0 &&
       files.chips.length === 0 &&
-      files.images.length === 0
+      files.images.length === 0 &&
+      files.videos.length === 0
     )
       return null;
     return (
@@ -2583,6 +2616,7 @@ function ChatShell({
         )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
         <SharedLinkCards links={m.shares ?? []} />
+        <VideoChips ids={files.videos} onOpen={openVideoPreview} />
         <FileChips paths={files.chips} onOpen={openFilePreview} onShare={artifactsOn ? openShare : undefined} />
         {VOICE_UI && visible.trim().length > 0 && (
           <div className="msg-actions">

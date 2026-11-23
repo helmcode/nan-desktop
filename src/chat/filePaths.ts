@@ -42,9 +42,11 @@ export function messageFiles(
   text: string,
   roots: string[] | "any",
   artifacts: Artifact[] | undefined,
-): { chips: string[]; images: string[] } {
+): { chips: string[]; images: string[]; videos: string[] } {
   const produced = artifacts ?? [];
   const images = produced.filter((a) => a.kind === "image").map((a) => a.path);
+  // R-V1: video project ids, once each (a turn may edit the same video twice).
+  const videos = [...new Set(produced.filter((a) => a.kind === "video").map((a) => a.path))];
   const chips: string[] = [];
   for (const path of [
     ...produced.filter((a) => a.kind === "file").map((a) => a.path),
@@ -52,7 +54,7 @@ export function messageFiles(
   ]) {
     if (!chips.includes(path)) chips.push(path);
   }
-  return { chips, images };
+  return { chips, images, videos };
 }
 
 export function extractFilePaths(text: string, roots: string[] | "any"): string[] {

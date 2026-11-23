@@ -9,6 +9,7 @@ export type PreviewKind =
   | "sheet"
   | "docx"
   | "web"
+  | "video"
   | "unsupported";
 
 export interface PreviewTarget {
@@ -16,8 +17,10 @@ export interface PreviewTarget {
   /// `web`: an https page. `media`: an image the app generated under
   /// `app_data/images`, shown through the asset protocol (the same scoped
   /// path the inline chat image uses; never read through the grant API).
-  kind: "file" | "web" | "media";
-  /// Absolute local path or https URL.
+  /// R-V1 `video`: a project of the user's video library (`ref` is its id,
+  /// never a path), shown in the sandboxed player.
+  kind: "file" | "web" | "media" | "video";
+  /// Absolute local path, https URL, or video project id.
   ref: string;
 }
 
@@ -59,6 +62,7 @@ export function extensionOf(path: string): string {
 export function previewKind(target: PreviewTarget): PreviewKind {
   if (target.kind === "web") return /^https?:\/\//i.test(target.ref) ? "web" : "unsupported";
   if (target.kind === "media") return "image";
+  if (target.kind === "video") return /^[0-9a-f]{32}$/.test(target.ref) ? "video" : "unsupported";
   const ext = extensionOf(target.ref);
   if (EXTENSIONS[ext]) return EXTENSIONS[ext];
   if (TEXT_EXTENSIONS.has(ext)) return "text";
