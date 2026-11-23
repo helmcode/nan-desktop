@@ -68,7 +68,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-
 /// The numeric aspect ratio of a page box. jsdom >= 31 serializes the
 /// property the CSSOM way ("1.77778 / 1"), older versions as the bare
 /// number: compare numbers, not strings.

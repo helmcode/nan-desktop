@@ -369,7 +369,7 @@ jobs:
       # stable rename (tauri-action's own one would point at versioned names).
       - name: Build (macOS)
         if: runner.os == 'macOS'
-        uses: tauri-apps/tauri-action@4092d6e7f198b7cb01ea63025c21e5c9159168c3 # v1
+        uses: tauri-apps/tauri-action@4092d6e7f198b7cb01ea63025c21e5c9159168c3 # v1 pre-release (dev branch)
         with:
           args: ${{ matrix.args }}
           uploadUpdaterJson: false

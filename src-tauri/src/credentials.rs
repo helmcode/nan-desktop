@@ -949,6 +949,9 @@ pub fn store() -> Result<&'static dyn CredentialStore, CredError> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     /// A vault written by any earlier build (aes-gcm 0.10) must still open:
     /// this envelope was produced by an independent AES-256-GCM
@@ -975,10 +978,6 @@ mod tests {
             Some(b"hola".as_slice())
         );
     }
-
-    use super::*;
-    use std::sync::Arc;
-    use tempfile::TempDir;
 
     fn vault_in(dir: &TempDir) -> Vault {
         Vault::new(
