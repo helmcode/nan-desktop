@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Windows: cerrar el navegador desde la barra del chat ya no deja la ventana de la app en blanco. El navegador usa ahora un motor separado del de la app, asi que cerrarlo no afecta al chat.
+
 ## 0.2.16 - 2026-11-19 - Permitir sin preguntar por defecto
 
 ### Changed

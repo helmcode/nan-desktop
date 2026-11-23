@@ -21,6 +21,11 @@
 //!   only, never the app's own (`tauri:`, `*.localhost`, ...) origins.
 //! - Incognito data store: no cookies, storage or cache shared with the app
 //!   UI, nothing written to disk, nothing kept after the window closes.
+//! - Windows: its own WebView2 user data folder ([`PROFILE_DIR`]), so it
+//!   runs in a WebView2 browser process of its own. Tauri otherwise gives
+//!   every webview the app's folder, and WebView2 runs every webview of one
+//!   folder in ONE browser process: tearing the browser window down could
+//!   take the chat window's webview with it (a white, dead chat window).
 //! - Downloads are blocked; popups open in the same window (or not at all).
 //! - Page scripts run through the engine's native evaluation callback;
 //!   pages get no channel to the app.
@@ -47,6 +52,10 @@ use tools::BrowserCall;
 pub const LABEL: &str = "browser";
 /// The chat window (the only receiver of browser events).
 const MAIN_LABEL: &str = "main";
+
+/// The browser's own WebView2 user data folder (Windows), under the app's
+/// local data directory: never the folder the chat window uses.
+pub const PROFILE_DIR: &str = "browser-webview2";
 
 /// `browser://state` (to the chat window): what the browser bar shows.
 pub const STATE_EVENT: &str = "browser://state";
@@ -341,6 +350,62 @@ pub fn reset_for_realm_switch(app: &AppHandle) {
 
 // -------------------------------------------------------------- window --
 
+/// The browser's WebView2 user data folder: a dedicated subfolder of the
+/// app's local data directory (which is the chat window's folder). A
+/// different folder means a different WebView2 environment and browser
+/// process, so closing the browser can never end the chat's webview.
+pub fn profile_dir(app_local_data: &std::path::Path) -> std::path::PathBuf {
+    app_local_data.join(PROFILE_DIR)
+}
+
+/// Remove what a previous session's browser engine left in its folder
+/// (best effort, at startup, before any browser window exists). Browsing
+/// data itself is never written (incognito); this clears the engine's own
+/// bookkeeping files.
+pub fn clear_profile_dir(app: &AppHandle) {
+    if cfg!(windows)
+        && let Ok(dir) = app.path().app_local_data_dir()
+    {
+        clear_profile_dir_in(&dir);
+    }
+}
+
+/// Delete the browser's folder under `app_local_data` and nothing else
+/// (a missing folder is fine). Returns whether the folder is gone.
+pub fn clear_profile_dir_in(app_local_data: &std::path::Path) -> bool {
+    let dir = profile_dir(app_local_data);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => true,
+        Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// The window is gone: record it and, when the user closed it, stop the
+/// reply that was driving it. The stream is aborted right here (in memory,
+/// cheap), so a message the user sends right after the close can never be
+/// aborted by a late worker; the slow part (process tree, chat database)
+/// runs OFF the event-loop thread, which keeps the chat window responsive.
+fn on_destroyed(app: &AppHandle) {
+    let stopped = destroyed_stop(&app.state::<BrowserState>(), |conversation_id| {
+        crate::chat::abort_reply(app, conversation_id).unwrap_or(false)
+    });
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(conversation_id) = stopped {
+            let _ = crate::chat::finish_stopped_reply(&app, conversation_id);
+        }
+        emit_state(&app);
+    });
+}
+
+/// The synchronous half of [`on_destroyed`]: record the close and abort
+/// the driving reply's stream now. Returns the conversation whose stopped
+/// reply still has to be finished (off the event-loop thread).
+fn destroyed_stop(state: &BrowserState, abort: impl FnOnce(i64) -> bool) -> Option<i64> {
+    let conversation_id = state.closed()?;
+    abort(conversation_id).then_some(conversation_id)
+}
+
 fn window_title(page_title: &str, lang: Lang) -> String {
     let page_title: String = page_title.chars().take(80).collect();
     let page_title = page_title.trim();
@@ -459,6 +524,12 @@ async fn ensure_window(app: &AppHandle, url: tauri::Url) -> Result<WebviewWindow
     if let Some((x, y)) = placement(app) {
         builder = builder.position(x, y);
     }
+    // Windows: a WebView2 environment (and browser process) of its own,
+    // never the chat window's (see the module docs).
+    #[cfg(windows)]
+    if let Ok(dir) = app.path().app_local_data_dir() {
+        builder = builder.data_directory(profile_dir(&dir));
+    }
     let window = builder
         // Own, non-persistent data store: nothing shared with the app UI,
         // nothing left on disk.
@@ -507,11 +578,7 @@ async fn ensure_window(app: &AppHandle, url: tauri::Url) -> Result<WebviewWindow
             close_app.state::<BrowserState>().set_closing();
         }
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            // Closing the browser means "stop": the reply driving it ends.
-            if let Some(conversation_id) = close_app.state::<BrowserState>().closed() {
-                let _ = crate::chat::stop_reply(&close_app, conversation_id);
-            }
-            emit_state(&close_app);
+            on_destroyed(&close_app);
         }
     });
     app.state::<BrowserState>().opened();
@@ -1254,8 +1321,14 @@ pub fn browser_state(app: AppHandle) -> BrowserView {
 
 /// The user's own controls in the browser bar: `back`, `forward`,
 /// `reload`, `show` (bring the window to the front) and `close`.
+///
+/// Async on purpose: a synchronous command runs on the event-loop thread,
+/// inside the chat webview's own IPC callback, and on Windows window
+/// operations from there can stall the chat window. Async commands run on
+/// the async runtime; the window calls below are dispatched to the event
+/// loop.
 #[tauri::command]
-pub fn browser_control(app: AppHandle, action: String) -> Result<(), String> {
+pub async fn browser_control(app: AppHandle, action: String) -> Result<(), String> {
     let window = app
         .get_webview_window(LABEL)
         .ok_or_else(|| "the browser is closed".to_string())?;
@@ -1348,6 +1421,120 @@ mod tests {
                 .unwrap()
                 .contains("Do not open it again")
         );
+    }
+
+    #[test]
+    fn the_browser_never_shares_the_chat_windows_webview2_folder() {
+        // Tauri gives every webview the app's local data directory unless
+        // told otherwise; one folder = one WebView2 browser process, so the
+        // browser's folder must be a different, dedicated one.
+        let local = std::path::Path::new("/data/com.helmcode.nan.desktop");
+        let dir = profile_dir(local);
+        assert_ne!(dir, local);
+        assert!(dir.starts_with(local));
+        assert_eq!(dir.file_name().unwrap(), PROFILE_DIR);
+        // The Windows-only builder line is not compiled on every CI host:
+        // pin it in the PRODUCTION source (the needle is built so it never
+        // appears literally in this test module).
+        let needle = concat!(".data_directory(", "profile_dir(&dir))");
+        assert!(production_source().contains(needle));
+    }
+
+    /// `mod.rs` without its test module.
+    fn production_source() -> &'static str {
+        let source = include_str!("mod.rs");
+        let marker = concat!("#[cfg", "(test)]");
+        source.split(marker).next().expect("production part")
+    }
+
+    #[test]
+    fn the_bar_close_is_an_async_command() {
+        // A sync command runs on the event-loop thread, inside the chat
+        // webview's IPC callback.
+        let needle = concat!("pub async fn ", "browser_control(");
+        assert!(production_source().contains(needle));
+    }
+
+    #[test]
+    fn clearing_the_browser_folder_deletes_only_that_folder() {
+        let local = tempfile::tempdir().expect("tempdir");
+        let root = local.path();
+        // Missing folder: fine.
+        assert!(clear_profile_dir_in(root));
+        // The engine's leftovers go; the app's own data next to it stays.
+        let browser = profile_dir(root);
+        std::fs::create_dir_all(browser.join("EBWebView/Default")).unwrap();
+        std::fs::write(browser.join("EBWebView/Local State"), "x").unwrap();
+        std::fs::create_dir_all(root.join("EBWebView")).unwrap();
+        std::fs::write(root.join("EBWebView/Local State"), "chat").unwrap();
+        std::fs::create_dir_all(root.join("realms/u1")).unwrap();
+        std::fs::write(root.join("realms/u1/chat.db"), "db").unwrap();
+        std::fs::write(root.join("vault.bin"), "v").unwrap();
+        assert!(clear_profile_dir_in(root));
+        assert!(!browser.exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("EBWebView/Local State")).unwrap(),
+            "chat"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("realms/u1/chat.db")).unwrap(),
+            "db"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("vault.bin")).unwrap(),
+            "v"
+        );
+        // Twice in a row: still fine.
+        assert!(clear_profile_dir_in(root));
+    }
+
+    #[test]
+    fn a_user_close_aborts_the_driving_stream_synchronously() {
+        // Driving reply: aborted right away, then finished by the worker.
+        let state = BrowserState::default();
+        state.opened();
+        assert!(state.set_agent(4));
+        let mut aborted = Vec::new();
+        let finish = destroyed_stop(&state, |id| {
+            aborted.push(id);
+            true
+        });
+        assert_eq!(aborted, vec![4], "aborted before returning");
+        assert_eq!(finish, Some(4));
+        // The stream had already ended: nothing left to finish.
+        let state = BrowserState::default();
+        state.opened();
+        assert!(state.set_agent(5));
+        assert_eq!(destroyed_stop(&state, |_| false), None);
+        // No driving reply: nothing is aborted.
+        let state = BrowserState::default();
+        state.opened();
+        let mut called = false;
+        assert_eq!(
+            destroyed_stop(&state, |_| {
+                called = true;
+                true
+            }),
+            None
+        );
+        assert!(!called);
+    }
+
+    #[test]
+    fn only_the_slow_stop_runs_on_the_blocking_worker() {
+        let source = production_source();
+        let handler = source
+            .split(concat!("fn on_destroyed", "(app: &AppHandle) {"))
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("on_destroyed");
+        let (sync_part, worker) = handler
+            .split_once("spawn_blocking(")
+            .expect("a blocking worker");
+        assert!(sync_part.contains("abort_reply"));
+        assert!(!sync_part.contains("finish_stopped_reply"));
+        assert!(worker.contains("finish_stopped_reply"));
+        assert!(!worker.contains("abort_reply"));
     }
 
     #[test]

@@ -1302,10 +1302,23 @@ pub fn chat_stop(app: AppHandle, conversation_id: i64) -> Result<(), String> {
 /// closing the in-app browser that reply was driving). What already
 /// arrived stays persisted.
 pub(crate) fn stop_reply(app: &AppHandle, conversation_id: i64) -> Result<(), String> {
-    let state = app.state::<ChatState>();
-    if !abort_stream(&state, conversation_id)? {
+    if !abort_reply(app, conversation_id)? {
         return Ok(());
     }
+    finish_stopped_reply(app, conversation_id)
+}
+
+/// The cheap, in-memory half of [`stop_reply`]: abort the running stream
+/// of `conversation_id` (if any). Returns whether one was running. Safe on
+/// the event-loop thread.
+pub(crate) fn abort_reply(app: &AppHandle, conversation_id: i64) -> Result<bool, String> {
+    abort_stream(&app.state::<ChatState>(), conversation_id)
+}
+
+/// The slow half of [`stop_reply`] (process tree, database, event), for a
+/// stream [`abort_reply`] just aborted. Blocking: never on the event-loop
+/// thread.
+pub(crate) fn finish_stopped_reply(app: &AppHandle, conversation_id: i64) -> Result<(), String> {
     // A command the aborted turn was running keeps going on its blocking
     // thread: end its process tree now instead of at its timeout.
     crate::process::stop_conversation_commands(conversation_id);

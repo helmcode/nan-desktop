@@ -291,6 +291,9 @@ pub fn run() {
                 // startup).
                 images::sweep_orphans_in_background(dir);
             }
+            // The in-app browser's own WebView2 folder (Windows): start
+            // every session from an empty one.
+            browser::clear_profile_dir(app.handle());
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                 // S18: window/about name is "Helmcode Desktop".
                 .title("Helmcode Desktop")
