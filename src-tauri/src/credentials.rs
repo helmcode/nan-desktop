@@ -818,7 +818,7 @@ fn header() -> [u8; HEADER_LEN] {
 }
 
 fn cipher(key: &[u8; KEY_LEN]) -> Aes256Gcm {
-    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key))
+    Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key))
 }
 
 /// `MAGIC | VERSION | NONCE | AES-256-GCM(plain, aad = MAGIC | VERSION)`.
@@ -827,7 +827,7 @@ fn seal_envelope(key: &[u8; KEY_LEN], plain: &[u8]) -> Result<Vec<u8>, CredError
     let head = header();
     let ciphertext = cipher(key)
         .encrypt(
-            Nonce::from_slice(&nonce),
+            &Nonce::from(nonce),
             Payload {
                 msg: plain,
                 aad: &head,
@@ -848,9 +848,10 @@ fn open_envelope(key: &[u8; KEY_LEN], bytes: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let (nonce, ciphertext) = bytes[HEADER_LEN..].split_at(NONCE_LEN);
+    let nonce = Nonce::try_from(nonce).ok()?;
     cipher(key)
         .decrypt(
-            Nonce::from_slice(nonce),
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad: &head,
@@ -951,6 +952,32 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    /// A vault written by any earlier build (aes-gcm 0.10) must still open:
+    /// this envelope was produced by an independent AES-256-GCM
+    /// implementation (Python `cryptography`), key 00..1f, nonce 64..6f.
+    #[test]
+    fn a_vault_envelope_from_an_independent_aes_gcm_still_opens() {
+        let key: [u8; KEY_LEN] = std::array::from_fn(|i| i as u8);
+        let golden = "4843445641554c54016465666768696a6b6c6d6e6f3339b00717cb6cbc4d09729cbf161edf3f18cb45482dce5e94b76338e70b7bb44f";
+        let bytes: Vec<u8> = (0..golden.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&golden[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(
+            open_envelope(&key, &bytes).as_deref(),
+            Some(br#"{"nan":"sk-test"}"#.as_slice())
+        );
+        let mut tampered = bytes.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert_eq!(open_envelope(&key, &tampered), None);
+        // And what we seal now round-trips.
+        let sealed = seal_envelope(&key, b"hola").expect("seal");
+        assert_eq!(
+            open_envelope(&key, &sealed).as_deref(),
+            Some(b"hola".as_slice())
+        );
+    }
 
     fn vault_in(dir: &TempDir) -> Vault {
         Vault::new(

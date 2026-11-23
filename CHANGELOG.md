@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Dependencias actualizadas: cifrado del almacen de claves (aes-gcm 0.11, sha2 0.11, getrandom 0.4), base de datos local (rusqlite 0.43), tauri-plugin-opener 2.7.3, y las herramientas de desarrollo (TypeScript 7, Vite 8.3.8, Vitest 5, jsdom 31). No cambia nada visible; las claves guardadas y los chats se siguen abriendo igual.
+
 ## 0.2.17 - 2026-11-23 - Artifacts en el panel y navegador estable en Windows
 
 ### Fixed
