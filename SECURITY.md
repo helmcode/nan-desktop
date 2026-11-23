@@ -334,6 +334,12 @@ can stop the assistant from the browser bar in the chat window.
   sign-in made in the browser lasts until the window closes, and it is
   shared by every conversation that uses the browser meanwhile (one
   window, one session): close the browser to end it.
+- **Own WebView2 environment on Windows.** Tauri would give the browser
+  the app's WebView2 user data folder, and WebView2 runs every webview of
+  one folder in one browser process. The browser gets its own folder
+  (`<local app data>/browser-webview2`, emptied at startup), so it shares
+  no browser process with the chat window: its teardown can never take
+  the chat's webview with it, and the two never share engine state.
 - **No downloads.** Every download is cancelled; the chat window shows a
   notice and the assistant is told, so it can ask the user to download the
   file from their own browser. Nothing is saved or opened.

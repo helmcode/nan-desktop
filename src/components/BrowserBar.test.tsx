@@ -169,4 +169,50 @@ describe("BrowserBar", () => {
     await act(async () => emit(BROWSER_STATE_EVENT, { ...open, url: "https://example.com/next" }));
     expect(screen.queryByRole("alert")).toBeNull();
   });
+
+  it("closing from the bar removes only the bar: the chat around it stays usable", async () => {
+    // Windows report (0.2.16): closing the browser from this bar left the
+    // chat window white. The renderer side must never be the cause: the
+    // bar unmounts cleanly on every shape of "closed" the core may send.
+    let closed = false;
+    resetTauri({
+      browser_state: () => (closed ? CLOSED_BROWSER : open),
+      browser_control: (args) => {
+        if ((args as { action?: string } | undefined)?.action === "close") closed = true;
+        return undefined;
+      },
+      browser_set_language: () => undefined,
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const typed = vi.fn();
+    render(
+      <I18nProvider initial="es">
+        <main>
+          <p>chat</p>
+          <Harness onStop={vi.fn()} />
+          <textarea aria-label="composer" onChange={typed} />
+        </main>
+      </I18nProvider>,
+    );
+    await act(async () => {});
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Cerrar navegador" }));
+    });
+    expect(invokedWith("browser_control")).toEqual([{ action: "close" }]);
+    // The Destroyed handler's state, then late or malformed duplicates.
+    await act(async () => emit(BROWSER_STATE_EVENT, CLOSED_BROWSER));
+    await act(async () => emit(BROWSER_STATE_EVENT, CLOSED_BROWSER));
+    await act(async () => emit(BROWSER_STATE_EVENT, null));
+    await act(async () => emit(BROWSER_STATE_EVENT, { open: "no" }));
+    expect(screen.queryByRole("region", { name: "Navegador del asistente" })).toBeNull();
+    expect(screen.getByText("chat")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("composer"), { target: { value: "hola" } });
+    expect(typed).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
+    // The browser can open again afterwards.
+    await act(async () => emit(BROWSER_STATE_EVENT, open));
+    expect(screen.getByRole("region", { name: "Navegador del asistente" })).toBeTruthy();
+  });
 });

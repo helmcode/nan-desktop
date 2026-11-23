@@ -21,6 +21,11 @@
 //!   only, never the app's own (`tauri:`, `*.localhost`, ...) origins.
 //! - Incognito data store: no cookies, storage or cache shared with the app
 //!   UI, nothing written to disk, nothing kept after the window closes.
+//! - Windows: its own WebView2 user data folder ([`PROFILE_DIR`]), so it
+//!   runs in a WebView2 browser process of its own. Tauri otherwise gives
+//!   every webview the app's folder, and WebView2 runs every webview of one
+//!   folder in ONE browser process: tearing the browser window down could
+//!   take the chat window's webview with it (a white, dead chat window).
 //! - Downloads are blocked; popups open in the same window (or not at all).
 //! - Page scripts run through the engine's native evaluation callback;
 //!   pages get no channel to the app.
@@ -47,6 +52,10 @@ use tools::BrowserCall;
 pub const LABEL: &str = "browser";
 /// The chat window (the only receiver of browser events).
 const MAIN_LABEL: &str = "main";
+
+/// The browser's own WebView2 user data folder (Windows), under the app's
+/// local data directory: never the folder the chat window uses.
+pub const PROFILE_DIR: &str = "browser-webview2";
 
 /// `browser://state` (to the chat window): what the browser bar shows.
 pub const STATE_EVENT: &str = "browser://state";
@@ -341,6 +350,42 @@ pub fn reset_for_realm_switch(app: &AppHandle) {
 
 // -------------------------------------------------------------- window --
 
+/// The browser's WebView2 user data folder: a dedicated subfolder of the
+/// app's local data directory (which is the chat window's folder). A
+/// different folder means a different WebView2 environment and browser
+/// process, so closing the browser can never end the chat's webview.
+pub fn profile_dir(app_local_data: &std::path::Path) -> std::path::PathBuf {
+    app_local_data.join(PROFILE_DIR)
+}
+
+/// Remove what a previous session's browser engine left in its folder
+/// (best effort, at startup, before any browser window exists). Browsing
+/// data itself is never written (incognito); this clears the engine's own
+/// bookkeeping files.
+pub fn clear_profile_dir(app: &AppHandle) {
+    if cfg!(windows)
+        && let Ok(dir) = app.path().app_local_data_dir()
+    {
+        let _ = std::fs::remove_dir_all(profile_dir(&dir));
+    }
+}
+
+/// The window is gone: record it and, when the user closed it, stop the
+/// reply that was driving it. Runs OFF the event-loop thread: stopping a
+/// reply opens the chat database and may end a process tree, and the
+/// event-loop thread is the one that keeps the chat window responsive.
+fn on_destroyed(app: &AppHandle) {
+    let conversation_id = app.state::<BrowserState>().closed();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Closing the browser means "stop": the reply driving it ends.
+        if let Some(conversation_id) = conversation_id {
+            let _ = crate::chat::stop_reply(&app, conversation_id);
+        }
+        emit_state(&app);
+    });
+}
+
 fn window_title(page_title: &str, lang: Lang) -> String {
     let page_title: String = page_title.chars().take(80).collect();
     let page_title = page_title.trim();
@@ -459,6 +504,12 @@ async fn ensure_window(app: &AppHandle, url: tauri::Url) -> Result<WebviewWindow
     if let Some((x, y)) = placement(app) {
         builder = builder.position(x, y);
     }
+    // Windows: a WebView2 environment (and browser process) of its own,
+    // never the chat window's (see the module docs).
+    #[cfg(windows)]
+    if let Ok(dir) = app.path().app_local_data_dir() {
+        builder = builder.data_directory(profile_dir(&dir));
+    }
     let window = builder
         // Own, non-persistent data store: nothing shared with the app UI,
         // nothing left on disk.
@@ -507,11 +558,7 @@ async fn ensure_window(app: &AppHandle, url: tauri::Url) -> Result<WebviewWindow
             close_app.state::<BrowserState>().set_closing();
         }
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            // Closing the browser means "stop": the reply driving it ends.
-            if let Some(conversation_id) = close_app.state::<BrowserState>().closed() {
-                let _ = crate::chat::stop_reply(&close_app, conversation_id);
-            }
-            emit_state(&close_app);
+            on_destroyed(&close_app);
         }
     });
     app.state::<BrowserState>().opened();
@@ -1254,8 +1301,14 @@ pub fn browser_state(app: AppHandle) -> BrowserView {
 
 /// The user's own controls in the browser bar: `back`, `forward`,
 /// `reload`, `show` (bring the window to the front) and `close`.
+///
+/// Async on purpose: a synchronous command runs on the event-loop thread,
+/// inside the chat webview's own IPC callback, and on Windows window
+/// operations from there can stall the chat window. Async commands run on
+/// the async runtime; the window calls below are dispatched to the event
+/// loop.
 #[tauri::command]
-pub fn browser_control(app: AppHandle, action: String) -> Result<(), String> {
+pub async fn browser_control(app: AppHandle, action: String) -> Result<(), String> {
     let window = app
         .get_webview_window(LABEL)
         .ok_or_else(|| "the browser is closed".to_string())?;
@@ -1347,6 +1400,48 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Do not open it again")
+        );
+    }
+
+    #[test]
+    fn the_browser_never_shares_the_chat_windows_webview2_folder() {
+        // Tauri gives every webview the app's local data directory unless
+        // told otherwise; one folder = one WebView2 browser process, so the
+        // browser's folder must be a different, dedicated one.
+        let local = std::path::Path::new("/data/com.helmcode.nan.desktop");
+        let dir = profile_dir(local);
+        assert_ne!(dir, local);
+        assert!(dir.starts_with(local));
+        assert_eq!(dir.file_name().unwrap(), PROFILE_DIR);
+        // The Windows-only builder line is not compiled on every CI host:
+        // pin it at the source level too.
+        let source = include_str!("mod.rs");
+        assert!(source.contains(".data_directory(profile_dir(&dir))"));
+    }
+
+    #[test]
+    fn closing_never_runs_on_the_event_loop_thread() {
+        // The bar's close is an async command (not run inside the chat
+        // webview's IPC callback), and the Destroyed handler hands the
+        // reply stop (database, process tree) to a blocking worker.
+        let source = include_str!("mod.rs");
+        assert!(source.contains("pub async fn browser_control("));
+        let handler = source
+            .split("fn on_destroyed(app: &AppHandle) {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("on_destroyed");
+        let worker = handler
+            .split("spawn_blocking(")
+            .nth(1)
+            .expect("the stop runs on a blocking worker");
+        assert!(worker.contains("stop_reply"));
+        assert!(
+            !handler
+                .split("spawn_blocking(")
+                .next()
+                .unwrap()
+                .contains("stop_reply")
         );
     }
 
