@@ -7,19 +7,22 @@ import { useI18n } from "../i18n";
 import { releaseSitePreview } from "../core";
 import { IconArrowLeft, IconFilm, IconPlus, IconTrash } from "../icons";
 import {
-  formatTime,
+  formatDuration,
   templatePoster,
   videoCreateFromTemplate,
   videoDelete,
   videoList,
+  videoPreview,
   videoTemplatePreview,
   videoTemplates,
   type Aspect,
+  type VideoAskContext,
   type VideoPreviewInfo,
   type VideoSummary,
   type VideoTemplate,
 } from "./api";
-import { VideoEditor } from "./VideoEditor";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { VideoEditor, rovingKeys } from "./VideoEditor";
 import { VideoPlayer } from "./VideoPlayer";
 import "./video.css";
 
@@ -27,28 +30,46 @@ const ASPECTS: Aspect[] = ["16:9", "9:16", "1:1"];
 
 type Tab = "mine" | "templates";
 
-/// A template's live preview (hover thumbnail and detail view): requested
-/// on mount, token released on unmount or when the aspect changes.
-function TemplatePreview({ id, aspect, compact }: { id: string; aspect: Aspect | null; compact: boolean }) {
-  const { locale } = useI18n();
-  const [info, setInfo] = useState<VideoPreviewInfo | null>(null);
+/// A live preview (hover thumbnails, the template detail): requested on
+/// mount, its token released on unmount or when the key changes. The
+/// detail plays by itself (muted) so it never sits on a black first frame.
+function LivePreview({
+  loadKey,
+  load,
+  compact,
+}: {
+  loadKey: string;
+  load: () => Promise<VideoPreviewInfo>;
+  compact: boolean;
+}) {
+  const { t } = useI18n();
+  const [info, setInfo] = useState<VideoPreviewInfo | null | "failed">(null);
   useEffect(() => {
     let alive = true;
     let loaded: VideoPreviewInfo | null = null;
     setInfo(null);
-    videoTemplatePreview(id, aspect, locale)
+    load()
       .then((value) => {
         if (!alive) return releaseSitePreview(value.url);
         loaded = value;
         setInfo(value);
       })
-      .catch(() => undefined);
+      .catch(() => alive && setInfo("failed"));
     return () => {
       alive = false;
       if (loaded) releaseSitePreview(loaded.url);
     };
-  }, [id, aspect, locale]);
-  return info ? <VideoPlayer key={info.url} info={info} compact={compact} /> : null;
+    // `loadKey` identifies what `load` fetches.
+  }, [loadKey]);
+  if (info === "failed") return compact ? null : <p className="video-note" role="alert">{t.video.templatePreviewFailed}</p>;
+  return info ? <VideoPlayer key={info.url} info={info} compact={compact} autoplay={!compact} /> : null;
+}
+
+function TemplatePreview({ id, aspect, compact }: { id: string; aspect: Aspect | null; compact: boolean }) {
+  const { locale } = useI18n();
+  return (
+    <LivePreview loadKey={`${id}|${aspect}|${locale}`} load={() => videoTemplatePreview(id, aspect, locale)} compact={compact} />
+  );
 }
 
 function TemplateCard({ template, onOpen }: { template: VideoTemplate; onOpen: () => void }) {
@@ -78,7 +99,7 @@ function TemplateCard({ template, onOpen }: { template: VideoTemplate; onOpen: (
           <span className="video-card-title">{template.title}</span>
           <span className="video-card-meta">
             <span className="video-aspect">{template.aspect}</span>
-            {formatTime(template.duration)}
+            {formatDuration(template.duration)}
           </span>
           <span className="video-card-desc">{template.description}</span>
         </span>
@@ -106,7 +127,7 @@ function TemplateDetail({
     <div className="video-template-detail">
       <button type="button" className="btn btn-ghost btn-sm" onClick={onBack}>
         <IconArrowLeft size={14} />
-        {t.video.back}
+        {t.video.allTemplates}
       </button>
       <div className="video-template-detail-body">
         <div className="video-template-detail-player">
@@ -118,13 +139,19 @@ function TemplateDetail({
           <p className="video-field-label" id="video-template-format">
             {t.video.formatLabel}
           </p>
-          <div className="video-segmented" role="radiogroup" aria-labelledby="video-template-format">
+          <div
+            className="video-segmented"
+            role="radiogroup"
+            aria-labelledby="video-template-format"
+            onKeyDown={rovingKeys(ASPECTS, aspect, setAspect)}
+          >
             {ASPECTS.map((a) => (
               <button
                 key={a}
                 type="button"
                 role="radio"
                 aria-checked={aspect === a}
+                tabIndex={aspect === a ? 0 : -1}
                 className={`video-seg${aspect === a ? " active" : ""}`}
                 onClick={() => setAspect(a)}
               >
@@ -170,6 +197,7 @@ export function VideosSurface({
   onOpenProject,
   onClose,
   onAskAssistant,
+  onSignIn,
 }: {
   profileId: string;
   active: boolean;
@@ -177,7 +205,9 @@ export function VideosSurface({
   projectId: string | null;
   onOpenProject: (projectId: string | null) => void;
   onClose: () => void;
-  onAskAssistant: (text: string) => void;
+  onAskAssistant: (text: string, context: VideoAskContext) => void;
+  /// The session expired: sign in again.
+  onSignIn?: () => void;
 }) {
   const { t, locale } = useI18n();
   const [tab, setTab] = useState<Tab>("mine");
@@ -187,6 +217,8 @@ export function VideosSurface({
   const [creating, setCreating] = useState(false);
   const [createFailed, setCreateFailed] = useState(false);
   const [deleteFailed, setDeleteFailed] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<VideoSummary | null>(null);
+  const [liveProject, setLiveProject] = useState<string | null>(null);
 
   const loadProjects = useCallback(() => {
     videoList(profileId)
@@ -220,7 +252,7 @@ export function VideosSurface({
   };
 
   const remove = (project: VideoSummary) => {
-    if (!window.confirm(t.video.deleteConfirm(project.title))) return;
+    setConfirmDelete(null);
     setDeleteFailed(false);
     videoDelete(profileId, project.id)
       .then(loadProjects)
@@ -238,6 +270,7 @@ export function VideosSurface({
           projectId={projectId}
           onClose={() => onOpenProject(null)}
           onAskAssistant={onAskAssistant}
+          onSignIn={onSignIn}
         />
       </section>
     );
@@ -253,7 +286,15 @@ export function VideosSurface({
         <h1 id="videos-title" className="studio-title">
           {t.video.surfaceTitle}
         </h1>
-        <div className="video-tabs" role="tablist" aria-label={t.video.tabsLabel}>
+        <div
+          className="video-tabs"
+          role="tablist"
+          aria-label={t.video.tabsLabel}
+          onKeyDown={rovingKeys<Tab>(["mine", "templates"], tab, (id) => {
+            setTab(id);
+            setDetail(null);
+          })}
+        >
           {(["mine", "templates"] as const).map((id) => (
             <button
               key={id}
@@ -261,6 +302,7 @@ export function VideosSurface({
               role="tab"
               id={`videos-tab-${id}`}
               aria-selected={tab === id}
+              tabIndex={tab === id ? 0 : -1}
               aria-controls={`videos-panel-${id}`}
               className={`video-tab${tab === id ? " active" : ""}`}
               onClick={() => {
@@ -308,6 +350,10 @@ export function VideosSurface({
                       className="video-card-main"
                       aria-label={t.video.openLabel(project.title)}
                       onClick={() => onOpenProject(project.id)}
+                      onMouseEnter={() => setLiveProject(project.id)}
+                      onMouseLeave={() => setLiveProject((prev) => (prev === project.id ? null : prev))}
+                      onFocus={() => setLiveProject(project.id)}
+                      onBlur={() => setLiveProject((prev) => (prev === project.id ? null : prev))}
                     >
                       <span className={`video-thumb aspect-${project.aspect.replace(":", "x")}`}>
                         {project.template ? (
@@ -315,12 +361,21 @@ export function VideosSurface({
                         ) : (
                           <IconFilm size={28} />
                         )}
+                        {liveProject === project.id && (
+                          <span className="video-thumb-live">
+                            <LivePreview
+                              loadKey={`${project.id}|${project.updated_ms}`}
+                              load={() => videoPreview(profileId, project.id)}
+                              compact
+                            />
+                          </span>
+                        )}
                       </span>
                       <span className="video-card-text">
                         <span className="video-card-title">{project.title}</span>
                         <span className="video-card-meta">
                           <span className="video-aspect">{project.aspect}</span>
-                          {formatTime(project.duration)} · {t.video.scenesCount(project.scenes)}
+                          {formatDuration(project.duration)} · {t.video.scenesCount(project.scenes)}
                         </span>
                         <span className="video-card-desc">{t.video.updated(relativeDate(project.updated_ms, locale))}</span>
                       </span>
@@ -330,7 +385,7 @@ export function VideosSurface({
                       className="icon-btn video-card-delete"
                       aria-label={t.video.deleteLabel(project.title)}
                       title={t.video.delete}
-                      onClick={() => remove(project)}
+                      onClick={() => setConfirmDelete(project)}
                     >
                       <IconTrash size={15} />
                     </button>
@@ -352,6 +407,7 @@ export function VideosSurface({
             ) : (
               <>
                 <p className="video-hint video-lede">{t.video.templatesLede}</p>
+                {templates === null && <p className="video-note">{t.video.templatesLoading}</p>}
                 {templates === "failed" && (
                   <p className="inline-error" role="alert">
                     {t.video.templatesFailed}
@@ -376,6 +432,15 @@ export function VideosSurface({
           </div>
         )}
       </div>
+      {confirmDelete && (
+        <ConfirmDialog
+          title={t.video.deleteTitle}
+          body={t.video.deleteConfirm(confirmDelete.title)}
+          confirmLabel={t.video.deleteButton}
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => remove(confirmDelete)}
+        />
+      )}
     </section>
   );
 }

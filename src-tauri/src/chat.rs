@@ -1126,8 +1126,15 @@ pub fn chat_send(
     continuation: Option<bool>,
     attachments: Option<Vec<crate::attachments::AttachmentInput>>,
     artifacts: Option<String>,
+    video_context: Option<crate::video::context::VideoContext>,
 ) -> Result<(), String> {
     let attachments = attachments.unwrap_or_default();
+    // R-V1: technical details of a video request, checked before anything
+    // is stored; they become a system note for this reply only.
+    let video_note = video_context
+        .as_ref()
+        .map(crate::video::context::note)
+        .transpose()?;
     if content.trim().is_empty() && attachments.is_empty() {
         return Err("message is empty".to_string());
     }
@@ -1286,6 +1293,7 @@ pub fn chat_send(
         // account): only a UX gate for offering `share_artifact`. The
         // server enforces the flag and every share asks the user anyway.
         tools::share_artifact::ShareOffer::from_wire(artifacts.as_deref()),
+        video_note,
     ));
     attach_stream(&state, conversation_id, generation, handle)?;
     Ok(())
@@ -1361,6 +1369,7 @@ async fn run_chat_stream(
     generation: u64,
     continued: bool,
     share_offer: tools::share_artifact::ShareOffer,
+    video_note: Option<String>,
 ) {
     let share_tool = share_offer == tools::share_artifact::ShareOffer::On;
     let state = app.state::<ChatState>();
@@ -1479,10 +1488,14 @@ async fn run_chat_stream(
     // Every rebuild of the request prefix goes through here, so the share
     // guidance rides along whenever `share_artifact` is offered.
     let compose = |history: Vec<serde_json::Value>| {
-        with_share_guidance(
+        let mut messages = with_share_guidance(
             compose_messages(workspace.as_ref(), skill.as_ref(), history),
             share_offer,
-        )
+        );
+        if let Some(note) = &video_note {
+            crate::video::context::insert_note(&mut messages, note);
+        }
+        messages
     };
     let mut messages = compose(traced_history);
     // Where the history ends and this reply's own tool rounds begin.

@@ -15,6 +15,7 @@ declare module "react" {
         "sandbox-origin"?: string;
         "low-power-idle"?: boolean;
         "disable-click-to-play"?: boolean;
+        "disable-fullscreen"?: boolean;
       };
     }
   }

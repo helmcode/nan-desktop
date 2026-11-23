@@ -517,10 +517,26 @@ pub async fn quota(base: &str, token: &str) -> Result<Quota, ExportError> {
 /// Whether a download URL (and every redirect hop) may be fetched: https
 /// only; the debug mock may serve plain http on loopback.
 pub fn download_url_allowed(url: &str, allow_loopback_http: bool) -> bool {
-    url.starts_with("https://")
-        || (allow_loopback_http
-            && (url.starts_with("http://127.0.0.1:") || url.starts_with("http://127.0.0.1/")))
+    if allow_loopback_http
+        && (url.starts_with("http://127.0.0.1:") || url.starts_with("http://127.0.0.1/"))
+    {
+        return true;
+    }
+    // Production: the tenants' R2 buckets only (presigned S3-style URLs).
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    parsed.scheme() == "https"
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.port().is_none()
+        && parsed
+            .host_str()
+            .is_some_and(|host| host.ends_with(R2_HOST_SUFFIX) && host.len() > R2_HOST_SUFFIX.len())
 }
+
+/// The only hosts a rendered MP4 is downloaded from (Cloudflare R2).
+pub const R2_HOST_SUFFIX: &str = ".r2.cloudflarestorage.com";
 
 /// A free `exports/` name for a title: `<slug>.mp4`, `<slug>-2.mp4`...
 pub fn export_name(dir: &Path, title: &str) -> String {
@@ -1060,6 +1076,22 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".part"))
         );
+        // Only R2 hosts in production.
+        for (url, ok) in [
+            (
+                "https://acc.r2.cloudflarestorage.com/renders/x.mp4?X-Amz-Signature=a",
+                true,
+            ),
+            ("https://bucket.acc.eu.r2.cloudflarestorage.com/x.mp4", true),
+            ("https://evil.example/x.mp4", false),
+            ("https://r2.cloudflarestorage.com.evil.example/x.mp4", false),
+            ("https://.r2.cloudflarestorage.com/x", false),
+            ("https://user:pw@acc.r2.cloudflarestorage.com/x.mp4", false),
+            ("https://acc.r2.cloudflarestorage.com:8443/x.mp4", false),
+            ("http://acc.r2.cloudflarestorage.com/x.mp4", false),
+        ] {
+            assert_eq!(download_url_allowed(url, false), ok, "{url}");
+        }
         // Expired link, http in production, bad names.
         let (base, server) = serve_once(http("403 Forbidden", "", b""));
         assert_eq!(
@@ -1089,7 +1121,7 @@ mod tests {
         );
         assert_eq!(
             tauri::async_runtime::block_on(download(
-                "https://x/x",
+                "https://a.r2.cloudflarestorage.com/x",
                 &dir,
                 "../e.mp4",
                 false,

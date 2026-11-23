@@ -54,6 +54,15 @@ export function onVideoChanged(handler: (payload: VideoChanged) => void): Promis
   return listen<VideoChanged>(VIDEO_CHANGED_EVENT, (event) => handler(event.payload));
 }
 
+/// A length in plain words: `15 s`, `1 min 30 s`, `2 min`.
+export function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0));
+  if (total < 60) return `${total} s`;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return s === 0 ? `${m} min` : `${m} min ${s} s`;
+}
+
 /// `m:ss` for a number of seconds (`1:05`), `h:mm:ss` past an hour.
 export function formatTime(seconds: number): string {
   const total = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
@@ -227,6 +236,24 @@ export interface UploadProgress {
 
 export function onUploadProgress(handler: (payload: UploadProgress) => void): Promise<UnlistenFn> {
   return listen<UploadProgress>(UPLOAD_EVENT, (event) => handler(event.payload));
+}
+
+/// The technical details of a video request, attached to the next chat
+/// message for the model only (never shown in the composer).
+export interface VideoAskContext {
+  project_id: string;
+  title?: string;
+  scene_id?: string;
+  scene_title?: string;
+  from?: number;
+  to?: number;
+  at?: number;
+  problems?: string[];
+}
+
+/// Cancel an export while its bundle is still uploading.
+export function exportAbort(projectId: string): Promise<boolean> {
+  return invoke<boolean>("video_export_abort", { projectId });
 }
 
 export function exportStart(profileId: string, projectId: string, quality: "standard" | "draft"): Promise<RenderStarted> {

@@ -129,6 +129,10 @@ export type ChatSendArgs = {
   /// `share_artifact`; `paywall` only adds a one-line hint so it can explain
   /// the plan lacks them. Omitted when off/unknown.
   artifacts?: "on" | "paywall";
+  /// R-V1: the technical details of a video request ("Ask for a change in
+  /// this scene"), for the model only: the core validates them and adds a
+  /// system note for this reply; they are never stored or shown.
+  videoContext?: import("./video/api").VideoAskContext;
 };
 
 // ---------------------------------------------------------------------------

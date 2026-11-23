@@ -3,7 +3,7 @@
 // components so it is tested directly.
 
 import type { Strings } from "../i18n";
-import { formatTime, type ExportError, type VideoScene } from "./api";
+import { formatDuration, formatTime, type ExportError, type VideoAskContext, type VideoScene } from "./api";
 
 export interface SceneWindow {
   scene: VideoScene;
@@ -48,20 +48,68 @@ export function parseDuration(raw: string): number | null {
   return Math.round(Math.min(MAX_SCENE_S, Math.max(MIN_SCENE_S, value)) * 100) / 100;
 }
 
-/// The composer text for "Ask for a change in this scene".
+/// "Ask for a change in this scene": the short request the composer shows
+/// (scene name and window, in the user's words) and the technical context
+/// attached to the message for the model only.
 export function changeRequest(
   t: Strings,
   video: { id: string; title: string },
   scenes: VideoScene[],
   index: number,
   currentTime: number | null,
-): string {
+): { text: string; context: VideoAskContext } | null {
   const windows = sceneWindows(scenes);
   const w = windows[index];
-  if (!w) return "";
+  if (!w) return null;
   const title = w.scene.title || t.video.sceneUntitled(index + 1);
-  const at = currentTime !== null && currentTime >= w.start && currentTime < w.end ? formatTime(currentTime) : null;
-  return t.video.askChangeText(video.title, video.id, title, formatTime(w.start), formatTime(w.end), at);
+  const at = currentTime !== null && currentTime >= w.start && currentTime < w.end ? currentTime : null;
+  return {
+    text: t.video.askChangeText(title, formatTime(w.start), formatTime(w.end)),
+    context: {
+      project_id: video.id,
+      title: video.title,
+      scene_id: w.scene.id,
+      scene_title: title,
+      from: Math.round(w.start * 1000) / 1000,
+      to: Math.round(w.end * 1000) / 1000,
+      ...(at !== null ? { at: Math.round(at * 1000) / 1000 } : {}),
+    },
+  };
+}
+
+/// Where a variable is used: the scenes whose file binds it
+/// (`data-var-text`, `data-var-src` or `var(--id)`).
+export function variableScenes(variableId: string, scenes: { id: string; html: string }[]): string[] {
+  const escaped = variableId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const binding = new RegExp(`data-var-(?:text|src)=["']${escaped}["']|var\\(--${escaped}[,)\\s]`);
+  return scenes.filter((scene) => binding.test(scene.html)).map((scene) => scene.id);
+}
+
+/// The variables grouped for the form: one group per scene (in scene
+/// order) holding the fields only that scene uses, then "General" for the
+/// ones used by several scenes or none (palette, logo...).
+export function groupVariables<V extends { id: string }>(
+  variables: V[],
+  scenes: { id: string; title: string }[],
+  sources: { id: string; html: string }[],
+): { sceneId: string | null; title: string | null; variables: V[] }[] {
+  const general: V[] = [];
+  const byScene = new Map<string, V[]>();
+  for (const variable of variables) {
+    const used = variableScenes(variable.id, sources);
+    if (used.length === 1) byScene.set(used[0], [...(byScene.get(used[0]) ?? []), variable]);
+    else general.push(variable);
+  }
+  const groups: { sceneId: string | null; title: string | null; variables: V[] }[] = scenes
+    .filter((scene) => byScene.has(scene.id))
+    .map((scene) => ({ sceneId: scene.id, title: scene.title, variables: byScene.get(scene.id)! }));
+  if (general.length > 0) groups.push({ sceneId: null, title: null, variables: general });
+  return groups;
+}
+
+/// Seconds an export of `durationS` costs (the server charges whole seconds).
+export function exportCharge(durationS: number): number {
+  return Math.ceil(durationS);
 }
 
 /// "You have N min of export time left this month" (whole minutes, never
@@ -79,10 +127,9 @@ export function shortDate(iso: string | null | undefined, locale: string): strin
   return new Intl.DateTimeFormat(locale === "en" ? "en-GB" : "es-ES", { day: "numeric", month: "long" }).format(date);
 }
 
-function waitText(seconds: number | undefined, locale: string): string | null {
+function waitText(seconds: number | undefined): string | null {
   if (!seconds || seconds <= 0) return null;
-  if (seconds < 90) return locale === "en" ? `${seconds} s` : `${seconds} s`;
-  return `${Math.ceil(seconds / 60)} min`;
+  return formatDuration(seconds < 90 ? seconds : Math.ceil(seconds / 60) * 60);
 }
 
 /// The plain-language message for a failed export step.
@@ -90,7 +137,7 @@ export function exportErrorMessage(t: Strings, locale: string, err: ExportError)
   const e = t.video.errors;
   switch (err.kind) {
     case "quota_exhausted":
-      return e.quota_exhausted(formatTime(err.remaining_seconds ?? 0), shortDate(err.period_end, locale));
+      return e.quota_exhausted(formatDuration(err.remaining_seconds ?? 0), shortDate(err.period_end, locale));
     case "subscription_required":
     case "too_large":
     case "invalid_project":
@@ -107,7 +154,7 @@ export function exportErrorMessage(t: Strings, locale: string, err: ExportError)
     case "unavailable":
       return e[err.kind];
     case "rate_limited":
-      return e.rate_limited(waitText(err.retry_after, locale));
+      return e.rate_limited(waitText(err.retry_after));
     default:
       return e.generic;
   }

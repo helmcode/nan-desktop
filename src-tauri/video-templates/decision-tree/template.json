@@ -33,5 +33,5 @@
     { "id": "note-5", "type": "color", "label": { "es": "Notas de salida B", "en": "Outcome notes B" }, "value": { "es": "#a8d8f0", "en": "#a8d8f0" } },
     { "id": "note-6", "type": "color", "label": { "es": "Nota elegida", "en": "Picked note" }, "value": { "es": "#f8b4c8", "en": "#f8b4c8" } }
   ],
-  "attribution": "Based on the HyperFrames \"Decision Tree\" example by HeyGen, Inc. (Apache-2.0)"
+  "attribution": {"es": "Basada en el ejemplo \"Decision Tree\" de HyperFrames de HeyGen, Inc. (Apache-2.0)", "en": "Based on the HyperFrames \"Decision Tree\" example by HeyGen, Inc. (Apache-2.0)"}
 }

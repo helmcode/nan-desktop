@@ -1,10 +1,13 @@
 // R-V1: the editor's pure logic and every export message.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { en } from "../i18n/en";
+import { en as enStrings } from "../i18n/en";
 import { es } from "../i18n/es";
+import { formatDuration } from "./api";
 import {
   changeRequest,
+  exportCharge,
   exportErrorMessage,
+  groupVariables,
   moveScene,
   parseDuration,
   quotaLine,
@@ -54,15 +57,47 @@ describe("scene timing and order", () => {
 });
 
 describe("Ask for a change in this scene", () => {
-  it("names the video, its id, the scene and its window, and the playhead inside it", () => {
+  it("shows a plain request and attaches the technical context for the model", () => {
     const video = { id: "0123456789abcdef0123456789abcdef", title: "Promo" };
-    expect(changeRequest(es, video, SCENES, 1, 5)).toBe(
-      "En el vídeo «Promo» (project_id 0123456789abcdef0123456789abcdef), escena «Escena 2» (de 0:03 a 0:07, ahora en 0:05): ",
-    );
-    expect(changeRequest(en, video, SCENES, 0, 9)).toBe(
-      'In the video "Promo" (project_id 0123456789abcdef0123456789abcdef), scene "Inicio" (0:00 to 0:03): ',
-    );
-    expect(changeRequest(es, video, SCENES, 9, null)).toBe("");
+    expect(changeRequest(es, video, SCENES, 1, 5)).toEqual({
+      text: "Escena «Escena 2» (0:03 a 0:07): ",
+      context: {
+        project_id: video.id,
+        title: "Promo",
+        scene_id: "body",
+        scene_title: "Escena 2",
+        from: 3,
+        to: 7.5,
+        at: 5,
+      },
+    });
+    const en = changeRequest(enStrings, video, SCENES, 0, 9)!;
+    expect(en.text).toBe('Scene "Inicio" (0:00 to 0:03): ');
+    expect(en.context.at).toBeUndefined();
+    expect(en.text).not.toContain(video.id);
+    expect(changeRequest(es, video, SCENES, 9, null)).toBeNull();
+  });
+});
+
+describe("fields grouped by scene", () => {
+  it("puts a field in its only scene and shared ones under General", () => {
+    const sources = [
+      { id: "intro", html: '<h1 data-var-text="headline">x</h1><p style="color:var(--accent)">' },
+      { id: "chart", html: '<span data-var-text="bar-1">x</span><div style="width:calc(var(--bar-1-amount) * 1%)">' },
+      { id: "cta", html: '<img data-var-src="logo"><p style="color:var(--accent)">' },
+    ];
+    const vars = ["headline", "bar-1", "bar-1-amount", "accent", "logo", "unused"].map((id) => ({ id }));
+    const groups = groupVariables(vars, [
+      { id: "intro", title: "Inicio" },
+      { id: "chart", title: "Datos" },
+      { id: "cta", title: "Cierre" },
+    ], sources);
+    expect(groups.map((g) => [g.title, g.variables.map((v) => v.id)])).toEqual([
+      ["Inicio", ["headline"]],
+      ["Datos", ["bar-1", "bar-1-amount"]],
+      ["Cierre", ["logo"]],
+      [null, ["accent", "unused"]],
+    ]);
   });
 });
 
@@ -72,7 +107,7 @@ describe("export copy", () => {
     expect(quotaLine(es, 5099)).toBe("Te quedan 84 min de exportación este mes");
     expect(quotaLine(es, 42)).toBe("Te quedan 42 s de exportación este mes");
     expect(quotaLine(es, 0)).toBe("Te quedan 0 min de exportación este mes");
-    expect(quotaLine(en, 7200)).toBe("You have 120 min of export time left this month");
+    expect(quotaLine(enStrings, 7200)).toBe("You have 120 min of export time left this month");
   });
 
   it("has a clear message for every error the API and the core return", () => {
@@ -102,14 +137,15 @@ describe("export copy", () => {
     expect(exportErrorMessage(es, "es", { kind: "weird" })).toBe(es.video.errors.generic);
     expect(exportErrorMessage(es, "es", { kind: "too_large" })).toContain("90 MB");
     expect(exportErrorMessage(es, "es", { kind: "rate_limited", retry_after: 30 })).toContain("30 s");
-    expect(exportErrorMessage(es, "es", { kind: "rate_limited", retry_after: 600 })).toContain("10 min");
+    expect(exportErrorMessage(es, "es", { kind: "rate_limited", retry_after: 600 })).toContain("en 10 min.");
+    expect(exportErrorMessage(es, "es", { kind: "rate_limited", retry_after: 100 })).toContain("en 2 min.");
     expect(exportErrorMessage(es, "es", { kind: "rate_limited" })).toContain("dentro de un rato");
     const quota = exportErrorMessage(es, "es", {
       kind: "quota_exhausted",
       remaining_seconds: 20,
       period_end: "2026-12-01T10:00:00Z",
     });
-    expect(quota).toContain("0:20");
+    expect(quota).toContain("te quedan 20 s");
     expect(quota).toContain("1 de diciembre");
   });
 
@@ -119,6 +155,14 @@ describe("export copy", () => {
     expect(uploadTooSlow(1, 100, 3)).toBe(false); // too early to judge
     expect(uploadTooSlow(100, 100, 900)).toBe(false); // already sent
     expect(es.video.errors.no_session).toContain("Vuelve a iniciar sesión");
+  });
+
+  it("writes lengths as 15 s / 1 min 30 s and charges whole seconds", () => {
+    expect(formatDuration(15)).toBe("15 s");
+    expect(formatDuration(90)).toBe("1 min 30 s");
+    expect(formatDuration(120)).toBe("2 min");
+    expect(formatDuration(0)).toBe("0 s");
+    expect(exportCharge(29.2)).toBe(30);
   });
 
   it("formats renewal dates and ignores bad ones", () => {

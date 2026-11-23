@@ -19,8 +19,11 @@ function findings(result: Awaited<ReturnType<typeof lintHyperframeHtml>>): strin
 }
 
 describe("templates pass @hyperframes/lint", () => {
-  it("finds the templates", () => {
-    expect(templates.length).toBeGreaterThanOrEqual(1);
+  it("finds exactly the twelve templates the core ships", () => {
+    const core = readFileSync("src-tauri/src/video/templates.rs", "utf8");
+    const promised = /for id in \[([\s\S]*?)\]/.exec(core)?.[1].match(/"([a-z-]+)"/g)?.map((q) => q.slice(1, -1)) ?? [];
+    expect(promised.length).toBe(12);
+    expect([...templates].sort()).toEqual([...promised].sort());
   });
 
   it.each(templates)("%s", async (id) => {

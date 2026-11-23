@@ -77,6 +77,7 @@ const APP_COMMANDS: &[&str] = &[
     "video_pick_asset",
     "video_delete",
     "video_export_start",
+    "video_export_abort",
     "video_export_status",
     "video_export_cancel",
     "video_export_quota",

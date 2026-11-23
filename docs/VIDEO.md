@@ -143,7 +143,10 @@ same `SITE_CSP` header + `sandbox allow-scripts` as websites.
 The player (`<hyperframes-player>`, our pinned bundle code in the app
 renderer) loads that URL with `sandbox-origin="opaque"`, so the composition
 runs in an opaque-origin frame: no app DOM, no storage, no Tauri bridge, no
-network; the player talks to it only through `postMessage`. The app CSP is
+network; the player talks to it only through `postMessage`. Before the
+first load the inner frame's `allow` is narrowed to `autoplay` (no
+`fullscreen`: a hostile composition cannot take the whole screen and imitate
+the app) and the player's fullscreen button is hidden. The app CSP is
 unchanged (`frame-src nan-site:` already existed).
 
 ## Editor
@@ -153,9 +156,19 @@ durations, voice/music volume or removal) / `video_pick_asset` (a SLOT:
 image variable, music, voice; the core opens the native dialog, applies the
 chat-attachment refusals: app data, credential stores, key files; checks
 type and magic; names the asset itself) / `video_delete` (after a
-confirmation). The renderer never sends a path or HTML. "Ask for a change in
-this scene" switches to the chat with the request (video title, project id,
-scene, its window and the playhead) in the composer.
+confirmation in the app's own dialog: the macOS webview has no JavaScript
+confirm panel). The renderer never sends a path or HTML. A change reloads
+the preview at the same playhead (or at the start of the scene that was
+edited).
+
+"Ask for a change in this scene" and "Ask the assistant to fix it" add a
+plain request to the composer (never replacing what the user typed), e.g.
+`Escena «Mensaje» (0:07 a 0:11): `, and attach the technical details (project
+id, scene id and window, playhead, check findings) as `chat_send`'s
+`videoContext`. The core validates it (`video/context.rs`: ids, caps,
+control and bidi characters stripped) and adds ONE system note before the
+user's message for that reply only; it is never stored or shown. A chip
+above the composer says a video is attached and can drop it.
 
 ## Templates
 
@@ -181,11 +194,18 @@ preview for a browser check.
 2. `video_export_status` (every 2 s): the renderer gets status/progress/error
    and `ready`, NEVER the presigned URL.
 3. `video_export_download`: the core asks for a fresh status, streams the
-   presigned MP4 (https only, no credentials, redirects re-checked, 2 GiB
+   presigned MP4 (https on `*.r2.cloudflarestorage.com` only; the debug mock
+   may use loopback http; no credentials, redirects re-checked, 2 GiB
    cap, `ftyp` magic) to `exports/<slug>.mp4` (temp + rename), emitting
    `video://download` progress. Then Open / Show in folder / Save a copy.
-4. `video_export_cancel`, `video_export_quota` ("Te quedan 84 min de
-   exportación este mes").
+4. `video_export_cancel` (a running render), `video_export_abort` (an
+   upload still in flight: the request is aborted, the server never admits
+   it), `video_export_quota` ("Te quedan 84 min de exportación este mes").
+   The panel refuses to start when the balance does not cover the video
+   ("Este vídeo usa 1 min 30 s y te quedan 42 s"), offers "Ver planes" after
+   a subscription/quota refusal and "Volver a iniciar sesión" after an
+   expired session, and checks the session before calling a render gone on
+   a 404 (the enterprise "no credential").
 
 The routes are a closed set (`render::Route`); render ids are validated
 (`[A-Za-z0-9_-]{1,64}`); every API code maps to a typed error with plain

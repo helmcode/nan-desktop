@@ -45,8 +45,33 @@ describe("VideoPlayer", () => {
     expect(player.getAttribute("height")).toBe("1920");
     expect(player.getAttribute("aria-label")).toBe("Reproductor de vídeo: Promo");
     expect(screen.getByLabelText("Formato 9:16").textContent).toBe("9:16");
-    expect(screen.getByText("1:15")).toBeTruthy();
+    expect(screen.getByText("1 min 15 s")).toBeTruthy();
+    // No fullscreen for the composition: the button is hidden.
+    expect(player.hasAttribute("disable-fullscreen")).toBe(true);
     expect(screen.getByText("30 fps")).toBeTruthy();
+  });
+
+  it("narrows the frame to autoplay before loading, and resumes at startAt once ready", async () => {
+    const frame = document.createElement("iframe");
+    frame.setAttribute("allow", "autoplay; fullscreen");
+    const seeks: number[] = [];
+    const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
+    Object.defineProperty(proto, "iframeElement", { configurable: true, get: () => frame });
+    proto.seek = (t: number) => seeks.push(t);
+    try {
+      render(
+        <I18nProvider initial="es">
+          <VideoPlayer info={INFO} startAt={12.5} />
+        </I18nProvider>,
+      );
+      await waitFor(() => expect(document.querySelector("hyperframes-player")?.getAttribute("src")).toBe(INFO.url));
+      expect(frame.getAttribute("allow")).toBe("autoplay");
+      document.querySelector("hyperframes-player")!.dispatchEvent(new CustomEvent("ready"));
+      expect(seeks).toEqual([12.5]);
+    } finally {
+      delete proto.iframeElement;
+      delete proto.seek;
+    }
   });
 
   it("formats times as m:ss and h:mm:ss", () => {

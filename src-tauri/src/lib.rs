@@ -252,6 +252,7 @@ pub fn run() {
         .manage(updater::UpdaterState::default())
         .manage(site_preview::SiteRegistry::default())
         .manage(browser::BrowserState::default())
+        .manage(video::UploadsState::default())
         // R20-D: the sandboxed website preview frame. Serves ONLY bytes
         // preview_read_file already gated and registered (never the disk),
         // under the site CSP header (no network) + a sandbox directive.
@@ -394,6 +395,7 @@ pub fn run() {
             video::video_pick_asset,
             video::video_delete,
             video::video_export_start,
+            video::video_export_abort,
             video::video_export_status,
             video::video_export_cancel,
             video::video_export_quota,

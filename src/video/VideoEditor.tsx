@@ -1,15 +1,17 @@
-// R-V1: the simple editor, for people who never touch code: the player,
-// the fill-in fields (texts, colors, images/logo), the scenes (order,
-// length, "Ask for a change in this scene"), music and voice with their
-// volume, the format, and the export. Every change goes through the core
-// (`video_update`, `video_pick_asset`): the renderer never writes a file or
-// names a path. What a scene SHOWS is changed by the assistant.
+// R-V1: the simple editor, for people who never touch code: the player
+// with its own timeline, the fill-in fields grouped by scene (texts,
+// numbers, colors, images/logo), the scenes (order, length, "Ask for a
+// change in this scene"), music and voice with their volume, the format,
+// and the export. Every change goes through the core (`video_update`,
+// `video_pick_asset`): the renderer never writes a file or names a path.
+// What a scene SHOWS is changed by the assistant.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useI18n } from "../i18n";
 import { releaseSitePreview } from "../core";
 import { IconArrowLeft, IconChevronDown, IconImage, IconSparkles, IconTrash, IconX } from "../icons";
 import {
+  formatDuration,
   formatTime,
   videoGet,
   videoPickAsset,
@@ -17,47 +19,143 @@ import {
   videoUpdate,
   type Aspect,
   type EditorPatch,
+  type VideoAskContext,
   type VideoPreviewInfo,
   type VideoProject,
   type VideoVariable,
 } from "./api";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { ExportPanel } from "./ExportPanel";
 import { lintProject, problemsForAssistant, type LintProblem } from "./lint";
-import { changeRequest, moveScene, parseDuration, sceneAt, sceneWindows } from "./logic";
+import { changeRequest, groupVariables, moveScene, parseDuration, sceneAt, sceneWindows } from "./logic";
 import { VideoPlayer, type PlayerHandle } from "./VideoPlayer";
 
 const ASPECTS: Aspect[] = ["16:9", "9:16", "1:1"];
-/// How long a typed text waits before it is saved (and the preview reloads).
+/// How long typing, a color drag or a volume drag waits before it is saved.
 export const TEXT_SAVE_MS = 700;
 
 type Save = "idle" | "saving" | "saved" | "failed";
 
-function TextField({ variable, onCommit }: { variable: VideoVariable; onCommit: (value: string) => void }) {
-  const [draft, setDraft] = useState(variable.value);
+/// A value field that saves once the user pauses (or leaves it), and never
+/// lets a late save response overwrite what the user is still typing.
+function useDebouncedField(value: string, onCommit: (value: string) => void) {
+  const [draft, setDraft] = useState(value);
+  const focused = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => setDraft(variable.value), [variable.value]);
-  useEffect(() => () => {
-    if (timer.current) clearTimeout(timer.current);
-  }, []);
-  const commit = (value: string) => {
+  const pending = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focused.current && pending.current === null) setDraft(value);
+    if (pending.current === value) pending.current = null;
+  }, [value]);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  const commit = (next: string) => {
     if (timer.current) clearTimeout(timer.current);
     timer.current = null;
-    if (value !== variable.value) onCommit(value);
+    if (next !== value) {
+      pending.current = next;
+      onCommit(next);
+    }
   };
-  const multiline = variable.value.length > 60;
-  const props = {
-    id: `video-var-${variable.id}`,
-    value: draft,
-    maxLength: 400,
-    onBlur: () => commit(draft),
-    onChange: (e: { currentTarget: { value: string } }) => {
-      const value = e.currentTarget.value;
-      setDraft(value);
+  return {
+    draft,
+    onFocus: () => {
+      focused.current = true;
+    },
+    onBlur: () => {
+      focused.current = false;
+      if (timer.current) commit(draft);
+    },
+    onChange: (next: string) => {
+      setDraft(next);
       if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => commit(value), TEXT_SAVE_MS);
+      timer.current = setTimeout(() => commit(next), TEXT_SAVE_MS);
     },
   };
-  return multiline ? <textarea rows={3} {...props} /> : <input type="text" {...props} />;
+}
+
+function TextField({ variable, onCommit }: { variable: VideoVariable; onCommit: (value: string) => void }) {
+  const field = useDebouncedField(variable.value, onCommit);
+  return (
+    <textarea
+      id={`video-var-${variable.id}`}
+      rows={2}
+      maxLength={400}
+      value={field.draft}
+      onFocus={field.onFocus}
+      onBlur={field.onBlur}
+      onChange={(e) => field.onChange(e.currentTarget.value)}
+    />
+  );
+}
+
+function ColorField({ variable, onCommit }: { variable: VideoVariable; onCommit: (value: string) => void }) {
+  const field = useDebouncedField(variable.value, onCommit);
+  return (
+    <input
+      id={`video-var-${variable.id}`}
+      type="color"
+      value={field.draft.length === 7 ? field.draft : "#000000"}
+      onFocus={field.onFocus}
+      onBlur={field.onBlur}
+      onChange={(e) => field.onChange(e.currentTarget.value)}
+    />
+  );
+}
+
+function NumberField({ variable, onCommit }: { variable: VideoVariable; onCommit: (value: string) => void }) {
+  const field = useDebouncedField(variable.value, onCommit);
+  return (
+    <input
+      id={`video-var-${variable.id}`}
+      type="number"
+      step="any"
+      inputMode="decimal"
+      value={field.draft}
+      onFocus={field.onFocus}
+      onBlur={field.onBlur}
+      onChange={(e) => e.currentTarget.value.trim() !== "" && field.onChange(e.currentTarget.value)}
+    />
+  );
+}
+
+function VolumeField({ label, volume, onCommit }: { label: string; volume: number; onCommit: (value: number) => void }) {
+  const { t } = useI18n();
+  const field = useDebouncedField(String(volume), (value) => onCommit(Number(value)));
+  const pct = Math.round(Number(field.draft) * 100);
+  return (
+    <label className="video-volume">
+      <span>{t.video.volume(label)}</span>
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.05}
+        value={field.draft}
+        onFocus={field.onFocus}
+        onBlur={field.onBlur}
+        onChange={(e) => field.onChange(e.currentTarget.value)}
+      />
+      <output>{t.video.volumePct(pct)}</output>
+    </label>
+  );
+}
+
+/// Arrow keys move the choice in a radio group (roving tabindex).
+export function rovingKeys<T>(options: T[], current: T, choose: (value: T) => void) {
+  return (e: KeyboardEvent<HTMLElement>) => {
+    const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    if (step === 0) return;
+    e.preventDefault();
+    const next = options[(options.indexOf(current) + step + options.length) % options.length];
+    choose(next);
+    const buttons = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("[role=radio],[role=tab]"));
+    buttons[options.indexOf(next)]?.focus();
+  };
 }
 
 export function VideoEditor({
@@ -65,12 +163,16 @@ export function VideoEditor({
   projectId,
   onClose,
   onAskAssistant,
+  onSignIn,
 }: {
   profileId: string;
   projectId: string;
   onClose: () => void;
-  /// Prefill the chat composer (and go there) with a request about this video.
-  onAskAssistant: (text: string) => void;
+  /// Go to the chat with a short request in the composer and the technical
+  /// context attached for the model only.
+  onAskAssistant: (text: string, context: VideoAskContext) => void;
+  /// The session expired: sign in again.
+  onSignIn?: () => void;
 }) {
   const { t } = useI18n();
   const [project, setProject] = useState<VideoProject | null>(null);
@@ -82,9 +184,19 @@ export function VideoEditor({
   const [problems, setProblems] = useState<LintProblem[] | null>(null);
   const [time, setTime] = useState(0);
   const [titleDraft, setTitleDraft] = useState("");
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const player = useRef<PlayerHandle | null>(null);
   const previewRef = useRef<VideoPreviewInfo | null>(null);
   const revision = useRef(0);
+  const request = useRef(0);
+  // Where the next preview starts: the playhead before the change (or the
+  // start of the scene that was edited).
+  const resumeAt = useRef(0);
+  const timeRef = useRef(0);
+  const onTime = useCallback((seconds: number) => {
+    timeRef.current = seconds;
+    setTime(seconds);
+  }, []);
 
   // Each project version gets a fresh sandboxed preview; the old token goes back.
   const showProject = useCallback(
@@ -122,21 +234,27 @@ export function VideoEditor({
     };
   }, [profileId, projectId, showProject]);
 
+  /// Save a change. `at` is where the playhead should be afterwards
+  /// (default: where it is now). Only the latest response is applied.
   const apply = useCallback(
-    (patch: EditorPatch) => {
+    (patch: EditorPatch, at?: number) => {
+      const mine = ++request.current;
+      resumeAt.current = at ?? timeRef.current;
       setSave("saving");
       videoUpdate(profileId, projectId, patch)
         .then((next) => {
+          if (mine !== request.current) return;
           setSave("saved");
           showProject(next);
         })
-        .catch(() => setSave("failed"));
+        .catch(() => mine === request.current && setSave("failed"));
     },
     [profileId, projectId, showProject],
   );
 
   const pick = (slot: Parameters<typeof videoPickAsset>[2]) => {
     setPickFailed(false);
+    resumeAt.current = timeRef.current;
     videoPickAsset(profileId, projectId, slot)
       .then((next) => next && showProject(next))
       .catch(() => setPickFailed(true));
@@ -170,7 +288,53 @@ export function VideoEditor({
   const errors = (problems ?? []).filter((p) => p.severity === "error");
   const warnings = (problems ?? []).filter((p) => p.severity === "warning");
   const sceneTitle = (index: number) => scenes[index]?.title || t.video.sceneUntitled(index + 1);
-  const setScenes = (next: { id: string; duration: number }[]) => apply({ scenes: next });
+  const list = scenes.map((s) => ({ id: s.id, duration: s.duration }));
+  /// The start of a scene in a new scene list (where the playhead goes).
+  const startIn = (next: { id: string; duration: number }[], id: string) => {
+    let at = 0;
+    for (const s of next) {
+      if (s.id === id) return at;
+      at += s.duration;
+    }
+    return 0;
+  };
+  const setScenes = (next: { id: string; duration: number }[], focus: string | null) =>
+    apply({ scenes: next }, focus ? startIn(next, focus) : 0);
+  const groups = groupVariables(meta.variables, scenes, project.sources.scenes);
+  const removing = confirmRemove ? scenes.findIndex((s) => s.id === confirmRemove) : -1;
+
+  const field = (variable: VideoVariable) => {
+    const commit = (value: string) => apply({ values: { [variable.id]: value } });
+    switch (variable.type) {
+      case "text":
+        return <TextField variable={variable} onCommit={commit} />;
+      case "number":
+        return <NumberField variable={variable} onCommit={commit} />;
+      case "color":
+        return <ColorField variable={variable} onCommit={commit} />;
+      case "image":
+        return (
+          <div className="video-image-field" id={`video-var-${variable.id}`}>
+            <span className="video-image-name">{variable.value ? variable.value.replace(/^assets\//, "") : t.video.noImage}</span>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => pick({ kind: "image", variable: variable.id })}>
+              <IconImage size={13} />
+              {variable.value ? t.video.replaceImage : t.video.pickImage}
+            </button>
+            {variable.value && (
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label={`${t.video.removeImage}: ${variable.label}`}
+                title={t.video.removeImage}
+                onClick={() => commit("")}
+              >
+                <IconX size={14} />
+              </button>
+            )}
+          </div>
+        );
+    }
+  };
 
   return (
     <section className="video-editor" aria-labelledby="video-editor-title">
@@ -205,9 +369,26 @@ export function VideoEditor({
               {t.video.previewFailed}
             </p>
           ) : preview ? (
-            <VideoPlayer key={preview.url} info={preview} handle={player} onTime={setTime} />
+            <VideoPlayer key={preview.url} info={preview} handle={player} onTime={onTime} startAt={resumeAt.current} />
           ) : (
             <p className="video-note">{t.video.loading}</p>
+          )}
+          {preview && (
+            <div className="video-timeline">
+              <input
+                type="range"
+                min={0}
+                max={project.duration}
+                step={0.05}
+                value={Math.min(time, project.duration)}
+                aria-label={t.video.timelineLabel}
+                aria-valuetext={formatTime(time)}
+                onChange={(e) => player.current?.seek(Number(e.currentTarget.value))}
+              />
+              <span className="video-timeline-time">
+                {formatTime(time)} / {formatTime(project.duration)}
+              </span>
+            </div>
           )}
 
           <section className="video-section" aria-labelledby="video-scenes-title">
@@ -215,13 +396,12 @@ export function VideoEditor({
               <h2 id="video-scenes-title" className="video-section-title">
                 {t.video.sectionScenes}
               </h2>
-              <span className="video-hint">{t.video.totalDuration(formatTime(project.duration))}</span>
+              <span className="video-hint">{t.video.totalDuration(formatDuration(project.duration))}</span>
             </div>
             <p className="video-hint">{t.video.scenesHint}</p>
             <ol className="video-scenes">
               {windows.map((w, index) => {
                 const title = sceneTitle(index);
-                const list = scenes.map((s) => ({ id: s.id, duration: s.duration }));
                 return (
                   <li key={w.scene.id} className={`video-scene${index === current ? " current" : ""}`}>
                     <button
@@ -246,7 +426,10 @@ export function VideoEditor({
                         onBlur={(e) => {
                           const value = parseDuration(e.currentTarget.value);
                           if (value !== null && value !== w.scene.duration) {
-                            setScenes(list.map((s) => (s.id === w.scene.id ? { ...s, duration: value } : s)));
+                            setScenes(
+                              list.map((s) => (s.id === w.scene.id ? { ...s, duration: value } : s)),
+                              w.scene.id,
+                            );
                           }
                         }}
                         onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
@@ -260,7 +443,9 @@ export function VideoEditor({
                         aria-label={t.video.moveUp(title)}
                         title={t.video.moveUp(title)}
                         disabled={index === 0}
-                        onClick={() => setScenes(moveScene(scenes, index, -1).map((s) => ({ id: s.id, duration: s.duration })))}
+                        onClick={() =>
+                          setScenes(moveScene(scenes, index, -1).map((s) => ({ id: s.id, duration: s.duration })), w.scene.id)
+                        }
                       >
                         <IconChevronDown size={14} style={{ transform: "rotate(180deg)" }} />
                       </button>
@@ -270,7 +455,9 @@ export function VideoEditor({
                         aria-label={t.video.moveDown(title)}
                         title={t.video.moveDown(title)}
                         disabled={index === scenes.length - 1}
-                        onClick={() => setScenes(moveScene(scenes, index, 1).map((s) => ({ id: s.id, duration: s.duration })))}
+                        onClick={() =>
+                          setScenes(moveScene(scenes, index, 1).map((s) => ({ id: s.id, duration: s.duration })), w.scene.id)
+                        }
                       >
                         <IconChevronDown size={14} />
                       </button>
@@ -280,11 +467,7 @@ export function VideoEditor({
                         aria-label={t.video.removeScene(title)}
                         title={t.video.removeScene(title)}
                         disabled={scenes.length === 1}
-                        onClick={() => {
-                          if (window.confirm(t.video.removeSceneConfirm(title))) {
-                            setScenes(list.filter((s) => s.id !== w.scene.id));
-                          }
-                        }}
+                        onClick={() => setConfirmRemove(w.scene.id)}
                       >
                         <IconTrash size={14} />
                       </button>
@@ -293,11 +476,10 @@ export function VideoEditor({
                       type="button"
                       className="btn btn-ghost btn-sm video-ask"
                       aria-label={t.video.askChangeLabel(title)}
-                      onClick={() =>
-                        onAskAssistant(
-                          changeRequest(t, { id: project.id, title: meta.title }, scenes, index, player.current?.currentTime() ?? null),
-                        )
-                      }
+                      onClick={() => {
+                        const ask = changeRequest(t, { id: project.id, title: meta.title }, scenes, index, timeRef.current);
+                        if (ask) onAskAssistant(ask.text, ask.context);
+                      }}
                     >
                       <IconSparkles size={13} />
                       {t.video.askChange}
@@ -315,70 +497,16 @@ export function VideoEditor({
               {t.video.sectionFields}
             </h2>
             {meta.variables.length === 0 && <p className="video-hint">{t.video.noFields}</p>}
-            {meta.variables.map((variable) => (
-              <div key={variable.id} className="video-field">
-                <label htmlFor={`video-var-${variable.id}`}>{variable.label}</label>
-                {variable.type === "text" && (
-                  <TextField variable={variable} onCommit={(value) => apply({ values: { [variable.id]: value } })} />
-                )}
-                {variable.type === "number" && (
-                  <input
-                    id={`video-var-${variable.id}`}
-                    type="number"
-                    step="any"
-                    inputMode="decimal"
-                    className="video-number"
-                    defaultValue={variable.value}
-                    key={variable.value}
-                    onBlur={(e) => {
-                      const value = e.currentTarget.value.trim();
-                      if (value !== "" && value !== variable.value) apply({ values: { [variable.id]: value } });
-                    }}
-                    onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-                  />
-                )}
-                {variable.type === "color" && (
-                  <input
-                    id={`video-var-${variable.id}`}
-                    type="color"
-                    defaultValue={variable.value.length === 7 ? variable.value : "#000000"}
-                    key={variable.value}
-                    onBlur={(e) => e.currentTarget.value !== variable.value && apply({ values: { [variable.id]: e.currentTarget.value } })}
-                    onChange={(e) => {
-                      const value = e.currentTarget.value;
-                      // Native pickers fire many changes while dragging: save once it settles.
-                      window.clearTimeout(Number(e.currentTarget.dataset.timer));
-                      e.currentTarget.dataset.timer = String(
-                        window.setTimeout(() => value !== variable.value && apply({ values: { [variable.id]: value } }), TEXT_SAVE_MS),
-                      );
-                    }}
-                  />
-                )}
-                {variable.type === "image" && (
-                  <div className="video-image-field" id={`video-var-${variable.id}`}>
-                    <span className="video-image-name">{variable.value ? variable.value.replace(/^assets\//, "") : t.video.noImage}</span>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => pick({ kind: "image", variable: variable.id })}
-                    >
-                      <IconImage size={13} />
-                      {variable.value ? t.video.replaceImage : t.video.pickImage}
-                    </button>
-                    {variable.value && (
-                      <button
-                        type="button"
-                        className="icon-btn"
-                        aria-label={`${t.video.removeImage}: ${variable.label}`}
-                        title={t.video.removeImage}
-                        onClick={() => apply({ values: { [variable.id]: "" } })}
-                      >
-                        <IconX size={14} />
-                      </button>
-                    )}
+            {groups.map((group) => (
+              <fieldset key={group.sceneId ?? "general"} className="video-field-group">
+                <legend>{group.title ? t.video.sceneFields(group.title) : t.video.generalFields}</legend>
+                {group.variables.map((variable) => (
+                  <div key={variable.id} className="video-field">
+                    <label htmlFor={`video-var-${variable.id}`}>{variable.label}</label>
+                    {field(variable)}
                   </div>
-                )}
-              </div>
+                ))}
+              </fieldset>
             ))}
             {pickFailed && (
               <p className="inline-error" role="alert">
@@ -415,20 +543,11 @@ export function VideoEditor({
                     )}
                   </div>
                   {track && (
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      defaultValue={track.volume}
-                      key={`${track.file}:${track.volume}`}
-                      aria-label={t.video.volume(label)}
-                      onPointerUp={(e) =>
-                        apply(slot === "music" ? { music_volume: Number(e.currentTarget.value) } : { voice_volume: Number(e.currentTarget.value) })
-                      }
-                      onKeyUp={(e) =>
-                        apply(slot === "music" ? { music_volume: Number(e.currentTarget.value) } : { voice_volume: Number(e.currentTarget.value) })
-                      }
+                    <VolumeField
+                      key={track.file}
+                      label={label}
+                      volume={track.volume}
+                      onCommit={(volume) => apply(slot === "music" ? { music_volume: volume } : { voice_volume: volume })}
                     />
                   )}
                 </div>
@@ -441,17 +560,25 @@ export function VideoEditor({
             <h2 id="video-format-title" className="video-section-title">
               {t.video.sectionFormat}
             </h2>
-            <div className="video-segmented" role="radiogroup" aria-labelledby="video-format-title">
+            <div
+              className="video-segmented video-formats"
+              role="radiogroup"
+              aria-labelledby="video-format-title"
+              onKeyDown={rovingKeys(ASPECTS, meta.aspect, (aspect) => apply({ aspect }))}
+            >
               {ASPECTS.map((aspect) => (
                 <button
                   key={aspect}
                   type="button"
                   role="radio"
                   aria-checked={meta.aspect === aspect}
+                  aria-label={t.video.aspectNames[aspect]}
+                  tabIndex={meta.aspect === aspect ? 0 : -1}
                   className={`video-seg${meta.aspect === aspect ? " active" : ""}`}
                   onClick={() => meta.aspect !== aspect && apply({ aspect })}
                 >
-                  {t.video.aspectNames[aspect]}
+                  <span className={`video-format-icon aspect-${aspect.replace(":", "x")}`} aria-hidden="true" />
+                  {aspect}
                 </button>
               ))}
             </div>
@@ -466,7 +593,16 @@ export function VideoEditor({
                 <button
                   type="button"
                   className="btn btn-secondary btn-sm"
-                  onClick={() => onAskAssistant(t.video.askFixText(meta.title, project.id, problemsForAssistant(problems)))}
+                  onClick={() =>
+                    onAskAssistant(t.video.askFixText, {
+                      project_id: project.id,
+                      title: meta.title,
+                      problems: problemsForAssistant(problems)
+                        .split("\n")
+                        .map((line) => line.replace(/^- /, ""))
+                        .filter(Boolean),
+                    })
+                  }
                 >
                   <IconSparkles size={13} />
                   {t.video.askFix}
@@ -479,9 +615,29 @@ export function VideoEditor({
             )}
           </section>
 
-          <ExportPanel profileId={profileId} project={project} blocked={problems === null || errors.length > 0} onExported={refresh} />
+          <ExportPanel
+            profileId={profileId}
+            project={project}
+            blocked={problems === null || errors.length > 0}
+            onExported={refresh}
+            onSignIn={onSignIn}
+          />
         </aside>
       </div>
+      {removing >= 0 && (
+        <ConfirmDialog
+          title={t.video.removeSceneTitle}
+          body={t.video.removeSceneConfirm(sceneTitle(removing))}
+          confirmLabel={t.video.removeSceneButton}
+          onCancel={() => setConfirmRemove(null)}
+          onConfirm={() => {
+            const id = scenes[removing].id;
+            setConfirmRemove(null);
+            const next = list.filter((s) => s.id !== id);
+            setScenes(next, next[Math.min(removing, next.length - 1)]?.id ?? null);
+          }}
+        />
+      )}
     </section>
   );
 }

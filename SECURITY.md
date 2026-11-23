@@ -78,8 +78,9 @@ through the same private channel; we route them to the right team.
   no-network CSP + sandbox as websites, and the player loads it with an
   opaque origin. MP4 export zips the project in the core (90 MiB cap),
   uploads it with the session JWT through a closed route set, and downloads
-  the result from the presigned URL without credentials; the renderer never
-  sees the token or the URL. Details: [docs/VIDEO.md](docs/VIDEO.md).
+  the result from the presigned URL (https, Cloudflare R2 hosts only)
+  without credentials; the renderer never sees the token or the URL. The
+  composition frame may autoplay but never go fullscreen. Details: [docs/VIDEO.md](docs/VIDEO.md).
 - **Sharing is explicit and scoped.** Artifacts are uploaded only when the
   user presses Share and confirms; requests go through a closed route
   allowlist in the Rust core (`src-tauri/src/artifacts.rs`). Helmcode links

@@ -2,7 +2,7 @@
 // R-V1: the Videos surface: the library, the template gallery and
 // "Use this template" in the chosen format.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("../test/tauriMock")).eventModule());
@@ -75,6 +75,42 @@ describe("VideosSurface", () => {
     await waitFor(() => expect(open).toHaveBeenCalledWith(PROJECT_ID));
   });
 
+  it("moves between tabs and formats with the arrow keys", async () => {
+    renderSurface();
+    const templatesTab = await screen.findByRole("tab", { name: "Plantillas" });
+    await waitFor(() => expect(templatesTab.getAttribute("aria-selected")).toBe("true"));
+    expect(templatesTab.getAttribute("tabindex")).toBe("0");
+    fireEvent.keyDown(templatesTab, { key: "ArrowLeft" });
+    expect(screen.getByRole("tab", { name: "Mis vídeos" }).getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Mis vídeos" }));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    fireEvent.click(await screen.findByRole("button", { name: "Vista previa de Anuncio para redes" }));
+    // One way back to the gallery, named for where it goes.
+    expect(screen.getByRole("button", { name: "Todas las plantillas" })).toBeTruthy();
+    const vertical = screen.getByRole("radio", { name: "Vertical 9:16" });
+    fireEvent.keyDown(vertical, { key: "ArrowRight" });
+    expect(screen.getByRole("radio", { name: "Cuadrado 1:1" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("shows loading, then a clear error when a template preview fails", async () => {
+    resetTauri({
+      video_list: () => [],
+      video_templates: () => new Promise((ok) => setTimeout(() => ok([TEMPLATE]), 30)),
+      video_template_preview: () => {
+        throw { kind: "io" };
+      },
+    });
+    render(
+      <I18nProvider initial="es">
+        <VideosSurface profileId="nan" active projectId={null} onOpenProject={() => {}} onClose={() => {}} onAskAssistant={() => {}} />
+      </I18nProvider>,
+    );
+    fireEvent.click(await screen.findByRole("tab", { name: "Plantillas" }));
+    expect(screen.getByText("Cargando plantillas…")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Vista previa de Anuncio para redes" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("No se ha podido cargar esta vista previa.");
+  });
+
   it("credits templates derived from upstream examples", async () => {
     renderSurface();
     fireEvent.click(await screen.findByRole("button", { name: "Vista previa de Árbol" }));
@@ -86,11 +122,15 @@ describe("VideosSurface", () => {
     const open = renderSurface(vi.fn(), [summary]);
     fireEvent.click(await screen.findByRole("button", { name: "Abrir Promo" }));
     expect(open).toHaveBeenCalledWith(PROJECT_ID);
-    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     fireEvent.click(screen.getByRole("button", { name: "Eliminar Promo" }));
+    const dialog = screen.getByRole("alertdialog", { name: "¿Eliminar este vídeo?" });
+    expect(document.activeElement?.textContent).toBe("Cancelar");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(invokedWith("video_delete")).toEqual([]);
+    expect(dialog).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Eliminar Promo" }));
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Eliminar" }));
     await waitFor(() => expect(invokedWith("video_delete")).toEqual([{ profileId: "nan", projectId: PROJECT_ID }]));
-    confirm.mockRestore();
   });
 });

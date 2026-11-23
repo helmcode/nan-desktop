@@ -34,7 +34,7 @@ describe("ExportPanel", () => {
     renderPanel();
     expect(await screen.findByText("Te quedan 84 min de exportación este mes")).toBeTruthy();
     expect(screen.getByText("Se renueva el 1 de diciembre")).toBeTruthy();
-    expect(screen.getByText("Usará 0:08 de tu tiempo de exportación")).toBeTruthy();
+    expect(screen.getByText("Usará 8 s de tu tiempo de exportación")).toBeTruthy();
   });
 
   it("renders on the server, polls, downloads into the project and offers the file", async () => {
@@ -137,7 +137,7 @@ describe("ExportPanel", () => {
     renderPanel();
     const exportButton = screen.getByRole("button", { name: "Exportar MP4" });
     for (const text of [
-      /Has gastado el tiempo de exportación de este mes \(te quedan 0:12\)\. Se renueva el 1 de diciembre\./,
+      /Has gastado el tiempo de exportación de este mes \(te quedan 12 s\)\. Se renueva el 1 de diciembre\./,
       /necesitas una suscripción activa/,
       /máximo 90 MB/,
       /Ya tienes dos vídeos generándose/,
@@ -168,6 +168,90 @@ describe("ExportPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Cancelar" }));
     await waitFor(() => expect(invokedWith("video_export_cancel")).toEqual([{ profileId: "nan", renderId: "r-3" }]));
     await waitFor(() => expect(localStorage.getItem(`video.render.${PROJECT_ID}`)).toBeNull());
+  });
+
+  it("warns before uploading when the balance does not cover the video", async () => {
+    resetTauri({ video_export_quota: () => ({ ...QUOTA, remaining_seconds: 5 }) });
+    renderPanel();
+    expect(await screen.findByText("Este vídeo usa 8 s y te quedan 5 s de exportación este mes.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Exportar MP4" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("offers plans after a subscription refusal and sign-in after an expired session", async () => {
+    const signIn = vi.fn();
+    const errors = [{ kind: "subscription_required" }, { kind: "no_session" }];
+    resetTauri({
+      video_export_quota: () => QUOTA,
+      video_export_start: () => {
+        throw errors.shift();
+      },
+      open_external: () => null,
+    });
+    renderPanel({ onSignIn: signIn });
+    fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Ver planes" }));
+    await waitFor(() => expect(invokedWith("open_external")).toEqual([{ url: "https://cloud.nan.builders/membership" }]));
+    fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Volver a iniciar sesión" }));
+    expect(signIn).toHaveBeenCalled();
+  });
+
+  it("cancels while the video is still uploading", async () => {
+    let reject: (err: unknown) => void = () => {};
+    resetTauri({
+      video_export_quota: () => QUOTA,
+      video_export_start: () => new Promise((_, no) => (reject = no)),
+      video_export_abort: () => {
+        reject({ kind: "canceled" });
+        return true;
+      },
+    });
+    renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancelar" }));
+    await waitFor(() => expect(invokedWith("video_export_abort")).toEqual([{ projectId: PROJECT_ID }]));
+    expect((await screen.findByRole("alert")).textContent).toBe("Se ha cancelado la exportación.");
+  });
+
+  it("keeps polling through a dropped connection and resumes a remembered render", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const replies: unknown[] = [
+      { kind: "offline" },
+      { status: "rendering", progress: 0.5, error: null, ready: false, size_bytes: null, expires_at: null },
+    ];
+    resetTauri({
+      video_export_quota: () => QUOTA,
+      video_export_status: () => {
+        const next = replies.shift();
+        if (next && (next as { kind?: string }).kind) throw next;
+        return next ?? { status: "rendering", progress: 0.5, error: null, ready: false, size_bytes: null, expires_at: null };
+      },
+    });
+    localStorage.setItem(`video.render.${PROJECT_ID}`, "r-7");
+    renderPanel();
+    await waitFor(() => expect(invokedWith("video_export_status")).toEqual([{ profileId: "nan", renderId: "r-7" }]));
+    expect(screen.queryByRole("alert")).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    });
+    expect(await screen.findByText("Generando el vídeo… 50%")).toBeTruthy();
+  });
+
+  it("checks the session before calling a missing render gone (enterprise 404)", async () => {
+    let quotaCalls = 0;
+    resetTauri({
+      video_export_quota: () => {
+        quotaCalls += 1;
+        if (quotaCalls > 1) throw { kind: "no_session" };
+        return QUOTA;
+      },
+      video_export_status: () => {
+        throw { kind: "not_found" };
+      },
+    });
+    localStorage.setItem(`video.render.${PROJECT_ID}`, "r-8");
+    renderPanel();
+    expect((await screen.findByRole("alert")).textContent).toMatch(/Vuelve a iniciar sesión/);
   });
 
   it("cannot export while the check finds errors, and says when the quota is unknown", async () => {

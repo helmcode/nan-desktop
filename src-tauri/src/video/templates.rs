@@ -94,7 +94,7 @@ struct TemplateDef {
     music: Option<TemplateMusic>,
     /// Credit kept for templates derived from upstream examples.
     #[serde(default)]
-    attribution: Option<String>,
+    attribution: Option<Localized>,
 }
 
 fn default_fps() -> u32 {
@@ -165,7 +165,7 @@ pub fn list(locale: &str) -> Vec<TemplateSummary> {
             aspect: def.aspect.label().to_string(),
             duration: project::round_ms(def.scenes.iter().map(|s| s.duration).sum()),
             scenes: def.scenes.len(),
-            attribution: def.attribution.clone(),
+            attribution: def.attribution.as_ref().map(|a| a.get(locale).to_string()),
         })
         .collect()
 }
@@ -274,6 +274,27 @@ mod tests {
             assert!(template.duration > 0.0 && template.duration <= project::MAX_DURATION_S);
         }
         assert_ne!(list("en")[0].title, String::new());
+        // Credits are localized.
+        let credit = |locale: &str| {
+            list(locale)
+                .into_iter()
+                .find(|t| t.id == "decision-tree")
+                .and_then(|t| t.attribution)
+        };
+        assert!(credit("es").unwrap().starts_with("Basada en"));
+        assert!(credit("en").unwrap().starts_with("Based on"));
+        for template in list("es").iter().chain(list("en").iter()) {
+            for brand in ["NYT", "New York Times"] {
+                assert!(
+                    !template
+                        .attribution
+                        .clone()
+                        .unwrap_or_default()
+                        .contains(brand)
+                );
+                assert!(!template.title.contains(brand) && !template.description.contains(brand));
+            }
+        }
     }
 
     #[test]

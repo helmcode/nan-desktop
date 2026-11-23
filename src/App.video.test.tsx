@@ -5,7 +5,7 @@
 // in the composer. The sidebar entry opens the Videos surface.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { emit, resetTauri } from "./test/tauriMock";
+import { emit, invokedWith, resetTauri } from "./test/tauriMock";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("./test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).eventModule());
@@ -42,6 +42,7 @@ beforeEach(() => {
     video_templates: () => [],
     video_export_quota: () => ({ included_seconds: 7200, used_seconds: 0, remaining_seconds: 7200, period_end: null }),
     preview_release_site: () => null,
+    chat_send: () => undefined,
   });
 });
 afterEach(() => cleanup());
@@ -62,7 +63,42 @@ describe("R-V1: videos in the shell", () => {
     fireEvent.click(within(pane).getByRole("button", { name: "Editar vídeo" }));
     fireEvent.click(await screen.findByRole("button", { name: "Pedir al asistente un cambio en Inicio" }));
     const box = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
-    expect(box.value).toBe(`En el vídeo «Promo» (project_id ${PROJECT_ID}), escena «Inicio» (de 0:00 a 0:03, ahora en 0:00): `);
+    // Plain words in the composer; the ids ride along hidden.
+    expect(box.value).toBe("Escena «Inicio» (0:00 a 0:03): ");
+    expect(screen.getByText("Sobre el vídeo «Promo»")).toBeTruthy();
+    fireEvent.change(box, { target: { value: `${box.value}más grande` } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await waitFor(() => expect(invokedWith("chat_send").length).toBe(1));
+    const sent = invokedWith("chat_send")[0]!;
+    expect(sent.content).toBe("Escena «Inicio» (0:00 a 0:03): más grande");
+    expect(sent.videoContext).toEqual({
+      project_id: PROJECT_ID,
+      title: "Promo",
+      scene_id: "intro",
+      scene_title: "Inicio",
+      from: 0,
+      to: 3,
+      at: 0,
+    });
+    expect(screen.queryByText("Sobre el vídeo «Promo»")).toBeNull();
+  });
+
+  it("never overwrites what the user was typing", async () => {
+    render(
+      <I18nProvider initial="es">
+        <App />
+      </I18nProvider>,
+    );
+    const box = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "Mi borrador" } });
+    await act(async () => emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo" }));
+    const pane = await screen.findByRole("complementary", { name: "Vista previa" });
+    fireEvent.click(await within(pane).findByRole("button", { name: "Editar vídeo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Pedir al asistente un cambio en Cierre" }));
+    const again = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
+    expect(again.value).toBe("Mi borrador\nEscena «Cierre» (0:03 a 0:07): ");
   });
 
   it("has a Videos entry in the sidebar", async () => {

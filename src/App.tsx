@@ -79,7 +79,7 @@ import {
   DEFAULT_GRANT_MODE,
   type GrantMode,
 } from "./core";
-import { onVideoChanged } from "./video/api";
+import { onVideoChanged, videoList, type VideoAskContext } from "./video/api";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { useEscape } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
@@ -371,7 +371,15 @@ function FileChips({
 
 /// R-V1: the videos a reply created or changed. Each opens in the preview
 /// pane (the sandboxed player); the pane offers the editor.
-function VideoChips({ ids, onOpen }: { ids: string[]; onOpen: (projectId: string) => void }) {
+function VideoChips({
+  ids,
+  titles,
+  onOpen,
+}: {
+  ids: string[];
+  titles: ReadonlyMap<string, string>;
+  onOpen: (projectId: string) => void;
+}) {
   const t = useT();
   if (ids.length === 0) return null;
   return (
@@ -380,7 +388,7 @@ function VideoChips({ ids, onOpen }: { ids: string[]; onOpen: (projectId: string
         <li key={id}>
           <button type="button" className="source-chip file-chip" onClick={() => onOpen(id)}>
             <IconFilm size={13} />
-            <span className="source-title">{t.video.chipOpen}</span>
+            <span className="source-title">{titles.has(id) ? t.video.chip(titles.get(id)!) : t.video.chipOpen}</span>
           </button>
         </li>
       ))}
@@ -772,6 +780,11 @@ function ChatShell({
   const [view, setView] = useState<"chat" | "settings" | "studio" | "videos">("chat");
   // R-V1: the project the Videos surface shows in its editor (null: the lists).
   const [videoProject, setVideoProject] = useState<string | null>(null);
+  // R-V1: the video context attached to the next message (shown as a chip
+  // above the composer, sent hidden to the model, cleared once sent).
+  const [videoAsk, setVideoAsk] = useState<VideoAskContext | null>(null);
+  // Titles of the user's videos, for the chips under the replies.
+  const [videoTitles, setVideoTitles] = useState<ReadonlyMap<string, string>>(() => new Map());
   const viewRef = useRef(view);
   useEffect(() => {
     viewRef.current = view;
@@ -2017,6 +2030,8 @@ function ChatShell({
     const grantIds = selectedFolders;
     // ...and its skill: only the id is sent; the core reads the text.
     const skillId = activeSkill?.id ?? null;
+    // ...and a video request's hidden context (typed messages only).
+    const videoContext = override === undefined && queuedFiles === undefined ? videoAsk : null;
     try {
       conversationId = await ensureConversation();
       if (conversationId === null) return false;
@@ -2058,7 +2073,9 @@ function ChatShell({
         // Offers the share-by-talking tool (the core still asks per share),
         // or behind the paywall only a hint so the model can explain.
         ...(artifactsAccess.availability !== "off" ? { artifacts: artifactsAccess.availability } : {}),
+        ...(videoContext ? { videoContext } : {}),
       });
+      if (videoContext) setVideoAsk(null);
       void refreshConversations();
       return true;
     } catch (err) {
@@ -2131,7 +2148,7 @@ function ChatShell({
       void refreshConversations();
       return false;
     }
-  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary, attach, artifactsAccess.availability]);
+  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary, attach, artifactsAccess.availability, videoAsk]);
 
   const sendImage = useCallback(async (): Promise<void> => {
     const prompt = composer.trim();
@@ -2200,6 +2217,22 @@ function ChatShell({
     focusChatOnReturn.current = settingsReturn === "chat";
     setView(settingsReturn);
   }, [settingsReturn]);
+  // R-V1: the titles of the user's videos named in this chat (chips).
+  const videoIdsKey = messages
+    .flatMap((m) => (m.artifacts ?? []).filter((a) => a.kind === "video").map((a) => a.path))
+    .join(",");
+  useEffect(() => {
+    const profileId = overview.active_profile;
+    if (!videoIdsKey || !profileId) return;
+    let alive = true;
+    videoList(profileId)
+      .then((list) => alive && setVideoTitles(new Map(list.map((v) => [v.id, v.title]))))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [videoIdsKey, overview.active_profile]);
+
   // R-V1: the Videos surface (library, templates, editor). "Edit video" in
   // the side panel opens the editor on that project.
   const openVideos = useCallback((projectId: string | null): void => {
@@ -2208,8 +2241,11 @@ function ChatShell({
   }, []);
   // "Ask for a change in this scene" / "Ask the assistant to fix it": back
   // to the chat with the request in the composer, ready to complete.
-  const askAssistantAboutVideo = useCallback((text: string): void => {
-    setComposer(text);
+  // The composer keeps what the user was writing: the request is added on
+  // a new line. The technical details ride along hidden (see videoAsk).
+  const askAssistantAboutVideo = useCallback((text: string, context: VideoAskContext): void => {
+    setComposer((prev) => (prev.trim() ? `${prev.trimEnd()}\n${text}` : text));
+    setVideoAsk(context);
     focusChatOnReturn.current = true;
     setView("chat");
   }, []);
@@ -2633,7 +2669,7 @@ function ChatShell({
         )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
         <SharedLinkCards links={m.shares ?? []} />
-        <VideoChips ids={files.videos} onOpen={openVideoPreview} />
+        <VideoChips ids={files.videos} titles={videoTitles} onOpen={openVideoPreview} />
         <FileChips paths={files.chips} onOpen={openFilePreview} onShare={artifactsOn ? openShare : undefined} />
         {VOICE_UI && visible.trim().length > 0 && (
           <div className="msg-actions">
@@ -2874,6 +2910,7 @@ function ChatShell({
               onOpenProject={openVideos}
               onClose={() => setView("chat")}
               onAskAssistant={askAssistantAboutVideo}
+              onSignIn={onSignOut}
             />
           </Suspense>
         </ErrorBoundary>
@@ -3145,6 +3182,21 @@ function ChatShell({
                   <p className="drop-hint" role="status">
                     {t.attachments.dropHint}
                   </p>
+                )}
+                {videoAsk && (
+                  <div className="video-ask-chip" role="status">
+                    <IconFilm size={13} />
+                    <span>{t.video.contextChip(videoAsk.title ?? "")}</span>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label={t.video.contextRemove}
+                      title={t.video.contextRemove}
+                      onClick={() => setVideoAsk(null)}
+                    >
+                      <IconX size={12} />
+                    </button>
+                  </div>
                 )}
                 <AttachmentTray
                   items={attach.items}

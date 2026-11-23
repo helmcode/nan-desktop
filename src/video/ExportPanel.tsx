@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { IconDownload, IconExternal, IconFolder, IconStop } from "../icons";
 import {
+  exportAbort,
   exportCancel,
   exportDownload,
   exportErrorOf,
@@ -18,7 +19,7 @@ import {
   exportSaveAs,
   exportStart,
   exportStatus,
-  formatTime,
+  formatDuration,
   onDownloadProgress,
   onUploadProgress,
   type ExportError,
@@ -27,7 +28,14 @@ import {
   type VideoExport,
   type VideoProject,
 } from "./api";
-import { exportErrorMessage, quotaLine, rememberRender, rememberedRender, shortDate, uploadTooSlow } from "./logic";
+import { openExternal } from "../Markdown";
+import { exportCharge, exportErrorMessage, quotaLine, rememberRender, rememberedRender, shortDate, uploadTooSlow } from "./logic";
+
+/// Where a member subscribes or changes plan, per tenant.
+export const PLANS_URL: Record<string, string> = {
+  nan: "https://cloud.nan.builders/membership",
+  helmcode: "https://console.helmcode.com/billing",
+};
 
 /// How often a render's status is asked for.
 export const POLL_MS = 2000;
@@ -46,6 +54,7 @@ export function ExportPanel({
   project,
   blocked,
   onExported,
+  onSignIn,
 }: {
   profileId: string;
   project: VideoProject;
@@ -53,6 +62,8 @@ export function ExportPanel({
   blocked: boolean;
   /// A new MP4 landed in the project (refresh its exports list).
   onExported: () => void;
+  /// The session expired: sign in again.
+  onSignIn?: () => void;
 }) {
   const { t, locale } = useI18n();
   const [quality, setQuality] = useState<"standard" | "draft">("standard");
@@ -121,9 +132,24 @@ export function ExportPanel({
         .catch((err: unknown) => {
           if (stopped || !alive.current) return;
           const error = exportErrorOf(err);
-          // A dropped connection keeps trying; anything else ends the export.
-          if (error.kind === "offline") timer = setTimeout(tick, POLL_MS * 2);
-          else fail(error);
+          // A dropped connection or a busy server keeps trying.
+          if (error.kind === "offline" || error.kind === "unavailable" || error.kind === "busy") {
+            timer = setTimeout(tick, POLL_MS * 2);
+            return;
+          }
+          // The enterprise API answers a lost session with 404 too: check
+          // the session before saying the export is gone.
+          if (error.kind === "not_found") {
+            exportQuota(profileId)
+              .then(() => !stopped && fail(error))
+              .catch((again: unknown) => {
+                if (stopped) return;
+                const why = exportErrorOf(again);
+                fail(why.kind === "no_session" ? why : error);
+              });
+            return;
+          }
+          fail(error);
         });
     };
     tick();
@@ -184,6 +210,10 @@ export function ExportPanel({
       .catch((err: unknown) => alive.current && fail(exportErrorOf(err)));
   };
 
+  const abortUpload = () => {
+    void exportAbort(project.id).catch(() => undefined);
+  };
+
   const cancel = (renderId: string) => {
     setPhase({ kind: "canceling", renderId });
     exportCancel(profileId, renderId)
@@ -223,6 +253,8 @@ export function ExportPanel({
               : t.video.queued
             : null;
   const exportsList = project.exports;
+  const charge = exportCharge(project.duration);
+  const short = quota !== null && quota !== "failed" && charge > quota.remaining_seconds;
   const renewal = quota && quota !== "failed" ? shortDate(quota.period_end, locale) : null;
 
   return (
@@ -247,12 +279,18 @@ export function ExportPanel({
             <option value="draft">{t.video.qualityDraft}</option>
           </select>
         </label>
-        <button type="button" className="btn btn-primary btn-sm" onClick={start} disabled={busy || blocked}>
+        <button type="button" className="btn btn-primary btn-sm" onClick={start} disabled={busy || blocked || short}>
           <IconDownload size={14} />
           {t.video.exportButton}
         </button>
       </div>
-      <p className="video-hint">{t.video.exportCost(formatTime(Math.ceil(project.duration)))}</p>
+      {short && quota !== null && typeof quota === "object" ? (
+        <p className="video-warn" role="status">
+          {t.video.insufficient(formatDuration(charge), formatDuration(quota.remaining_seconds))}
+        </p>
+      ) : (
+        <p className="video-hint">{t.video.exportCost(formatDuration(charge))}</p>
+      )}
       {statusText && (
         <div className="video-progress" role="status" aria-live="polite">
           <span>{statusText}</span>
@@ -266,6 +304,12 @@ export function ExportPanel({
           >
             <span style={{ width: `${progress ?? 35}%` }} />
           </div>
+          {phase.kind === "uploading" && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={abortUpload}>
+              <IconStop size={13} />
+              {t.video.cancel}
+            </button>
+          )}
           {phase.kind === "rendering" && (
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => cancel(phase.renderId)}>
               <IconStop size={13} />
@@ -280,9 +324,22 @@ export function ExportPanel({
         </p>
       )}
       {phase.kind === "error" && (
-        <p className="inline-error" role="alert">
-          {exportErrorMessage(t, locale, phase.error)}
-        </p>
+        <div className="video-error">
+          <p className="inline-error" role="alert">
+            {exportErrorMessage(t, locale, phase.error)}
+          </p>
+          {(phase.error.kind === "subscription_required" || phase.error.kind === "quota_exhausted") && PLANS_URL[profileId] && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => openExternal(PLANS_URL[profileId])}>
+              <IconExternal size={13} />
+              {t.video.viewPlans}
+            </button>
+          )}
+          {phase.error.kind === "no_session" && onSignIn && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onSignIn}>
+              {t.video.signInAgain}
+            </button>
+          )}
+        </div>
       )}
       {phase.kind === "done" && (
         <p className="video-ok" role="status">

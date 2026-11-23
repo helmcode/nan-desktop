@@ -75,6 +75,7 @@
     "allow-video-pick-asset",
     "allow-video-delete",
     "allow-video-export-start",
+    "allow-video-export-abort",
     "allow-video-export-status",
     "allow-video-export-cancel",
     "allow-video-export-quota",

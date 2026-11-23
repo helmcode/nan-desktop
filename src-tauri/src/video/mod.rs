@@ -18,6 +18,7 @@
 //! paths from a closed set, and the core resolves both inside the active
 //! user's realm.
 
+pub mod context;
 pub mod editor;
 pub mod library;
 pub mod preview;
@@ -441,18 +442,70 @@ pub async fn video_export_start(
     .await
     .map_err(|_| render::ExportError::new("io"))??;
     let emitter = app.clone();
-    let pid = project_for_events;
-    render::start(&base, &token, &meta, bundle, move |sent, total| {
-        let _ = emitter.emit(
-            UPLOAD_EVENT,
-            UploadProgress {
-                project_id: pid.clone(),
-                sent,
-                total,
-            },
-        );
-    })
-    .await
+    let pid = project_for_events.clone();
+    let upload = tauri::async_runtime::spawn(async move {
+        render::start(&base, &token, &meta, bundle, move |sent, total| {
+            let _ = emitter.emit(
+                UPLOAD_EVENT,
+                UploadProgress {
+                    project_id: pid.clone(),
+                    sent,
+                    total,
+                },
+            );
+        })
+        .await
+    });
+    let uploads = app.state::<UploadsState>();
+    uploads.insert(&project_for_events, upload.inner().abort_handle());
+    let result = upload.await;
+    uploads.remove(&project_for_events);
+    // An aborted upload closed the connection before the server admitted
+    // the render: nothing was charged.
+    result.unwrap_or_else(|_| Err(render::ExportError::new("canceled")))
+}
+
+/// Uploads in flight, by project: "Cancel" during the upload aborts the
+/// request (the connection closes, the server never admits the render).
+#[derive(Default)]
+pub struct UploadsState(
+    std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
+);
+
+impl UploadsState {
+    fn insert(&self, project_id: &str, handle: tokio::task::AbortHandle) {
+        if let Ok(mut map) = self.0.lock()
+            && let Some(previous) = map.insert(project_id.to_string(), handle)
+        {
+            previous.abort();
+        }
+    }
+
+    fn remove(&self, project_id: &str) {
+        if let Ok(mut map) = self.0.lock() {
+            map.remove(project_id);
+        }
+    }
+
+    /// Abort a project's upload; whether one was running.
+    pub fn abort(&self, project_id: &str) -> bool {
+        let Ok(mut map) = self.0.lock() else {
+            return false;
+        };
+        match map.remove(project_id) {
+            Some(handle) => {
+                handle.abort();
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Cancel an export while its bundle is still uploading.
+#[tauri::command]
+pub fn video_export_abort(app: AppHandle, project_id: String) -> bool {
+    library::valid_project_id(&project_id) && app.state::<UploadsState>().abort(&project_id)
 }
 
 /// A render's status (never its download URL).
@@ -635,5 +688,18 @@ mod tests {
         render::prepare(&dir, "standard").unwrap();
         assert!(create_from_template_in(&realm, "nope", None, "es").is_err());
         assert_eq!(library::list_projects(&realm).len(), 1);
+    }
+
+    #[test]
+    fn an_upload_can_be_aborted_by_project() {
+        let uploads = UploadsState::default();
+        let task = tauri::async_runtime::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        uploads.insert("p1", task.inner().abort_handle());
+        assert!(!uploads.abort("p2"));
+        assert!(uploads.abort("p1"));
+        assert!(tauri::async_runtime::block_on(task).is_err(), "aborted");
+        assert!(!uploads.abort("p1"), "only once");
     }
 }

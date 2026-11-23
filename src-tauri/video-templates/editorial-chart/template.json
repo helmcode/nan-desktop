@@ -36,5 +36,5 @@
     { "id": "bars", "type": "color", "label": { "es": "Color de las barras", "en": "Bar color" }, "value": { "es": "#5c5c5c", "en": "#5c5c5c" } },
     { "id": "accent", "type": "color", "label": { "es": "Color de la línea", "en": "Line color" }, "value": { "es": "#326fa8", "en": "#326fa8" } }
   ],
-  "attribution": "Based on the HyperFrames \"NYT Graph\" example by HeyGen, Inc. (Apache-2.0)"
+  "attribution": {"es": "Basada en un ejemplo de gráfico de HyperFrames de HeyGen, Inc. (Apache-2.0)", "en": "Based on a HyperFrames chart example by HeyGen, Inc. (Apache-2.0)"}
 }

@@ -3,7 +3,7 @@
 // scene order and length, picked files by slot), never a path or HTML, and
 // hands scene changes to the assistant with the project and time context.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("../test/tauriMock")).eventModule());
@@ -18,6 +18,21 @@ import { I18nProvider } from "../i18n";
 import { invokedWith, resetTauri } from "../test/tauriMock";
 import { VideoEditor, TEXT_SAVE_MS } from "./VideoEditor";
 import { PREVIEW, PROJECT_ID, TOKEN, project } from "./fixtures";
+
+function setupWith(base: ReturnType<typeof project>, ask = vi.fn()) {
+  resetTauri({
+    video_get: () => base,
+    video_preview: () => PREVIEW,
+    video_update: () => base,
+    video_export_quota: () => ({ included_seconds: 0, used_seconds: 0, remaining_seconds: 0, period_end: null }),
+    preview_release_site: () => null,
+  });
+  return render(
+    <I18nProvider initial="es">
+      <VideoEditor profileId="nan" projectId={PROJECT_ID} onClose={() => {}} onAskAssistant={ask} />
+    </I18nProvider>,
+  );
+}
 
 function setup(ask = vi.fn()) {
   resetTauri({
@@ -113,10 +128,17 @@ describe("VideoEditor", () => {
     await waitFor(() => expect(invokedWith("video_update").at(-1)?.patch).toEqual({ remove_music: true }));
   });
 
-  it("asks the assistant for a scene change with the project and scene context", async () => {
+  it("asks for a scene change in plain words, with the ids as hidden context", async () => {
     const { ask } = setup();
     fireEvent.click(await screen.findByRole("button", { name: "Pedir al asistente un cambio en Cierre" }));
-    expect(ask).toHaveBeenCalledWith(`En el vídeo «Promo» (project_id ${PROJECT_ID}), escena «Cierre» (de 0:03 a 0:07): `);
+    expect(ask).toHaveBeenCalledWith("Escena «Cierre» (0:03 a 0:07): ", {
+      project_id: PROJECT_ID,
+      title: "Promo",
+      scene_id: "cta",
+      scene_title: "Cierre",
+      from: 3,
+      to: 7.5,
+    });
   });
 
   it("blocks the export on check errors and offers to send them to the assistant", async () => {
@@ -125,8 +147,82 @@ describe("VideoEditor", () => {
     expect(await screen.findByText("1 problema que arreglar antes de exportar.")).toBeTruthy();
     expect((screen.getByRole("button", { name: "Exportar MP4" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Pedir al asistente que lo arregle" }));
-    expect(ask.mock.calls[0][0]).toContain(`project_id ${PROJECT_ID}`);
-    expect(ask.mock.calls[0][0]).toContain("- missing_root");
+    expect(ask.mock.calls[0][0]).toBe("Arregla los problemas que ha encontrado la revisión automática de este vídeo.");
+    expect(ask.mock.calls[0][1]).toEqual({ project_id: PROJECT_ID, title: "Promo", problems: ["missing_root"] });
+  });
+
+  it("removes a scene only after the in-app dialog confirms it", async () => {
+    setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Quitar Inicio" }));
+    let dialog = screen.getByRole("alertdialog", { name: "¿Quitar esta escena?" });
+    expect(document.activeElement?.textContent).toBe("Cancelar");
+    fireEvent.click(screen.getByRole("button", { name: "Cancelar" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(invokedWith("video_update")).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Quitar Inicio" }));
+    dialog = screen.getByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Quitar" }));
+    await waitFor(() => expect(invokedWith("video_update").at(-1)?.patch).toEqual({ scenes: [{ id: "cta", duration: 4.5 }] }));
+  });
+
+  it("saves numbers, colors and volume once they settle (one save each)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    resetTauri({});
+    const base = project();
+    base.meta.variables.push({ id: "bar-1", type: "number", label: "Longitud", value: "10" });
+    setupWith(base);
+    const color = (await screen.findByLabelText("Color de acento")) as HTMLInputElement;
+    fireEvent.change(color, { target: { value: "#112233" } });
+    fireEvent.change(color, { target: { value: "#445566" } });
+    fireEvent.blur(color);
+    fireEvent.change(screen.getByLabelText("Longitud"), { target: { value: "6.5" } });
+    fireEvent.change(screen.getByLabelText("Volumen de música"), { target: { value: "0.3" } });
+    await vi.advanceTimersByTimeAsync(TEXT_SAVE_MS + 10);
+    await waitFor(() =>
+      expect(invokedWith("video_update").map((c) => c?.patch)).toEqual([
+        { values: { accent: "#445566" } },
+        { values: { "bar-1": "6.5" } },
+        { music_volume: 0.3 },
+      ]),
+    );
+    expect(screen.getByText("30 %")).toBeTruthy();
+  });
+
+  it("keeps the playhead when a change reloads the preview", async () => {
+    const seeks: number[] = [];
+    const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
+    proto.seek = (t: number) => seeks.push(t);
+    try {
+      let n = 0;
+      setup();
+      resetTauri({
+        video_get: () => project(),
+        video_preview: () => ({ ...PREVIEW, url: `nan-site://localhost/${String(++n).padStart(32, "0")}` }),
+        video_update: () => project(),
+        video_export_quota: () => ({ included_seconds: 0, used_seconds: 0, remaining_seconds: 0, period_end: null }),
+        preview_release_site: () => null,
+      });
+      cleanup();
+      render(
+        <I18nProvider initial="es">
+          <VideoEditor profileId="nan" projectId={PROJECT_ID} onClose={() => {}} onAskAssistant={() => {}} />
+        </I18nProvider>,
+      );
+      await waitFor(() => expect(document.querySelector("hyperframes-player")?.getAttribute("src")).toContain("01"));
+      const first = document.querySelector("hyperframes-player")!;
+      first.dispatchEvent(new CustomEvent("timeupdate", { detail: { currentTime: 5.5 } }));
+      fireEvent.click(screen.getByRole("radio", { name: "Cuadrado 1:1" }));
+      await waitFor(() => expect(document.querySelector("hyperframes-player")?.getAttribute("src")).toContain("02"));
+      document.querySelector("hyperframes-player")!.dispatchEvent(new CustomEvent("ready"));
+      expect(seeks.at(-1)).toBe(5.5);
+      // A scene edit lands on that scene's new start instead.
+      fireEvent.click(screen.getByRole("button", { name: "Bajar Inicio" }));
+      await waitFor(() => expect(document.querySelector("hyperframes-player")?.getAttribute("src")).toContain("03"));
+      document.querySelector("hyperframes-player")!.dispatchEvent(new CustomEvent("ready"));
+      expect(seeks.at(-1)).toBe(4.5);
+    } finally {
+      delete proto.seek;
+    }
   });
 
   it("releases its preview token when it closes", async () => {
