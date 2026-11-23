@@ -366,24 +366,44 @@ pub fn clear_profile_dir(app: &AppHandle) {
     if cfg!(windows)
         && let Ok(dir) = app.path().app_local_data_dir()
     {
-        let _ = std::fs::remove_dir_all(profile_dir(&dir));
+        clear_profile_dir_in(&dir);
+    }
+}
+
+/// Delete the browser's folder under `app_local_data` and nothing else
+/// (a missing folder is fine). Returns whether the folder is gone.
+pub fn clear_profile_dir_in(app_local_data: &std::path::Path) -> bool {
+    let dir = profile_dir(app_local_data);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => true,
+        Err(err) => err.kind() == std::io::ErrorKind::NotFound,
     }
 }
 
 /// The window is gone: record it and, when the user closed it, stop the
-/// reply that was driving it. Runs OFF the event-loop thread: stopping a
-/// reply opens the chat database and may end a process tree, and the
-/// event-loop thread is the one that keeps the chat window responsive.
+/// reply that was driving it. The stream is aborted right here (in memory,
+/// cheap), so a message the user sends right after the close can never be
+/// aborted by a late worker; the slow part (process tree, chat database)
+/// runs OFF the event-loop thread, which keeps the chat window responsive.
 fn on_destroyed(app: &AppHandle) {
-    let conversation_id = app.state::<BrowserState>().closed();
+    let stopped = destroyed_stop(&app.state::<BrowserState>(), |conversation_id| {
+        crate::chat::abort_reply(app, conversation_id).unwrap_or(false)
+    });
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        // Closing the browser means "stop": the reply driving it ends.
-        if let Some(conversation_id) = conversation_id {
-            let _ = crate::chat::stop_reply(&app, conversation_id);
+        if let Some(conversation_id) = stopped {
+            let _ = crate::chat::finish_stopped_reply(&app, conversation_id);
         }
         emit_state(&app);
     });
+}
+
+/// The synchronous half of [`on_destroyed`]: record the close and abort
+/// the driving reply's stream now. Returns the conversation whose stopped
+/// reply still has to be finished (off the event-loop thread).
+fn destroyed_stop(state: &BrowserState, abort: impl FnOnce(i64) -> bool) -> Option<i64> {
+    let conversation_id = state.closed()?;
+    abort(conversation_id).then_some(conversation_id)
 }
 
 fn window_title(page_title: &str, lang: Lang) -> String {
@@ -1414,35 +1434,107 @@ mod tests {
         assert!(dir.starts_with(local));
         assert_eq!(dir.file_name().unwrap(), PROFILE_DIR);
         // The Windows-only builder line is not compiled on every CI host:
-        // pin it at the source level too.
+        // pin it in the PRODUCTION source (the needle is built so it never
+        // appears literally in this test module).
+        let needle = concat!(".data_directory(", "profile_dir(&dir))");
+        assert!(production_source().contains(needle));
+    }
+
+    /// `mod.rs` without its test module.
+    fn production_source() -> &'static str {
         let source = include_str!("mod.rs");
-        assert!(source.contains(".data_directory(profile_dir(&dir))"));
+        let marker = concat!("#[cfg", "(test)]");
+        source.split(marker).next().expect("production part")
     }
 
     #[test]
-    fn closing_never_runs_on_the_event_loop_thread() {
-        // The bar's close is an async command (not run inside the chat
-        // webview's IPC callback), and the Destroyed handler hands the
-        // reply stop (database, process tree) to a blocking worker.
-        let source = include_str!("mod.rs");
-        assert!(source.contains("pub async fn browser_control("));
+    fn the_bar_close_is_an_async_command() {
+        // A sync command runs on the event-loop thread, inside the chat
+        // webview's IPC callback.
+        let needle = concat!("pub async fn ", "browser_control(");
+        assert!(production_source().contains(needle));
+    }
+
+    #[test]
+    fn clearing_the_browser_folder_deletes_only_that_folder() {
+        let local = tempfile::tempdir().expect("tempdir");
+        let root = local.path();
+        // Missing folder: fine.
+        assert!(clear_profile_dir_in(root));
+        // The engine's leftovers go; the app's own data next to it stays.
+        let browser = profile_dir(root);
+        std::fs::create_dir_all(browser.join("EBWebView/Default")).unwrap();
+        std::fs::write(browser.join("EBWebView/Local State"), "x").unwrap();
+        std::fs::create_dir_all(root.join("EBWebView")).unwrap();
+        std::fs::write(root.join("EBWebView/Local State"), "chat").unwrap();
+        std::fs::create_dir_all(root.join("realms/u1")).unwrap();
+        std::fs::write(root.join("realms/u1/chat.db"), "db").unwrap();
+        std::fs::write(root.join("vault.bin"), "v").unwrap();
+        assert!(clear_profile_dir_in(root));
+        assert!(!browser.exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("EBWebView/Local State")).unwrap(),
+            "chat"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("realms/u1/chat.db")).unwrap(),
+            "db"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("vault.bin")).unwrap(),
+            "v"
+        );
+        // Twice in a row: still fine.
+        assert!(clear_profile_dir_in(root));
+    }
+
+    #[test]
+    fn a_user_close_aborts_the_driving_stream_synchronously() {
+        // Driving reply: aborted right away, then finished by the worker.
+        let state = BrowserState::default();
+        state.opened();
+        assert!(state.set_agent(4));
+        let mut aborted = Vec::new();
+        let finish = destroyed_stop(&state, |id| {
+            aborted.push(id);
+            true
+        });
+        assert_eq!(aborted, vec![4], "aborted before returning");
+        assert_eq!(finish, Some(4));
+        // The stream had already ended: nothing left to finish.
+        let state = BrowserState::default();
+        state.opened();
+        assert!(state.set_agent(5));
+        assert_eq!(destroyed_stop(&state, |_| false), None);
+        // No driving reply: nothing is aborted.
+        let state = BrowserState::default();
+        state.opened();
+        let mut called = false;
+        assert_eq!(
+            destroyed_stop(&state, |_| {
+                called = true;
+                true
+            }),
+            None
+        );
+        assert!(!called);
+    }
+
+    #[test]
+    fn only_the_slow_stop_runs_on_the_blocking_worker() {
+        let source = production_source();
         let handler = source
-            .split("fn on_destroyed(app: &AppHandle) {")
+            .split(concat!("fn on_destroyed", "(app: &AppHandle) {"))
             .nth(1)
             .and_then(|rest| rest.split("\n}\n").next())
             .expect("on_destroyed");
-        let worker = handler
-            .split("spawn_blocking(")
-            .nth(1)
-            .expect("the stop runs on a blocking worker");
-        assert!(worker.contains("stop_reply"));
-        assert!(
-            !handler
-                .split("spawn_blocking(")
-                .next()
-                .unwrap()
-                .contains("stop_reply")
-        );
+        let (sync_part, worker) = handler
+            .split_once("spawn_blocking(")
+            .expect("a blocking worker");
+        assert!(sync_part.contains("abort_reply"));
+        assert!(!sync_part.contains("finish_stopped_reply"));
+        assert!(worker.contains("finish_stopped_reply"));
+        assert!(!worker.contains("abort_reply"));
     }
 
     #[test]

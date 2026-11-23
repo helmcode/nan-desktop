@@ -1057,8 +1057,9 @@ pending browser card brings the chat window forward. Closing the window
 (bar or window button) stops the reply driving it and the tools refuse
 (`user_closed_browser`) until the user's next message; a blocked download
 is attached to the next tool result (`download_blocked`). The bar's close
-is an async command and the window's `Destroyed` handler hands the reply
-stop (database, process tree) to a blocking worker, so nothing slow runs on
+is an async command and the window's `Destroyed` handler aborts the
+driving reply's stream at once (in memory) and hands the rest of the stop
+(database, process tree) to a blocking worker, so nothing slow runs on
 the event-loop thread that keeps the chat window responsive. On Windows the
 browser has its own WebView2 user data folder (`browser-webview2`, emptied
 at startup) and therefore its own browser process: up to 0.2.16 it shared
