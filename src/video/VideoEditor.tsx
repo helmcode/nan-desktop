@@ -36,16 +36,17 @@ export const TEXT_SAVE_MS = 700;
 
 type Save = "idle" | "saving" | "saved" | "failed";
 
-/// A value field that saves once the user pauses (or leaves it), and never
-/// lets a late save response overwrite what the user is still typing.
-function useDebouncedField(value: string, onCommit: (value: string) => void) {
+/// A value field that saves once the user pauses (or leaves it). The draft
+/// is exactly what the user typed (empty included); only a `valid` value is
+/// saved, and leaving the field with an invalid one restores the saved
+/// value. Whatever the core answers (possibly normalized: "6,5" -> "6.5")
+/// re-syncs the draft unless the user is in the field.
+function useDebouncedField(value: string, onCommit: (value: string) => void, valid: (draft: string) => boolean = () => true) {
   const [draft, setDraft] = useState(value);
   const focused = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pending = useRef<string | null>(null);
   useEffect(() => {
-    if (!focused.current && pending.current === null) setDraft(value);
-    if (pending.current === value) pending.current = null;
+    if (!focused.current) setDraft(value);
   }, [value]);
   useEffect(
     () => () => {
@@ -56,10 +57,7 @@ function useDebouncedField(value: string, onCommit: (value: string) => void) {
   const commit = (next: string) => {
     if (timer.current) clearTimeout(timer.current);
     timer.current = null;
-    if (next !== value) {
-      pending.current = next;
-      onCommit(next);
-    }
+    if (valid(next) && next !== value) onCommit(next);
   };
   return {
     draft,
@@ -68,22 +66,35 @@ function useDebouncedField(value: string, onCommit: (value: string) => void) {
     },
     onBlur: () => {
       focused.current = false;
-      if (timer.current) commit(draft);
+      if (valid(draft)) {
+        if (timer.current) commit(draft);
+      } else {
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = null;
+        setDraft(value);
+      }
     },
     onChange: (next: string) => {
       setDraft(next);
       if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => commit(next), TEXT_SAVE_MS);
+      timer.current = valid(next) ? setTimeout(() => commit(next), TEXT_SAVE_MS) : null;
     },
   };
 }
 
+/// Texts longer than this get a multi-line box.
+const LONG_TEXT = 48;
+
 function TextField({ variable, onCommit }: { variable: VideoVariable; onCommit: (value: string) => void }) {
   const field = useDebouncedField(variable.value, onCommit);
+  // One line for short texts ("Nova", "-30%"); it grows for long ones
+  // (the same element, so typing never loses focus).
+  const long = field.draft.length > LONG_TEXT || field.draft.includes("\n");
   return (
     <textarea
       id={`video-var-${variable.id}`}
-      rows={2}
+      className={long ? "video-text long" : "video-text"}
+      rows={long ? 3 : 1}
       maxLength={400}
       value={field.draft}
       onFocus={field.onFocus}
@@ -107,18 +118,23 @@ function ColorField({ variable, onCommit }: { variable: VideoVariable; onCommit:
   );
 }
 
+/// A number the core accepts (decimal comma or dot).
+export function validNumber(draft: string): boolean {
+  return /^-?\d+([.,]\d+)?$/.test(draft.trim());
+}
+
 function NumberField({ variable, onCommit }: { variable: VideoVariable; onCommit: (value: string) => void }) {
-  const field = useDebouncedField(variable.value, onCommit);
+  const field = useDebouncedField(variable.value, (value) => onCommit(value.trim().replace(",", ".")), validNumber);
   return (
     <input
       id={`video-var-${variable.id}`}
-      type="number"
-      step="any"
+      type="text"
       inputMode="decimal"
+      className="video-number"
       value={field.draft}
       onFocus={field.onFocus}
       onBlur={field.onBlur}
-      onChange={(e) => e.currentTarget.value.trim() !== "" && field.onChange(e.currentTarget.value)}
+      onChange={(e) => field.onChange(e.currentTarget.value)}
     />
   );
 }
@@ -156,6 +172,12 @@ export function rovingKeys<T>(options: T[], current: T, choose: (value: T) => vo
     const buttons = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("[role=radio],[role=tab]"));
     buttons[options.indexOf(next)]?.focus();
   };
+}
+
+/// Where a freshly opened editor starts: a moment into the first scene
+/// (scenes animate in from nothing, so 0:00 is often an empty frame).
+export function firstFrame(scenes: { duration: number }[]): number {
+  return scenes.length > 0 ? Math.min(1, scenes[0].duration / 2) : 0;
 }
 
 export function VideoEditor({
@@ -369,11 +391,17 @@ export function VideoEditor({
               {t.video.previewFailed}
             </p>
           ) : preview ? (
-            <VideoPlayer key={preview.url} info={preview} handle={player} onTime={onTime} startAt={resumeAt.current} />
+            <VideoPlayer
+              key={preview.url}
+              info={preview}
+              handle={player}
+              onTime={onTime}
+              startAt={resumeAt.current > 0 ? resumeAt.current : firstFrame(scenes)}
+            />
           ) : (
             <p className="video-note">{t.video.loading}</p>
           )}
-          {preview && (
+          {preview && preview.height > preview.width && (
             <div className="video-timeline">
               <input
                 type="range"
@@ -573,12 +601,16 @@ export function VideoEditor({
                   role="radio"
                   aria-checked={meta.aspect === aspect}
                   aria-label={t.video.aspectNames[aspect]}
+                  title={t.video.aspectNames[aspect]}
                   tabIndex={meta.aspect === aspect ? 0 : -1}
                   className={`video-seg${meta.aspect === aspect ? " active" : ""}`}
                   onClick={() => meta.aspect !== aspect && apply({ aspect })}
                 >
                   <span className={`video-format-icon aspect-${aspect.replace(":", "x")}`} aria-hidden="true" />
-                  {aspect}
+                  <span className="video-format-text">
+                    <span>{t.video.aspectShort[aspect]}</span>
+                    <small>{aspect}</small>
+                  </span>
                 </button>
               ))}
             </div>

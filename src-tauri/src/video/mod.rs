@@ -495,8 +495,12 @@ impl UploadsState {
         handle: tokio::task::AbortHandle,
         body_sent: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
+        // A previous upload of the same project is only stopped while its
+        // body is still going out: once sent, the server may have admitted
+        // (and charged) it, so it runs to its reply.
         if let Ok(mut map) = self.0.lock()
-            && let Some((previous, _)) = map.insert(project_id.to_string(), (handle, body_sent))
+            && let Some((previous, sent)) = map.insert(project_id.to_string(), (handle, body_sent))
+            && !sent.load(std::sync::atomic::Ordering::SeqCst)
         {
             previous.abort();
         }
@@ -736,5 +740,18 @@ mod tests {
         uploads.insert("p3", task.inner().abort_handle(), sent);
         assert!(!uploads.abort("p3"));
         assert!(tauri::async_runtime::block_on(task).is_ok(), "not aborted");
+        // Nor does a second export of the same project stop it.
+        let first = tauri::async_runtime::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        });
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        uploads.insert("p4", first.inner().abort_handle(), sent);
+        let second = tauri::async_runtime::spawn(async {});
+        let fresh = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        uploads.insert("p4", second.inner().abort_handle(), fresh);
+        assert!(
+            tauri::async_runtime::block_on(first).is_ok(),
+            "sent upload kept"
+        );
     }
 }

@@ -873,3 +873,45 @@
 .video-editor-stage .video-stage {
   min-width: min(100%, 360px);
 }
+
+/* ---- Review round 2 ----------------------------------------------------- */
+
+.video-field textarea.video-text {
+  min-height: 2.2rem;
+  resize: none;
+  overflow: hidden;
+}
+
+.video-field textarea.video-text.long {
+  overflow: auto;
+  resize: vertical;
+}
+
+.video-field input.video-number {
+  width: 8rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.video-formats .video-seg {
+  padding: 0.35rem 0.3rem;
+}
+
+.video-format-text {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.15;
+  font-size: 0.78rem;
+}
+
+.video-format-text small {
+  font-size: 0.7rem;
+  color: var(--text-3);
+}

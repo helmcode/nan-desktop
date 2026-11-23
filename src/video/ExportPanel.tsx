@@ -47,6 +47,8 @@ type Phase =
   | { kind: "canceling"; renderId: string }
   | { kind: "downloading"; renderId: string; pct: number | null }
   | { kind: "done"; file: VideoExport }
+  /// The user canceled: a neutral note, not an error.
+  | { kind: "canceled" }
   | { kind: "error"; error: ExportError };
 
 export function ExportPanel({
@@ -74,6 +76,7 @@ export function ExportPanel({
   });
   const [fileError, setFileError] = useState(false);
   const alive = useRef(true);
+  const userCanceled = useRef(false);
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -91,7 +94,8 @@ export function ExportPanel({
   const fail = useCallback(
     (error: ExportError) => {
       rememberRender(project.id, null);
-      setPhase({ kind: "error", error });
+      setPhase(userCanceled.current && error.kind === "canceled" ? { kind: "canceled" } : { kind: "error", error });
+      userCanceled.current = false;
       refreshQuota();
     },
     [project.id, refreshQuota],
@@ -213,7 +217,12 @@ export function ExportPanel({
   };
 
   const abortUpload = () => {
-    void exportAbort(project.id).catch(() => undefined);
+    userCanceled.current = true;
+    void exportAbort(project.id)
+      .then((aborted) => {
+        if (!aborted) userCanceled.current = false;
+      })
+      .catch(() => undefined);
   };
 
   const cancel = (renderId: string) => {
@@ -223,7 +232,7 @@ export function ExportPanel({
       .finally(() => {
         if (!alive.current) return;
         rememberRender(project.id, null);
-        setPhase({ kind: "idle" });
+        setPhase({ kind: "canceled" });
         refreshQuota();
       });
   };
@@ -289,9 +298,17 @@ export function ExportPanel({
         </button>
       </div>
       {short && quota !== null && typeof quota === "object" ? (
-        <p className="video-warn" role="status">
-          {t.video.insufficient(formatDuration(charge), formatDuration(quota.remaining_seconds))}
-        </p>
+        <div className="video-error">
+          <p className="video-warn" role="status">
+            {t.video.insufficient(formatDuration(charge), formatDuration(quota.remaining_seconds))}
+          </p>
+          {PLANS_URL[profileId] && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => openExternal(PLANS_URL[profileId])}>
+              <IconExternal size={13} />
+              {t.video.viewPlans}
+            </button>
+          )}
+        </div>
       ) : (
         <p className="video-hint">{t.video.exportCost(formatDuration(charge))}</p>
       )}
@@ -344,6 +361,11 @@ export function ExportPanel({
             </button>
           )}
         </div>
+      )}
+      {phase.kind === "canceled" && (
+        <p className="video-hint" role="status">
+          {t.video.exportCanceled}
+        </p>
       )}
       {phase.kind === "done" && (
         <p className="video-ok" role="status">

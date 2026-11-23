@@ -175,6 +175,7 @@ describe("ExportPanel", () => {
     renderPanel();
     expect(await screen.findByText("Este vídeo usa 8 s y te quedan 5 s de exportación este mes.")).toBeTruthy();
     expect((screen.getByRole("button", { name: "Exportar MP4" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Ver planes" })).toBeTruthy();
   });
 
   it("offers plans after a subscription refusal and sign-in after an expired session", async () => {
@@ -210,7 +211,9 @@ describe("ExportPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
     fireEvent.click(await screen.findByRole("button", { name: "Cancelar" }));
     await waitFor(() => expect(invokedWith("video_export_abort")).toEqual([{ projectId: PROJECT_ID }]));
-    expect((await screen.findByRole("alert")).textContent).toBe("Se ha cancelado la exportación.");
+    // A cancel the user asked for is a neutral note, not an error.
+    expect(await screen.findByText("Exportación cancelada. No se ha cobrado nada.")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("stops offering Cancel once the whole video is sent, and keeps the render it gets", async () => {

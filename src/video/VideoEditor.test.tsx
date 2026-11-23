@@ -188,6 +188,103 @@ describe("VideoEditor", () => {
     expect(screen.getByText("30 %")).toBeTruthy();
   });
 
+  it("lets a number be cleared and retyped, saving exactly what was typed", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const base = project();
+    base.meta.variables.push({ id: "bar-1", type: "number", label: "Longitud", value: "10" });
+    setupWith(base);
+    const input = (await screen.findByLabelText("Longitud")) as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "1" } });
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input.value).toBe("");
+    fireEvent.change(input, { target: { value: "2" } });
+    fireEvent.change(input, { target: { value: "25" } });
+    await vi.advanceTimersByTimeAsync(TEXT_SAVE_MS + 10);
+    await waitFor(() => expect(invokedWith("video_update").map((c) => c?.patch)).toEqual([{ values: { "bar-1": "25" } }]));
+    // Leaving it empty restores the saved value and saves nothing.
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.blur(input);
+    expect(input.value).toBe("10");
+    await vi.advanceTimersByTimeAsync(TEXT_SAVE_MS + 10);
+    expect(invokedWith("video_update").length).toBe(1);
+  });
+
+  it("re-syncs a field to the value the core normalized", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const base = project();
+    base.meta.variables.push({ id: "bar-1", type: "number", label: "Longitud", value: "10" });
+    const saved = project();
+    saved.meta.variables.push({ id: "bar-1", type: "number", label: "Longitud", value: "6.5" });
+    resetTauri({
+      video_get: () => base,
+      video_preview: () => PREVIEW,
+      video_update: () => saved,
+      video_export_quota: () => ({ included_seconds: 0, used_seconds: 0, remaining_seconds: 0, period_end: null }),
+      preview_release_site: () => null,
+    });
+    render(
+      <I18nProvider initial="es">
+        <VideoEditor profileId="nan" projectId={PROJECT_ID} onClose={() => {}} onAskAssistant={() => {}} />
+      </I18nProvider>,
+    );
+    const input = (await screen.findByLabelText("Longitud")) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "6,5" } });
+    await vi.advanceTimersByTimeAsync(TEXT_SAVE_MS + 10);
+    await waitFor(() => expect(invokedWith("video_update").at(-1)?.patch).toEqual({ values: { "bar-1": "6.5" } }));
+    await waitFor(() => expect(input.value).toBe("6.5"));
+  });
+
+  it("uses one line for short texts and more for long ones", async () => {
+    setup();
+    const field = (await screen.findByLabelText("Titular")) as HTMLTextAreaElement;
+    expect(field.rows).toBe(1);
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "x".repeat(60) } });
+    expect(field.rows).toBe(3);
+  });
+
+  it("opens on a frame with content and shows its own timeline only for tall films", async () => {
+    const seeks: number[] = [];
+    const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
+    proto.seek = (t: number) => seeks.push(t);
+    try {
+      setup();
+      await waitFor(() => expect(document.querySelector("hyperframes-player")).not.toBeNull());
+      document.querySelector("hyperframes-player")!.dispatchEvent(new CustomEvent("ready"));
+      expect(seeks).toEqual([1]);
+      expect(screen.queryByLabelText("Posición en el vídeo")).toBeNull();
+    } finally {
+      delete proto.seek;
+    }
+    cleanup();
+    resetTauri({
+      video_get: () => project(),
+      video_preview: () => ({ ...PREVIEW, width: 1080, height: 1920, aspect: "9:16" }),
+      video_export_quota: () => ({ included_seconds: 0, used_seconds: 0, remaining_seconds: 0, period_end: null }),
+      preview_release_site: () => null,
+    });
+    render(
+      <I18nProvider initial="es">
+        <VideoEditor profileId="nan" projectId={PROJECT_ID} onClose={() => {}} onAskAssistant={() => {}} />
+      </I18nProvider>,
+    );
+    expect(await screen.findByLabelText("Posición en el vídeo")).toBeTruthy();
+  });
+
+  it("returns the focus to the button that opened the dialog, and names formats in words", async () => {
+    setup();
+    const trigger = await screen.findByRole("button", { name: "Quitar Inicio" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(screen.getByRole("alertdialog", { name: "¿Quitar esta escena?" }).textContent).toContain(
+      "«Inicio» deja de formar parte del vídeo.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancelar" }));
+    expect(document.activeElement).toBe(trigger);
+    expect(screen.getByRole("radio", { name: "Vertical 9:16" }).textContent).toContain("Vertical");
+  });
+
   it("keeps the playhead when a change reloads the preview", async () => {
     const seeks: number[] = [];
     const proto = HTMLElement.prototype as unknown as Record<string, unknown>;

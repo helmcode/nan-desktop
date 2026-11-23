@@ -435,7 +435,7 @@ export function VideosSurface({
       {confirmDelete && (
         <ConfirmDialog
           title={t.video.deleteTitle}
-          body={t.video.deleteConfirm(confirmDelete.title)}
+          body={t.video.deleteConfirm}
           confirmLabel={t.video.deleteButton}
           onCancel={() => setConfirmDelete(null)}
           onConfirm={() => remove(confirmDelete)}

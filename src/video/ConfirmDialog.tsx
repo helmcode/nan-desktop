@@ -24,8 +24,13 @@ export function ConfirmDialog({
 }) {
   const t = useT();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  // Focus starts on Cancel and goes back to what opened the dialog.
   useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     cancelRef.current?.focus();
+    return () => {
+      if (opener && opener.isConnected) opener.focus();
+    };
   }, []);
   useEscape(true, (e) => {
     e.preventDefault();
