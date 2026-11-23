@@ -484,6 +484,8 @@ export const es: Strings = {
     shellCrashed: "No se ha podido mostrar esta conversación. Elige otra o empieza un chat nuevo.",
     siteCaption: "Vista previa aislada: el código del sitio se ejecuta aparte de la aplicación y sin acceso a la red.",
     siteFrame: (name: string) => `Sitio web ${name}`,
+    artifactUnavailable: "Este archivo compartido no se puede mostrar aquí. Ábrelo en tu navegador.",
+    artifactGone: "Este enlace compartido ya no está disponible. Puede que haya caducado o se haya retirado.",
   },
   skills: {
     title: "Skills",

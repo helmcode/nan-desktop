@@ -482,6 +482,8 @@ export const en = {
     shellCrashed: "This conversation could not be shown. Pick another one or start a new chat.",
     siteCaption: "Isolated preview: the site's code runs apart from the app, with no network access.",
     siteFrame: (name: string) => `Website ${name}`,
+    artifactUnavailable: "This shared file cannot be shown here. Open it in your browser.",
+    artifactGone: "This shared link is not available. It may have expired or been removed.",
   },
   skills: {
     title: "Skills",

@@ -66,6 +66,7 @@ const APP_COMMANDS: &[&str] = &[
     "preview_release_site",
     "preview_reveal_location",
     "web_preview_fetch",
+    "artifact_link_preview",
     "open_external",
     "telemetry_renderer_crash",
     "update_check",

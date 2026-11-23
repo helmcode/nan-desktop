@@ -64,6 +64,7 @@
     "allow-preview-release-site",
     "allow-preview-reveal-location",
     "allow-web-preview-fetch",
+    "allow-artifact-link-preview",
     "allow-open-external",
     "allow-telemetry-renderer-crash",
     "allow-update-check",
