@@ -213,6 +213,24 @@ describe("ExportPanel", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("Se ha cancelado la exportación.");
   });
 
+  it("stops offering Cancel once the whole video is sent, and keeps the render it gets", async () => {
+    let resolve: (value: unknown) => void = () => {};
+    resetTauri({
+      video_export_quota: () => QUOTA,
+      video_export_start: () => new Promise((ok) => (resolve = ok)),
+      video_export_status: () => ({ status: "queued", progress: 0, error: null, ready: false, size_bytes: null, expires_at: null }),
+    });
+    renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
+    act(() => emit("video://upload", { project_id: PROJECT_ID, sent: 100, total: 100 }));
+    expect(await screen.findByText("Preparando la exportación… (no se puede cancelar hasta que empiece)")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Cancelar" })).toBeNull();
+    await act(async () => resolve({ render_id: "r-9", charge_seconds: 8 }));
+    expect(localStorage.getItem(`video.render.${PROJECT_ID}`)).toBe("r-9");
+    // The render can be canceled (and refunded) as usual.
+    expect(await screen.findByRole("button", { name: "Cancelar" })).toBeTruthy();
+  });
+
   it("keeps polling through a dropped connection and resumes a remembered render", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const replies: unknown[] = [

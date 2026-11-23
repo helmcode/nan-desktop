@@ -1369,7 +1369,7 @@ async fn run_chat_stream(
     generation: u64,
     continued: bool,
     share_offer: tools::share_artifact::ShareOffer,
-    video_note: Option<String>,
+    video_note: Option<crate::video::context::Note>,
 ) {
     let share_tool = share_offer == tools::share_artifact::ShareOffer::On;
     let state = app.state::<ChatState>();

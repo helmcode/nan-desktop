@@ -579,6 +579,7 @@ export const es: Strings = {
     uploading: "Enviando el vídeo…",
     uploadingPct: (pct: number) => `Enviando el vídeo… ${pct}%`,
     slowUpload: "Tu conexión va lenta: puede que el envío no termine en el límite de 10 minutos. Usa imágenes o audios más ligeros, o prueba con una conexión más rápida.",
+    preparing: "Preparando la exportación… (no se puede cancelar hasta que empiece)",
     queued: "Esperando un hueco para generarlo…",
     rendering: (pct: number) => `Generando el vídeo… ${pct}%`,
     downloading: (pct: number | null) => (pct === null ? "Descargando el MP4…" : `Descargando el MP4… ${pct}%`),

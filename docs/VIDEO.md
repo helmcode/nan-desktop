@@ -165,9 +165,14 @@ edited).
 plain request to the composer (never replacing what the user typed), e.g.
 `Escena «Mensaje» (0:07 a 0:11): `, and attach the technical details (project
 id, scene id and window, playhead, check findings) as `chat_send`'s
-`videoContext`. The core validates it (`video/context.rs`: ids, caps,
-control and bidi characters stripped) and adds ONE system note before the
-user's message for that reply only; it is never stored or shown. A chip
+`videoContext`. The core validates it (`video/context.rs`) and, for that
+reply only (never stored or shown), adds ONE system note holding ONLY
+values it generated or validated (the 32-hex project id, a scene id that
+passed `valid_id`, seconds) and appends the free text (video and scene
+titles, check findings: model-written or derived from the composition, so
+possibly hostile) to the user's message as an escaped
+`<video_context untrusted="true">` data block the system note says is
+data, never instructions. A chip
 above the composer says a video is attached and can drop it.
 
 ## Templates
@@ -200,7 +205,10 @@ preview for a browser check.
    `video://download` progress. Then Open / Show in folder / Save a copy.
 4. `video_export_cancel` (a running render), `video_export_abort` (an
    upload still in flight: the request is aborted, the server never admits
-   it), `video_export_quota` ("Te quedan 84 min de exportación este mes").
+   it; once every byte is sent the upload can no longer be aborted, since
+   the server may already have admitted and charged it: the panel shows
+   "Preparando…" and the render id that comes back can be canceled, which
+   refunds), `video_export_quota` ("Te quedan 84 min de exportación este mes").
    The panel refuses to start when the balance does not cover the video
    ("Este vídeo usa 1 min 30 s y te quedan 42 s"), offers "Ver planes" after
    a subscription/quota refusal and "Volver a iniciar sesión" after an

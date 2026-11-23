@@ -577,6 +577,7 @@ export const en = {
     uploading: "Sending the video…",
     uploadingPct: (pct: number) => `Sending the video… ${pct}%`,
     slowUpload: "Your connection is slow: the upload may not finish within the 10 minute limit. Use lighter images or audio, or try on a faster connection.",
+    preparing: "Preparing the export… (it can no longer be canceled until it starts)",
     queued: "Waiting for a free renderer…",
     rendering: (pct: number) => `Rendering… ${pct}%`,
     downloading: (pct: number | null) => (pct === null ? "Downloading the MP4…" : `Downloading the MP4… ${pct}%`),

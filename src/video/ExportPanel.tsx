@@ -170,7 +170,9 @@ export function ExportPanel({
         prev.kind === "uploading"
           ? {
               kind: "uploading",
-              pct: p.total ? Math.min(100, Math.round((p.sent / p.total) * 100)) : null,
+              // 100 only once every byte is out (then the upload can no
+              // longer be canceled: the server may have admitted it).
+              pct: p.total ? (p.sent >= p.total ? 100 : Math.min(99, Math.round((p.sent / p.total) * 100))) : null,
               slow: prev.slow || uploadTooSlow(p.sent, p.total, elapsed),
             }
           : prev,
@@ -242,7 +244,9 @@ export function ExportPanel({
     phase.kind === "uploading"
       ? phase.pct === null
         ? t.video.uploading
-        : t.video.uploadingPct(phase.pct)
+        : phase.pct >= 100
+          ? t.video.preparing
+          : t.video.uploadingPct(phase.pct)
       : phase.kind === "canceling"
         ? t.video.canceling
         : phase.kind === "downloading"
@@ -304,7 +308,7 @@ export function ExportPanel({
           >
             <span style={{ width: `${progress ?? 35}%` }} />
           </div>
-          {phase.kind === "uploading" && (
+          {phase.kind === "uploading" && (phase.pct ?? 0) < 100 && (
             <button type="button" className="btn btn-ghost btn-sm" onClick={abortUpload}>
               <IconStop size={13} />
               {t.video.cancel}

@@ -443,8 +443,13 @@ pub async fn video_export_start(
     .map_err(|_| render::ExportError::new("io"))??;
     let emitter = app.clone();
     let pid = project_for_events.clone();
+    let body_sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sent_flag = body_sent.clone();
     let upload = tauri::async_runtime::spawn(async move {
         render::start(&base, &token, &meta, bundle, move |sent, total| {
+            if sent >= total {
+                sent_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             let _ = emitter.emit(
                 UPLOAD_EVENT,
                 UploadProgress {
@@ -457,7 +462,11 @@ pub async fn video_export_start(
         .await
     });
     let uploads = app.state::<UploadsState>();
-    uploads.insert(&project_for_events, upload.inner().abort_handle());
+    uploads.insert(
+        &project_for_events,
+        upload.inner().abort_handle(),
+        body_sent,
+    );
     let result = upload.await;
     uploads.remove(&project_for_events);
     // An aborted upload closed the connection before the server admitted
@@ -467,15 +476,27 @@ pub async fn video_export_start(
 
 /// Uploads in flight, by project: "Cancel" during the upload aborts the
 /// request (the connection closes, the server never admits the render).
-#[derive(Default)]
-pub struct UploadsState(
-    std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
+/// Once the whole body is sent the server may already have admitted (and
+/// charged) the render, so the upload can no longer be aborted: it runs to
+/// its reply, whose render id the renderer keeps (and can cancel, which
+/// refunds).
+type Upload = (
+    tokio::task::AbortHandle,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
 );
 
+#[derive(Default)]
+pub struct UploadsState(std::sync::Mutex<std::collections::HashMap<String, Upload>>);
+
 impl UploadsState {
-    fn insert(&self, project_id: &str, handle: tokio::task::AbortHandle) {
+    fn insert(
+        &self,
+        project_id: &str,
+        handle: tokio::task::AbortHandle,
+        body_sent: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
         if let Ok(mut map) = self.0.lock()
-            && let Some(previous) = map.insert(project_id.to_string(), handle)
+            && let Some((previous, _)) = map.insert(project_id.to_string(), (handle, body_sent))
         {
             previous.abort();
         }
@@ -487,18 +508,23 @@ impl UploadsState {
         }
     }
 
-    /// Abort a project's upload; whether one was running.
+    /// Abort a project's upload while its body is still being sent;
+    /// whether it was aborted.
     pub fn abort(&self, project_id: &str) -> bool {
         let Ok(mut map) = self.0.lock() else {
             return false;
         };
-        match map.remove(project_id) {
-            Some(handle) => {
-                handle.abort();
-                true
-            }
-            None => false,
+        let sent = match map.get(project_id) {
+            Some((_, sent)) => sent.load(std::sync::atomic::Ordering::SeqCst),
+            None => return false,
+        };
+        if sent {
+            return false;
         }
+        if let Some((handle, _)) = map.remove(project_id) {
+            handle.abort();
+        }
+        true
     }
 }
 
@@ -696,10 +722,19 @@ mod tests {
         let task = tauri::async_runtime::spawn(async {
             std::future::pending::<()>().await;
         });
-        uploads.insert("p1", task.inner().abort_handle());
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        uploads.insert("p1", task.inner().abort_handle(), sent);
         assert!(!uploads.abort("p2"));
         assert!(uploads.abort("p1"));
         assert!(tauri::async_runtime::block_on(task).is_err(), "aborted");
         assert!(!uploads.abort("p1"), "only once");
+        // Once the whole body is sent, the upload runs to its reply.
+        let task = tauri::async_runtime::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        });
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        uploads.insert("p3", task.inner().abort_handle(), sent);
+        assert!(!uploads.abort("p3"));
+        assert!(tauri::async_runtime::block_on(task).is_ok(), "not aborted");
     }
 }
