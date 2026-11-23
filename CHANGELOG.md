@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### New
+- Videos: pidele al asistente un video ("hazme un video de 15 segundos presentando mi panaderia") y lo crea con escenas animadas, textos, colores, imagenes generadas y, si quieres, voz en off. Se abre en la vista previa lateral con su reproductor.
+- Nueva seccion Videos en la barra lateral: tus videos, una galeria de 12 plantillas (promo de producto, anuncio vertical para redes, datos explicados, intro de logo, testimonio, cuenta atras, evento, tutorial por pasos, antes y despues, resumen del ano, arbol de decision y grafico editorial) en horizontal, vertical o cuadrado, y un editor sencillo: cambia textos, colores, logo e imagenes, ordena y ajusta las escenas, pon musica o voz con su volumen, cambia el formato y usa "Pedir un cambio en esta escena" para que el asistente haga el resto.
+- Exportar MP4: el video se genera en nuestros servidores, con el progreso a la vista, la opcion de cancelar y el tiempo de exportacion que te queda este mes. Al terminar se guarda en tu equipo con "Abrir", "Mostrar en carpeta" y "Guardar una copia".
+- Los videos se revisan antes de exportar; si hay algun problema, un boton se lo pide al asistente para que lo arregle. La vista previa no se conecta a internet y no puede acceder a la app.
+
 ## 0.2.18 - 2026-11-23 - Dependencias al dia
 
 ### Changed

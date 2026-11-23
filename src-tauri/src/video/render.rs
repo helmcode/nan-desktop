@@ -774,6 +774,17 @@ mod tests {
         );
         assert!(!bundle.is_empty());
         assert_eq!(prepare(&dir, "ultra").unwrap_err().kind, "invalid");
+        // A remote reference written behind the app's back never ships.
+        for remote in ["https://cdn.example/a.png", "//cdn.example/a.png", "http://x/a.png"] {
+            let original = std::fs::read_to_string(dir.join("compositions/outro.html")).unwrap();
+            std::fs::write(
+                dir.join("compositions/outro.html"),
+                original.replace("</h1>", &format!("</h1><img src=\"{remote}\" alt=\"\">")),
+            )
+            .unwrap();
+            assert_eq!(prepare(&dir, "standard").unwrap_err().kind, "invalid_project", "{remote}");
+            std::fs::write(dir.join("compositions/outro.html"), original).unwrap();
+        }
         std::fs::write(
             dir.join("compositions/intro.html"),
             "<template><script src=x></script></template>",
@@ -1009,5 +1020,66 @@ mod tests {
             .kind,
             "invalid"
         );
+    }
+
+    /// End to end against the mock platform (`node test/mock-renders.mjs`):
+    /// `VIDEO_MOCK_RENDERS=http://127.0.0.1:14330 cargo test --lib
+    /// export_round_trip_against_the_mock -- --ignored`.
+    #[test]
+    #[ignore]
+    fn export_round_trip_against_the_mock() {
+        let base = std::env::var("VIDEO_MOCK_RENDERS").expect("VIDEO_MOCK_RENDERS");
+        let (_tmp, _realm, _id, dir) = fresh_project();
+        tauri::async_runtime::block_on(async {
+            let before = quota(&base, "fake-jwt").await.unwrap();
+            let (meta, bundle) = prepare(&dir, "draft").unwrap();
+            let started = start(&base, "fake-jwt", &meta, bundle).await.unwrap();
+            assert_eq!(started.charge_seconds, 5);
+            assert_eq!(quota(&base, "fake-jwt").await.unwrap().used_seconds, before.used_seconds + 5);
+            assert_eq!(start(&base, "wrong", &meta, Vec::new()).await.unwrap_err().kind, "no_session");
+            let mut seen = Vec::new();
+            let url = loop {
+                let (status, url) = status(&base, "fake-jwt", &started.render_id).await.unwrap();
+                seen.push(status.status.clone());
+                if let Some(url) = url {
+                    break url;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            };
+            assert!(seen.contains(&"rendering".to_string()), "{seen:?}");
+            let name = export_name(&dir, "Demo");
+            let size = download(&url, &dir, &name, true, |_, _| {}).await.unwrap();
+            assert_eq!(size, 4096);
+            assert!(library::list_exports(&dir).contains_key("demo.mp4"));
+            // Cancel refunds an unfinished render; quota and too-large refusals are typed.
+            let (meta, bundle) = prepare(&dir, "standard").unwrap();
+            let second = start(&base, "fake-jwt", &meta, bundle).await.unwrap();
+            let used = quota(&base, "fake-jwt").await.unwrap().used_seconds;
+            cancel(&base, "fake-jwt", &second.render_id).await.unwrap();
+            assert_eq!(quota(&base, "fake-jwt").await.unwrap().used_seconds, used - 5);
+            let (status, _) = status(&base, "fake-jwt", &second.render_id).await.unwrap();
+            assert_eq!(status.status, "canceled");
+            let mut trigger = meta.clone();
+            trigger.title = "trigger-402".into();
+            let (_, bundle) = prepare(&dir, "standard").unwrap();
+            assert_eq!(start(&base, "fake-jwt", &trigger, bundle).await.unwrap_err().kind, "subscription_required");
+            trigger.title = "trigger-429".into();
+            let (_, bundle) = prepare(&dir, "standard").unwrap();
+            let limited = start(&base, "fake-jwt", &trigger, bundle).await.unwrap_err();
+            assert_eq!((limited.kind.as_str(), limited.retry_after), ("rate_limited", Some(120)));
+            let mut long = meta.clone();
+            long.duration_s = 599.0;
+            let (_, bundle) = prepare(&dir, "standard").unwrap();
+            let quota_err = start(&base, "fake-jwt", &long, bundle).await;
+            if let Err(err) = quota_err {
+                assert_eq!(err.kind, "quota_exhausted");
+                assert!(err.period_end.is_some());
+            }
+            assert_eq!(status_err(&base).await, "not_found");
+        });
+    }
+
+    async fn status_err(base: &str) -> String {
+        status(base, "fake-jwt", "missing").await.unwrap_err().kind
     }
 }

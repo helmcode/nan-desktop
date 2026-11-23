@@ -11,7 +11,9 @@
 > Newer subsystems are documented next to their code and in companion docs:
 > per-user data realms and credential storage in [SECURITY.md](../SECURITY.md),
 > conversation memory, skills and image edits in [MEMORY.md](MEMORY.md), the
-> release/signing pipeline in [SIGNING.md](../SIGNING.md), and artifacts
+> release/signing pipeline in [SIGNING.md](../SIGNING.md), videos
+> (HyperFrames authoring, sandboxed preview, editor, templates, server MP4
+> export) in [VIDEO.md](VIDEO.md), and artifacts
 > sharing (`src-tauri/src/artifacts.rs`), the sandboxed website preview
 > (`src-tauri/src/site_preview.rs`) and the update schedule
 > (`src/updateSchedule.ts`) in their module headers.
