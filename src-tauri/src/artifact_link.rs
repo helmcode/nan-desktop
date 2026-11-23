@@ -107,21 +107,32 @@ fn is_ticket_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
 }
 
-/// The content ticket the share page embeds (`https://<host>/c/<ticket>`,
-/// as the frame / image source or the download link), on the SAME host as
-/// the link. `None` when the page carries none: a sign-in page, a 404
-/// page, or content on any other host.
+/// The content ticket the share page embeds, read ONLY from the template's
+/// own markup on the SAME host as the link: the download link
+/// `href="https://<host>/c/<ticket>?dl=1"` (every viewer page has it) or,
+/// failing that, the frame / image `src="https://<host>/c/<ticket>"`.
+/// Sharer-controlled text (the title in `<title>`, `<h1>`, `title=` and
+/// `alt=`) can never forge either: Go's `html/template` escapes `"` there,
+/// and both anchors need a literal quote before and after the URL. `None`
+/// when the page carries none: a sign-in page, a 404 page, or content on
+/// any other host.
 pub fn content_ticket(page: &str, host: &str) -> Option<String> {
-    let needle = format!("https://{host}/c/");
+    let download = format!("href=\"https://{host}/c/");
+    let source = format!("src=\"https://{host}/c/");
+    anchored_ticket(page, &download, "?dl=1\"").or_else(|| anchored_ticket(page, &source, "\""))
+}
+
+/// The first ticket between `open` and `close` with the ticket shape.
+fn anchored_ticket(page: &str, open: &str, close: &str) -> Option<String> {
     let mut from = 0;
-    while let Some(at) = page[from..].find(&needle) {
-        let start = from + at + needle.len();
+    while let Some(at) = page[from..].find(open) {
+        let start = from + at + open.len();
         let len = page.as_bytes()[start..]
             .iter()
             .take_while(|b| is_ticket_byte(**b))
             .count();
         let ticket = &page[start..start + len];
-        if TICKET_LEN.contains(&ticket.len()) {
+        if TICKET_LEN.contains(&ticket.len()) && page[start + len..].starts_with(close) {
             return Some(ticket.to_string());
         }
         from = start;
@@ -533,12 +544,48 @@ mod tests {
         assert_eq!(content_ticket(&foreign, "artifacts.nan.builders"), None);
         // A too-short candidate is skipped, the next valid one wins.
         let page = format!(
-            "https://artifacts.nan.builders/c/x\" https://artifacts.nan.builders/c/{TICKET}\""
+            "<img src=\"https://artifacts.nan.builders/c/x\"><img src=\"https://artifacts.nan.builders/c/{TICKET}\">"
         );
         assert_eq!(
             content_ticket(&page, "artifacts.nan.builders").as_deref(),
             Some(TICKET)
         );
+        // A bare URL in text (no template anchor) is never a ticket.
+        let bare = format!("<p>https://artifacts.nan.builders/c/{TICKET}</p>");
+        assert_eq!(content_ticket(&bare, "artifacts.nan.builders"), None);
+    }
+
+    /// A hostile title carrying a fake `/c/` URL, escaped as Go's
+    /// html/template would (`"` -> `&#34;`) wherever the title lands.
+    fn hostile_page(real: &str, fake_title: &str) -> String {
+        let t = fake_title.replace('"', "&#34;");
+        format!(
+            "<html><head><title>{t} · NaN</title><meta property=\"og:title\" content=\"{t}\"></head>\
+             <body><section class=\"file-head\"><h1 class=\"file-title\">{t}</h1>\
+             <a class=\"dl\" href=\"https://artifacts.nan.builders/c/{real}?dl=1\" \
+             aria-label=\"Download x.html\"></a></section>\
+             <iframe sandbox=\"allow-scripts\" src=\"https://artifacts.nan.builders/c/{real}\" \
+             title=\"{t}\"></iframe></body></html>"
+        )
+    }
+
+    #[test]
+    fn a_title_with_a_fake_content_url_never_redirects_the_fetch() {
+        const FAKE: &str = "FAKEfakeFAKEfake0123456789";
+        for title in [
+            format!("see https://artifacts.nan.builders/c/{FAKE}"),
+            format!("x\" src=\"https://artifacts.nan.builders/c/{FAKE}\""),
+            format!("x\" href=\"https://artifacts.nan.builders/c/{FAKE}?dl=1\""),
+        ] {
+            let page = hostile_page(TICKET, &title);
+            // The fake URL comes first in the page, and still loses.
+            assert!(page.find(FAKE).unwrap() < page.find(TICKET).unwrap());
+            assert_eq!(
+                content_ticket(&page, "artifacts.nan.builders").as_deref(),
+                Some(TICKET),
+                "{title}"
+            );
+        }
     }
 
     #[test]
