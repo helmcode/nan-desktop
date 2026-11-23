@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.17 - 2026-11-23 - Artifacts en el panel y navegador estable en Windows
 
 ### Fixed
 - Los enlaces de archivos compartidos (artifacts.nan.builders y artifacts.helmcode.com) muestran el archivo en la vista previa lateral, no solo sus datos: las webs se abren aisladas y sin red, y los PDF, imagenes, textos, hojas y documentos con su visor. Si el enlace es privado o no se puede mostrar, ofrece abrirlo en el navegador.
