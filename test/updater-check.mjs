@@ -172,7 +172,7 @@ check("release signs, builds and publishes the feed", () => {
     "TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
     "TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
     "createUpdaterArtifacts",
-    "includeUpdaterJson: false",
+    "uploadUpdaterJson: false",
     'pnpm tauri signer sign "$out/$tar_name"',
     "node scripts/updater-manifest.mjs",
     "assets?name=latest.json",
