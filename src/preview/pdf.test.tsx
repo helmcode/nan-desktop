@@ -68,6 +68,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+
+/// The numeric aspect ratio of a page box. jsdom >= 31 serializes the
+/// property the CSSOM way ("1.77778 / 1"), older versions as the bare
+/// number: compare numbers, not strings.
+function ratio(el: Element): number {
+  const [w, h = "1"] = (el as HTMLElement).style.aspectRatio.split("/");
+  return Number(w) / Number(h);
+}
+
 describe("pdfRenderScale", () => {
   it("draws the page at the pane width times the pixel ratio", () => {
     expect(pdfRenderScale(500, 600, 1)).toBeCloseTo(600 / 500);
@@ -106,7 +115,7 @@ describe("PdfPreview (continuous scroll)", () => {
     pages.forEach((page, i) => {
       expect(page.getAttribute("data-page")).toBe(String(i + 1));
       // The box keeps the page's aspect ratio before it is painted.
-      expect((page as HTMLElement).style.aspectRatio).toBe(String(960 / 540));
+      expect(ratio(page as HTMLElement)).toBeCloseTo(960 / 540, 4);
       const canvas = page.querySelector("canvas");
       expect(canvas?.classList.contains("preview-pdf-canvas")).toBe(true);
     });
@@ -246,9 +255,9 @@ describe("PdfPreview (continuous scroll)", () => {
     await screen.findByRole("group", { name: "PDF document, 3 pages" });
     await waitFor(() => expect(pdf.render).toHaveBeenCalledTimes(3));
     const box = (n: number) => document.querySelector(`.preview-pdf-page[data-page="${n}"]`) as HTMLElement;
-    await waitFor(() => expect(box(2).style.aspectRatio).toBe(String(960 / 540)));
-    expect(box(1).style.aspectRatio).toBe(String(600 / 800));
-    expect(box(3).style.aspectRatio).toBe(String(500 / 1000));
+    await waitFor(() => expect(ratio(box(2))).toBeCloseTo(960 / 540, 4));
+    expect(ratio(box(1))).toBeCloseTo(600 / 800, 4);
+    expect(ratio(box(3))).toBeCloseTo(500 / 1000, 4);
   });
 
   it("keeps unpainted pages at page 1's ratio until they are painted", async () => {
@@ -284,11 +293,11 @@ describe("PdfPreview (continuous scroll)", () => {
     // The page observers are created in passive effects (see above).
     await waitFor(() => expect(observers).toHaveLength(2));
     const box2 = document.querySelector('.preview-pdf-page[data-page="2"]') as HTMLElement;
-    expect(box2.style.aspectRatio).toBe(String(600 / 800));
+    expect(ratio(box2)).toBeCloseTo(600 / 800, 4);
     await act(async () => {
       observers[1].cb([{ isIntersecting: true, target: observers[1].targets[0] } as IntersectionObserverEntry], observers[1] as never);
     });
-    await waitFor(() => expect(box2.style.aspectRatio).toBe(String(960 / 540)));
+    await waitFor(() => expect(ratio(box2)).toBeCloseTo(960 / 540, 4));
   });
 
   it("replaces the whole document with the failure note when one page fails to render (chosen design)", async () => {
