@@ -99,12 +99,34 @@ describe("ExportPanel", () => {
     expect(screen.getByText("Descargando el MP4… 25%")).toBeTruthy();
   });
 
+  it("shows upload progress and warns when the connection is too slow", async () => {
+    resetTauri({
+      video_export_quota: () => QUOTA,
+      video_export_start: () => new Promise(() => {}),
+    });
+    renderPanel();
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValue(1_000_000);
+    fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
+    expect(await screen.findByText("Enviando el vídeo…")).toBeTruthy();
+    now.mockReturnValue(1_000_000 + 2_000);
+    act(() => emit("video://upload", { project_id: PROJECT_ID, sent: 50, total: 100 }));
+    expect(await screen.findByText("Enviando el vídeo… 50%")).toBeTruthy();
+    expect(screen.queryByText(/conexión va lenta/)).toBeNull();
+    now.mockReturnValue(1_000_000 + 120_000);
+    act(() => emit("video://upload", { project_id: PROJECT_ID, sent: 60, total: 600 }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/conexión va lenta/);
+    now.mockRestore();
+  });
+
   it("explains quota, subscription and size refusals in plain words", async () => {
     const errors = [
       { kind: "quota_exhausted", remaining_seconds: 12, period_end: "2026-12-01T00:00:00Z" },
       { kind: "subscription_required" },
       { kind: "too_large" },
       { kind: "too_many_active" },
+      { kind: "busy", retry_after: 20 },
+      { kind: "unavailable" },
     ];
     resetTauri({
       video_export_quota: () => QUOTA,
@@ -119,6 +141,8 @@ describe("ExportPanel", () => {
       /necesitas una suscripción activa/,
       /máximo 90 MB/,
       /Ya tienes dos vídeos generándose/,
+      /servidores están recibiendo otros vídeos/,
+      /no está disponible ahora mismo/,
     ]) {
       fireEvent.click(exportButton);
       expect((await screen.findByRole("alert")).textContent).toMatch(text);

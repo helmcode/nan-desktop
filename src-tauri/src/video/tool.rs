@@ -71,7 +71,9 @@ currentTime, never autoplay, loop or crossorigin.\n\
 - Make the video easy to customize: declare variables for the texts, colors and \
 images the user will want to change (type text, color or image) and bind them \
 with data-var-text=\"id\" (keep the text as the fallback content), \
-data-var-src=\"id\" on <img>, and var(--id) in CSS for colors.\n\
+data-var-src=\"id\" on <img>, and var(--id) in CSS for colors. Chart data: a \
+number variable is var(--id) in CSS (width: calc(var(--bar-1) / 50 * 100%)), so \
+edited values move the bars.\n\
 - Voice-over: pass voiceover {text, voice} (voices ef_dora or em_alex in Spanish, \
 af_heart in English); the result tells you its length, so size the scenes to it. \
 Images: call generate_image first, then pass its returned path in images \
@@ -475,6 +477,11 @@ fn edit_meta(base: VideoMeta, edit: &MetaEdit) -> Result<VideoMeta, String> {
         if variable.kind == VariableKind::Color {
             variable.value = variable.value.trim().to_ascii_lowercase();
         }
+        if variable.kind == VariableKind::Number
+            && let Some(number) = project::parse_number(&variable.value)
+        {
+            variable.value = number;
+        }
         if variable.kind == VariableKind::Image {
             variable.value = variable.value.trim().to_string();
         }
@@ -673,9 +680,9 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
     }, "required": ["id"] });
     let variable = serde_json::json!({ "type": "object", "properties": {
         "id": { "type": "string", "description": "Variable id: lowercase letters, digits, dashes." },
-        "type": { "type": "string", "enum": ["text", "color", "image"] },
+        "type": { "type": "string", "enum": ["text", "color", "image", "number"] },
         "label": { "type": "string", "description": "Field name the user sees, in the user's language." },
-        "value": { "type": "string", "description": "text; #rrggbb color; or assets/<image file>." }
+        "value": { "type": "string", "description": "text; #rrggbb color; assets/<image file>; or a number (42, 6.5)." }
     }, "required": ["id", "type"] });
     let voice = serde_json::json!({ "type": "object", "properties": {
         "text": { "type": "string", "description": "What the narrator says." },

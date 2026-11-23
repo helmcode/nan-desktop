@@ -321,6 +321,22 @@ export function VideoEditor({
                 {variable.type === "text" && (
                   <TextField variable={variable} onCommit={(value) => apply({ values: { [variable.id]: value } })} />
                 )}
+                {variable.type === "number" && (
+                  <input
+                    id={`video-var-${variable.id}`}
+                    type="number"
+                    step="any"
+                    inputMode="decimal"
+                    className="video-number"
+                    defaultValue={variable.value}
+                    key={variable.value}
+                    onBlur={(e) => {
+                      const value = e.currentTarget.value.trim();
+                      if (value !== "" && value !== variable.value) apply({ values: { [variable.id]: value } });
+                    }}
+                    onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+                  />
+                )}
                 {variable.type === "color" && (
                   <input
                     id={`video-var-${variable.id}`}

@@ -377,6 +377,16 @@ pub async fn video_delete(
 
 // ------------------------------------------------------------- export --
 
+/// Emitted while the bundle uploads: `{project_id, sent, total}`.
+pub const UPLOAD_EVENT: &str = "video://upload";
+
+#[derive(Debug, Clone, Serialize)]
+struct UploadProgress {
+    project_id: String,
+    sent: u64,
+    total: u64,
+}
+
 /// Emitted while an MP4 downloads: `{project_id, received, total}`.
 pub const DOWNLOAD_EVENT: &str = "video://download";
 
@@ -423,13 +433,26 @@ pub async fn video_export_start(
 ) -> Result<render::Started, render::ExportError> {
     let realm = export_realm(&app, &profile_id)?;
     let (base, token) = platform(&profile_id)?;
+    let project_for_events = project_id.clone();
     let (meta, bundle) = tauri::async_runtime::spawn_blocking(move || {
         let dir = library::project_dir(&realm, &project_id)?;
         render::prepare(&dir, &quality)
     })
     .await
     .map_err(|_| render::ExportError::new("io"))??;
-    render::start(&base, &token, &meta, bundle).await
+    let emitter = app.clone();
+    let pid = project_for_events;
+    render::start(&base, &token, &meta, bundle, move |sent, total| {
+        let _ = emitter.emit(
+            UPLOAD_EVENT,
+            UploadProgress {
+                project_id: pid.clone(),
+                sent,
+                total,
+            },
+        );
+    })
+    .await
 }
 
 /// A render's status (never its download URL).
@@ -588,8 +611,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let realm = tmp.path().join("realm");
         std::fs::create_dir(&realm).unwrap();
-        let id = create_from_template_in(&realm, "product-promo", Some(project::Aspect::Portrait), "en")
-            .unwrap();
+        let id = create_from_template_in(
+            &realm,
+            "product-promo",
+            Some(project::Aspect::Portrait),
+            "en",
+        )
+        .unwrap();
         let dir = library::project_dir(&realm, &id).unwrap();
         let meta = library::read_meta(&dir).unwrap();
         assert_eq!(meta.template.as_deref(), Some("product-promo"));

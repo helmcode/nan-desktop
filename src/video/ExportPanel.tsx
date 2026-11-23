@@ -20,20 +20,21 @@ import {
   exportStatus,
   formatTime,
   onDownloadProgress,
+  onUploadProgress,
   type ExportError,
   type RenderQuota,
   type RenderStatus,
   type VideoExport,
   type VideoProject,
 } from "./api";
-import { exportErrorMessage, quotaLine, rememberRender, rememberedRender, shortDate } from "./logic";
+import { exportErrorMessage, quotaLine, rememberRender, rememberedRender, shortDate, uploadTooSlow } from "./logic";
 
 /// How often a render's status is asked for.
 export const POLL_MS = 2000;
 
 type Phase =
   | { kind: "idle" }
-  | { kind: "uploading" }
+  | { kind: "uploading"; pct: number | null; slow: boolean }
   | { kind: "rendering"; renderId: string; status: RenderStatus | null }
   | { kind: "canceling"; renderId: string }
   | { kind: "downloading"; renderId: string; pct: number | null }
@@ -132,6 +133,28 @@ export function ExportPanel({
     };
   }, [renderingId, profileId, download, fail]);
 
+  // Upload progress for this project, with the slow-connection warning
+  // (the platform's upload window is 10 minutes).
+  const uploadStarted = useRef(0);
+  useEffect(() => {
+    const unlisten = onUploadProgress((p) => {
+      if (p.project_id !== project.id) return;
+      const elapsed = (Date.now() - uploadStarted.current) / 1000;
+      setPhase((prev) =>
+        prev.kind === "uploading"
+          ? {
+              kind: "uploading",
+              pct: p.total ? Math.min(100, Math.round((p.sent / p.total) * 100)) : null,
+              slow: prev.slow || uploadTooSlow(p.sent, p.total, elapsed),
+            }
+          : prev,
+      );
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [project.id]);
+
   // Download progress events for this project.
   useEffect(() => {
     const unlisten = onDownloadProgress((p) => {
@@ -149,7 +172,8 @@ export function ExportPanel({
 
   const start = () => {
     setFileError(false);
-    setPhase({ kind: "uploading" });
+    uploadStarted.current = Date.now();
+    setPhase({ kind: "uploading", pct: null, slow: false });
     exportStart(profileId, project.id, quality)
       .then((started) => {
         if (!alive.current) return;
@@ -181,12 +205,14 @@ export function ExportPanel({
   const progress =
     phase.kind === "rendering" && phase.status?.status === "rendering"
       ? Math.round(phase.status.progress * 100)
-      : phase.kind === "downloading"
+      : phase.kind === "downloading" || phase.kind === "uploading"
         ? phase.pct
         : null;
   const statusText =
     phase.kind === "uploading"
-      ? t.video.uploading
+      ? phase.pct === null
+        ? t.video.uploading
+        : t.video.uploadingPct(phase.pct)
       : phase.kind === "canceling"
         ? t.video.canceling
         : phase.kind === "downloading"
@@ -247,6 +273,11 @@ export function ExportPanel({
             </button>
           )}
         </div>
+      )}
+      {phase.kind === "uploading" && phase.slow && (
+        <p className="video-warn" role="alert">
+          {t.video.slowUpload}
+        </p>
       )}
       {phase.kind === "error" && (
         <p className="inline-error" role="alert">

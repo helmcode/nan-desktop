@@ -13,6 +13,7 @@ import {
   sceneAt,
   sceneWindows,
   shortDate,
+  uploadTooSlow,
 } from "./logic";
 
 const SCENES = [
@@ -88,6 +89,8 @@ describe("export copy", () => {
       "no_session",
       "offline",
       "expired",
+      "busy",
+      "unavailable",
     ];
     const seen = new Set<string>();
     for (const kind of kinds) {
@@ -108,6 +111,14 @@ describe("export copy", () => {
     });
     expect(quota).toContain("0:20");
     expect(quota).toContain("1 de diciembre");
+  });
+
+  it("warns when an upload will not fit the 10 minute window", () => {
+    expect(uploadTooSlow(10, 100, 60)).toBe(true); // 600 s projected
+    expect(uploadTooSlow(50, 100, 60)).toBe(false); // 120 s projected
+    expect(uploadTooSlow(1, 100, 3)).toBe(false); // too early to judge
+    expect(uploadTooSlow(100, 100, 900)).toBe(false); // already sent
+    expect(es.video.errors.no_session).toContain("Vuelve a iniciar sesión");
   });
 
   it("formats renewal dates and ignores bad ones", () => {

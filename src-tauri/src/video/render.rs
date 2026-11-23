@@ -36,7 +36,10 @@ pub const MAX_MP4_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_REPLY_BYTES: usize = 256 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// The upload window (contract §4: the proxy's read timeout is 600 s).
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Upload chunk (progress granularity).
+const UPLOAD_CHUNK: usize = 256 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_REDIRECTS: usize = 3;
 
@@ -267,6 +270,8 @@ pub struct Status {
     pub ready: bool,
     pub size_bytes: Option<u64>,
     pub expires_at: Option<String>,
+    /// Seconds this render costs (refunded when it fails or is canceled).
+    pub charge_seconds: Option<u64>,
 }
 
 /// The monthly allowance.
@@ -291,6 +296,8 @@ struct StatusWire {
     size_bytes: Option<u64>,
     #[serde(default)]
     expires_at: Option<String>,
+    #[serde(default)]
+    charge_seconds: Option<u64>,
 }
 
 const STATUSES: &[&str] = &["queued", "rendering", "done", "failed", "canceled"];
@@ -320,18 +327,28 @@ fn status_from(wire: StatusWire) -> Result<(Status, Option<String>), ExportError
             error,
             size_bytes: wire.size_bytes,
             expires_at: wire.expires_at,
+            charge_seconds: wire.charge_seconds,
         },
         url,
     ))
 }
 
-/// A non-2xx reply as a typed error (contract §2 and its amendment).
-pub fn classify(status: u16, body: &serde_json::Value, retry_after: Option<u64>) -> ExportError {
+/// A non-2xx reply as a typed error (contract §2 and §4). `route` matters
+/// for 404: the enterprise API answers a missing credential with 404, so on
+/// the create and quota routes (which never name a render) a 404 means
+/// "sign in again"; on a render's own routes it means the render is gone.
+pub fn classify(
+    route: &Route,
+    status: u16,
+    body: &serde_json::Value,
+    retry_after: Option<u64>,
+) -> ExportError {
     let code = body.get("error").and_then(|e| e.as_str()).unwrap_or("");
     let mut err = match (status, code) {
         (401, _) => ExportError::new("no_session"),
         (402, "render_quota_exhausted") => ExportError::new("quota_exhausted"),
         (402, _) => ExportError::new("subscription_required"),
+        (404, _) if matches!(route, Route::Create | Route::Quota) => ExportError::new("no_session"),
         (404, _) => ExportError::new("not_found"),
         (409, _) => ExportError::new("canceled"),
         (413, _) => ExportError::new("too_large"),
@@ -340,9 +357,11 @@ pub fn classify(status: u16, body: &serde_json::Value, retry_after: Option<u64>)
         (429, _) => ExportError::new("rate_limited"),
         (400, "upload_failed") => ExportError::new("upload_failed"),
         (400, _) => ExportError::new("invalid_project"),
+        (503, "busy") => ExportError::new("busy"),
+        (503, _) => ExportError::new("unavailable"),
         _ => ExportError::new("server"),
     };
-    if status == 429 {
+    if status == 429 || status == 503 {
         err.retry_after = retry_after.map(|s| s.min(24 * 60 * 60));
     }
     if err.kind == "quota_exhausted" {
@@ -408,9 +427,26 @@ async fn call(
     }
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     if !(200..300).contains(&status) {
-        return Err(classify(status, &json, wait));
+        return Err(classify(route, status, &json, wait));
     }
     Ok((status, json))
+}
+
+/// The bundle as a streamed multipart part that reports `(sent, total)`
+/// as reqwest pulls each chunk.
+fn bundle_part(
+    bundle: Vec<u8>,
+    progress: impl Fn(u64, u64) + Send + Sync + 'static,
+) -> reqwest::multipart::Part {
+    let total = bundle.len() as u64;
+    let chunks: Vec<Vec<u8>> = bundle.chunks(UPLOAD_CHUNK).map(<[u8]>::to_vec).collect();
+    let mut sent = 0u64;
+    let stream = futures_util::stream::iter(chunks.into_iter().map(move |chunk| {
+        sent += chunk.len() as u64;
+        progress(sent, total);
+        Ok::<_, std::io::Error>(chunk)
+    }));
+    reqwest::multipart::Part::stream_with_length(reqwest::Body::wrap_stream(stream), total)
 }
 
 /// `POST /v1/desktop/renders` with the bundle.
@@ -419,6 +455,7 @@ pub async fn start(
     token: &str,
     meta: &RenderMeta,
     bundle: Vec<u8>,
+    progress: impl Fn(u64, u64) + Send + Sync + 'static,
 ) -> Result<Started, ExportError> {
     let meta_json = serde_json::to_string(meta).map_err(|_| ExportError::new("invalid"))?;
     let form = reqwest::multipart::Form::new()
@@ -430,7 +467,7 @@ pub async fn start(
         )
         .part(
             "bundle",
-            reqwest::multipart::Part::bytes(bundle)
+            bundle_part(bundle, progress)
                 .file_name("project.zip")
                 .mime_str("application/zip")
                 .map_err(|_| ExportError::new("invalid"))?,
@@ -633,6 +670,7 @@ mod tests {
     fn every_api_error_maps_to_a_typed_kind() {
         let body = |code: &str| serde_json::json!({ "error": code });
         let quota = classify(
+            &Route::Create,
             402,
             &serde_json::json!({"error":"render_quota_exhausted","remaining_seconds":12,"period_end":"2026-12-01T00:00:00Z"}),
             None,
@@ -651,27 +689,56 @@ mod tests {
             (401, "", "no_session"),
             (404, "", "not_found"),
             (500, "", "server"),
-            (503, "", "server"),
+            (503, "", "unavailable"),
         ] {
             assert_eq!(
-                classify(status, &body(code), None).kind,
+                classify(&Route::Status("r".into()), status, &body(code), None).kind,
                 kind,
                 "{status} {code}"
             );
         }
-        let busy = classify(429, &body("too_many_active_renders"), Some(30));
+        let busy = classify(
+            &Route::Create,
+            429,
+            &body("too_many_active_renders"),
+            Some(30),
+        );
         assert_eq!(
             (busy.kind.as_str(), busy.retry_after),
             ("too_many_active", Some(30))
         );
-        let limited = classify(429, &body("rate_limited"), Some(999_999));
+        let limited = classify(&Route::Create, 429, &body("rate_limited"), Some(999_999));
         assert_eq!(
             (limited.kind.as_str(), limited.retry_after),
             ("rate_limited", Some(86_400))
         );
+        // 503s are retryable and friendly; a 404 on create/quota is the
+        // enterprise "no credential".
+        let busy = classify(&Route::Create, 503, &body("busy"), Some(20));
+        assert_eq!((busy.kind.as_str(), busy.retry_after), ("busy", Some(20)));
+        assert_eq!(
+            classify(&Route::Create, 503, &body("storage_unavailable"), None).kind,
+            "unavailable"
+        );
+        assert_eq!(
+            classify(&Route::Quota, 503, &body("unavailable"), None).kind,
+            "unavailable"
+        );
+        assert_eq!(
+            classify(&Route::Create, 404, &body(""), None).kind,
+            "no_session"
+        );
+        assert_eq!(
+            classify(&Route::Quota, 404, &body(""), None).kind,
+            "no_session"
+        );
+        assert_eq!(
+            classify(&Route::Cancel("r".into()), 404, &body(""), None).kind,
+            "not_found"
+        );
         // Only a quota error carries quota fields.
         assert_eq!(
-            classify(402, &body("subscription_required"), None).remaining_seconds,
+            classify(&Route::Create, 402, &body("subscription_required"), None).remaining_seconds,
             None
         );
     }
@@ -775,14 +842,22 @@ mod tests {
         assert!(!bundle.is_empty());
         assert_eq!(prepare(&dir, "ultra").unwrap_err().kind, "invalid");
         // A remote reference written behind the app's back never ships.
-        for remote in ["https://cdn.example/a.png", "//cdn.example/a.png", "http://x/a.png"] {
+        for remote in [
+            "https://cdn.example/a.png",
+            "//cdn.example/a.png",
+            "http://x/a.png",
+        ] {
             let original = std::fs::read_to_string(dir.join("compositions/outro.html")).unwrap();
             std::fs::write(
                 dir.join("compositions/outro.html"),
                 original.replace("</h1>", &format!("</h1><img src=\"{remote}\" alt=\"\">")),
             )
             .unwrap();
-            assert_eq!(prepare(&dir, "standard").unwrap_err().kind, "invalid_project", "{remote}");
+            assert_eq!(
+                prepare(&dir, "standard").unwrap_err().kind,
+                "invalid_project",
+                "{remote}"
+            );
             std::fs::write(dir.join("compositions/outro.html"), original).unwrap();
         }
         std::fs::write(
@@ -860,13 +935,17 @@ mod tests {
             quality: "standard".into(),
             title: "Hola".into(),
         };
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = progress.clone();
         let started = tauri::async_runtime::block_on(start(
             &base,
             "jwt-123",
             &meta,
             b"PK\x03\x04zip".to_vec(),
+            move |sent, total| seen.lock().unwrap().push((sent, total)),
         ))
         .unwrap();
+        assert_eq!(progress.lock().unwrap().last().copied(), Some((7, 7)));
         assert_eq!(
             started,
             Started {
@@ -1033,10 +1112,21 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let before = quota(&base, "fake-jwt").await.unwrap();
             let (meta, bundle) = prepare(&dir, "draft").unwrap();
-            let started = start(&base, "fake-jwt", &meta, bundle).await.unwrap();
+            let started = start(&base, "fake-jwt", &meta, bundle, |_, _| {})
+                .await
+                .unwrap();
             assert_eq!(started.charge_seconds, 5);
-            assert_eq!(quota(&base, "fake-jwt").await.unwrap().used_seconds, before.used_seconds + 5);
-            assert_eq!(start(&base, "wrong", &meta, Vec::new()).await.unwrap_err().kind, "no_session");
+            assert_eq!(
+                quota(&base, "fake-jwt").await.unwrap().used_seconds,
+                before.used_seconds + 5
+            );
+            assert_eq!(
+                start(&base, "wrong", &meta, Vec::new(), |_, _| {})
+                    .await
+                    .unwrap_err()
+                    .kind,
+                "no_session"
+            );
             let mut seen = Vec::new();
             let url = loop {
                 let (status, url) = status(&base, "fake-jwt", &started.render_id).await.unwrap();
@@ -1047,34 +1137,58 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(500));
             };
             assert!(seen.contains(&"rendering".to_string()), "{seen:?}");
+            let (done, _) = status(&base, "fake-jwt", &started.render_id).await.unwrap();
+            assert_eq!(done.charge_seconds, Some(5));
             let name = export_name(&dir, "Demo");
             let size = download(&url, &dir, &name, true, |_, _| {}).await.unwrap();
             assert_eq!(size, 4096);
             assert!(library::list_exports(&dir).contains_key("demo.mp4"));
             // Cancel refunds an unfinished render; quota and too-large refusals are typed.
             let (meta, bundle) = prepare(&dir, "standard").unwrap();
-            let second = start(&base, "fake-jwt", &meta, bundle).await.unwrap();
+            let second = start(&base, "fake-jwt", &meta, bundle, |_, _| {})
+                .await
+                .unwrap();
             let used = quota(&base, "fake-jwt").await.unwrap().used_seconds;
             cancel(&base, "fake-jwt", &second.render_id).await.unwrap();
-            assert_eq!(quota(&base, "fake-jwt").await.unwrap().used_seconds, used - 5);
+            assert_eq!(
+                quota(&base, "fake-jwt").await.unwrap().used_seconds,
+                used - 5
+            );
             let (status, _) = status(&base, "fake-jwt", &second.render_id).await.unwrap();
             assert_eq!(status.status, "canceled");
             let mut trigger = meta.clone();
             trigger.title = "trigger-402".into();
             let (_, bundle) = prepare(&dir, "standard").unwrap();
-            assert_eq!(start(&base, "fake-jwt", &trigger, bundle).await.unwrap_err().kind, "subscription_required");
+            assert_eq!(
+                start(&base, "fake-jwt", &trigger, bundle, |_, _| {})
+                    .await
+                    .unwrap_err()
+                    .kind,
+                "subscription_required"
+            );
             trigger.title = "trigger-429".into();
             let (_, bundle) = prepare(&dir, "standard").unwrap();
-            let limited = start(&base, "fake-jwt", &trigger, bundle).await.unwrap_err();
-            assert_eq!((limited.kind.as_str(), limited.retry_after), ("rate_limited", Some(120)));
+            let limited = start(&base, "fake-jwt", &trigger, bundle, |_, _| {})
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (limited.kind.as_str(), limited.retry_after),
+                ("rate_limited", Some(120))
+            );
             let mut long = meta.clone();
             long.duration_s = 599.0;
             let (_, bundle) = prepare(&dir, "standard").unwrap();
-            let quota_err = start(&base, "fake-jwt", &long, bundle).await;
+            let quota_err = start(&base, "fake-jwt", &long, bundle, |_, _| {}).await;
             if let Err(err) = quota_err {
                 assert_eq!(err.kind, "quota_exhausted");
                 assert!(err.period_end.is_some());
             }
+            trigger.title = "trigger-busy".into();
+            let (_, bundle) = prepare(&dir, "standard").unwrap();
+            let busy = start(&base, "fake-jwt", &trigger, bundle, |_, _| {})
+                .await
+                .unwrap_err();
+            assert_eq!((busy.kind.as_str(), busy.retry_after), ("busy", Some(20)));
             assert_eq!(status_err(&base).await, "not_found");
         });
     }

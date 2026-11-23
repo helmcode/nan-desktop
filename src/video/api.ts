@@ -65,7 +65,7 @@ export function formatTime(seconds: number): string {
 
 // ------------------------------------------------------------- editor --
 
-export type VariableKind = "text" | "color" | "image";
+export type VariableKind = "text" | "color" | "image" | "number";
 
 export interface VideoVariable {
   id: string;
@@ -200,6 +200,7 @@ export interface RenderStatus {
   ready: boolean;
   size_bytes: number | null;
   expires_at: string | null;
+  charge_seconds?: number | null;
 }
 
 export interface RenderQuota {
@@ -216,6 +217,17 @@ export interface DownloadProgress {
 }
 
 export const DOWNLOAD_EVENT = "video://download";
+export const UPLOAD_EVENT = "video://upload";
+
+export interface UploadProgress {
+  project_id: string;
+  sent: number;
+  total: number;
+}
+
+export function onUploadProgress(handler: (payload: UploadProgress) => void): Promise<UnlistenFn> {
+  return listen<UploadProgress>(UPLOAD_EVENT, (event) => handler(event.payload));
+}
 
 export function exportStart(profileId: string, projectId: string, quality: "standard" | "draft"): Promise<RenderStarted> {
   return invoke<RenderStarted>("video_export_start", { profileId, projectId, quality });

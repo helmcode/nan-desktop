@@ -113,6 +113,37 @@ pub enum VariableKind {
     Color,
     /// An image file in `assets/` (`data-var-src`), or empty for none.
     Image,
+    /// A number (`var(--id)` in CSS `calc()`: bar lengths, sizes...).
+    Number,
+}
+
+/// Largest magnitude of a number variable.
+pub const MAX_NUMBER: f64 = 1e9;
+
+/// A number variable's value, normalized: a decimal comma becomes a dot,
+/// at most 4 decimals, finite and within [`MAX_NUMBER`].
+pub fn parse_number(raw: &str) -> Option<String> {
+    let text = raw.trim().replace(',', ".");
+    let ok = !text.is_empty()
+        && text.len() <= 24
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'.' || b == b'-')
+        && !text.starts_with('.')
+        && !text.ends_with('.');
+    let value: f64 = if ok { text.parse().ok()? } else { return None };
+    if !value.is_finite() || value.abs() > MAX_NUMBER {
+        return None;
+    }
+    let rounded = (value * 10_000.0).round() / 10_000.0;
+    let mut out = format!("{rounded:.4}");
+    while out.contains('.') && (out.ends_with('0') || out.ends_with('.')) {
+        out.pop();
+    }
+    if out == "-0" {
+        out = "0".into();
+    }
+    Some(out)
 }
 
 /// One fill-in field of the video (the editor's variables form).
@@ -737,6 +768,9 @@ pub fn check_value(
             }
             Ok(path.to_string())
         }
+        VariableKind::Number => {
+            parse_number(value).ok_or_else(|| format!("\"{value}\" is not a number like 42 or 6.5"))
+        }
     }
 }
 
@@ -852,16 +886,30 @@ fn variable_declarations(meta: &VideoMeta) -> serde_json::Value {
                     VariableKind::Text => "string",
                     VariableKind::Color => "color",
                     VariableKind::Image => "image",
+                    VariableKind::Number => "number",
                 };
                 serde_json::json!({
                     "id": variable.id,
                     "type": kind,
                     "label": variable.label,
-                    "default": variable.value,
+                    "default": variable_json(variable),
                 })
             })
             .collect(),
     )
+}
+
+/// A value as HyperFrames types it (numbers as JSON numbers).
+fn variable_json(variable: &Variable) -> serde_json::Value {
+    match variable.kind {
+        VariableKind::Number => variable
+            .value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        _ => serde_json::Value::String(variable.value.clone()),
+    }
 }
 
 /// Every variable's value by id (each scene host's `data-variable-values`,
@@ -870,12 +918,7 @@ fn variable_values(meta: &VideoMeta) -> serde_json::Value {
     serde_json::Value::Object(
         meta.variables
             .iter()
-            .map(|variable| {
-                (
-                    variable.id.clone(),
-                    serde_json::Value::String(variable.value.clone()),
-                )
-            })
+            .map(|variable| (variable.id.clone(), variable_json(variable)))
             .collect(),
     )
 }
@@ -900,8 +943,16 @@ pub fn generate_index(meta: &VideoMeta, theme_css: &str) -> String {
     let colors: String = meta
         .variables
         .iter()
-        .filter(|v| v.kind == VariableKind::Color && valid_color(&v.value))
-        .map(|v| format!("--{}:{};", v.id, v.value))
+        .filter_map(|v| match v.kind {
+            // Colors and numbers are set by the core itself (validated, so
+            // safe in CSS), not only by the runtime: the render never
+            // depends on a variable binding to get them right.
+            VariableKind::Color if valid_color(&v.value) => {
+                Some(format!("--{}:{};", v.id, v.value))
+            }
+            VariableKind::Number => parse_number(&v.value).map(|n| format!("--{}:{n};", v.id)),
+            _ => None,
+        })
         .collect();
     let mut hosts = String::new();
     for (scene, start) in meta.scenes.iter().zip(meta.starts()) {
@@ -1176,6 +1227,29 @@ mod tests {
         assert!(check_value(VariableKind::Image, "assets/missing.png", &assets).is_err());
         assert!(check_value(VariableKind::Image, "assets/voice.wav", &assets).is_err());
         assert!(check_value(VariableKind::Image, "https://x.io/a.png", &assets).is_err());
+    }
+
+    #[test]
+    fn number_variables_are_normalized_and_drive_css() {
+        assert_eq!(parse_number(" 6,5 ").as_deref(), Some("6.5"));
+        assert_eq!(parse_number("10").as_deref(), Some("10"));
+        assert_eq!(parse_number("-0").as_deref(), Some("0"));
+        assert_eq!(parse_number("3.14159").as_deref(), Some("3.1416"));
+        for bad in ["", "abc", "1e9999", "1;x", "10%", ".5", "5.", "99999999999"] {
+            assert_eq!(parse_number(bad), None, "{bad}");
+        }
+        assert!(check_value(VariableKind::Number, "1);background:url(x", &assets).is_err());
+        let mut m = meta();
+        m.variables.push(Variable {
+            id: "bar-1".into(),
+            kind: VariableKind::Number,
+            label: "Barra".into(),
+            value: "62.5".into(),
+        });
+        let html = generate_index(&m, "");
+        assert!(html.contains(":root{--bg:#101820;--bar-1:62.5;}"), "{html}");
+        assert!(html.contains("&quot;bar-1&quot;:62.5"));
+        assert!(html.contains("&quot;type&quot;:&quot;number&quot;"));
     }
 
     #[test]

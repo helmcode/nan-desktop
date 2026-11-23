@@ -103,12 +103,24 @@ export function exportErrorMessage(t: Strings, locale: string, err: ExportError)
     case "no_session":
     case "offline":
     case "expired":
+    case "busy":
+    case "unavailable":
       return e[err.kind];
     case "rate_limited":
       return e.rate_limited(waitText(err.retry_after, locale));
     default:
       return e.generic;
   }
+}
+
+/// The upload window the platform allows (its proxy read timeout).
+export const UPLOAD_WINDOW_S = 600;
+
+/// Whether an upload at its current pace will not finish in the window
+/// (judged after a few seconds, with a 10% margin).
+export function uploadTooSlow(sent: number, total: number, elapsedS: number): boolean {
+  if (elapsedS < 5 || sent <= 0 || total <= 0 || sent >= total) return false;
+  return (total / sent) * elapsedS > UPLOAD_WINDOW_S * 0.9;
 }
 
 /// Render ids of exports in flight, per project, so reopening the editor

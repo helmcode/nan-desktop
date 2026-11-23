@@ -174,6 +174,7 @@ pub fn apply_patch(dir: &Path, patch: &EditorPatch) -> Result<VideoMeta, Rejecti
             VariableKind::Color => value.trim().to_ascii_lowercase(),
             VariableKind::Image => value.trim().to_string(),
             VariableKind::Text => value.clone(),
+            VariableKind::Number => value.trim().replace(',', "."),
         };
     }
     if let Some(scenes) = &patch.scenes {

@@ -15,8 +15,9 @@
 //                                      422 invalid_meta / invalid_bundle, 429
 //                                      too_many_active_renders (> 2 active) or
 //                                      rate_limited (title "trigger-429"),
-//                                      400 upload_failed (title
-//                                      "trigger-400").
+//                                      503 busy (title "trigger-busy") /
+//                                      storage_unavailable ("trigger-503"),
+//                                      both with Retry-After (contract §4).
 //   GET  /v1/desktop/renders/quota     {included_seconds, used_seconds,
 //                                      remaining_seconds, period_end}
 //   GET  /v1/desktop/renders/{id}      queued -> rendering (progress) -> done
@@ -99,6 +100,7 @@ function view(render, base) {
   return {
     id: render.id,
     status,
+    charge_seconds: render.charge,
     progress: status === "done" ? 1 : status === "rendering" ? Math.min(0.99, (elapsed - 1500) / (RENDER_MS - 1500)) : 0,
     error: status === "failed" ? "render_failed" : null,
     download_url: status === "done" ? `${base}/files/${render.id}.mp4?X-Mock-Signature=abc` : null,
@@ -148,7 +150,8 @@ export async function handleRenders(req, res, base) {
       Number.isInteger(meta.width) && Number.isInteger(meta.height);
     if (!okMeta) return json(res, 422, { error: "invalid_meta" }), true;
     if (meta.title === "trigger-402") return json(res, 402, { error: "subscription_required" }), true;
-    if (meta.title === "trigger-400") return json(res, 400, { error: "upload_failed" }), true;
+    if (meta.title === "trigger-busy") return json(res, 503, { error: "busy" }, { "retry-after": "20" }), true;
+    if (meta.title === "trigger-503") return json(res, 503, { error: "storage_unavailable" }, { "retry-after": "30" }), true;
     createdThisHour = createdThisHour.filter((t) => Date.now() - t < 3600_000);
     if (meta.title === "trigger-429" || createdThisHour.length >= 10) {
       return json(res, 429, { error: "rate_limited" }, { "retry-after": "120" }), true;
