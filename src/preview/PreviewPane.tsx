@@ -6,10 +6,12 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
+  fetchArtifactLinkPreview,
   fetchWebPreview,
   readFileWithSiteForPreview,
   rejectionKind,
   releaseSitePreview,
+  type ArtifactLinkPreview,
   type FileForPreview,
   type WebPreview,
 } from "../core";
@@ -22,7 +24,7 @@ import { BrandMark } from "../brand";
 import { Markdown, openExternal } from "../Markdown";
 import { isEditableImagePath } from "../studio/studio";
 import { isTopLayer, useEscapeLayer } from "../escapeLayers";
-import { previewKind, targetKey, type PreviewTarget } from "./kind";
+import { isArtifactShareUrl, previewKind, targetKey, type PreviewTarget } from "./kind";
 import { revealInFolder } from "./reveal";
 import { shareSourceFor, type ShareSource } from "../artifacts/artifacts";
 
@@ -92,6 +94,70 @@ function WebBody({ profileId, url, onOpenLink }: { profileId: string; url: strin
     <article className="preview-web">
       {state.value.title && <h2 className="preview-web-title">{state.value.title}</h2>}
       <Markdown text={state.value.text} onOpenLink={onOpenLink} />
+    </article>
+  );
+}
+
+/// Issue #57: an HTML artifact's sandboxed token goes back to the core when
+/// its preview is gone (same ephemeral document class as a user's HTML).
+function releaseArtifact(artifact: ArtifactLinkPreview): void {
+  if (artifact.siteUrl !== null) releaseSitePreview(artifact.siteUrl);
+}
+
+/// Issue #57: a shared artifact link shows the artifact itself. The core
+/// fetches the share page and the bytes (no credentials); HTML runs in the
+/// sandboxed frame, every other type in the existing renderers. A link the
+/// core cannot show here (restricted, expired, an unknown type) falls back
+/// to the open-in-browser card.
+function ArtifactBody({ url, onOpenLink }: { url: string; onOpenLink: (url: string) => void }) {
+  const t = useT();
+  const state = useLoad<ArtifactLinkPreview>(`artifact:${url}`, () => fetchArtifactLinkPreview(url), releaseArtifact);
+  if (state.status === "loading") return <p className="preview-note">{t.preview.loading}</p>;
+  if (state.status === "error") {
+    if (state.kind === "too_large") return <LinkOutCard url={url} message={t.preview.tooLarge} />;
+    const message = state.kind === "not_found" ? t.preview.artifactGone : t.preview.artifactUnavailable;
+    return <LinkOutCard url={url} message={message} />;
+  }
+  const artifact = state.value;
+  const name = artifact.title ?? artifact.filename ?? hostOf(url);
+  const path = artifact.filename ?? "artifact.txt";
+  if (artifact.kind === "html") {
+    // A direct child of .preview-body, like a local HTML file, so the frame
+    // fills the pane (App.css `.preview-body:has(> .preview-site)`).
+    return artifact.siteUrl !== null ? (
+      <SitePreview url={artifact.siteUrl} name={name} />
+    ) : (
+      <LinkOutCard url={url} message={t.preview.artifactUnavailable} />
+    );
+  }
+  let body;
+  switch (artifact.kind) {
+    case "image":
+      body = <Renderers.image bytes={artifact.bytes} alt={name} />;
+      break;
+    case "pdf":
+      body = <Renderers.pdf bytes={artifact.bytes} />;
+      break;
+    case "markdown":
+      body = <Renderers.text bytes={artifact.bytes} path={path} markdown />;
+      break;
+    case "text":
+      body = <Renderers.text bytes={artifact.bytes} path={path} markdown={false} />;
+      break;
+    case "sheet":
+      body = <Renderers.sheet bytes={artifact.bytes} />;
+      break;
+    case "docx":
+      body = <Renderers.docx bytes={artifact.bytes} onOpenLink={onOpenLink} />;
+      break;
+    default:
+      body = null;
+  }
+  if (body === null) return <LinkOutCard url={url} message={t.preview.artifactUnavailable} />;
+  return (
+    <article className="preview-artifact">
+      {artifact.title && <h2 className="preview-web-title">{artifact.title}</h2>}
+      {body}
     </article>
   );
 }
@@ -292,10 +358,12 @@ export default function PreviewPane({
             ) : target.kind === "media" ? (
               <img className="preview-image" src={convertFileSrc(target.ref)} alt={title} />
             ) : isWeb ? (
-              previewKind(target) === "web" ? (
-                <WebBody profileId={profileId} url={target.ref} onOpenLink={onOpenLink} />
-              ) : (
+              previewKind(target) !== "web" ? (
                 <p className="preview-note">{t.preview.unsupported}</p>
+              ) : isArtifactShareUrl(target.ref) ? (
+                <ArtifactBody url={target.ref} onOpenLink={onOpenLink} />
+              ) : (
+                <WebBody profileId={profileId} url={target.ref} onOpenLink={onOpenLink} />
               )
             ) : (
               <FileBody profileId={profileId} path={target.ref} onOpenLink={onOpenLink} />

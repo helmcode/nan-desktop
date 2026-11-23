@@ -291,6 +291,56 @@ export function fetchWebPreview(profileId: string, url: string): Promise<WebPrev
 }
 
 // ---------------------------------------------------------------------------
+// Shared artifact links in the preview (issue #57) - src/artifact_link.rs
+//
+// The core fetches the share page and the artifact bytes itself (no
+// credentials). HTML comes back as a sandboxed site URL (the same
+// ephemeral document class as a user's own HTML file); every other type as
+// base64 bytes for the existing renderers.
+// ---------------------------------------------------------------------------
+
+export type ArtifactLinkKind = "html" | "pdf" | "image" | "markdown" | "text" | "sheet" | "docx";
+
+export interface ArtifactLinkPayload {
+  kind: string;
+  title?: string | null;
+  filename?: string | null;
+  size: number;
+  base64?: string;
+  siteUrl?: string;
+}
+
+export interface ArtifactLinkPreview {
+  kind: ArtifactLinkKind | "unsupported";
+  title: string | null;
+  filename: string | null;
+  bytes: Uint8Array;
+  /// HTML only, and only the core's sandboxed scheme; null otherwise.
+  siteUrl: string | null;
+}
+
+const ARTIFACT_KINDS: ReadonlySet<string> = new Set(["html", "pdf", "image", "markdown", "text", "sheet", "docx"]);
+
+/// The sandboxed URL of an HTML artifact, or null (any other kind, or a
+/// URL that is not the core's site scheme: never frame an arbitrary URL).
+export function artifactSiteUrl(payload: ArtifactLinkPayload): string | null {
+  if (payload.kind !== "html" || typeof payload.siteUrl !== "string") return null;
+  return SITE_URL.test(payload.siteUrl) ? payload.siteUrl : null;
+}
+
+export async function fetchArtifactLinkPreview(url: string): Promise<ArtifactLinkPreview> {
+  const payload = await invoke<ArtifactLinkPayload>("artifact_link_preview", { url });
+  const label = (value: unknown) => (typeof value === "string" && value.trim() ? value : null);
+  return {
+    kind: ARTIFACT_KINDS.has(payload.kind) ? (payload.kind as ArtifactLinkKind) : "unsupported",
+    title: label(payload.title),
+    filename: label(payload.filename),
+    bytes: typeof payload.base64 === "string" ? base64ToBytes(payload.base64) : new Uint8Array(),
+    siteUrl: artifactSiteUrl(payload),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Local file preview (S21) - src/preview.rs
 //
 // The CSP forbids data:/blob: images and fetches to asset:, so the renderer

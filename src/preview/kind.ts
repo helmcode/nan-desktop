@@ -71,6 +71,17 @@ export function codeLanguage(path: string): string {
   return ext === "yml" ? "yaml" : ext === "svg" ? "xml" : ext;
 }
 
+/// Issue #57: a share link of one of the two tenants' artifact hosts
+/// (https, exact host, exact `/a/<token>` path; query and fragment
+/// ignored). Mirrors `artifact_link::parse_share_url` in the core, which
+/// re-checks it; every other URL keeps the generic web preview.
+const ARTIFACT_SHARE_URL =
+  /^https:\/\/(?:artifacts\.nan\.builders|artifacts\.helmcode\.com)\/a\/[A-Za-z0-9_-]{16,128}(?:[?#][^\s]*)?$/i;
+
+export function isArtifactShareUrl(url: string): boolean {
+  return url.length <= 2048 && ARTIFACT_SHARE_URL.test(url.trim());
+}
+
 export function targetKey(target: PreviewTarget): string {
   return `${target.kind}:${target.ref}`;
 }

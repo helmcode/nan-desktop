@@ -37,6 +37,8 @@ mod links;
 mod memory;
 // Preview pane backends (S21): granted-file reads + platform page fetch.
 mod preview;
+// Issue #57: shared artifact links shown with their content in the pane.
+mod artifact_link;
 // Child processes: every spawn hides its console window on Windows.
 mod process;
 mod profile;
@@ -378,6 +380,7 @@ pub fn run() {
             preview::preview_release_site,
             preview::preview_reveal_location,
             preview::web_preview_fetch,
+            artifact_link::artifact_link_preview,
             links::open_external,
             telemetry::telemetry_renderer_crash,
             updater::update_check,
