@@ -117,6 +117,10 @@ it). Both are always offered (the library is the app's own storage, like
 generated images), need no approval card, and emit `video://changed` so the
 side panel opens the video; the reply records a `video` artifact (its id).
 
+- Variables: `text` (`data-var-text`), `color` and `number` (both written
+  by the core as `:root` custom properties, validated, so `var(--id)` works
+  in CSS and `calc()` without relying on the runtime binding; numbers drive
+  chart bars), `image` (`data-var-src`).
 - Voice-over: kokoro (`/audio/speech`, the same request as read-aloud), WAV
   saved as `assets/voiceover.wav`; its length goes back to the model.
 - Images: the model calls `generate_image` first and passes the returned
@@ -186,8 +190,13 @@ preview for a browser check.
 The routes are a closed set (`render::Route`); render ids are validated
 (`[A-Za-z0-9_-]{1,64}`); every API code maps to a typed error with plain
 copy: 402 quota (remaining + renewal date) / subscription, 413, 422,
-429 too-many-active / rate-limited (Retry-After), 409 canceled, 400
-upload_failed, 401 session, failed/timeout renders, offline, expired link.
+429 too-many-active / rate-limited (Retry-After), 409 canceled, 503 busy /
+storage_unavailable / unavailable (retryable, Retry-After), no credential
+(NaN 401, enterprise 404 on create/quota) as "sign in again", failed/timeout
+renders, offline, expired link. The job status carries `charge_seconds`.
+The upload window is 10 minutes (the platform proxy's read timeout): the
+bundle streams in chunks with `video://upload` progress, and the panel warns
+when the pace projects past ~9 minutes.
 An export in flight is remembered per project in `localStorage` (a
 convenience: reopening the editor resumes the progress).
 
