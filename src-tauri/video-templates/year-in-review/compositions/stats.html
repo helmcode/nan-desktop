@@ -1,0 +1,56 @@
+<template id="stats-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .stats-stage { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 7vmin; padding: 7vmin 8vmin; box-sizing: border-box; }
+    .stats-title { margin: 0; font-family: "Playfair Display", serif; font-weight: 700; font-size: 7vmin; line-height: 1.05; animation: stats-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4vmin; }
+    .stats-card { display: flex; flex-direction: column; gap: 1.6vmin; padding-top: 3vmin; position: relative; min-width: 0; }
+    .stats-line { position: absolute; top: 0; left: 0; right: 0; height: 0.4vmin; background: var(--accent); transform-origin: left center; animation: stats-bar 0.7s cubic-bezier(0.7, 0, 0.3, 1) both; }
+    .stats-value { margin: 0; font-family: "Playfair Display", serif; font-weight: 700; font-size: 11vmin; line-height: 1; color: var(--accent); white-space: nowrap; animation: stats-pop 0.8s cubic-bezier(0.2, 0.9, 0.3, 1.2) both; }
+    .stats-label { margin: 0; font-size: 3.2vmin; line-height: 1.25; opacity: 0.85; animation: stats-up 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .stats-card:nth-child(1) .stats-line { animation-delay: 0.4s; }
+    .stats-card:nth-child(1) .stats-value { animation-delay: 0.55s; }
+    .stats-card:nth-child(1) .stats-label { animation-delay: 0.75s; }
+    .stats-card:nth-child(2) .stats-line { animation-delay: 0.75s; }
+    .stats-card:nth-child(2) .stats-value { animation-delay: 0.9s; }
+    .stats-card:nth-child(2) .stats-label { animation-delay: 1.1s; }
+    .stats-card:nth-child(3) .stats-line { animation-delay: 1.1s; }
+    .stats-card:nth-child(3) .stats-value { animation-delay: 1.25s; }
+    .stats-card:nth-child(3) .stats-label { animation-delay: 1.45s; }
+    .stats-card:nth-child(4) .stats-line { animation-delay: 1.45s; }
+    .stats-card:nth-child(4) .stats-value { animation-delay: 1.6s; }
+    .stats-card:nth-child(4) .stats-label { animation-delay: 1.8s; }
+    @media (min-aspect-ratio: 5/4) {
+      .stats-title { font-size: 8.5vmin; }
+      .stats-value { font-size: 13vmin; }
+      .stats-label { font-size: 3.8vmin; }
+      .stats-stage { gap: 9vmin; }
+    }
+    @media (max-aspect-ratio: 5/4) {
+      .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 6vmin; column-gap: 6vmin; }
+      .stats-value { font-size: 12vmin; }
+      .stats-label { font-size: 4vmin; }
+    }
+    @media (max-aspect-ratio: 4/5) {
+      .stats-title { font-size: 10vmin; }
+      .stats-grid { row-gap: 12vmin; }
+      .stats-value { font-size: 15vmin; }
+      .stats-label { font-size: 5vmin; }
+      .stats-stage { gap: 12vmin; }
+    }
+    @keyframes stats-up { from { opacity: 0; transform: translateY(4vmin); } to { opacity: 1; transform: none; } }
+    @keyframes stats-bar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes stats-pop { from { opacity: 0; transform: translateY(5vmin); clip-path: inset(100% 0 0 0); } to { opacity: 1; transform: none; clip-path: inset(0 0 -20% 0); } }
+  </style>
+  <div id="root" data-composition-id="stats" data-width="1920" data-height="1080">
+    <div id="stats-stage" class="clip stats-stage" data-start="0" data-duration="5.5">
+      <h2 id="stats-title" class="stats-title" data-var-text="stats-title">Un año en cifras</h2>
+      <div id="stats-grid" class="stats-grid">
+        <div id="stats-card-1" class="stats-card"><div class="stats-line"></div><p class="stats-value" data-var-text="stat-1-value">1.240</p><p class="stats-label" data-var-text="stat-1-label">proyectos entregados</p></div>
+        <div id="stats-card-2" class="stats-card"><div class="stats-line"></div><p class="stats-value" data-var-text="stat-2-value">38</p><p class="stats-label" data-var-text="stat-2-label">personas en el equipo</p></div>
+        <div id="stats-card-3" class="stats-card"><div class="stats-line"></div><p class="stats-value" data-var-text="stat-3-value">12</p><p class="stats-label" data-var-text="stat-3-label">países con clientes</p></div>
+        <div id="stats-card-4" class="stats-card"><div class="stats-line"></div><p class="stats-value" data-var-text="stat-4-value">98 %</p><p class="stats-label" data-var-text="stat-4-label">de clientes satisfechos</p></div>
+      </div>
+    </div>
+  </div>
+</template>

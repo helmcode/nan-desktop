@@ -1,0 +1,38 @@
+<template id="cta-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--fg); color: var(--bg); font-family: "Inter", system-ui, sans-serif; }
+    .cta-stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4.5vmin; padding: 0 8vmin; text-align: center; }
+    .cta-ring { position: absolute; left: 50%; top: 50%; width: 150vmax; height: 150vmax; margin: -75vmax 0 0 -75vmax; border-radius: 50%; background: var(--bg); animation: cta-iris 0.7s cubic-bezier(0.7, 0, 0.3, 1) both; }
+    .cta-old { position: relative; font-size: 5vmin; font-weight: 700; opacity: 0.6; animation: cta-fade 0.5s ease 0.5s both; }
+    .cta-strike { position: absolute; left: -4%; top: 50%; width: 108%; height: 0.8vmin; background: var(--accent); transform-origin: left center; animation: cta-strike 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) 0.9s both; }
+    .cta-price { position: relative; margin: 0; font-family: "Montserrat", "Inter", system-ui, sans-serif; font-size: 20vmin; font-weight: 800; letter-spacing: -0.05em; line-height: 0.95; white-space: nowrap; color: var(--bg); animation: cta-slam 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.3) 1.1s both; }
+    .cta-button { position: relative; display: flex; align-items: center; gap: 2.5vmin; padding: 2.6vmin 6vmin; border-radius: 999px; background: var(--accent); color: var(--bg); font-size: 5.5vmin; font-weight: 700; animation: cta-rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) 1.6s both, cta-pulse 0.9s ease-in-out 2.3s 2 both; }
+    .cta-arrow { display: block; width: 4vmin; height: 4vmin; border-top: 1vmin solid currentColor; border-right: 1vmin solid currentColor; transform: rotate(45deg); }
+    .cta-url { position: relative; margin: 0; font-size: 3.8vmin; font-weight: 700; letter-spacing: 0.02em; opacity: 0.85; animation: cta-fade 0.6s ease 2s both; }
+    @keyframes cta-iris { from { transform: scale(1); } to { transform: scale(0); } }
+    @keyframes cta-fade { from { opacity: 0; } to { opacity: 0.7; } }
+    @keyframes cta-strike { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes cta-slam { from { opacity: 0; transform: scale(1.8); } to { opacity: 1; transform: scale(1); } }
+    @keyframes cta-rise { from { opacity: 0; transform: translateY(5vmin); } to { opacity: 1; transform: none; } }
+    @keyframes cta-pulse { 0%, 100% { scale: 1; } 50% { scale: 1.07; } }
+    @media (max-aspect-ratio: 3/4) {
+      .cta-price { font-size: 17vmin; }
+    }
+    @media (max-aspect-ratio: 3/4) {
+      .cta-stage { gap: 6vmin; }
+      .cta-old { font-size: 6.5vmin; }
+      .cta-price { font-size: 18vmin; }
+      .cta-button { font-size: 7vmin; padding: 3.4vmin 8vmin; }
+      .cta-url { font-size: 5vmin; }
+    }
+  </style>
+  <div id="root" data-composition-id="cta" data-width="1920" data-height="1080">
+    <div id="cta-stage" class="clip cta-stage" data-start="0" data-duration="4">
+      <div id="cta-ring" class="cta-ring"></div>
+      <span id="cta-old" class="cta-old"><span data-var-text="old-price">28,50 €</span><span id="cta-strike" class="cta-strike"></span></span>
+      <p id="cta-price" class="cta-price" data-var-text="price">19,90 €</p>
+      <div id="cta-button" class="cta-button"><span data-var-text="cta">Pídelo hoy</span><span id="cta-arrow" class="cta-arrow"></span></div>
+      <p id="cta-url" class="cta-url" data-var-text="url">@novacafe</p>
+    </div>
+  </div>
+</template>

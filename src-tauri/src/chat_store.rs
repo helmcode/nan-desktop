@@ -150,6 +150,9 @@ pub struct ChatMessageRow {
 pub enum ArtifactKind {
     File,
     Image,
+    /// R-V1: a video project the assistant created or changed; `path` is
+    /// the project id (never a filesystem path).
+    Video,
 }
 
 /// One file a reply produced, by absolute path.

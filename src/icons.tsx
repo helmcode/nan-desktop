@@ -296,3 +296,23 @@ export const IconTable = (p: IconProps) => (
     <path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10" />
   </Icon>
 );
+
+/// R-V1: videos (a film frame with a play mark).
+export const IconFilm = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="M10 9.5v5l4.5-2.5z" />
+  </Icon>
+);
+
+export const IconPlay = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M7 5v14l11-7z" />
+  </Icon>
+);
+
+export const IconGrip = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01" />
+  </Icon>
+);

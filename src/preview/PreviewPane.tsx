@@ -27,6 +27,9 @@ import { isTopLayer, useEscapeLayer } from "../escapeLayers";
 import { isArtifactShareUrl, previewKind, targetKey, type PreviewTarget } from "./kind";
 import { revealInFolder } from "./reveal";
 import { shareSourceFor, type ShareSource } from "../artifacts/artifacts";
+import { videoPreview, type VideoPreviewInfo } from "../video/api";
+
+const VideoPlayer = lazy(() => import("../video/VideoPlayer").then((m) => ({ default: m.VideoPlayer })));
 
 const Renderers = {
   image: lazy(() => import("./renderers").then((m) => ({ default: m.ImagePreview }))),
@@ -162,6 +165,30 @@ function ArtifactBody({ url, onOpenLink }: { url: string; onOpenLink: (url: stri
   );
 }
 
+/// R-V1: a video preview's token goes back to the core when its player is
+/// gone (the target changed or the pane closed).
+function releaseVideo(info: VideoPreviewInfo): void {
+  releaseSitePreview(info.url);
+}
+
+/// R-V1: a project of the user's video library in the sandboxed player.
+function VideoBody({ profileId, projectId }: { profileId: string; projectId: string }) {
+  const t = useT();
+  const state = useLoad<VideoPreviewInfo>(`video:${projectId}`, () => videoPreview(profileId, projectId), releaseVideo);
+  if (state.status === "loading") return <p className="preview-note">{t.video.loading}</p>;
+  if (state.status === "error") {
+    const message =
+      state.kind === "not_found" ? t.video.gone : state.kind === "too_large" ? t.video.tooLarge : t.video.previewFailed;
+    return <p className="preview-note">{message}</p>;
+  }
+  return (
+    <article className="preview-video">
+      <h2 className="preview-web-title">{state.value.title}</h2>
+      <VideoPlayer info={state.value} />
+    </article>
+  );
+}
+
 /// R22: a user HTML document's ephemeral token goes back to the core when
 /// its preview is gone (a tool website's token is never released).
 function releaseFile(file: FileForPreview): void {
@@ -227,6 +254,7 @@ export default function PreviewPane({
   onEditImage,
   onRemove,
   onShare,
+  onOpenVideo,
 }: {
   target: PreviewTarget;
   profileId: string;
@@ -242,14 +270,18 @@ export default function PreviewPane({
   /// When set (shared artifacts available), a shareable file or generated
   /// image shows a "Share" button that opens the share-as-link dialog.
   onShare?: (source: ShareSource) => void;
+  /// R-V1: when set, a video shows "Edit video", which opens the Videos
+  /// editor on it.
+  onOpenVideo?: (projectId: string) => void;
 }) {
   const t = useT();
   const isWeb = target.kind === "web";
+  const isVideo = target.kind === "video";
   const isImage = target.kind === "media" || (target.kind === "file" && previewKind(target) === "image");
   const editable =
     onEditImage !== undefined &&
     (target.kind === "media" || (target.kind === "file" && previewKind(target) === "image" && isEditableImagePath(target.ref)));
-  const title = isWeb ? hostOf(target.ref) : folderName(target.ref);
+  const title = isWeb ? hostOf(target.ref) : isVideo ? t.video.previewTitle : folderName(target.ref);
   const key = targetKey(target);
   // Only local files the user granted live in a folder of theirs; web pages
   // and generated images (app data) have nothing to show in a folder.
@@ -294,6 +326,12 @@ export default function PreviewPane({
             onClick={() => openExternal(target.ref)}
           >
             <IconExternal size={16} />
+          </button>
+        )}
+        {isVideo && onOpenVideo && (
+          <button type="button" className="btn btn-secondary btn-sm preview-edit" onClick={() => onOpenVideo(target.ref)}>
+            <IconPencil size={14} />
+            {t.video.edit}
           </button>
         )}
         {editable && (
@@ -357,6 +395,12 @@ export default function PreviewPane({
               </div>
             ) : target.kind === "media" ? (
               <img className="preview-image" src={convertFileSrc(target.ref)} alt={title} />
+            ) : isVideo ? (
+              previewKind(target) === "video" ? (
+                <VideoBody profileId={profileId} projectId={target.ref} />
+              ) : (
+                <p className="preview-note">{t.preview.unsupported}</p>
+              )
             ) : isWeb ? (
               previewKind(target) !== "web" ? (
                 <p className="preview-note">{t.preview.unsupported}</p>

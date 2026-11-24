@@ -1,0 +1,31 @@
+{
+  "id": "before-after",
+  "title": { "es": "Antes y después", "en": "Before and after" },
+  "description": {
+    "es": "Compara dos estados con una cortinilla que revela el después, y cierra con una frase.",
+    "en": "Compare two states with a wipe that reveals the after, then close with one line."
+  },
+  "category": "marketing",
+  "aspect": "16:9",
+  "fps": 30,
+  "fonts": ["inter-400.woff2", "inter-700.woff2", "inter-900.woff2", "jetbrains-mono-500.woff2"],
+  "scenes": [
+    { "id": "compare", "title": { "es": "Comparación", "en": "Comparison" }, "duration": 6.5 },
+    { "id": "closing", "title": { "es": "Cierre", "en": "Closing" }, "duration": 3 }
+  ],
+  "variables": [
+    { "id": "before-label", "type": "text", "label": { "es": "Etiqueta de antes", "en": "Before label" }, "value": { "es": "Antes", "en": "Before" } },
+    { "id": "before-value", "type": "text", "label": { "es": "Dato de antes", "en": "Before figure" }, "value": { "es": "12 h", "en": "12 h" } },
+    { "id": "before-text", "type": "text", "label": { "es": "Detalle de antes", "en": "Before detail" }, "value": { "es": "a la semana en tareas repetitivas", "en": "a week on repetitive tasks" } },
+    { "id": "after-label", "type": "text", "label": { "es": "Etiqueta de después", "en": "After label" }, "value": { "es": "Después", "en": "After" } },
+    { "id": "after-value", "type": "text", "label": { "es": "Dato de después", "en": "After figure" }, "value": { "es": "2 h", "en": "2 h" } },
+    { "id": "after-text", "type": "text", "label": { "es": "Detalle de después", "en": "After detail" }, "value": { "es": "con el proceso automatizado", "en": "with the process automated" } },
+    { "id": "closing", "type": "text", "label": { "es": "Frase de cierre", "en": "Closing line" }, "value": { "es": "Menos rutina, más tiempo para lo importante.", "en": "Less busywork, more time for what matters." } },
+    { "id": "url", "type": "text", "label": { "es": "Web o usuario", "en": "Website or handle" }, "value": { "es": "tuweb.com", "en": "yoursite.com" } },
+    { "id": "logo", "type": "image", "label": { "es": "Logo", "en": "Logo" }, "value": { "es": "assets/logo.svg", "en": "assets/logo.svg" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#111216", "en": "#111216" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto", "en": "Text" }, "value": { "es": "#f4f4f6", "en": "#f4f4f6" } },
+    { "id": "muted", "type": "color", "label": { "es": "Color de antes", "en": "Before color" }, "value": { "es": "#2a2c33", "en": "#2a2c33" } },
+    { "id": "accent", "type": "color", "label": { "es": "Color de después", "en": "After color" }, "value": { "es": "#3ddc97", "en": "#3ddc97" } }
+  ]
+}

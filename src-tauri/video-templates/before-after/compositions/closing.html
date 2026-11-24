@@ -1,0 +1,29 @@
+<template id="closing-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .closing-stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5vmin; padding: 0 9vmin; text-align: center; }
+    .closing-split { display: flex; width: 24vmin; height: 1.6vmin; border-radius: 1vmin; overflow: hidden; animation: closing-grow 0.7s cubic-bezier(0.7, 0, 0.2, 1) both; }
+    .closing-split span { flex: 1; }
+    .closing-split span:first-child { background: var(--muted); }
+    .closing-split span:last-child { background: var(--accent); }
+    .closing-line { margin: 0; max-width: 20ch; font-size: 8.5vmin; font-weight: 900; line-height: 1.05; letter-spacing: -0.035em; animation: closing-up 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.3s both; }
+    .closing-foot { display: flex; align-items: center; gap: 2.6vmin; animation: closing-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 0.8s both; }
+    .closing-logo { width: 7vmin; height: 7vmin; object-fit: contain; }
+    .closing-url { margin: 0; font-family: "JetBrains Mono", monospace; font-weight: 500; font-size: 3.6vmin; color: var(--accent); }
+    @media (max-aspect-ratio: 4/5) {
+      .closing-line { font-size: 10vmin; }
+    }
+    @keyframes closing-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes closing-up { from { opacity: 0; transform: translateY(5vmin); } to { opacity: 1; transform: none; } }
+  </style>
+  <div id="root" data-composition-id="closing" data-width="1920" data-height="1080">
+    <div id="closing-stage" class="clip closing-stage" data-start="0" data-duration="3">
+      <div id="closing-split" class="closing-split"><span></span><span></span></div>
+      <h2 id="closing-line" class="closing-line" data-var-text="closing">Menos rutina, más tiempo para lo importante.</h2>
+      <div id="closing-foot" class="closing-foot">
+        <img id="closing-logo" class="closing-logo" src="assets/logo.svg" data-var-src="logo" alt="">
+        <p id="closing-url" class="closing-url" data-var-text="url">tuweb.com</p>
+      </div>
+    </div>
+  </div>
+</template>

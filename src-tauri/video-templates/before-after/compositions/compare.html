@@ -1,0 +1,97 @@
+<template id="compare-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--muted); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .compare-stage { position: absolute; inset: 0; }
+    .compare-panel { position: absolute; inset: 0; }
+    .compare-before { background: var(--muted); color: var(--fg); }
+    .compare-after { background: var(--accent); color: var(--bg); clip-path: inset(0 0 0 50%); animation: compare-wipe 1s cubic-bezier(0.7, 0, 0.2, 1) 1.6s both; }
+    .compare-box { position: absolute; top: 0; bottom: 0; width: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; gap: 3vmin; padding: 6vmin 7vmin; box-sizing: border-box; }
+    .compare-box-before { left: 0; animation: compare-slide 1s cubic-bezier(0.7, 0, 0.2, 1) 1.6s both; }
+    .compare-box-after { left: 50%; }
+    .compare-label { margin: 0; padding: 1vmin 2.4vmin; border: 0.35vmin solid currentColor; border-radius: 999px; font-family: "JetBrains Mono", monospace; font-weight: 500; font-size: 2.6vmin; letter-spacing: 0.14em; text-transform: uppercase; }
+    .compare-value { margin: 0; font-size: 17vmin; font-weight: 900; line-height: 0.9; letter-spacing: -0.05em; }
+    .compare-text { margin: 0; max-width: 18ch; font-size: 3.6vmin; line-height: 1.25; opacity: 0.8; }
+    .compare-tiles { display: grid; grid-template-columns: repeat(3, 4.2vmin); gap: 1.4vmin; margin-bottom: 1vmin; }
+    .compare-tile { width: 4.2vmin; height: 4.2vmin; border-radius: 1vmin; }
+    .compare-box-before .compare-tile { background: var(--fg); opacity: 0.35; }
+    .compare-box-after .compare-tile { background: var(--bg); }
+    .compare-box-before > * { animation: compare-in 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .compare-box-before > :nth-child(2) { animation-delay: 0.1s; }
+    .compare-box-before > :nth-child(3) { animation-delay: 0.2s; }
+    .compare-box-before > :nth-child(4) { animation-delay: 0.3s; }
+    .compare-box-after > * { animation: compare-in 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .compare-box-after > :nth-child(1) { animation-delay: 2.2s; }
+    .compare-box-after > :nth-child(2) { animation-delay: 2.3s; }
+    .compare-box-after > :nth-child(3) { animation-delay: 2.4s; }
+    .compare-box-after > :nth-child(4) { animation-delay: 2.5s; }
+    .compare-t1 { transform: translate(0.6vmin, -1vmin) rotate(18deg); }
+    .compare-t2 { transform: translate(-0.8vmin, 1.2vmin) rotate(-24deg); }
+    .compare-t3 { transform: translate(1.4vmin, 0.4vmin) rotate(40deg); }
+    .compare-t4 { transform: translate(-1.2vmin, -0.6vmin) rotate(-12deg); }
+    .compare-t5 { transform: translate(0.4vmin, 1.4vmin) rotate(30deg); }
+    .compare-t6 { transform: translate(1vmin, -1.2vmin) rotate(-36deg); }
+    .compare-t7 { transform: translate(-1.4vmin, 0.8vmin) rotate(22deg); }
+    .compare-t8 { transform: translate(0.8vmin, -0.4vmin) rotate(-8deg); }
+    .compare-t9 { transform: translate(-0.6vmin, 1vmin) rotate(48deg); }
+    .compare-box-after .compare-tile { animation: compare-snap 0.7s cubic-bezier(0.3, 1.4, 0.5, 1) both; }
+    .compare-box-after .compare-tile:nth-child(2) { animation-delay: 2.85s; }
+    .compare-box-after .compare-tile:nth-child(3) { animation-delay: 2.9s; }
+    .compare-box-after .compare-tile:nth-child(4) { animation-delay: 2.95s; }
+    .compare-box-after .compare-tile:nth-child(5) { animation-delay: 3s; }
+    .compare-box-after .compare-tile:nth-child(6) { animation-delay: 3.05s; }
+    .compare-box-after .compare-tile:nth-child(7) { animation-delay: 3.1s; }
+    .compare-box-after .compare-tile:nth-child(8) { animation-delay: 3.15s; }
+    .compare-box-after .compare-tile:nth-child(9) { animation-delay: 3.2s; }
+    .compare-box-after .compare-tile:nth-child(1) { animation-delay: 2.8s; }
+    .compare-divider { position: absolute; top: 0; bottom: 0; left: 50%; width: 0.6vmin; margin-left: -0.3vmin; background: var(--fg); animation: compare-divider 1s cubic-bezier(0.7, 0, 0.2, 1) 1.6s both; }
+    .compare-handle { position: absolute; top: 50%; left: 50%; width: 9vmin; height: 9vmin; margin: -4.5vmin 0 0 -4.5vmin; border-radius: 50%; background: var(--fg); color: var(--bg); display: flex; align-items: center; justify-content: center; box-shadow: 0 1vmin 3vmin rgba(0, 0, 0, 0.35); }
+    .compare-handle svg { width: 5vmin; height: 5vmin; }
+    @media (min-aspect-ratio: 5/4) {
+      .compare-value { font-size: 20vmin; }
+      .compare-text { font-size: 4vmin; }
+      .compare-label { font-size: 2.8vmin; }
+    }
+    @media (max-aspect-ratio: 4/5) {
+      .compare-after { clip-path: inset(50% 0 0 0); animation-name: compare-wipe-v; }
+      .compare-box { left: 0; right: 0; width: auto; height: 50%; padding: 6vmin 8vmin; }
+      .compare-box-before { top: 0; bottom: auto; animation-name: compare-slide-v; }
+      .compare-box-after { top: 50%; bottom: auto; left: 0; }
+      .compare-value { font-size: 20vmin; }
+      .compare-text { font-size: 4.6vmin; max-width: 20ch; }
+      .compare-label { font-size: 3.2vmin; }
+      .compare-divider { top: 50%; bottom: auto; left: 0; right: 0; width: auto; height: 0.6vmin; margin: -0.3vmin 0 0 0; animation-name: compare-divider-v; }
+      .compare-handle svg { transform: rotate(90deg); }
+    }
+    @keyframes compare-in { from { opacity: 0; transform: translateY(4vmin); } to { opacity: 1; transform: none; } }
+    @keyframes compare-wipe { from { clip-path: inset(0 0 0 100%); } to { clip-path: inset(0 0 0 50%); } }
+    @keyframes compare-wipe-v { from { clip-path: inset(100% 0 0 0); } to { clip-path: inset(50% 0 0 0); } }
+    @keyframes compare-slide { from { transform: translateX(50%); } to { transform: none; } }
+    @keyframes compare-slide-v { from { transform: translateY(50%); } to { transform: none; } }
+    @keyframes compare-divider { from { left: 100%; opacity: 0; } 10% { opacity: 1; } to { left: 50%; opacity: 1; } }
+    @keyframes compare-divider-v { from { top: 100%; opacity: 0; } 10% { opacity: 1; } to { top: 50%; opacity: 1; } }
+    @keyframes compare-snap { from { opacity: 0; transform: rotate(-45deg) scale(0.3); } to { opacity: 1; transform: none; } }
+  </style>
+  <div id="root" data-composition-id="compare" data-width="1920" data-height="1080">
+    <div id="compare-stage" class="clip compare-stage" data-start="0" data-duration="6.5">
+      <div id="compare-before" class="compare-panel compare-before">
+        <div id="compare-box-before" class="compare-box compare-box-before">
+          <div id="compare-tiles-before" class="compare-tiles"><span class="compare-tile compare-t1"></span><span class="compare-tile compare-t2"></span><span class="compare-tile compare-t3"></span><span class="compare-tile compare-t4"></span><span class="compare-tile compare-t5"></span><span class="compare-tile compare-t6"></span><span class="compare-tile compare-t7"></span><span class="compare-tile compare-t8"></span><span class="compare-tile compare-t9"></span></div>
+          <p id="compare-before-label" class="compare-label" data-var-text="before-label">Antes</p>
+          <p id="compare-before-value" class="compare-value" data-var-text="before-value">12 h</p>
+          <p id="compare-before-text" class="compare-text" data-var-text="before-text">a la semana en tareas repetitivas</p>
+        </div>
+      </div>
+      <div id="compare-after" class="compare-panel compare-after">
+        <div id="compare-box-after" class="compare-box compare-box-after">
+          <div id="compare-tiles-after" class="compare-tiles"><span class="compare-tile"></span><span class="compare-tile"></span><span class="compare-tile"></span><span class="compare-tile"></span><span class="compare-tile"></span><span class="compare-tile"></span><span class="compare-tile"></span><span class="compare-tile"></span><span class="compare-tile"></span></div>
+          <p id="compare-after-label" class="compare-label" data-var-text="after-label">Después</p>
+          <p id="compare-after-value" class="compare-value" data-var-text="after-value">2 h</p>
+          <p id="compare-after-text" class="compare-text" data-var-text="after-text">con el proceso automatizado</p>
+        </div>
+      </div>
+      <div id="compare-divider" class="compare-divider">
+        <div id="compare-handle" class="compare-handle"><svg viewBox="0 0 40 40"><path d="M15 12l-8 8 8 8M25 12l8 8-8 8" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      </div>
+    </div>
+  </div>
+</template>

@@ -1,0 +1,26 @@
+<template id="outro-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--fg); color: var(--bg); font-family: "Inter", system-ui, sans-serif; }
+    .outro-stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5vmin; padding: 0 8vmin; text-align: center; }
+    .outro-check { width: 22vmin; height: 22vmin; animation: outro-pop 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.3) both; }
+    .outro-ring { fill: var(--accent); }
+    .outro-tick { fill: none; stroke: var(--fg); stroke-width: 9; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; animation: outro-draw 0.5s cubic-bezier(0.6, 0, 0.3, 1) 0.45s both; }
+    .outro-title { margin: 0; max-width: 18ch; font-size: 9vmin; font-weight: 900; line-height: 1.05; letter-spacing: -0.03em; animation: outro-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 0.7s both; }
+    .outro-foot { display: flex; align-items: center; gap: 3vmin; animation: outro-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 1.1s both; }
+    .outro-logo { width: 7vmin; height: 7vmin; object-fit: contain; }
+    .outro-url { margin: 0; font-size: 4vmin; font-weight: 700; color: var(--accent); }
+    @keyframes outro-pop { from { opacity: 0; transform: scale(0.4) rotate(-20deg); } to { opacity: 1; transform: none; } }
+    @keyframes outro-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+    @keyframes outro-up { from { opacity: 0; transform: translateY(5vmin); } to { opacity: 1; transform: none; } }
+  </style>
+  <div id="root" data-composition-id="outro" data-width="1920" data-height="1080">
+    <div id="outro-stage" class="clip outro-stage" data-start="0" data-duration="3.5">
+      <svg id="outro-check" class="outro-check" viewBox="0 0 100 100"><circle class="outro-ring" cx="50" cy="50" r="48"/><path class="outro-tick" pathLength="1" d="M29 52l14 14 28-30"/></svg>
+      <h2 id="outro-title" class="outro-title" data-var-text="outro">Ya está. Ahora te toca a ti.</h2>
+      <div id="outro-foot" class="outro-foot">
+        <img id="outro-logo" class="outro-logo" src="assets/logo.svg" data-var-src="logo" alt="">
+        <p id="outro-url" class="outro-url" data-var-text="url">tuweb.com</p>
+      </div>
+    </div>
+  </div>
+</template>

@@ -1,0 +1,35 @@
+{
+  "id": "tutorial-steps",
+  "title": { "es": "Tutorial en pasos", "en": "Step-by-step tutorial" },
+  "description": {
+    "es": "Explica cómo hacer algo en tres pasos numerados, con portada y cierre.",
+    "en": "Explain how to do something in three numbered steps, with an opening and a closing."
+  },
+  "category": "education",
+  "aspect": "16:9",
+  "fps": 30,
+  "fonts": ["inter-400.woff2", "inter-700.woff2", "inter-900.woff2", "montserrat-800.woff2"],
+  "scenes": [
+    { "id": "intro", "title": { "es": "Portada", "en": "Opening" }, "duration": 3 },
+    { "id": "step-1", "title": { "es": "Paso 1", "en": "Step 1" }, "duration": 3.5 },
+    { "id": "step-2", "title": { "es": "Paso 2", "en": "Step 2" }, "duration": 3.5 },
+    { "id": "step-3", "title": { "es": "Paso 3", "en": "Step 3" }, "duration": 3.5 },
+    { "id": "outro", "title": { "es": "Cierre", "en": "Closing" }, "duration": 3.5 }
+  ],
+  "variables": [
+    { "id": "kicker", "type": "text", "label": { "es": "Etiqueta", "en": "Tag" }, "value": { "es": "Guía rápida", "en": "Quick guide" } },
+    { "id": "title", "type": "text", "label": { "es": "Título", "en": "Title" }, "value": { "es": "Cómo crear tu primer proyecto", "en": "How to create your first project" } },
+    { "id": "step-1-title", "type": "text", "label": { "es": "Paso 1: título", "en": "Step 1: title" }, "value": { "es": "Crea tu cuenta", "en": "Create your account" } },
+    { "id": "step-1-text", "type": "text", "label": { "es": "Paso 1: detalle", "en": "Step 1: detail" }, "value": { "es": "Regístrate con tu correo en menos de un minuto.", "en": "Sign up with your email in under a minute." } },
+    { "id": "step-2-title", "type": "text", "label": { "es": "Paso 2: título", "en": "Step 2: title" }, "value": { "es": "Elige una plantilla", "en": "Pick a template" } },
+    { "id": "step-2-text", "type": "text", "label": { "es": "Paso 2: detalle", "en": "Step 2: detail" }, "value": { "es": "Parte de un diseño listo y adáptalo a tu estilo.", "en": "Start from a ready-made design and make it yours." } },
+    { "id": "step-3-title", "type": "text", "label": { "es": "Paso 3: título", "en": "Step 3: title" }, "value": { "es": "Publica y comparte", "en": "Publish and share" } },
+    { "id": "step-3-text", "type": "text", "label": { "es": "Paso 3: detalle", "en": "Step 3: detail" }, "value": { "es": "Un clic y tu proyecto ya está en línea.", "en": "One click and your project is live." } },
+    { "id": "outro", "type": "text", "label": { "es": "Frase de cierre", "en": "Closing line" }, "value": { "es": "Ya está. Ahora te toca a ti.", "en": "That's it. Your turn now." } },
+    { "id": "url", "type": "text", "label": { "es": "Web o usuario", "en": "Website or handle" }, "value": { "es": "tuweb.com", "en": "yoursite.com" } },
+    { "id": "logo", "type": "image", "label": { "es": "Logo", "en": "Logo" }, "value": { "es": "assets/logo.svg", "en": "assets/logo.svg" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#f3efe6", "en": "#f3efe6" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto", "en": "Text" }, "value": { "es": "#1d1b18", "en": "#1d1b18" } },
+    { "id": "accent", "type": "color", "label": { "es": "Color de acento", "en": "Accent color" }, "value": { "es": "#ff5a36", "en": "#ff5a36" } }
+  ]
+}

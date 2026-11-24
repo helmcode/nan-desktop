@@ -66,6 +66,21 @@ through the same private channel; we route them to the right team.
   with a CSP header of `default-src 'none'; connect-src 'none'`: its scripts
   reach neither the app, nor storage, nor the Tauri bridge, nor the network.
   Implementation: `src-tauri/src/site_preview.rs`.
+- **Videos are isolated, network-free and rendered only on our servers.**
+  Video projects live in the signed-in user's realm (`videos/<id>/`); the
+  renderer names projects by id and never sends a path or HTML (picked files
+  go through the core's native dialog with the attachment refusals). Every
+  scene is validated before it is written: no remote reference (http(s),
+  `//`, absolute or `..` paths; `data:` URIs and relative `assets/` files
+  only), no GSAP, no clocks, randomness, timers, network or storage APIs,
+  finite animations. The preview is ONE assembled document (pinned runtime
+  inlined, assets as `data:` URIs) served from `nan-site:` with the same
+  no-network CSP + sandbox as websites, and the player loads it with an
+  opaque origin. MP4 export zips the project in the core (90 MiB cap),
+  uploads it with the session JWT through a closed route set, and downloads
+  the result from the presigned URL (https, Cloudflare R2 hosts only)
+  without credentials; the renderer never sees the token or the URL. The
+  composition frame may autoplay but never go fullscreen. Details: [docs/VIDEO.md](docs/VIDEO.md).
 - **Sharing is explicit and scoped.** Artifacts are uploaded only when the
   user presses Share and confirms; requests go through a closed route
   allowlist in the Rust core (`src-tauri/src/artifacts.rs`). Helmcode links

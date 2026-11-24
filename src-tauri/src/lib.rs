@@ -66,6 +66,9 @@ mod tools;
 mod tts;
 // Turn continuity: end reasons, step budget, tool-trace replay, summary.
 mod turn;
+// R-V1: videos (HyperFrames projects): library, model tools, sandboxed
+// preview, server-side MP4 export.
+mod video;
 // Auto-update (round 7): silent check, install only on the user's click.
 mod updater;
 // Built-in web search the model can call (proxied by the platform API).
@@ -249,6 +252,7 @@ pub fn run() {
         .manage(updater::UpdaterState::default())
         .manage(site_preview::SiteRegistry::default())
         .manage(browser::BrowserState::default())
+        .manage(video::UploadsState::default())
         // R20-D: the sandboxed website preview frame. Serves ONLY bytes
         // preview_read_file already gated and registered (never the disk),
         // under the site CSP header (no network) + a sandbox directive.
@@ -381,6 +385,24 @@ pub fn run() {
             preview::preview_reveal_location,
             preview::web_preview_fetch,
             artifact_link::artifact_link_preview,
+            video::video_list,
+            video::video_preview,
+            video::video_templates,
+            video::video_template_preview,
+            video::video_create_from_template,
+            video::video_get,
+            video::video_update,
+            video::video_pick_asset,
+            video::video_delete,
+            video::video_export_start,
+            video::video_export_abort,
+            video::video_export_status,
+            video::video_export_cancel,
+            video::video_export_quota,
+            video::video_export_download,
+            video::video_export_open,
+            video::video_export_reveal,
+            video::video_export_save_as,
             links::open_external,
             telemetry::telemetry_renderer_crash,
             updater::update_check,

@@ -20,10 +20,13 @@
 //                                    switch the account, so a second user of
 //                                    the same tenant can be exercised.
 //   GET  /reset                   → clears all in-memory state
+//   /v1/desktop/renders...        → the video export routes (R-V1), see
+//                                    mock-renders.mjs
 //
 // Usage: node test/mock-device.mjs
 
 import { createServer } from "node:http";
+import { handleRenders } from "./mock-renders.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = 14322;
@@ -82,6 +85,7 @@ function sendJson(res, status, payload, extraHeaders = {}) {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, BASE);
+  if (await handleRenders(req, res, BASE)) return;
 
   if (req.method === "POST" && url.pathname === "/api/auth/device/start") {
     await readBody(req);

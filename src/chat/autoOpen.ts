@@ -161,6 +161,10 @@ export function finalDeliverable(
 ): Artifact | null {
   const usable = artifacts.filter((a) => typeof a.path === "string" && a.path.length > 0);
   const last = <T>(list: T[]): T | null => list[list.length - 1] ?? null;
+  // 0. R-V1: a video the reply created or changed IS what the user asked
+  // for (the images and voice-over that went into it are its parts).
+  const video = last(usable.filter((a) => a.kind === "video"));
+  if (video) return video;
   // 1. One file (written once or rewritten): it is the deliverable (D2).
   if (new Set(usable.map((a) => a.path)).size === 1) return last(usable);
   // 2. The last deliverable a tool declared this turn.
@@ -198,5 +202,6 @@ export function lastProducedTarget(rows: ChatMessageRow[], declared: DeclaredOut
   const request = ask >= 0 ? (rows[ask].content ?? "") : "";
   const artifact = finalDeliverable(last.content ?? "", last.artifacts ?? [], request, declared);
   if (!artifact) return null;
+  if (artifact.kind === "video") return { kind: "video", ref: artifact.path };
   return { kind: artifact.kind === "image" ? "media" : "file", ref: artifact.path };
 }

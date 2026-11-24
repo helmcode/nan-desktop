@@ -79,6 +79,7 @@ import {
   DEFAULT_GRANT_MODE,
   type GrantMode,
 } from "./core";
+import { onVideoChanged, videoList, type VideoAskContext } from "./video/api";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { useEscape } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
@@ -89,6 +90,7 @@ import {
   IconBolt,
   IconChevronDown,
   IconFile,
+  IconFilm,
   IconFolder,
   IconGlobe,
   IconMemory,
@@ -179,6 +181,7 @@ import { QueuedMessages } from "./chat/QueuedMessages";
 const PreviewPane = lazy(() => import("./preview/PreviewPane"));
 // So does the Image Studio (its own view).
 const ImageStudio = lazy(() => import("./studio/ImageStudio").then((m) => ({ default: m.ImageStudio })));
+const VideosSurface = lazy(() => import("./video/VideosSurface").then((m) => ({ default: m.VideosSurface })));
 
 // The renderer never sees profile URLs, API keys or session tokens (S4/S12):
 // profiles arrive as {id, name, has_key, key_mask} from the Rust core, and
@@ -363,6 +366,33 @@ function FileChips({
           </li>
         ))}
       </ChipSection>
+  );
+}
+
+/// R-V1: the videos a reply created or changed. Each opens in the preview
+/// pane (the sandboxed player); the pane offers the editor.
+function VideoChips({
+  ids,
+  titles,
+  onOpen,
+}: {
+  ids: string[];
+  titles: ReadonlyMap<string, string>;
+  onOpen: (projectId: string) => void;
+}) {
+  const t = useT();
+  if (ids.length === 0) return null;
+  return (
+    <ChipSection label={t.video.previewTitle} count={ids.length}>
+      {ids.map((id) => (
+        <li key={id}>
+          <button type="button" className="source-chip file-chip" onClick={() => onOpen(id)}>
+            <IconFilm size={13} />
+            <span className="source-title">{titles.has(id) ? t.video.chip(titles.get(id)!) : t.video.chipOpen}</span>
+          </button>
+        </li>
+      ))}
+    </ChipSection>
   );
 }
 
@@ -747,7 +777,14 @@ function ChatShell({
   const activeProfile: ProfileView | undefined = overview.profiles.find((p) => p.id === overview.active_profile);
   const workspace = useWorkspace(overview.active_profile);
 
-  const [view, setView] = useState<"chat" | "settings" | "studio">("chat");
+  const [view, setView] = useState<"chat" | "settings" | "studio" | "videos">("chat");
+  // R-V1: the project the Videos surface shows in its editor (null: the lists).
+  const [videoProject, setVideoProject] = useState<string | null>(null);
+  // R-V1: the video context attached to the next message (shown as a chip
+  // above the composer, sent hidden to the model, cleared once sent).
+  const [videoAsk, setVideoAsk] = useState<VideoAskContext | null>(null);
+  // Titles of the user's videos, for the chips under the replies.
+  const [videoTitles, setVideoTitles] = useState<ReadonlyMap<string, string>>(() => new Map());
   const viewRef = useRef(view);
   useEffect(() => {
     viewRef.current = view;
@@ -1334,6 +1371,16 @@ function ChatShell({
       onApprovalResolved((resolved) => {
         dispatchApproval({ type: "resolved", id: resolved.approval_id, granted: resolved.granted });
       }),
+      // R-V1: a video the assistant just created or changed opens in that
+      // conversation's preview pane right away (before the turn ends).
+      onVideoChanged((changed) => {
+        setPreviews((prev) =>
+          new Map(prev).set(changed.conversation_id, {
+            target: { kind: "video", ref: changed.project_id },
+            open: true,
+          }),
+        );
+      }),
       // In-app browser allow mode: a one-line "Using <host>" per new site.
       onBrowserSiteUsed((used) => {
         dispatchApproval({
@@ -1772,6 +1819,7 @@ function ChatShell({
   }, []);
   const openWebPreview = useCallback((url: string) => openPreview({ kind: "web", ref: url }), [openPreview]);
   const openFilePreview = useCallback((path: string) => openPreview({ kind: "file", ref: path }), [openPreview]);
+  const openVideoPreview = useCallback((id: string) => openPreview({ kind: "video", ref: id }), [openPreview]);
   const setPreviewOpen = useCallback((open: boolean): void => {
     const key = activeConvRef.current ?? NEW_CHAT_KEY;
     setPreviews((prev) => {
@@ -1982,6 +2030,8 @@ function ChatShell({
     const grantIds = selectedFolders;
     // ...and its skill: only the id is sent; the core reads the text.
     const skillId = activeSkill?.id ?? null;
+    // ...and a video request's hidden context (typed messages only).
+    const videoContext = override === undefined && queuedFiles === undefined ? videoAsk : null;
     try {
       conversationId = await ensureConversation();
       if (conversationId === null) return false;
@@ -2023,7 +2073,9 @@ function ChatShell({
         // Offers the share-by-talking tool (the core still asks per share),
         // or behind the paywall only a hint so the model can explain.
         ...(artifactsAccess.availability !== "off" ? { artifacts: artifactsAccess.availability } : {}),
+        ...(videoContext ? { videoContext } : {}),
       });
+      if (videoContext) setVideoAsk(null);
       void refreshConversations();
       return true;
     } catch (err) {
@@ -2096,7 +2148,7 @@ function ChatShell({
       void refreshConversations();
       return false;
     }
-  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary, attach, artifactsAccess.availability]);
+  }, [composer, streamingActive, ensureConversation, model, refreshConversations, selectedFolders, activeSkill, loadMessages, syncTeamLibrary, attach, artifactsAccess.availability, videoAsk]);
 
   const sendImage = useCallback(async (): Promise<void> => {
     const prompt = composer.trim();
@@ -2165,6 +2217,39 @@ function ChatShell({
     focusChatOnReturn.current = settingsReturn === "chat";
     setView(settingsReturn);
   }, [settingsReturn]);
+  // R-V1: the titles of the user's videos named in this chat (chips).
+  const videoIdsKey = messages
+    .flatMap((m) => (m.artifacts ?? []).filter((a) => a.kind === "video").map((a) => a.path))
+    .join(",");
+  useEffect(() => {
+    const profileId = overview.active_profile;
+    if (!videoIdsKey || !profileId) return;
+    let alive = true;
+    videoList(profileId)
+      .then((list) => alive && setVideoTitles(new Map(list.map((v) => [v.id, v.title]))))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [videoIdsKey, overview.active_profile]);
+
+  // R-V1: the Videos surface (library, templates, editor). "Edit video" in
+  // the side panel opens the editor on that project.
+  const openVideos = useCallback((projectId: string | null): void => {
+    setVideoProject(projectId);
+    setView("videos");
+  }, []);
+  // "Ask for a change in this scene" / "Ask the assistant to fix it": back
+  // to the chat with the request in the composer, ready to complete.
+  // The composer keeps what the user was writing: the request is added on
+  // a new line. The technical details ride along hidden (see videoAsk).
+  const askAssistantAboutVideo = useCallback((text: string, context: VideoAskContext): void => {
+    setComposer((prev) => (prev.trim() ? `${prev.trimEnd()}\n${text}` : text));
+    setVideoAsk(context);
+    focusChatOnReturn.current = true;
+    setView("chat");
+  }, []);
+
   useEffect(() => {
     if (view !== "chat" || !focusChatOnReturn.current) return;
     focusChatOnReturn.current = false;
@@ -2548,7 +2633,8 @@ function ChatShell({
       (m.sources ?? []).length === 0 &&
       (m.shares ?? []).length === 0 &&
       files.chips.length === 0 &&
-      files.images.length === 0
+      files.images.length === 0 &&
+      files.videos.length === 0
     )
       return null;
     return (
@@ -2583,6 +2669,7 @@ function ChatShell({
         )}
         <SourceChips sources={m.sources ?? []} onOpen={openWebPreview} />
         <SharedLinkCards links={m.shares ?? []} />
+        <VideoChips ids={files.videos} titles={videoTitles} onOpen={openVideoPreview} />
         <FileChips paths={files.chips} onOpen={openFilePreview} onShare={artifactsOn ? openShare : undefined} />
         {VOICE_UI && visible.trim().length > 0 && (
           <div className="msg-actions">
@@ -2631,6 +2718,15 @@ function ChatShell({
               >
                 <IconImage size={16} />
                 {t.sidebar.studio}
+              </button>
+              <button
+                type="button"
+                className={`sidebar-link${view === "videos" ? " active" : ""}`}
+                aria-current={view === "videos" ? "page" : undefined}
+                onClick={() => openVideos(view === "videos" ? null : videoProject)}
+              >
+                <IconFilm size={16} />
+                {t.video.sidebar}
               </button>
             </>
           )}
@@ -2795,7 +2891,31 @@ function ChatShell({
           </section>
         }
       >
-      {view === "studio" ? null : view === "settings" ? (
+      {view === "videos" && overview.active_profile && (
+        <ErrorBoundary
+          resetKey={`videos|${videoProject ?? ""}`}
+          fallback={
+            <section className="studio">
+              <p className="inline-error" role="alert">
+                {t.settings.surfaceCrashed}
+              </p>
+            </section>
+          }
+        >
+          <Suspense fallback={<section className="studio" aria-busy="true" />}>
+            <VideosSurface
+              profileId={overview.active_profile}
+              active
+              projectId={videoProject}
+              onOpenProject={openVideos}
+              onClose={() => setView("chat")}
+              onAskAssistant={askAssistantAboutVideo}
+              onSignIn={onSignOut}
+            />
+          </Suspense>
+        </ErrorBoundary>
+      )}
+      {view === "studio" || view === "videos" ? null : view === "settings" ? (
         // The surface shows one section at a time; the section list in the
         // sidebar picks it. `data-section` is what App.css keys the visible
         // section off (see .settings-surface there).
@@ -3063,6 +3183,21 @@ function ChatShell({
                     {t.attachments.dropHint}
                   </p>
                 )}
+                {videoAsk && (
+                  <div className="video-ask-chip" role="status">
+                    <IconFilm size={13} />
+                    <span>{t.video.contextChip(videoAsk.title ?? "")}</span>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label={t.video.contextRemove}
+                      title={t.video.contextRemove}
+                      onClick={() => setVideoAsk(null)}
+                    >
+                      <IconX size={12} />
+                    </button>
+                  </div>
+                )}
                 <AttachmentTray
                   items={attach.items}
                   onRemove={attach.remove}
@@ -3279,6 +3414,7 @@ function ChatShell({
                   onEditImage={editFromPreview}
                   onRemove={removeFromPreview}
                   onShare={artifactsOn ? openShare : undefined}
+                  onOpenVideo={openVideos}
                 />
               </Suspense>
             )}

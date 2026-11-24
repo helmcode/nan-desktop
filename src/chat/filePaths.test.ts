@@ -76,7 +76,7 @@ describe("messageFiles (round 3: produced files always get a chip)", () => {
   });
 
   it("tolerates rows without artifacts (older app versions)", () => {
-    expect(messageFiles(`${DL}/a.txt`, [DL], undefined)).toEqual({ chips: [`${DL}/a.txt`], images: [] });
+    expect(messageFiles(`${DL}/a.txt`, [DL], undefined)).toEqual({ chips: [`${DL}/a.txt`], images: [], videos: [] });
   });
 });
 

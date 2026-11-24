@@ -62,6 +62,10 @@ icu_normalizer = "2"
 # Shared skills (S4): content hash of a bundle (share link + the offline
 # cache file name). Already in the tree transitively.
 sha2 = "0.11"
+# R-V1: CRC-32 of the stored zip the video export uploads (the bundle is
+# written by hand: deterministic, no compression). Already in the tree
+# transitively (flate2/png).
+crc32fast = "1"
 # Chat attachments (vision): decode PNG/JPEG/WebP/GIF (first frame), downscale
 # to the long-side cap and re-encode as JPEG before an image is sent to the
 # model. Pure Rust codecs only; no default features (no TIFF/AVIF/EXR...).
@@ -102,3 +106,6 @@ cairo-rs = { version = "0.18", features = ["png"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# R-V1: reads back the hand-written export zip in tests (already in the
+# lock file through the updater).
+zip = { version = "9", default-features = false }

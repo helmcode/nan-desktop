@@ -1,0 +1,30 @@
+<template id="takeaway-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--accent); color: var(--bg); font-family: "Inter", system-ui, sans-serif; }
+    .takeaway-stage { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 6vmin; padding: 0 12vmin; }
+    .takeaway-wipe { position: absolute; inset: 0; background: var(--bg); transform-origin: left center; animation: takeaway-wipe 0.6s cubic-bezier(0.7, 0, 0.3, 1) both; }
+    .takeaway-mark { width: 10vmin; height: 10vmin; border-radius: 50%; background: var(--bg); animation: takeaway-pop 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.4) 0.5s both; }
+    .takeaway-text { margin: 0; max-width: 140vmin; font-size: 9.5vmin; font-weight: 900; line-height: 1.02; letter-spacing: -0.04em; animation: takeaway-rise 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.6s both; }
+    .takeaway-source { margin: 0; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 2.8vmin; font-weight: 500; letter-spacing: 0.04em; animation: takeaway-fade 0.6s ease 1.4s both; }
+    @keyframes takeaway-wipe { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+    @keyframes takeaway-pop { from { transform: scale(0); } to { transform: scale(1); } }
+    @keyframes takeaway-rise { from { opacity: 0; clip-path: inset(0 0 100% 0); transform: translateY(4vmin); } to { opacity: 1; clip-path: inset(0 0 0 0); transform: none; } }
+    @keyframes takeaway-fade { from { opacity: 0; } to { opacity: 0.75; } }
+    @media (max-aspect-ratio: 3/4) {
+      .takeaway-stage { padding: 0 7vmin; }
+      .takeaway-text { font-size: 9vmin; max-width: 86vmin; }
+    }
+    @media (max-aspect-ratio: 3/4) {
+      .takeaway-text { font-size: 11vmin; }
+      .takeaway-source { font-size: 3.4vmin; }
+    }
+  </style>
+  <div id="root" data-composition-id="takeaway" data-width="1920" data-height="1080">
+    <div id="takeaway-stage" class="clip takeaway-stage" data-start="0" data-duration="3.5">
+      <div id="takeaway-mark" class="takeaway-mark"></div>
+      <h2 id="takeaway-text" class="takeaway-text" data-var-text="takeaway">Automatiza lo repetitivo. Dedica el tiempo a decidir.</h2>
+      <p id="takeaway-source" class="takeaway-source" data-var-text="source">Fuente: encuesta interna a 120 equipos</p>
+      <div id="takeaway-wipe" class="takeaway-wipe"></div>
+    </div>
+  </div>
+</template>

@@ -1,0 +1,37 @@
+{
+  "id": "decision-tree",
+  "title": { "es": "Árbol de decisión", "en": "Decision tree" },
+  "description": {
+    "es": "Un diagrama de flujo animado con notas adhesivas: una pregunta, dos caminos y cuatro salidas, y un cursor que elige una.",
+    "en": "An animated sticky-note flowchart: one question, two paths and four outcomes, with a cursor that picks one."
+  },
+  "category": "education",
+  "aspect": "16:9",
+  "fps": 30,
+  "fonts": ["inter-400.woff2", "inter-700.woff2"],
+  "scenes": [
+    { "id": "tree", "title": { "es": "Árbol", "en": "Tree" }, "duration": 11 }
+  ],
+  "variables": [
+    { "id": "question", "type": "text", "label": { "es": "Pregunta", "en": "Question" }, "value": { "es": "¿Has programado antes?", "en": "Have you coded before?" } },
+    { "id": "answer-yes", "type": "text", "label": { "es": "Respuesta izquierda", "en": "Left answer" }, "value": { "es": "Sí", "en": "Yes" } },
+    { "id": "answer-no", "type": "text", "label": { "es": "Respuesta derecha", "en": "Right answer" }, "value": { "es": "Todavía no", "en": "Not yet" } },
+    { "id": "branch-yes", "type": "text", "label": { "es": "Camino izquierdo", "en": "Left path" }, "value": { "es": "Elige un proyecto real", "en": "Pick a real project" } },
+    { "id": "branch-no", "type": "text", "label": { "es": "Camino derecho", "en": "Right path" }, "value": { "es": "Empieza por lo básico", "en": "Start with the basics" } },
+    { "id": "leaf-1", "type": "text", "label": { "es": "Salida 1", "en": "Outcome 1" }, "value": { "es": "Crea una herramienta propia", "en": "Build your own tool" } },
+    { "id": "leaf-2", "type": "text", "label": { "es": "Salida 2", "en": "Outcome 2" }, "value": { "es": "Colabora en código abierto", "en": "Contribute to open source" } },
+    { "id": "leaf-3", "type": "text", "label": { "es": "Salida 3 (la elegida)", "en": "Outcome 3 (the pick)" }, "value": { "es": "Sigue un curso gratuito", "en": "Take a free course" } },
+    { "id": "leaf-4", "type": "text", "label": { "es": "Salida 4", "en": "Outcome 4" }, "value": { "es": "Prueba herramientas sin código", "en": "Try no-code tools" } },
+    { "id": "cursor-name", "type": "text", "label": { "es": "Nombre del cursor", "en": "Cursor name" }, "value": { "es": "Tú", "en": "You" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#ffffff", "en": "#ffffff" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto y líneas", "en": "Text and lines" }, "value": { "es": "#2b2b2b", "en": "#2b2b2b" } },
+    { "id": "accent", "type": "color", "label": { "es": "Cursor y selección", "en": "Cursor and selection" }, "value": { "es": "#9747ff", "en": "#9747ff" } },
+    { "id": "note-1", "type": "color", "label": { "es": "Nota de la pregunta", "en": "Question note" }, "value": { "es": "#e8d44d", "en": "#e8d44d" } },
+    { "id": "note-2", "type": "color", "label": { "es": "Nota del camino izquierdo", "en": "Left path note" }, "value": { "es": "#c2e8a0", "en": "#c2e8a0" } },
+    { "id": "note-3", "type": "color", "label": { "es": "Nota del camino derecho", "en": "Right path note" }, "value": { "es": "#f5c5a3", "en": "#f5c5a3" } },
+    { "id": "note-4", "type": "color", "label": { "es": "Notas de salida A", "en": "Outcome notes A" }, "value": { "es": "#d4c5f9", "en": "#d4c5f9" } },
+    { "id": "note-5", "type": "color", "label": { "es": "Notas de salida B", "en": "Outcome notes B" }, "value": { "es": "#a8d8f0", "en": "#a8d8f0" } },
+    { "id": "note-6", "type": "color", "label": { "es": "Nota elegida", "en": "Picked note" }, "value": { "es": "#f8b4c8", "en": "#f8b4c8" } }
+  ],
+  "attribution": {"es": "Basada en el ejemplo \"Decision Tree\" de HyperFrames de HeyGen, Inc. (Apache-2.0)", "en": "Based on the HyperFrames \"Decision Tree\" example by HeyGen, Inc. (Apache-2.0)"}
+}

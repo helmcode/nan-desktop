@@ -413,6 +413,8 @@ pub fn tool_definitions(workspace: Option<&tools::Workspace>) -> Vec<serde_json:
         tools::save_skill::tool_definition(),
         tools::website::tool_definition(),
     ];
+    // R-V1: videos are always offered (they live in the app's library).
+    defs.extend(crate::video::tool::tool_definitions());
     if let Some(workspace) = workspace {
         defs.extend(file_tool_definitions(workspace.run_command));
     }
@@ -461,9 +463,10 @@ working folders; for any other place, ask the user to add that folder first.";
 /// workspace description when the user set one up.
 pub fn system_prompt(workspace: Option<&tools::Workspace>) -> String {
     let rules = format!(
-        "{ASSISTANT_RULES}\n\n{}\n\n{}\n\n{}",
+        "{ASSISTANT_RULES}\n\n{}\n\n{}\n\n{}\n\n{}",
         tools::save_skill::GUIDANCE,
         tools::website::GUIDANCE,
+        crate::video::tool::GUIDANCE,
         crate::browser::tools::GUIDANCE
     );
     match workspace {
@@ -1123,8 +1126,15 @@ pub fn chat_send(
     continuation: Option<bool>,
     attachments: Option<Vec<crate::attachments::AttachmentInput>>,
     artifacts: Option<String>,
+    video_context: Option<crate::video::context::VideoContext>,
 ) -> Result<(), String> {
     let attachments = attachments.unwrap_or_default();
+    // R-V1: technical details of a video request, checked before anything
+    // is stored; they become a system note for this reply only.
+    let video_note = video_context
+        .as_ref()
+        .map(crate::video::context::note)
+        .transpose()?;
     if content.trim().is_empty() && attachments.is_empty() {
         return Err("message is empty".to_string());
     }
@@ -1283,6 +1293,7 @@ pub fn chat_send(
         // account): only a UX gate for offering `share_artifact`. The
         // server enforces the flag and every share asks the user anyway.
         tools::share_artifact::ShareOffer::from_wire(artifacts.as_deref()),
+        video_note,
     ));
     attach_stream(&state, conversation_id, generation, handle)?;
     Ok(())
@@ -1358,6 +1369,7 @@ async fn run_chat_stream(
     generation: u64,
     continued: bool,
     share_offer: tools::share_artifact::ShareOffer,
+    video_note: Option<crate::video::context::Note>,
 ) {
     let share_tool = share_offer == tools::share_artifact::ShareOffer::On;
     let state = app.state::<ChatState>();
@@ -1476,10 +1488,14 @@ async fn run_chat_stream(
     // Every rebuild of the request prefix goes through here, so the share
     // guidance rides along whenever `share_artifact` is offered.
     let compose = |history: Vec<serde_json::Value>| {
-        with_share_guidance(
+        let mut messages = with_share_guidance(
             compose_messages(workspace.as_ref(), skill.as_ref(), history),
             share_offer,
-        )
+        );
+        if let Some(note) = &video_note {
+            crate::video::context::insert_note(&mut messages, note);
+        }
+        messages
     };
     let mut messages = compose(traced_history);
     // Where the history ends and this reply's own tool rounds begin.
@@ -2329,6 +2345,29 @@ async fn run_tool_call(
         let produced = file_artifacts(&outcome);
         let declared = declared_outputs(tools::website::TOOL_NAME, &outcome);
         return (outcome_for_model(outcome), produced, declared);
+    }
+    if call.name == crate::video::tool::CREATE || call.name == crate::video::tool::EDIT {
+        // R-V1: validated and written into the user's video library (the
+        // app's own storage, like generated images); the project opens in
+        // the side panel and stays as a chip on the reply.
+        let (result, project) = crate::video::run_model_tool(
+            app,
+            app_data,
+            profile_id,
+            conversation_id,
+            &call.name,
+            &call.arguments,
+        )
+        .await;
+        let produced = project
+            .map(|id| {
+                vec![chat_store::Artifact {
+                    path: id,
+                    kind: chat_store::ArtifactKind::Video,
+                }]
+            })
+            .unwrap_or_default();
+        return (result, produced, Vec::new());
     }
     if call.name == images::TOOL_NAME {
         let Some((prompt, size)) = images::parse_tool_args(&call.arguments) else {
@@ -3221,11 +3260,14 @@ mod tests {
                 "web_search",
                 "generate_image",
                 "save_chat_as_skill",
-                "write_website"
+                "write_website",
+                "create_video",
+                "edit_video"
             ],
             "round 3: the model can create images without a workspace; round 15: \
              it can always distill the chat into a skill draft; R20-D: it can always \
-             build a website (it lands in the session folder)"
+             build a website (it lands in the session folder); R-V1: videos live \
+             in the app's own library"
         );
         let ws = tools::Workspace {
             roots: vec![std::path::PathBuf::from("/Users/me/Proyecto")],
@@ -3240,6 +3282,8 @@ mod tests {
                 "generate_image",
                 "save_chat_as_skill",
                 "write_website",
+                "create_video",
+                "edit_video",
                 "list_files",
                 "read_file",
                 "write_file",
@@ -3766,6 +3810,8 @@ mod tests {
         assert!(bare.contains(tools::save_skill::GUIDANCE));
         // R20-D: so does how to build a self-contained website.
         assert!(bare.contains(tools::website::GUIDANCE));
+        // R-V1: and how to author a deterministic video.
+        assert!(bare.contains(crate::video::tool::GUIDANCE));
         assert!(
             !bare.contains("Workspace folders"),
             "no workspace, no folders"

@@ -1,0 +1,57 @@
+<template id="chart-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .chart-stage { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 6vmin; padding: 8vmin 12vmin; }
+    .chart-title { margin: 0; font-size: 5.5vmin; font-weight: 700; letter-spacing: -0.02em; animation: chart-in 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .chart-rows { display: flex; flex-direction: column; gap: 4.5vmin; }
+    .chart-row { display: grid; grid-template-columns: 32vmin 1fr; align-items: center; gap: 4vmin; animation: chart-in 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .chart-row-2 { animation-delay: 0.2s; }
+    .chart-row-3 { animation-delay: 0.4s; }
+    .chart-label { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 3.4vmin; font-weight: 500; letter-spacing: 0.02em; opacity: 0.8; }
+    .chart-track { position: relative; height: 10vmin; display: flex; align-items: center; }
+    .chart-bar { height: 100%; border-radius: 0 1.6vmin 1.6vmin 0; background: var(--muted); transform-origin: left center; animation: chart-grow 1.1s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .chart-bar-1 { width: calc(var(--bar-1-amount, 1) / max(var(--bar-1-amount, 1), var(--bar-2-amount, 1), var(--bar-3-amount, 1)) * 100%); animation-delay: 0.5s; }
+    .chart-bar-2 { width: calc(var(--bar-2-amount, 1) / max(var(--bar-1-amount, 1), var(--bar-2-amount, 1), var(--bar-3-amount, 1)) * 100%); animation-delay: 0.75s; }
+    .chart-bar-3 { width: calc(var(--bar-3-amount, 1) / max(var(--bar-1-amount, 1), var(--bar-2-amount, 1), var(--bar-3-amount, 1)) * 100%); background: var(--accent); animation-delay: 1s; }
+    .chart-value { position: absolute; left: 3vmin; font-size: 4.6vmin; font-weight: 900; letter-spacing: -0.02em; color: var(--fg); animation: chart-fade 0.5s ease both; }
+    .chart-value-1 { animation-delay: 1.3s; }
+    .chart-value-2 { animation-delay: 1.55s; }
+    .chart-value-3 { animation-delay: 1.8s; color: var(--bg); }
+    @keyframes chart-in { from { opacity: 0; transform: translateY(3vmin); } to { opacity: 1; transform: none; } }
+    @keyframes chart-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes chart-fade { from { opacity: 0; } to { opacity: 1; } }
+    @media (max-aspect-ratio: 3/4) {
+      .chart-stage { padding: 7vmin; gap: 5vmin; }
+      .chart-row { grid-template-columns: 1fr; gap: 1.5vmin; }
+      .chart-rows { gap: 3.5vmin; }
+      .chart-track { height: 8vmin; }
+      .chart-title { font-size: 5vmin; }
+    }
+    @media (max-aspect-ratio: 3/4) {
+      .chart-rows { gap: 6vmin; }
+      .chart-track { height: 12vmin; }
+      .chart-title { font-size: 6.5vmin; }
+      .chart-label { font-size: 4.2vmin; }
+      .chart-value { font-size: 5.5vmin; }
+    }
+  </style>
+  <div id="root" data-composition-id="chart" data-width="1920" data-height="1080">
+    <div id="chart-stage" class="clip chart-stage" data-start="0" data-duration="4.5">
+      <h2 id="chart-title" class="chart-title" data-var-text="chart-title">Horas por semana en informes</h2>
+      <div id="chart-rows" class="chart-rows">
+        <div id="chart-row-1" class="chart-row chart-row-1">
+          <span class="chart-label" data-var-text="bar-1-label">A mano</span>
+          <div class="chart-track"><div class="chart-bar chart-bar-1"></div><span class="chart-value chart-value-1" data-var-text="bar-1-value">10 h</span></div>
+        </div>
+        <div id="chart-row-2" class="chart-row chart-row-2">
+          <span class="chart-label" data-var-text="bar-2-label">En parte</span>
+          <div class="chart-track"><div class="chart-bar chart-bar-2"></div><span class="chart-value chart-value-2" data-var-text="bar-2-value">6,5 h</span></div>
+        </div>
+        <div id="chart-row-3" class="chart-row chart-row-3">
+          <span class="chart-label" data-var-text="bar-3-label">Automatizado</span>
+          <div class="chart-track"><div class="chart-bar chart-bar-3"></div><span class="chart-value chart-value-3" data-var-text="bar-3-value">3,8 h</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>

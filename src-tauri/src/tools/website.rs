@@ -183,6 +183,32 @@ const URL_ATTRIBUTES: &[&str] = &[
 /// Remote-looking URL starts, wherever they appear in a script or CSS.
 const REMOTE_MARKERS: &[&str] = &["http://", "https://", "ws://", "wss://", "ftp://"];
 
+/// What "stays inside the document" means for one kind of document: the
+/// website (everything inline, `data:` only) or a video project (R-V1:
+/// relative `assets/` files too). The tokenizer and every other check are
+/// shared, so both kinds refuse the network the same way.
+pub(crate) struct UrlPolicy {
+    /// Whether a URL attribute value (`name` lowercased, value as written
+    /// with the scheme-hiding entities decoded) stays local.
+    pub local_value: fn(&str, &str) -> bool,
+    /// Whether the text right after a CSS `url(` (lowercased, leading
+    /// quotes and spaces trimmed) stays local.
+    pub css_url_local: fn(&str) -> bool,
+    /// The refusal message for the model.
+    pub refused: fn(&str) -> String,
+}
+
+/// The website policy: inline only (`data:` URIs, `#anchors`).
+const WEBSITE_POLICY: UrlPolicy = UrlPolicy {
+    local_value,
+    css_url_local: website_css_url_local,
+    refused,
+};
+
+fn website_css_url_local(rest: &str) -> bool {
+    rest.starts_with("data:") || rest.starts_with('#')
+}
+
 /// Why a document was refused, worded for the model (it may retry).
 fn refused(what: &str) -> String {
     format!(
@@ -232,28 +258,36 @@ pub fn validate_html(html: &str) -> Result<(), String> {
     if html.contains('\0') {
         return Err("html contains NUL bytes; it must be text".into());
     }
-    check_document(html, 0)
+    check_document(html, 0, &WEBSITE_POLICY)
+}
+
+/// The network checks of [`validate_html`] (no size or text checks) under
+/// another [`UrlPolicy`] (video projects).
+pub(crate) fn check_network(html: &str, policy: &UrlPolicy) -> Result<(), String> {
+    check_document(html, 0, policy)
 }
 
 /// The network checks for one document (the top level, or a `srcdoc`).
-fn check_document(html: &str, depth: usize) -> Result<(), String> {
+fn check_document(html: &str, depth: usize, policy: &UrlPolicy) -> Result<(), String> {
     let low = lower(html);
-    check_attributes(html, &low, depth)?;
+    check_attributes(html, &low, depth, policy)?;
     check_blocks(
         &low,
         "<script",
         "</script>",
         "an inline script references a remote URL",
+        policy,
     )?;
     check_blocks(
         &low,
         "<style",
         "</style>",
         "a stylesheet references a remote URL",
+        policy,
     )?;
-    check_css(&low)?;
+    check_css(&low, policy)?;
     if low.contains("<base") {
-        return Err(refused("a <base> element is not allowed"));
+        return Err((policy.refused)("a <base> element is not allowed"));
     }
     Ok(())
 }
@@ -268,7 +302,7 @@ struct Attribute {
 /// tokenizer does: a `>` inside a quoted attribute value does not end the
 /// tag, while a quote anywhere else (an attribute name) is plain text.
 /// Returns the index of the closing `>` (or the document length) and every
-/// attribute that has a value.
+/// attribute (a boolean one with an empty value).
 fn scan_tag(low: &str, start: usize) -> (usize, Vec<Attribute>) {
     let b = low.as_bytes();
     let ws = |c: u8| matches!(c, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ');
@@ -301,6 +335,11 @@ fn scan_tag(low: &str, start: usize) -> (usize, Vec<Attribute>) {
             i += 1;
         }
         if b.get(i) != Some(&b'=') {
+            // A boolean attribute (`muted`, `autoplay`): no value.
+            attributes.push(Attribute {
+                name,
+                value: (name.1, name.1),
+            });
             continue;
         }
         i += 1;
@@ -328,7 +367,24 @@ fn scan_tag(low: &str, start: usize) -> (usize, Vec<Attribute>) {
 }
 
 /// Every `name=value` attribute of every tag, for the URL attributes.
-fn check_attributes(html: &str, low: &str, depth: usize) -> Result<(), String> {
+fn check_attributes(html: &str, low: &str, depth: usize, policy: &UrlPolicy) -> Result<(), String> {
+    for_each_tag(html, low, |_, attributes| {
+        for (name, value) in attributes {
+            check_attribute(name, value, depth, policy)?;
+        }
+        Ok(())
+    })
+}
+
+/// Visit every tag of a document (comments, doctype and the bodies of
+/// scripts and styles skipped) with its lowercased name and its
+/// `(lowercased name, value as written)` attributes, tokenized the way the
+/// HTML tokenizer does. The first error stops the walk.
+pub(crate) fn for_each_tag(
+    html: &str,
+    low: &str,
+    mut visit: impl FnMut(&str, &[(&str, &str)]) -> Result<(), String>,
+) -> Result<(), String> {
     let bytes = low.as_bytes();
     let mut i = 0;
     while let Some(open) = low[i..].find('<') {
@@ -358,13 +414,25 @@ fn check_attributes(html: &str, low: &str, depth: usize) -> Result<(), String> {
             continue;
         }
         let (end, attributes) = scan_tag(low, start);
-        for attribute in &attributes {
-            let name = &low[attribute.name.0..attribute.name.1];
-            let value = &html[attribute.value.0..attribute.value.1];
-            check_attribute(name, value, depth)?;
-        }
-        i = (end + 1).min(low.len());
         let tag = &low[start + 1..end];
+        // `div`, or `/div` for an end tag.
+        let name_end = tag
+            .char_indices()
+            .skip(1)
+            .find(|&(_, c)| c.is_ascii_whitespace() || c == '/' || c == '>')
+            .map_or(tag.len(), |(at, _)| at);
+        let tag_name = &tag[..name_end];
+        let pairs: Vec<(&str, &str)> = attributes
+            .iter()
+            .map(|attribute| {
+                (
+                    &low[attribute.name.0..attribute.name.1],
+                    &html[attribute.value.0..attribute.value.1],
+                )
+            })
+            .collect();
+        visit(tag_name, &pairs)?;
+        i = (end + 1).min(low.len());
         for raw in ["script", "style"] {
             if tag.starts_with(raw)
                 && bytes
@@ -380,8 +448,14 @@ fn check_attributes(html: &str, low: &str, depth: usize) -> Result<(), String> {
 }
 
 /// One attribute (`name` lowercased, `value` as written).
-fn check_attribute(name: &str, value: &str, depth: usize) -> Result<(), String> {
-    if URL_ATTRIBUTES.contains(&name) && !local_value(name, &decode_entities(value)) {
+fn check_attribute(
+    name: &str,
+    value: &str,
+    depth: usize,
+    policy: &UrlPolicy,
+) -> Result<(), String> {
+    let refused = policy.refused;
+    if URL_ATTRIBUTES.contains(&name) && !(policy.local_value)(name, &decode_entities(value)) {
         return Err(refused(&format!(
             "the {name} attribute points outside the file ({})",
             shorten(value)
@@ -393,13 +467,13 @@ fn check_attribute(name: &str, value: &str, depth: usize) -> Result<(), String> 
             if depth >= MAX_SRCDOC_DEPTH {
                 return Err(refused("srcdoc documents are nested too deeply"));
             }
-            check_document(&inner, depth + 1)?;
+            check_document(&inner, depth + 1, policy)?;
         }
     }
     if name == "http-equiv" && value.trim().eq_ignore_ascii_case("refresh") {
         return Err(refused("a meta refresh is not allowed"));
     }
-    if name == "style" && css_remote(&value.to_ascii_lowercase()) {
+    if name == "style" && css_remote(&value.to_ascii_lowercase(), policy) {
         return Err(refused("an inline style loads a remote URL"));
     }
     if name.starts_with("on")
@@ -484,7 +558,13 @@ fn shorten(value: &str) -> String {
 
 /// The bodies between `open` and `close` (lowercased document) must not
 /// mention a remote URL (or a protocol-relative one).
-fn check_blocks(low: &str, open: &str, close: &str, what: &str) -> Result<(), String> {
+fn check_blocks(
+    low: &str,
+    open: &str,
+    close: &str,
+    what: &str,
+    policy: &UrlPolicy,
+) -> Result<(), String> {
     let mut i = 0;
     while let Some(at) = low[i..].find(open) {
         let start = i + at;
@@ -500,7 +580,7 @@ fn check_blocks(low: &str, open: &str, close: &str, what: &str) -> Result<(), St
             || body.contains("'//")
             || body.contains("`//")
         {
-            return Err(refused(what));
+            return Err((policy.refused)(what));
         }
         i = body_end;
     }
@@ -508,26 +588,27 @@ fn check_blocks(low: &str, open: &str, close: &str, what: &str) -> Result<(), St
 }
 
 /// CSS anywhere in the document: `@import` and `url()` must stay local.
-fn check_css(low: &str) -> Result<(), String> {
+fn check_css(low: &str, policy: &UrlPolicy) -> Result<(), String> {
     if low.contains("@import") {
-        return Err(refused("CSS @import is not allowed"));
+        return Err((policy.refused)("CSS @import is not allowed"));
     }
-    if css_remote(low) {
-        return Err(refused(
+    if css_remote(low, policy) {
+        return Err((policy.refused)(
             "a CSS url() loads something that is not a data: URI",
         ));
     }
     Ok(())
 }
 
-/// Whether some CSS `url(...)` points at anything but `data:` or `#`.
-fn css_remote(low: &str) -> bool {
+/// Whether some CSS `url(...)` points outside what `policy` keeps local
+/// (for a website: anything but `data:` or `#`).
+fn css_remote(low: &str, policy: &UrlPolicy) -> bool {
     let mut i = 0;
     while let Some(at) = low[i..].find("url(") {
         let start = i + at + 4;
         let rest =
             low[start..].trim_start_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'');
-        if !(rest.starts_with("data:") || rest.starts_with('#')) {
+        if !(policy.css_url_local)(rest) {
             return true;
         }
         i = start;

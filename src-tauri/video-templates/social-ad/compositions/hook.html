@@ -1,0 +1,35 @@
+<template id="hook-template">
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Inter", system-ui, sans-serif; }
+    .hook-stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4vmin; padding: 0 9vmin; }
+    .hook-band { position: absolute; left: -20%; width: 140%; height: 9vmin; background: var(--accent); transform-origin: center; }
+    .hook-band-a { top: 10%; transform: rotate(-6deg); animation: hook-band-a 3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .hook-band-b { bottom: 9%; background: var(--fg); transform: rotate(-6deg); animation: hook-band-b 3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+    .hook-kicker { position: relative; margin: 0; padding: 1.4vmin 3vmin; background: var(--fg); color: var(--bg); font-size: 3.6vmin; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; animation: hook-slide 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.2) 0.15s both; }
+    .hook-title { position: relative; margin: 0; max-width: 120vmin; font-family: "Montserrat", "Inter", system-ui, sans-serif; font-size: 12vmin; font-weight: 800; line-height: 0.98; letter-spacing: -0.03em; animation: hook-pop 0.7s cubic-bezier(0.2, 0.9, 0.3, 1.3) 0.35s both, hook-nudge 2.2s ease-in-out 0.8s both; }
+    @keyframes hook-band-a { from { transform: translateX(-100%) rotate(-6deg); } to { transform: translateX(0) rotate(-6deg); } }
+    @keyframes hook-band-b { from { transform: translateX(100%) rotate(-6deg); } to { transform: translateX(0) rotate(-6deg); } }
+    @keyframes hook-slide { from { opacity: 0; transform: translateX(-10vmin); } to { opacity: 1; transform: none; } }
+    @keyframes hook-pop { from { opacity: 0; transform: scale(1.35); filter: blur(1.5vmin); } to { opacity: 1; transform: scale(1); filter: blur(0); } }
+    @keyframes hook-nudge { from { translate: 0 0; } to { translate: 0 -2vmin; } }
+    @media (max-aspect-ratio: 3/4) {
+      .hook-stage { padding: 0 7vmin; }
+      .hook-title { font-size: 12.5vmin; max-width: 86vmin; }
+    }
+    @media (max-aspect-ratio: 3/4) {
+      .hook-title { font-size: 15vmin; }
+      .hook-kicker { font-size: 4.4vmin; }
+      .hook-band { height: 12vmin; }
+      .hook-band-a { top: 14%; }
+      .hook-band-b { bottom: 14%; }
+    }
+  </style>
+  <div id="root" data-composition-id="hook" data-width="1920" data-height="1080">
+    <div id="hook-stage" class="clip hook-stage" data-start="0" data-duration="3">
+      <div id="hook-band-a" class="hook-band hook-band-a"></div>
+      <div id="hook-band-b" class="hook-band hook-band-b"></div>
+      <p id="hook-kicker" class="hook-kicker" data-var-text="kicker">Para madrugadores</p>
+      <h1 id="hook-title" class="hook-title" data-var-text="hook">¿Tu mañana empieza con prisa?</h1>
+    </div>
+  </div>
+</template>

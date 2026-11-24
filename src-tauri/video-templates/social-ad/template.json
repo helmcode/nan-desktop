@@ -1,0 +1,33 @@
+{
+  "id": "social-ad",
+  "title": { "es": "Anuncio para redes", "en": "Social ad" },
+  "description": {
+    "es": "Anuncio vertical y directo: gancho, oferta con insignia de descuento y llamada a la acción con precio.",
+    "en": "A punchy vertical ad: hook, offer with a discount badge and a call to action with the price."
+  },
+  "category": "marketing",
+  "aspect": "9:16",
+  "fps": 30,
+  "fonts": ["inter-700.woff2", "montserrat-800.woff2"],
+  "scenes": [
+    { "id": "hook", "title": { "es": "Gancho", "en": "Hook" }, "duration": 3 },
+    { "id": "offer", "title": { "es": "Oferta", "en": "Offer" }, "duration": 4 },
+    { "id": "cta", "title": { "es": "Precio y acción", "en": "Price and action" }, "duration": 4 }
+  ],
+  "variables": [
+    { "id": "kicker", "type": "text", "label": { "es": "Antetítulo", "en": "Kicker" }, "value": { "es": "Para madrugadores", "en": "For early birds" } },
+    { "id": "hook", "type": "text", "label": { "es": "Frase gancho", "en": "Hook line" }, "value": { "es": "¿Tu mañana empieza con prisa?", "en": "Is your morning always a rush?" } },
+    { "id": "product", "type": "text", "label": { "es": "Producto", "en": "Product" }, "value": { "es": "Nova", "en": "Nova" } },
+    { "id": "offer", "type": "text", "label": { "es": "Oferta", "en": "Offer" }, "value": { "es": "Café de especialidad listo en 30 segundos", "en": "Specialty coffee ready in 30 seconds" } },
+    { "id": "discount", "type": "text", "label": { "es": "Descuento", "en": "Discount" }, "value": { "es": "-30%", "en": "-30%" } },
+    { "id": "badge-note", "type": "text", "label": { "es": "Nota de la insignia", "en": "Badge note" }, "value": { "es": "Solo esta semana", "en": "This week only" } },
+    { "id": "old-price", "type": "text", "label": { "es": "Precio anterior", "en": "Old price" }, "value": { "es": "28,50 €", "en": "$28.50" } },
+    { "id": "price", "type": "text", "label": { "es": "Precio", "en": "Price" }, "value": { "es": "19,90 €", "en": "$19.90" } },
+    { "id": "cta", "type": "text", "label": { "es": "Llamada a la acción", "en": "Call to action" }, "value": { "es": "Pídelo hoy", "en": "Order today" } },
+    { "id": "url", "type": "text", "label": { "es": "Web o usuario", "en": "Website or handle" }, "value": { "es": "@novacafe", "en": "@novacoffee" } },
+    { "id": "logo", "type": "image", "label": { "es": "Logo", "en": "Logo" }, "value": { "es": "assets/logo.svg", "en": "assets/logo.svg" } },
+    { "id": "bg", "type": "color", "label": { "es": "Fondo", "en": "Background" }, "value": { "es": "#ffe14d", "en": "#ffe14d" } },
+    { "id": "fg", "type": "color", "label": { "es": "Texto", "en": "Text" }, "value": { "es": "#141414", "en": "#141414" } },
+    { "id": "accent", "type": "color", "label": { "es": "Color de acento", "en": "Accent color" }, "value": { "es": "#ff3b30", "en": "#ff3b30" } }
+  ]
+}
