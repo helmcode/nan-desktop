@@ -374,7 +374,7 @@ export const es: Strings = {
     },
     commands: {
       title: "Ejecutar órdenes",
-      body: "Permite que el asistente ejecute órdenes dentro de tus carpetas de trabajo, por ejemplo para crear un PDF. Pregunta antes de cada orden en las carpetas con Preguntar siempre.",
+      body: "Permite que el asistente ejecute órdenes dentro de tus carpetas de trabajo, por ejemplo para crear un PDF. Pregunta antes de cada orden en las carpetas con «Preguntar siempre».",
     },
     memory: {
       title: "Memoria",

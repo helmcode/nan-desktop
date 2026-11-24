@@ -372,7 +372,7 @@ export const en = {
     },
     commands: {
       title: "Run commands",
-      body: "Lets the assistant run commands inside your working folders, for example to create a PDF. It asks before every command in folders set to Ask every time.",
+      body: "Lets the assistant run commands inside your working folders, for example to create a PDF. It asks before every command in folders set to “Ask every time”.",
     },
     memory: {
       title: "Memory",
