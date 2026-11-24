@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Actualizar ya no deja la app colgada: la instalacion y el reinicio se hacen de forma mas directa y, si la app no se ha cerrado a los 20 segundos, se cierra sola y abre la version nueva.
+- Videos en vertical y cuadrado: la vista previa ya no corta la parte de abajo del video (pasaba en macOS en todas las plantillas). Tres plantillas se ven mejor en cuadrado.
+- "Permitir sin preguntar" tambien vale para la carpeta temporal del chat cuando todas las carpetas seleccionadas estan en ese modo, y el selector de carpetas no se puede cambiar mientras el asistente responde (el cambio vale desde el siguiente mensaje).
+
+### New
+- Exportar varios formatos a la vez (horizontal, vertical y cuadrado): se generan uno detras de otro, con el tiempo total que van a usar antes de empezar, y cada uno se puede cancelar.
+- Vista previa del video: boton para exportar y boton de pantalla completa. Se actualiza sola cuando el asistente cambia el video.
+- Colores en hexadecimal (#0a0a0a, #FFF) junto al selector de color.
+- "Pedir al asistente que lo arregle" envia la peticion directamente.
+
 ## 0.2.19 - 2026-11-24 - Videos
 
 ### New
