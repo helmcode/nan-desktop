@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.20 - 2026-11-24 - Actualizar sin cuelgues y mejoras de videos
 
 ### Fixed
 - Actualizar ya no deja la app colgada: la instalacion y el reinicio se hacen de forma mas directa y, si la app no se ha cerrado a los 20 segundos, se cierra sola y abre la version nueva.

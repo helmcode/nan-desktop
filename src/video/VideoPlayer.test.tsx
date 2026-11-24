@@ -46,7 +46,11 @@ describe("VideoPlayer", () => {
         <VideoPlayer info={INFO} />
       </I18nProvider>,
     );
-    await waitFor(() => expect(document.querySelector("hyperframes-player")).not.toBeNull());
+    // The element commits first and an effect then loads it: wait for the
+    // load, not just the element (slow CI runners land in between).
+    await waitFor(() =>
+      expect(document.querySelector("hyperframes-player")?.getAttribute("src")).toBe(INFO.url),
+    );
     const player = document.querySelector("hyperframes-player")!;
     expect(PLAYER_SANDBOX_ORIGIN).toBe("opaque");
     expect(player.getAttribute("sandbox-origin")).toBe("opaque");

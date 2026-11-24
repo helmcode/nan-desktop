@@ -252,7 +252,10 @@ describe("VideoEditor", () => {
     proto.seek = (t: number) => seeks.push(t);
     try {
       setup();
-      await waitFor(() => expect(document.querySelector("hyperframes-player")).not.toBeNull());
+      // Wait for the effect that wires the listeners and loads the player.
+      await waitFor(() =>
+        expect(document.querySelector("hyperframes-player")?.hasAttribute("src")).toBe(true),
+      );
       document.querySelector("hyperframes-player")!.dispatchEvent(new CustomEvent("ready"));
       expect(seeks).toEqual([1]);
       expect(screen.queryByLabelText("Posición en el vídeo")).toBeNull();
