@@ -270,7 +270,7 @@ durations and fixed lists; tests pin every builder):
 | `vision_routed` | `from_model`, `to_model` (only ids from the app's built-in model list, else `other`): a reply with images went to the model that can see them because the selected one cannot |
 | `update_install` | `from`, `to` (app versions): the user clicked Update, before the download |
 | `update_applied` | `from`, `to`, `seconds`: the next launch runs the new version; seconds from the click to that launch |
-| `update_not_applied` | `from`, `to`, `running`: the next launch still runs an older version |
+| `update_not_applied` | `from`, `to`, `running`: the next launch runs a different version than the one installed (the install did not take) |
 | `crash` | `source` (`rust_panic`, `renderer`), `location` (Rust: `file:line` where the panic happened, the app's or a library's source file, build-machine path prefixes removed; renderer: the error name, only standard error classes such as `TypeError` or the `typeof` of a non-Error rejection, anything else is sent as `Error`) |
 
 The `tool` list includes the in-app browser tools (`browser_open`,

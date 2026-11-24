@@ -343,8 +343,8 @@ pub fn update_applied(from: &str, to: &str, seconds: u64) -> EventSpec {
     )
 }
 
-/// `update_not_applied {from, to, running}`: the next launch still runs an
-/// older version (the install did not take).
+/// `update_not_applied {from, to, running}`: the next launch runs a
+/// different version than the one installed (the install did not take).
 pub fn update_not_applied(from: &str, to: &str, running: &str) -> EventSpec {
     spec(
         "update_not_applied",
