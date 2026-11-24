@@ -1,0 +1,6 @@
+# Byte-exact video assets: the HyperFrames runtime is pinned by SHA-256, the
+# golden index is compared byte for byte, and templates must render the same
+# on every OS. Keep LF on Windows checkouts (core.autocrlf would add CR).
+src-tauri/vendor/hyperframes/** -text
+src-tauri/src/video/testdata/** -text
+src-tauri/video-templates/** eol=lf
