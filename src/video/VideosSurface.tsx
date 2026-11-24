@@ -7,6 +7,7 @@ import { useI18n } from "../i18n";
 import { releaseSitePreview } from "../core";
 import { IconArrowLeft, IconFilm, IconPlus, IconTrash } from "../icons";
 import {
+  ASPECTS,
   formatDuration,
   templatePoster,
   videoCreateFromTemplate,
@@ -26,7 +27,6 @@ import { VideoEditor, rovingKeys } from "./VideoEditor";
 import { VideoPlayer } from "./VideoPlayer";
 import "./video.css";
 
-const ASPECTS: Aspect[] = ["16:9", "9:16", "1:1"];
 
 type Tab = "mine" | "templates";
 

@@ -599,7 +599,9 @@ export const en = {
     insufficientMany: (cost: string, left: string) =>
       `These formats use ${cost} and you have ${left} of export time left this month. Remove one or shorten the video.`,
     queuePending: "Queued, starts when the previous one finishes.",
-    queueWaiting: (time: string) => `Our renderers are full. Trying again in ${time}…`,
+    /// The same first sentence as the matching export error, then the countdown.
+    queueWaiting: (reason: string, time: string) =>
+      `${reason === "too_many_active" ? "You already have two videos rendering." : reason === "rate_limited" ? "Too many exports in a short time." : "Our servers are busy receiving other videos."} Trying again in ${time}.`,
     queueSkipped: "Not exported.",
     cancelFormat: (name: string) => `Cancel ${name}`,
     cancelRest: "Cancel the rest",

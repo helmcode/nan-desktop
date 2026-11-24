@@ -338,7 +338,7 @@ describe("ExportPanel", () => {
     expect(screen.getByText("Generando el vídeo… 20%")).toBeTruthy();
   });
 
-  it("cancels the rest in one go", async () => {
+  it("cancels the rest (the formats not started) and keeps the one rendering", async () => {
     resetTauri({
       video_export_quota: () => QUOTA,
       video_export_start: () => ({ render_id: "r-1", charge_seconds: 8 }),
@@ -351,10 +351,62 @@ describe("ExportPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Exportar 3 MP4" }));
     expect(await screen.findByText("Esperando un hueco para generarlo…")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Cancelar el resto" }));
-    await waitFor(() => expect(screen.getAllByText("Exportación cancelada. No se ha cobrado nada.").length).toBe(3));
-    expect(invokedWith("video_export_cancel")).toEqual([{ profileId: "nan", renderId: "r-1" }]);
+    await waitFor(() => expect(screen.getAllByText("Exportación cancelada. No se ha cobrado nada.").length).toBe(2));
+    // The running render goes on, with its own Cancel; nothing is left to "cancel the rest" of.
+    expect(invokedWith("video_export_cancel")).toEqual([]);
+    expect(screen.getByText("Esperando un hueco para generarlo…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Cancelar el resto" })).toBeNull();
     expect(invokedWith("video_export_start").length).toBe(1);
-    expect(localStorage.getItem(`video.render.${PROJECT_ID}`)).toBeNull();
+    expect(localStorage.getItem(`video.render.${PROJECT_ID}`)).toBe("r-1");
+    fireEvent.click(screen.getByRole("button", { name: "Cancelar Horizontal 16:9" }));
+    await waitFor(() => expect(invokedWith("video_export_cancel")).toEqual([{ profileId: "nan", renderId: "r-1" }]));
+  });
+
+  it("keeps exporting when the panel closes, and shows the result when it opens again", async () => {
+    let finish = false;
+    resetTauri({
+      video_export_quota: () => QUOTA,
+      video_export_start: () => ({ render_id: "r-1", charge_seconds: 8 }),
+      video_export_status: () =>
+        finish
+          ? { status: "done", progress: 1, error: null, ready: true, size_bytes: 9, expires_at: null }
+          : { status: "rendering", progress: 0.5, error: null, ready: false, size_bytes: null, expires_at: null },
+      video_export_download: () => ({ name: "promo-horizontal.mp4", size: 9 }),
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const view = renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
+    expect(await screen.findByText("Generando el vídeo… 50%")).toBeTruthy();
+    view.unmount();
+    finish = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+    });
+    await waitFor(() => expect(invokedWith("video_export_download").length).toBe(1));
+    renderPanel();
+    expect(await screen.findByText("Tu MP4 está listo.")).toBeTruthy();
+    expect(invokedWith("video_export_start").length).toBe(1);
+  });
+
+  it("shares one queue between two panels of the same project", async () => {
+    resetTauri({
+      video_export_quota: () => QUOTA,
+      video_export_start: () => ({ render_id: "r-1", charge_seconds: 8 }),
+      video_export_status: () => ({ status: "rendering", progress: 0.3, error: null, ready: false, size_bytes: null, expires_at: null }),
+    });
+    render(
+      <I18nProvider initial="es">
+        <ExportPanel profileId="nan" project={project()} blocked={false} onExported={() => {}} />
+        <ExportPanel profileId="nan" project={project()} blocked={false} onExported={() => {}} />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "Exportar MP4" })[0]);
+    await waitFor(() => expect(screen.getAllByText("Generando el vídeo… 30%").length).toBe(2));
+    expect(invokedWith("video_export_start").length).toBe(1);
+    // Both are locked while it runs.
+    for (const button of screen.getAllByRole("button", { name: "Exportar MP4" })) {
+      expect((button as HTMLButtonElement).disabled).toBe(true);
+    }
   });
 
   it("waits for a free slot when the server is full, then carries on", async () => {
@@ -371,13 +423,18 @@ describe("ExportPanel", () => {
     });
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
-    expect(await screen.findByText("Los servidores están llenos. Se vuelve a intentar en 5 s…")).toBeTruthy();
+    // The same words as the matching error, with a countdown that ticks.
+    expect(await screen.findByText("Ya tienes dos vídeos generándose. Se vuelve a intentar en 5 s.")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(await screen.findByText("Ya tienes dos vídeos generándose. Se vuelve a intentar en 3 s.")).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
     });
     // No Retry-After: the default wait.
-    expect(await screen.findByText("Los servidores están llenos. Se vuelve a intentar en 30 s…")).toBeTruthy();
+    expect(await screen.findByText("Demasiadas exportaciones seguidas. Se vuelve a intentar en 30 s.")).toBeTruthy();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
     });

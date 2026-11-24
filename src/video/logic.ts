@@ -3,7 +3,7 @@
 // components so it is tested directly.
 
 import type { Strings } from "../i18n";
-import { formatDuration, formatTime, type Aspect, type ExportError, type VideoAskContext, type VideoScene } from "./api";
+import { ASPECTS, formatDuration, formatTime, type Aspect, type ExportError, type VideoAskContext, type VideoScene } from "./api";
 
 export interface SceneWindow {
   scene: VideoScene;
@@ -191,7 +191,6 @@ export function uploadTooSlow(sent: number, total: number, elapsedS: number): bo
 const RENDER_KEY = (projectId: string) => `video.render.${projectId}`;
 
 const ASPECT_KEY = (projectId: string) => `video.render.${projectId}.aspect`;
-const ASPECTS: readonly Aspect[] = ["16:9", "9:16", "1:1"];
 
 /// `aspect`: the format the render was asked in (so a resumed download
 /// gets the right file name).

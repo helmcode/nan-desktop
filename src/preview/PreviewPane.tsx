@@ -196,6 +196,8 @@ function VideoBody({
   const changes = useVideoRevision(projectId);
   const [state, setState] = useState<LoadState<VideoPreviewInfo>>({ status: "loading" });
   const [startAt, setStartAt] = useState(0);
+  // Full screen survives the reload of the player after an assistant edit.
+  const [fullscreen, setFullscreen] = useState(false);
   const shown = useRef<VideoPreviewInfo | null>(null);
   const time = useRef(0);
   useEffect(() => {
@@ -237,6 +239,8 @@ function VideoBody({
         key={state.value.url}
         info={state.value}
         startAt={startAt}
+        fullscreen={fullscreen}
+        onFullscreenChange={setFullscreen}
         onTime={(seconds) => {
           time.current = seconds;
         }}
@@ -396,6 +400,7 @@ export default function PreviewPane({
             type="button"
             className={`btn btn-sm preview-export ${exporting ? "btn-primary" : "btn-secondary"}`}
             aria-expanded={exporting}
+            aria-controls="preview-video-export"
             onClick={() => setExportingFor(exporting ? null : key)}
           >
             <IconDownload size={14} />

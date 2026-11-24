@@ -2,6 +2,7 @@
 // R-V1: the simple editor writes ONLY through the core commands (values,
 // scene order and length, picked files by slot), never a path or HTML, and
 // hands scene changes to the assistant with the project and time context.
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
@@ -353,6 +354,32 @@ describe("VideoEditor", () => {
     expect(hex.getAttribute("aria-invalid")).toBe("true");
     fireEvent.blur(hex);
     expect(invokedWith("video_update").length).toBe(2);
+  });
+
+  it("puts the saved color back when the hex code is emptied", async () => {
+    setup();
+    const hex = (await screen.findByRole("textbox", { name: "Código de color de Color de acento" })) as HTMLInputElement;
+    fireEvent.focus(hex);
+    fireEvent.change(hex, { target: { value: "" } });
+    fireEvent.blur(hex);
+    expect(hex.value).toBe("#7c6cff");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(invokedWith("video_update")).toEqual([]);
+  });
+
+  it("shows a wrong hex code's message on its own line under the field", async () => {
+    setup();
+    const hex = (await screen.findByRole("textbox", { name: "Código de color de Color de acento" })) as HTMLInputElement;
+    fireEvent.change(hex, { target: { value: "zz" } });
+    fireEvent.keyDown(hex, { key: "Enter" });
+    const message = await screen.findByRole("alert");
+    expect(message.parentElement?.classList.contains("video-color-field")).toBe(true);
+    expect(message.classList.contains("video-hex-error")).toBe(true);
+    expect(hex.getAttribute("aria-describedby")).toBe(message.id);
+    // The row wraps and the message takes a whole line (the row is flex).
+    const css = readFileSync("src/video/video.css", "utf8");
+    expect(css).toMatch(/\.video-color-field \{[^}]*flex-wrap: wrap;/);
+    expect(css).toMatch(/\.video-hex-error \{[^}]*flex-basis: 100%;/);
   });
 
   it("keeps the hex code in step with the color picker", async () => {

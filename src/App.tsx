@@ -2013,6 +2013,7 @@ function ChatShell({
     continuation = false,
     queuedFiles?: readonly PendingAttachment[],
     videoOverride?: VideoAskContext,
+    skipSkill = false,
   ): Promise<boolean> => {
     const text = (override ?? composer).trim();
     const fromTray = queuedFiles === undefined && override === undefined && attach.items.length > 0;
@@ -2032,7 +2033,8 @@ function ChatShell({
     // The open conversation's folders (read before a new row adopts them).
     const grantIds = selectedFolders;
     // ...and its skill: only the id is sent; the core reads the text.
-    const skillId = activeSkill?.id ?? null;
+    // (An app-made request, such as a video's "fix it", goes without it.)
+    const skillId = skipSkill ? null : (activeSkill?.id ?? null);
     // ...and a video request's hidden context (typed messages only).
     const videoContext = videoOverride ?? (override === undefined && queuedFiles === undefined ? videoAsk : null);
     try {
@@ -2257,14 +2259,26 @@ function ChatShell({
   // sent it, without touching the composer (its draft and its video chip
   // stay). When it cannot go out now (a reply is still streaming, or the
   // send failed) it falls back to the composer, so it is never lost.
+  // It goes to the conversation on screen (a video opened from the library
+  // has no conversation of its own) WITHOUT the active skill (an app-made
+  // request, not the user's). While a reply runs (or messages already
+  // wait) it joins that conversation's send queue, like a message the user
+  // sends meanwhile.
   const sendAssistantAboutVideo = useCallback(
     (text: string, context: VideoAskContext): void => {
       setView("chat");
-      void send(text, false, undefined, context).then((sent) => {
+      const id = activeConvRef.current;
+      if (id !== null && (streamingIds.has(id) || queueOf(queuesRef.current, id).items.length > 0)) {
+        queueSeq.current += 1;
+        const seq = queueSeq.current;
+        setQueues((prev) => enqueue(prev, id, text, seq, [], { videoContext: context, skipSkill: true }));
+        return;
+      }
+      void send(text, false, undefined, context, true).then((sent) => {
         if (!sent) askAssistantAboutVideo(text, context);
       });
     },
-    [send, askAssistantAboutVideo],
+    [send, askAssistantAboutVideo, streamingIds],
   );
 
   useEffect(() => {
@@ -2451,7 +2465,7 @@ function ChatShell({
     setQueues((prev) => takeQueued(prev, id));
     setAutoRetryConvId((prev) => (prev === id ? null : prev));
     void sendRef
-      .current(message.text, false, message.attachments ?? [])
+      .current(message.text, false, message.attachments ?? [], message.videoContext, message.skipSkill ?? false)
       .then((sent) => {
         if (sent) return;
         // Deleted while this send was in flight: no queue comes back, and
@@ -2478,6 +2492,8 @@ function ChatShell({
     // back to the tray.
     setComposer((prev) => (prev.trim() ? `${item.text}\n${prev}` : item.text));
     attachAppendRef.current(item.attachments ?? []);
+    // A video request keeps its hidden context (the chip shows it).
+    if (item.videoContext) setVideoAsk(item.videoContext);
     composerRef.current?.focus();
   }, []);
   const removeQueuedMessage = useCallback((itemId: number): void => {

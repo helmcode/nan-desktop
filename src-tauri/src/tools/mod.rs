@@ -446,10 +446,11 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(bytes).into()
 }
 
-/// The synthetic grant over a conversation's session temp folder: ask mode,
-/// folder scope. It is not in `tools.json`; [`approve_proposal`] adds it to
-/// the routing store with the mode [`scratch_mode`] derives from the
-/// conversation's scope, so the temp folder follows the user's settings.
+/// The synthetic grant over a conversation's session temp folder, folder
+/// scope. It is not in `tools.json`. Its `ask` mode is only the default
+/// (validation, execution and the share reader never read it):
+/// [`approve_proposal`] overrides it with [`scratch_mode`], derived from
+/// the conversation's selected folders, before routing.
 fn scratch_grant(profile_id: &str, conversation_id: i64, canonical: PathBuf) -> grants::Grant {
     grants::Grant {
         id: format!("{SCRATCH_GRANT_PREFIX}{conversation_id}"),
@@ -3091,12 +3092,19 @@ pub fn approval_route(store: &GrantsStore, proposal: &PendingProposal) -> Approv
     }
 }
 
-/// Actions the browsing guard covers: commands and every change to files.
-/// Reads (`read_file`, `list_files`) stay free.
+/// Actions the browsing guard covers: commands and every change to files,
+/// including `write_website` (its temp folder can run without a prompt,
+/// R24). Reads (`read_file`, `list_files`) stay free.
 pub fn guarded_after_browsing(action_kind: &str) -> bool {
     matches!(
         action_kind,
-        "run_command" | "write_file" | "replace_file" | "move_path" | "delete_path" | "save_image"
+        "run_command"
+            | "write_file"
+            | "replace_file"
+            | "move_path"
+            | "delete_path"
+            | "save_image"
+            | "write_website"
     )
 }
 
@@ -5348,6 +5356,7 @@ mod tests {
             "move_path",
             "delete_path",
             "save_image",
+            "write_website",
         ] {
             assert_eq!(
                 route_after_browsing(Auto, kind, true, true, false),
@@ -6927,8 +6936,13 @@ mod tests {
         );
     }
 
-    /// Propose `action` against the conversation's session temp folder (the
-    /// `with_scratch` path that save_image / write_website use) and approve.
+    /// ROUTING-LEVEL helper: propose `action` against the conversation's
+    /// session temp folder through `with_scratch` and approve it. It forces
+    /// the temp-folder grant for any action kind to exercise
+    /// [`approve_proposal`]'s routing. In production, with folders
+    /// selected, only the save_image fallback and write_website take this
+    /// path; run_command reaches the temp folder only with an EMPTY
+    /// selection, which always asks.
     fn approve_in_scratch(
         dir: &Path,
         st: &ToolsState,
@@ -6951,81 +6965,92 @@ mod tests {
         }
     }
 
-    fn scratch_command(st: &ToolsState) -> ToolAction {
-        ToolAction::RunCommand {
-            cmd: "ls".into(),
-            cwd_in_grant: path_str(&st.scratch_dir(1)),
-        }
-    }
-
-    fn enable_run_command(dir: &Path) {
-        let mut store = grants::load_or_seed(dir).expect("load");
-        store.set_run_command_enabled(true);
-        grants::save(dir, &store).expect("save");
+    fn write_site((dir, st): (&Path, &ToolsState), approver: &FakeApprover) -> ToolOutcome {
+        tauri::async_runtime::block_on(write_website_in(
+            dir,
+            st,
+            approver,
+            "nan",
+            1,
+            &site_draft("Panadería Ana", SITE),
+        ))
+        .expect("written")
     }
 
     #[test]
-    fn scratch_runs_without_a_prompt_when_every_selected_folder_allows() {
+    fn the_temp_folder_writes_without_a_prompt_when_every_selected_folder_allows() {
         let TwoFolders {
             dir, st, _guards, ..
         } = two_folder_layout();
-        enable_run_command(&dir);
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         set_grant_mode(&dir, "g2", ApprovalMode::Allow);
         st.set_conversation_scope(1, Some(vec!["g1".into(), "g2".into()]));
+        // The production paths into the temp folder with folders selected:
+        // write_website and the save_image fallback.
         let approver = FakeApprover::answering(true);
+        write_site((&dir, &st), &approver);
+        let source = generated_image(&dir);
+        let (elsewhere, _g) = tempdir();
+        let save = save_image(
+            &dir,
+            &st,
+            &approver,
+            &source,
+            &path_str(&canon(&elsewhere).join("zorro.png")),
+        );
+        assert!(matches!(save, ImageSave::SavedToTemp { .. }), "{save:?}");
+        assert_eq!(approver.prompts(), (0, 0), "no prompt at all");
+        // Routing level: any action on the temp-folder grant routes Auto.
         assert_eq!(
             approve_in_scratch(&dir, &st, &approver, &scratch_write(&st)),
             ApprovalRoute::Auto
         );
-        assert_eq!(
-            approve_in_scratch(&dir, &st, &approver, &scratch_command(&st)),
-            ApprovalRoute::Auto
-        );
-        assert_eq!(approver.prompts(), (0, 0), "no prompt at all");
     }
 
     #[test]
-    fn scratch_asks_when_a_selected_folder_asks() {
+    fn the_temp_folder_asks_when_a_selected_folder_asks() {
         let TwoFolders {
             dir, st, _guards, ..
         } = two_folder_layout();
-        enable_run_command(&dir);
         // Every selected folder asks.
         st.set_conversation_scope(1, Some(vec!["g1".into()]));
         let approver = FakeApprover::answering(true);
-        assert_eq!(
-            approve_in_scratch(&dir, &st, &approver, &scratch_command(&st)),
-            ApprovalRoute::Inline
-        );
+        write_site((&dir, &st), &approver);
+        assert_eq!(approver.prompts(), (0, 1));
         // Mixed selection: one allows, one asks -> the strictest wins.
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         st.set_conversation_scope(1, Some(vec!["g1".into(), "g2".into()]));
+        write_site((&dir, &st), &approver);
+        assert_eq!(approver.prompts(), (0, 2));
         assert_eq!(
-            approve_in_scratch(&dir, &st, &approver, &scratch_command(&st)),
+            approve_in_scratch(&dir, &st, &approver, &scratch_write(&st)),
             ApprovalRoute::Inline
         );
-        assert_eq!(approver.prompts(), (0, 2));
     }
 
     #[test]
-    fn scratch_asks_without_a_scope_or_with_nothing_selected() {
+    fn the_temp_folder_asks_without_a_scope_or_with_nothing_selected() {
         let TwoFolders {
             dir, st, _guards, ..
         } = two_folder_layout();
-        enable_run_command(&dir);
+        let mut store = grants::load_or_seed(&dir).expect("load");
+        store.set_run_command_enabled(true);
+        grants::save(&dir, &store).expect("save");
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         set_grant_mode(&dir, "g2", ApprovalMode::Allow);
         let approver = FakeApprover::answering(true);
         // No scope (legacy): no selected folder to follow.
-        assert_eq!(
-            approve_in_scratch(&dir, &st, &approver, &scratch_command(&st)),
-            ApprovalRoute::Inline
-        );
-        // Empty selection (the temp folder is the only workspace): the
-        // conservative reading keeps asking, even with every folder allow.
+        write_site((&dir, &st), &approver);
+        assert_eq!(approver.prompts(), (0, 1));
+        // Empty selection: the temp folder is the only workspace (the one
+        // production case where run_command runs there). The conservative
+        // reading keeps asking, even with every folder in allow.
         st.set_conversation_scope(1, Some(Vec::new()));
-        let proposal = propose(&dir, &st, "nan", Some(1), &scratch_command(&st)).expect("proposed");
+        let command = ToolAction::RunCommand {
+            cmd: "ls".into(),
+            cwd_in_grant: path_str(&st.scratch_dir(1)),
+        };
+        let proposal = propose(&dir, &st, "nan", Some(1), &command).expect("proposed");
         let route =
             tauri::async_runtime::block_on(approve_proposal(&dir, &st, &approver, &proposal))
                 .expect("approved");
@@ -7034,28 +7059,24 @@ mod tests {
     }
 
     #[test]
-    fn scratch_after_browsing_follows_the_browser_setting() {
+    fn a_temp_folder_website_after_browsing_follows_the_browser_setting() {
         let TwoFolders {
             dir, st, _guards, ..
         } = two_folder_layout();
-        enable_run_command(&dir);
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         st.set_conversation_scope(1, Some(vec!["g1".into()]));
         st.mark_browsed(1);
         // Browser in allow (the default): the guard is off.
         let approver = FakeApprover::answering(true);
-        assert_eq!(
-            approve_in_scratch(&dir, &st, &approver, &scratch_command(&st)),
-            ApprovalRoute::Auto
-        );
+        write_site((&dir, &st), &approver);
         assert_eq!(approver.prompts(), (0, 0));
-        // Browser in ask: commands after browsing ask inline, and say why.
+        // Browser in ask: a website written after browsing asks inline, and
+        // the card says why.
         browser_asks(&dir);
-        assert_eq!(
-            approve_in_scratch(&dir, &st, &approver, &scratch_command(&st)),
-            ApprovalRoute::Inline
-        );
+        write_site((&dir, &st), &approver);
+        assert_eq!(approver.prompts(), (0, 1));
         let card = approver.inline_calls.lock().expect("lock")[0].clone();
+        assert_eq!(card.action, "write_website");
         assert!(card.after_browsing, "asked because of the browsing guard");
     }
 

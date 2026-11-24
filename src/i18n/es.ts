@@ -601,7 +601,9 @@ export const es: Strings = {
     insufficientMany: (cost: string, left: string) =>
       `Estos formatos usan ${cost} y te quedan ${left} de exportación este mes. Quita alguno o acorta el vídeo.`,
     queuePending: "En cola, empieza cuando termine el anterior.",
-    queueWaiting: (time: string) => `Los servidores están llenos. Se vuelve a intentar en ${time}…`,
+    /// The same first sentence as the matching export error, then the countdown.
+    queueWaiting: (reason: string, time: string) =>
+      `${reason === "too_many_active" ? "Ya tienes dos vídeos generándose." : reason === "rate_limited" ? "Demasiadas exportaciones seguidas." : "Nuestros servidores están recibiendo otros vídeos."} Se vuelve a intentar en ${time}.`,
     queueSkipped: "No se ha exportado.",
     cancelFormat: (name: string) => `Cancelar ${name}`,
     cancelRest: "Cancelar el resto",

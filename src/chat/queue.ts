@@ -38,9 +38,15 @@ export interface QueuedMessage {
   /** Why the core refused its files (an attach problem reason); shown on
    * the held item until the user edits it. */
   problem?: string;
+  /** A video request's hidden context (the automatic check's "fix it"),
+   * sent with this message for the model only. */
+  videoContext?: VideoAskContext;
+  /** Sent without the conversation's active skill (an app-made request). */
+  skipSkill?: boolean;
 }
 
 import type { PendingAttachment } from "./attachments";
+import type { VideoAskContext } from "../video/api";
 
 export interface ConversationQueue {
   items: readonly QueuedMessage[];
@@ -75,11 +81,13 @@ export function enqueue(
   text: string,
   id: number,
   attachments: readonly PendingAttachment[] = [],
+  extra: Pick<QueuedMessage, "videoContext" | "skipSkill"> = {},
 ): Queues {
   const trimmed = text.trim();
   if (!trimmed && attachments.length === 0) return queues;
   const current = queueOf(queues, conversationId);
-  const message: QueuedMessage = attachments.length > 0 ? { id, text: trimmed, attachments } : { id, text: trimmed };
+  const base: QueuedMessage = attachments.length > 0 ? { id, text: trimmed, attachments } : { id, text: trimmed };
+  const message: QueuedMessage = { ...base, ...extra };
   return withQueue(queues, conversationId, { items: [...current.items, message], held: false });
 }
 

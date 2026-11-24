@@ -268,6 +268,46 @@ pub fn with_aspect(
         .collect()
 }
 
+/// The project checks (`validate_meta`, every scene through the preview
+/// assembly: no network, determinism, structure) on in-memory bundle files.
+pub fn check_bundle(files: &[(String, Vec<u8>)]) -> Result<(), ExportError> {
+    let invalid = || ExportError::new("invalid_project");
+    let file = |name: &str| files.iter().find(|(n, _)| n == name).map(|(_, b)| b);
+    let meta: project::VideoMeta =
+        serde_json::from_slice(file("video.json").ok_or_else(invalid)?).map_err(|_| invalid())?;
+    project::validate_meta(&meta, &|rel| {
+        rel.starts_with("assets/") && file(rel).is_some()
+    })
+    .map_err(|_| invalid())?;
+    let theme = match file("theme.css") {
+        Some(bytes) => String::from_utf8(bytes.clone()).map_err(|_| invalid())?,
+        None => String::new(),
+    };
+    let mut scenes = std::collections::BTreeMap::new();
+    for scene in &meta.scenes {
+        let bytes = file(&format!("compositions/{}.html", scene.id)).ok_or_else(invalid)?;
+        scenes.insert(
+            scene.id.clone(),
+            String::from_utf8(bytes.clone()).map_err(|_| invalid())?,
+        );
+    }
+    let asset = |rel: &str| {
+        if rel.starts_with("assets/") {
+            file(rel).cloned()
+        } else {
+            None
+        }
+    };
+    super::preview::assemble(&super::preview::Parts {
+        meta: &meta,
+        theme: &theme,
+        scenes: &scenes,
+        asset: &asset,
+    })
+    .map_err(ExportError::from)?;
+    Ok(())
+}
+
 /// Validate the project for export and build `(meta, bundle)`. `aspect`
 /// renders the project in another format than its own (see
 /// [`with_aspect`]); the project itself is never changed.
@@ -289,6 +329,9 @@ pub fn prepare(
     let aspect = aspect.unwrap_or(meta.aspect);
     if aspect != meta.aspect {
         files = with_aspect(files, aspect)?;
+        // The variant is what ships: it passes the same checks as the
+        // project itself before anything is uploaded.
+        check_bundle(&files)?;
     }
     let bundle = zip_stored(&files, MAX_BUNDLE_BYTES)?;
     let (width, height) = aspect.size();
@@ -1046,6 +1089,39 @@ mod tests {
             "byte for byte"
         );
         assert!(unzip_names(&bundle).contains(&"video.json".to_string()));
+
+        // The variant passes the project checks; a broken one is refused.
+        check_bundle(&switched).unwrap();
+        let broken: Vec<(String, Vec<u8>)> = switched
+            .iter()
+            .map(|(name, bytes)| {
+                if name == "compositions/outro.html" {
+                    (
+                        name.clone(),
+                        b"<template><script src=x></script></template>".to_vec(),
+                    )
+                } else {
+                    (name.clone(), bytes.clone())
+                }
+            })
+            .collect();
+        assert_eq!(check_bundle(&broken).unwrap_err().kind, "invalid_project");
+        let remote: Vec<(String, Vec<u8>)> = switched
+            .iter()
+            .map(|(name, bytes)| {
+                if name == "compositions/outro.html" {
+                    let html = String::from_utf8(bytes.clone()).unwrap();
+                    (
+                        name.clone(),
+                        html.replace("</h1>", "</h1><img src=\"https://x/a.png\" alt=\"\">")
+                            .into_bytes(),
+                    )
+                } else {
+                    (name.clone(), bytes.clone())
+                }
+            })
+            .collect();
+        assert_eq!(check_bundle(&remote).unwrap_err().kind, "invalid_project");
 
         // The project's own format (or none) is the plain bundle.
         let (same, plain) = prepare(&dir, "standard", Some(project::Aspect::Landscape)).unwrap();

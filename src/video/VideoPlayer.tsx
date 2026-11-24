@@ -22,12 +22,18 @@
 // and, where the webview allows the Fullscreen API on app elements
 // (`requestFullscreen`, or `webkitRequestFullscreen` on older WebKit), the
 // same element also goes to the screen's full screen. The element is never
-// moved in the DOM (moving an iframe reloads it). Escape, or the button
-// again, leaves it.
+// moved in the DOM (moving an iframe reloads it). Escape, the button
+// again, or a tool approval request (it would be hidden under the layer)
+// leaves it. Not modal: the focus goes to the exit button and the player's
+// own controls stay reachable. A parent that reloads the player (a new
+// preview after an assistant edit) can keep it full screen through the
+// `fullscreen` / `onFullscreenChange` props; the new element then fills the
+// window (the webview's own full screen needs a fresh click).
 
 import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type CSSProperties, type Ref } from "react";
 import { useT } from "../i18n";
 import { isTopLayer, useEscapeLayer } from "../escapeLayers";
+import { onApprovalRequest } from "../core";
 import { IconFit } from "../icons";
 import { formatDuration, type VideoPreviewInfo } from "./api";
 import "./video.css";
@@ -54,7 +60,7 @@ type FullscreenDocument = Document & { webkitFullscreenElement?: Element | null;
 
 /// Ask the webview for real full screen on `el` (best effort: the overlay
 /// already fills the window when it is not available).
-export function enterNativeFullscreen(el: HTMLElement): void {
+function enterNativeFullscreen(el: HTMLElement): void {
   const node = el as FullscreenElement;
   try {
     const request = node.requestFullscreen ?? node.webkitRequestFullscreen;
@@ -98,6 +104,8 @@ export function VideoPlayer({
   compact = false,
   autoplay = false,
   startAt = 0,
+  fullscreen: controlledFullscreen,
+  onFullscreenChange,
 }: {
   info: VideoPreviewInfo;
   handle?: Ref<PlayerHandle>;
@@ -109,6 +117,9 @@ export function VideoPlayer({
   /// Where the playhead goes once the film is ready (an editor change
   /// reloads the preview: the user keeps their place).
   startAt?: number;
+  /// Full screen held by the parent (kept across a reload of the player).
+  fullscreen?: boolean;
+  onFullscreenChange?: (on: boolean) => void;
 }) {
   const t = useT();
   const element = useRef<PlayerElement | null>(null);
@@ -116,7 +127,16 @@ export function VideoPlayer({
   const [failed, setFailed] = useState(false);
   const [ready, setReady] = useState(false);
   const figure = useRef<HTMLElement | null>(null);
-  const [fullscreen, setFullscreen] = useState(false);
+  const [ownFullscreen, setOwnFullscreen] = useState(false);
+  const fullscreen = controlledFullscreen ?? ownFullscreen;
+  const onFullscreenRef = useRef(onFullscreenChange);
+  onFullscreenRef.current = onFullscreenChange;
+  const setFullscreenRef = useRef((on: boolean) => {
+    setOwnFullscreen(on);
+    onFullscreenRef.current?.(on);
+  });
+  const setFullscreen = setFullscreenRef.current;
+  const toggleButton = useRef<HTMLButtonElement | null>(null);
   const startRef = useRef(startAt);
   startRef.current = startAt;
   const onTimeRef = useRef(onTime);
@@ -191,6 +211,9 @@ export function VideoPlayer({
       if (wasNative && !now) setFullscreen(false);
       wasNative = now;
     };
+    // A tool approval card must never sit hidden under the layer.
+    const unlistenApproval = onApprovalRequest(() => setFullscreen(false));
+    toggleButton.current?.focus();
     window.addEventListener("keydown", onKey, true);
     document.addEventListener("fullscreenchange", onChange);
     document.addEventListener("webkitfullscreenchange", onChange);
@@ -198,9 +221,10 @@ export function VideoPlayer({
       window.removeEventListener("keydown", onKey, true);
       document.removeEventListener("fullscreenchange", onChange);
       document.removeEventListener("webkitfullscreenchange", onChange);
+      void unlistenApproval.then((fn) => fn()).catch(() => undefined);
       exitNativeFullscreen();
     };
-  }, [fullscreen, layer]);
+  }, [fullscreen, layer, setFullscreen]);
 
   const toggleFullscreen = () => {
     if (fullscreen) {
@@ -217,7 +241,6 @@ export function VideoPlayer({
       ref={figure}
       className={`video-player${compact ? " compact" : ""}${fullscreen ? " fullscreen" : ""}`}
       role={fullscreen ? "dialog" : undefined}
-      aria-modal={fullscreen ? "true" : undefined}
       aria-label={fullscreen ? t.video.playerLabel(info.title) : undefined}
     >
       <div
@@ -261,6 +284,7 @@ export function VideoPlayer({
           {!autoplay && (
             <button
               type="button"
+              ref={toggleButton}
               className="icon-btn video-fullscreen"
               aria-label={fullscreen ? t.video.exitFullscreen : t.video.fullscreen}
               aria-pressed={fullscreen}

@@ -3,7 +3,7 @@
 // the core's sandboxed URL, and the side pane releases the preview token
 // when it goes away.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("../test/tauriMock")).eventModule());
@@ -104,6 +104,10 @@ describe("VideoPlayer", () => {
       expect(figure.classList.contains("fullscreen")).toBe(true);
       expect(requested).toEqual([figure]);
       expect(screen.getByRole("dialog", { name: "Reproductor de vídeo: Promo" })).toBe(figure);
+      // Not modal (the player's own controls stay reachable); the keyboard
+      // lands on the exit button.
+      expect(figure.hasAttribute("aria-modal")).toBe(false);
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Salir de pantalla completa" }));
       // The composition frame still gets no fullscreen permission.
       expect(document.querySelector("hyperframes-player")!.hasAttribute("disable-fullscreen")).toBe(true);
       // Escape leaves full screen, and only that (the panel stays open).
@@ -115,6 +119,42 @@ describe("VideoPlayer", () => {
     } finally {
       delete proto.requestFullscreen;
     }
+  });
+
+  it("leaves full screen when a tool asks for approval (the card must not hide under it)", async () => {
+    resetTauri({});
+    render(
+      <I18nProvider initial="es">
+        <VideoPlayer info={INFO} />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Pantalla completa" }));
+    const figure = document.querySelector("figure.video-player")!;
+    expect(figure.classList.contains("fullscreen")).toBe(true);
+    await act(async () => emit("tools://approval-request", { approval_id: "a1", conversation_id: 1 }));
+    expect(figure.classList.contains("fullscreen")).toBe(false);
+  });
+
+  it("stays full screen when an assistant edit reloads the preview", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let n = 0;
+    resetTauri({
+      video_preview: () => ({ ...INFO, url: `nan-site://localhost/${String(++n).padStart(32, "0")}` }),
+      preview_release_site: () => null,
+    });
+    render(
+      <I18nProvider initial="es">
+        <PreviewPane target={{ kind: "video", ref: ID }} profileId="nan" onClose={() => {}} onOpenLink={() => {}} />
+      </I18nProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Pantalla completa" }));
+    await act(async () => {
+      emit("video://changed", { conversation_id: 1, project_id: ID, title: "Promo" });
+      await vi.advanceTimersByTimeAsync(VIDEO_REFRESH_MS + 10);
+    });
+    await waitFor(() => expect(document.querySelector("hyperframes-player")?.getAttribute("src")).toContain("02"));
+    expect(document.querySelector("figure.video-player")!.classList.contains("fullscreen")).toBe(true);
+    expect(screen.getByRole("button", { name: "Salir de pantalla completa" })).toBeTruthy();
   });
 
   it("falls back to filling the window when the webview has no Fullscreen API", async () => {
@@ -287,6 +327,10 @@ describe("PreviewPane: video target", () => {
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(await screen.findByText("Te quedan 120 min de exportación este mes")).toBeTruthy();
+    // The section it controls comes into view with the keyboard on its heading.
+    const section = document.getElementById(toggle.getAttribute("aria-controls")!)!;
+    expect(section).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(within(section).getByRole("heading", { name: "Exportar MP4" })));
     const start = await screen.findByRole("button", { name: "Exportar MP4" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(start);

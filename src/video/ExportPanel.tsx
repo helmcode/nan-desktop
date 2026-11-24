@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useI18n } from "../i18n";
 import { IconDownload, IconExternal, IconFolder, IconStop } from "../icons";
 import {
+  ASPECTS,
   exportOpen,
   exportQuota,
   exportReveal,
@@ -33,11 +34,9 @@ export const PLANS_URL: Record<string, string> = {
   helmcode: "https://console.helmcode.com/billing",
 };
 
-export const EXPORT_ASPECTS: Aspect[] = ["16:9", "9:16", "1:1"];
-
 /// The formats to queue, the project's own first.
 export function exportOrder(selected: Aspect[], own: Aspect): Aspect[] {
-  return [own, ...EXPORT_ASPECTS.filter((a) => a !== own)].filter((a) => selected.includes(a));
+  return [own, ...ASPECTS.filter((a) => a !== own)].filter((a) => selected.includes(a));
 }
 
 /// Which stage of the queue an item is in, for refreshing the quota when a
@@ -97,6 +96,9 @@ export function ExportPanel({
   useEffect(() => {
     const resumed = rememberedRender(project.id);
     if (resumed) queue.resume(resumed, rememberedAspect(project.id) ?? own);
+    // Once per project (the queue): `own` changing later must not resume
+    // again, and `project.id` is already part of `queue`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run on opening a project only
     // Only on opening the project.
   }, [queue]);
 
@@ -126,6 +128,16 @@ export function ExportPanel({
     if (fresh) onExported();
   }, [items, onExported]);
 
+  // Waiting for a slot: the countdown ticks every second.
+  const waiting = items.some((item) => item.phase.kind === "waiting");
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!waiting) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [waiting]);
+
   const busy = queue.busy;
   const order = exportOrder(selected, own);
   const each = exportCharge(project.duration);
@@ -133,7 +145,10 @@ export function ExportPanel({
   const short = quota !== null && quota !== "failed" && charge > quota.remaining_seconds;
   const renewal = quota && quota !== "failed" ? shortDate(quota.period_end, locale) : null;
   const many = items.length > 1;
-  const open = items.filter((item) => !isSettled(item) && item.phase.kind !== "downloading");
+  // "Cancel the rest": the formats not started yet, while another one runs
+  // or several wait.
+  const rest = items.filter((item) => item.phase.kind === "pending" || item.phase.kind === "waiting");
+  const unsettled = items.filter((item) => !isSettled(item));
 
   const toggle = (aspect: Aspect) =>
     setSelected((prev) => (prev.includes(aspect) ? prev.filter((a) => a !== aspect) : [...prev, aspect]));
@@ -171,7 +186,7 @@ export function ExportPanel({
       phase.kind === "pending"
         ? t.video.queuePending
         : phase.kind === "waiting"
-          ? t.video.queueWaiting(formatDuration(phase.seconds))
+          ? t.video.queueWaiting(phase.reason, formatDuration(Math.max(1, Math.ceil((phase.until - now) / 1000))))
           : phase.kind === "uploading"
             ? phase.pct === null
               ? t.video.uploading
@@ -276,7 +291,7 @@ export function ExportPanel({
 
   return (
     <section className="video-section video-export" aria-labelledby="video-export-title">
-      <h2 id="video-export-title" className="video-section-title">
+      <h2 id="video-export-title" className="video-section-title" tabIndex={-1}>
         {t.video.sectionExport}
       </h2>
       <p className="video-hint">{t.video.exportLede}</p>
@@ -286,7 +301,7 @@ export function ExportPanel({
       </p>
       <fieldset className="video-export-formats" disabled={busy}>
         <legend className="video-field-label">{t.video.exportFormats}</legend>
-        {[own, ...EXPORT_ASPECTS.filter((a) => a !== own)].map((aspect) => (
+        {[own, ...ASPECTS.filter((a) => a !== own)].map((aspect) => (
           <label key={aspect} className={`video-export-format${selected.includes(aspect) ? " active" : ""}`}>
             <input type="checkbox" checked={selected.includes(aspect)} onChange={() => toggle(aspect)} />
             <span className={`video-format-icon aspect-${aspect.replace(":", "x")}`} aria-hidden="true" />
@@ -338,8 +353,8 @@ export function ExportPanel({
           {items.map(row)}
         </ul>
       )}
-      {open.length > 1 && (
-        <button type="button" className="btn btn-ghost btn-sm video-cancel-rest" onClick={() => queue.cancelAll()}>
+      {rest.length > 0 && unsettled.length > 1 && (
+        <button type="button" className="btn btn-ghost btn-sm video-cancel-rest" onClick={() => queue.cancelRest()}>
           <IconStop size={13} />
           {t.video.cancelRest}
         </button>

@@ -158,7 +158,12 @@ screen where the webview grants the Fullscreen API to app elements and is
 simply ignored where it does not. No Tauri window permission is needed. The
 element is never moved in the DOM (moving the iframe would reload it).
 Escape (an escape layer: the side panel behind it does not close on the
-same key), the button again, or the webview's own exit leaves it.
+same key), the button again, the webview's own exit, or a tool approval
+request (its card would be hidden under the layer) leaves it. It is not
+modal: the keyboard lands on the exit button and the player's controls stay
+reachable. The side panel keeps it full screen when an assistant edit
+reloads the player (the new element fills the window; the webview's own
+full screen would need a fresh click).
 
 ## Following the assistant
 
@@ -193,7 +198,11 @@ edited).
 fix it" (the automatic check) is a complete request, so it is SENT right
 away as if the user had typed it, without touching the composer's draft or
 its video chip; when it cannot go out (a reply is still streaming, or the
-send fails) it falls back to the composer. Both attach the technical details (project
+send fails) it falls back to the composer. While a reply runs (or
+messages already wait) it joins the conversation's send queue with its
+hidden context instead. It goes to the conversation on screen (a video
+opened from the library has none of its own) and never with the active
+skill (an app-made request, not the user's). Both attach the technical details (project
 id, scene id and window, playhead, check findings) as `chat_send`'s
 `videoContext`. The core validates it (`video/context.rs`) and, for that
 reply only (never stored or shown), adds ONE system note holding ONLY
@@ -268,15 +277,23 @@ project's is built IN MEMORY by `render::with_aspect`, which applies what
 the editor's format switch writes (`video.json` aspect, regenerated
 `index.html`, every scene root fitted with `with_root_canvas`; a test
 checks it equals a real switch byte for byte) and never touches the project
-on disk. Files are named after the format (`promo-vertical.mp4`,
-`-horizontal`, `-square`). The formats run through ONE queue per project
+on disk; the variant passes the same project checks again
+(`render::check_bundle`: `validate_meta` plus the preview assembly) before
+it is zipped. Files are named after the format (`promo-vertical.mp4`,
+`-horizontal`, `-square`), from the format the core recorded when it
+started that render (`RenderAspects`); only a render resumed after a
+restart uses the renderer's value (a closed set, it only picks the suffix). The formats run through ONE queue per project
 (`src/video/exportQueue.ts`, shared by the editor and the side panel and
 kept while the panel is closed): strictly one after another, so we never
 hold more than one active render or burst creates; a 429
 (`too_many_active`, `rate_limited`) or 503 `busy` anyway waits
-`Retry-After` (30 s without it, at most 10 waits) and tries again. Each
-format has its own row (progress, Cancel, Open / Show in folder / Save a
-copy); "Cancel the rest" cancels every format not finished; a refusal that
+`Retry-After` (30 s without it, at most 10 waits; the row counts down
+with the same first sentence as the matching error) and tries again; a
+cancel wakes it at once. A cancel during the upload is a cancel even if the
+server then answers 429/503 (nothing was admitted). Each format has its
+own row (progress, Cancel, Open / Show in folder / Save a copy); "Cancel
+the rest" cancels the formats not started yet (the one rendering keeps its
+own Cancel); a refusal that
 applies to all (quota, subscription, session, size, invalid project) skips
 the remaining ones. Only the render in flight is remembered across a reopen
 (with its format), not the formats still waiting.

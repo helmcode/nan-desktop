@@ -11,13 +11,13 @@ import { useI18n } from "../i18n";
 import { releaseSitePreview } from "../core";
 import { IconArrowLeft, IconChevronDown, IconImage, IconSparkles, IconTrash, IconX } from "../icons";
 import {
+  ASPECTS,
   formatDuration,
   formatTime,
   videoGet,
   videoPickAsset,
   videoPreview,
   videoUpdate,
-  type Aspect,
   type EditorPatch,
   type VideoAskContext,
   type VideoPreviewInfo,
@@ -31,7 +31,6 @@ import { changeRequest, groupVariables, moveScene, normalizeHex, parseDuration, 
 import { useVideoRevision } from "./useVideoRevision";
 import { VideoPlayer, type PlayerHandle } from "./VideoPlayer";
 
-const ASPECTS: Aspect[] = ["16:9", "9:16", "1:1"];
 /// How long typing, a color drag or a volume drag waits before it is saved.
 export const TEXT_SAVE_MS = 700;
 
@@ -127,6 +126,12 @@ function ColorField({ variable, onCommit }: { variable: VideoVariable; onCommit:
     }
   }, [field.draft]);
   const applyHex = () => {
+    // Emptied by the user: back to the saved color, nothing to complain about.
+    if (hex.trim() === "") {
+      setHex(field.draft);
+      setInvalid(false);
+      return;
+    }
     const normalized = normalizeHex(hex);
     if (normalized === null) {
       setInvalid(true);
@@ -230,7 +235,7 @@ function VolumeField({ label, volume, onCommit }: { label: string; volume: numbe
 }
 
 /// Arrow keys move the choice in a radio group (roving tabindex).
-export function rovingKeys<T>(options: T[], current: T, choose: (value: T) => void) {
+export function rovingKeys<T>(options: readonly T[], current: T, choose: (value: T) => void) {
   return (e: KeyboardEvent<HTMLElement>) => {
     const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
     if (step === 0) return;

@@ -8,6 +8,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Aspect = "16:9" | "9:16" | "1:1";
 
+/// Every format, in the order the app lists them.
+export const ASPECTS: readonly Aspect[] = ["16:9", "9:16", "1:1"];
+
 /// `video_preview`: the sandboxed document's URL and the canvas.
 export interface VideoPreviewInfo {
   url: string;

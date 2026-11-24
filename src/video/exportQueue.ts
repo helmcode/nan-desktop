@@ -7,7 +7,8 @@
 // One queue per project, shared by every export panel showing it (the
 // editor and the side panel) and kept while the panel is closed, so going
 // back to the chat never stops an export. Plain TypeScript (no React) so it
-// is tested directly; the panel subscribes with useSyncExternalStore.
+// is tested directly (exportQueue.test.ts); the panel subscribes with
+// useSyncExternalStore.
 
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -42,8 +43,9 @@ export type Quality = "standard" | "draft";
 
 export type QueuePhase =
   | { kind: "pending" }
-  /// The server is full (429/503): trying again in `seconds`.
-  | { kind: "waiting"; seconds: number }
+  /// The server said "not now" (`reason`: too_many_active, rate_limited,
+  /// busy): trying again at `until` (epoch ms).
+  | { kind: "waiting"; reason: string; until: number }
   | { kind: "uploading"; pct: number | null; slow: boolean }
   /// `progress` null: queued on the server.
   | { kind: "rendering"; renderId: string; progress: number | null }
@@ -189,8 +191,17 @@ export class ExportQueue {
     }
   }
 
-  /// Cancel everything not finished yet ("Cancel the rest").
-  cancelAll(): void {
+  /// "Cancel the rest": the formats that have not started (queued or
+  /// waiting for a slot). The one rendering keeps going; it has its own
+  /// Cancel.
+  cancelRest(): void {
+    for (const item of this.items) {
+      if (item.phase.kind === "pending" || item.phase.kind === "waiting") this.cancel(item.key);
+    }
+  }
+
+  /// Everything not finished yet (tests, a profile going away).
+  cancelEverything(): void {
     for (const item of this.items) {
       if (!isSettled(item) && item.phase.kind !== "downloading") this.cancel(item.key);
     }
@@ -277,14 +288,15 @@ export class ExportQueue {
         } catch (err) {
           const error = exportErrorOf(err);
           if (control.cancel) {
-            // Aborted before the server admitted it: nothing was charged.
-            this.set(key, error.kind === "canceled" ? { kind: "canceled" } : { kind: "error", error });
+            // Canceled before the server admitted it (aborted, or refused
+            // anyway): nothing was charged, whatever the reply said.
+            this.set(key, { kind: "canceled" });
             return;
           }
           if (WAIT_KINDS.has(error.kind) && waits < MAX_WAITS) {
             waits += 1;
             const seconds = error.retry_after && error.retry_after > 0 ? error.retry_after : DEFAULT_WAIT_S;
-            this.set(key, { kind: "waiting", seconds });
+            this.set(key, { kind: "waiting", reason: error.kind, until: Date.now() + seconds * 1000 });
             await this.wait(seconds * 1000, control);
             continue;
           }
@@ -381,6 +393,6 @@ export function exportQueueFor(profileId: string, projectId: string): ExportQueu
 
 /// Tests: forget every queue (each test starts from nothing).
 export function resetExportQueues(): void {
-  for (const queue of queues.values()) queue.cancelAll();
+  for (const queue of queues.values()) queue.cancelEverything();
   queues.clear();
 }

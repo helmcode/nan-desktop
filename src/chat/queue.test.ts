@@ -131,3 +131,13 @@ describe("queued attachments", () => {
     expect(queueOf(enqueue(EMPTY_QUEUES, 1, "hola", 3), 1).items[0]).toEqual({ id: 3, text: "hola" });
   });
 });
+
+describe("app-made queued requests", () => {
+  it("keep a video request's hidden context and go without the skill", () => {
+    const context = { project_id: "0123456789abcdef0123456789abcdef", title: "Promo", problems: ["missing_root"] };
+    const queues = enqueue(EMPTY_QUEUES, 7, "Arregla", 1, [], { videoContext: context, skipSkill: true });
+    expect(queueOf(queues, 7).items).toEqual([{ id: 1, text: "Arregla", videoContext: context, skipSkill: true }]);
+    // A user's message carries neither.
+    expect(queueOf(enqueue(EMPTY_QUEUES, 7, "hola", 2), 7).items).toEqual([{ id: 2, text: "hola" }]);
+  });
+});
