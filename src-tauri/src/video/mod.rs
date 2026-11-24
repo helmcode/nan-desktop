@@ -424,20 +424,34 @@ fn mock_download_allowed() -> bool {
         && std::env::var("NAN_DESKTOP_MOCK_PLATFORM").is_ok_and(|m| !m.trim().is_empty())
 }
 
+/// An optional export format from the renderer (`16:9`, `9:16`, `1:1`).
+fn parse_aspect(raw: Option<&str>) -> Result<Option<project::Aspect>, render::ExportError> {
+    match raw {
+        None => Ok(None),
+        Some(raw) => project::Aspect::parse(raw)
+            .map(Some)
+            .ok_or_else(|| render::ExportError::new("invalid")),
+    }
+}
+
 /// Zip the project, check the 90 MiB cap, and start a server render.
+/// `aspect` renders it in another format than its own (in memory; the
+/// project is never changed).
 #[tauri::command]
 pub async fn video_export_start(
     app: AppHandle,
     profile_id: String,
     project_id: String,
     quality: String,
+    aspect: Option<String>,
 ) -> Result<render::Started, render::ExportError> {
+    let aspect = parse_aspect(aspect.as_deref())?;
     let realm = export_realm(&app, &profile_id)?;
     let (base, token) = platform(&profile_id)?;
     let project_for_events = project_id.clone();
     let (meta, bundle) = tauri::async_runtime::spawn_blocking(move || {
         let dir = library::project_dir(&realm, &project_id)?;
-        render::prepare(&dir, &quality)
+        render::prepare(&dir, &quality, aspect)
     })
     .await
     .map_err(|_| render::ExportError::new("io"))??;
@@ -573,7 +587,9 @@ pub async fn video_export_download(
     profile_id: String,
     project_id: String,
     render_id: String,
+    aspect: Option<String>,
 ) -> Result<editor::ExportView, render::ExportError> {
+    let aspect = parse_aspect(aspect.as_deref())?;
     let realm = export_realm(&app, &profile_id)?;
     let (base, token) = platform(&profile_id)?;
     let (status, url) = render::status(&base, &token, &render_id).await?;
@@ -584,7 +600,7 @@ pub async fn video_export_download(
     };
     let dir = library::project_dir(&realm, &project_id)?;
     let title = library::read_meta(&dir)?.title;
-    let name = render::export_name(&dir, &title);
+    let name = render::export_name(&dir, &title, aspect);
     let emitter = app.clone();
     let pid = project_id.clone();
     let size = render::download(
@@ -715,7 +731,7 @@ mod tests {
         assert!(intro.contains("data-width=\"1080\" data-height=\"1920\""));
         // Ready to preview and to export.
         preview::assemble_project(&dir).unwrap();
-        render::prepare(&dir, "standard").unwrap();
+        render::prepare(&dir, "standard", None).unwrap();
         assert!(create_from_template_in(&realm, "nope", None, "es").is_err());
         assert_eq!(library::list_projects(&realm).len(), 1);
     }

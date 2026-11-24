@@ -232,6 +232,7 @@ export const es: Strings = {
   },
   workspace: {
     chipTitle: "Dónde puede trabajar el asistente",
+    lockedTitle: "Podrás cambiar las carpetas cuando termine la respuesta",
     menuLabel: "Dónde trabaja el asistente",
     selectionHeading: "Carpetas de este chat",
     pickFolder: "Elegir carpeta de trabajo",
@@ -373,7 +374,7 @@ export const es: Strings = {
     },
     commands: {
       title: "Ejecutar órdenes",
-      body: "Permite que el asistente ejecute órdenes dentro de tus carpetas de trabajo, por ejemplo para crear un PDF. Pregunta antes de cada orden.",
+      body: "Permite que el asistente ejecute órdenes dentro de tus carpetas de trabajo, por ejemplo para crear un PDF. Pregunta antes de cada orden en las carpetas con Preguntar siempre.",
     },
     memory: {
       title: "Memoria",
@@ -593,6 +594,23 @@ export const es: Strings = {
     saveCopy: "Guardar una copia…",
     exportsTitle: "Exportados",
     openFailed: "No se ha podido abrir el archivo.",
+    exportFormats: "Formatos",
+    exportPickFormat: "Elige al menos un formato.",
+    exportButtonMany: (n: number) => `Exportar ${n} MP4`,
+    exportCostMany: (total: string, each: string) => `Usará ${total} de tu tiempo de exportación (${each} por formato). Se generan uno detrás de otro.`,
+    insufficientMany: (cost: string, left: string) =>
+      `Estos formatos usan ${cost} y te quedan ${left} de exportación este mes. Quita alguno o acorta el vídeo.`,
+    queuePending: "En cola, empieza cuando termine el anterior.",
+    queueWaiting: (time: string) => `Los servidores están llenos. Se vuelve a intentar en ${time}…`,
+    queueSkipped: "No se ha exportado.",
+    cancelFormat: (name: string) => `Cancelar ${name}`,
+    cancelRest: "Cancelar el resto",
+    hexLabel: (label: string) => `Código de color de ${label}`,
+    hexInvalid: "Escribe un código como #0a0a0a o #fff.",
+    fullscreen: "Pantalla completa",
+    exitFullscreen: "Salir de pantalla completa",
+    previewExport: "Exportar",
+    previewCheckFailed: "Este vídeo tiene problemas que arreglar antes de exportarlo. Ábrelo en el editor para verlos.",
     errors: {
       quota_exhausted: (left: string, date: string | null) =>
         `Has gastado el tiempo de exportación de este mes (te quedan ${left}).${date ? ` Se renueva el ${date}.` : ""} Acorta el vídeo o espera a la renovación.`,

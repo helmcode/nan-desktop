@@ -230,6 +230,7 @@ export const en = {
   } as Record<string, string>,
   workspace: {
     chipTitle: "Where the assistant can work",
+    lockedTitle: "You can change the folders when the reply ends",
     menuLabel: "Where the assistant works",
     selectionHeading: "Folders for this chat",
     pickFolder: "Choose a working folder",
@@ -371,7 +372,7 @@ export const en = {
     },
     commands: {
       title: "Run commands",
-      body: "Lets the assistant run commands inside your working folders, for example to create a PDF. It asks before every command.",
+      body: "Lets the assistant run commands inside your working folders, for example to create a PDF. It asks before every command in folders set to Ask every time.",
     },
     memory: {
       title: "Memory",
@@ -591,6 +592,23 @@ export const en = {
     saveCopy: "Save a copy…",
     exportsTitle: "Exported",
     openFailed: "The file could not be opened.",
+    exportFormats: "Formats",
+    exportPickFormat: "Pick at least one format.",
+    exportButtonMany: (n: number) => `Export ${n} MP4s`,
+    exportCostMany: (total: string, each: string) => `Uses ${total} of your export time (${each} per format). They render one after another.`,
+    insufficientMany: (cost: string, left: string) =>
+      `These formats use ${cost} and you have ${left} of export time left this month. Remove one or shorten the video.`,
+    queuePending: "Queued, starts when the previous one finishes.",
+    queueWaiting: (time: string) => `Our renderers are full. Trying again in ${time}…`,
+    queueSkipped: "Not exported.",
+    cancelFormat: (name: string) => `Cancel ${name}`,
+    cancelRest: "Cancel the rest",
+    hexLabel: (label: string) => `Color code for ${label}`,
+    hexInvalid: "Type a code like #0a0a0a or #fff.",
+    fullscreen: "Full screen",
+    exitFullscreen: "Exit full screen",
+    previewExport: "Export",
+    previewCheckFailed: "This video has problems to fix before exporting it. Open it in the editor to see them.",
     errors: {
       quota_exhausted: (left: string, date: string | null) =>
         `You have used this month's export time (${left} left).${date ? ` It renews on ${date}.` : ""} Shorten the video or wait for the renewal.`,

@@ -9,10 +9,17 @@
   min-width: 0;
 }
 
+/* The stage is the composition's box. When max-height bites, the width
+   must shrink with it (max-width tied to the ratio): otherwise the box is
+   wider than the ratio and WebKit (the macOS app) sizes the player's
+   `height: 100%` from the aspect-ratio height instead of the clamped one,
+   so a 9:16 video is centred in a box taller than the stage and its lower
+   half is cropped away. */
 .video-stage {
   position: relative;
   width: 100%;
   max-height: 70vh;
+  max-width: calc(70vh * var(--video-ratio, 1.78));
   margin: 0 auto;
   background: #000;
   border: 1px solid var(--border);
@@ -30,7 +37,11 @@
   text-align: center;
 }
 
+/* Pinned to the stage box: never a percentage height the engine could
+   resolve against anything but the stage itself. */
 .video-element {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -914,4 +925,124 @@
 .video-format-text small {
   font-size: 0.7rem;
   color: var(--text-3);
+}
+
+/* ---- Round 24: full screen, hex colors, export queue, preview export -- */
+
+.video-fullscreen {
+  margin-left: auto;
+}
+
+/* The player fills the window (and the screen where the webview grants the
+   Fullscreen API). Fixed, not moved: moving the iframe would reload it. */
+.video-player.fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  background: #000;
+}
+
+.video-player.fullscreen .video-stage {
+  width: min(100%, calc((100vh - 4rem) * var(--video-ratio, 1.78)));
+  max-width: none;
+  max-height: calc(100vh - 4rem);
+  border: 0;
+  border-radius: 0;
+}
+
+.video-player.fullscreen .video-meta {
+  width: min(100%, calc((100vh - 4rem) * var(--video-ratio, 1.78)));
+  color: #cfcfd4;
+}
+
+.video-color-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.video-hex {
+  width: 6.5rem;
+  font-family: var(--mono);
+  text-transform: lowercase;
+}
+
+.video-hex[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
+.video-hex-error {
+  margin: 0.2rem 0 0;
+  font-size: 0.78rem;
+}
+
+.video-export-formats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.video-export-formats legend {
+  margin-bottom: 0.3rem;
+  padding: 0;
+}
+
+.video-export-format {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.video-export-format.active {
+  border-color: var(--accent);
+}
+
+.video-export-formats:disabled .video-export-format {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.video-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.video-queue-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.video-queue-format {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.video-cancel-rest {
+  align-self: flex-start;
+}
+
+.preview-video .video-export {
+  margin-top: 1rem;
+}
+
+.preview-export {
+  flex: none;
 }

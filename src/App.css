@@ -2445,8 +2445,13 @@ button:disabled {
   font-size: 0.83rem;
 }
 
-.ws-chip:hover:not(:disabled) {
+.ws-chip:hover:not(:disabled):not([aria-disabled="true"]) {
   background-color: var(--surface-3);
+}
+
+.ws-chip[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .ws-chip-label {
@@ -2466,7 +2471,7 @@ button:disabled {
   background-color: var(--warn-soft);
 }
 
-.ws-chip-wide:hover:not(:disabled) {
+.ws-chip-wide:hover:not(:disabled):not([aria-disabled="true"]) {
   background-color: rgba(255, 189, 46, 0.16);
 }
 

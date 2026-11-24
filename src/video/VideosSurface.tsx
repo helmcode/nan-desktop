@@ -197,6 +197,7 @@ export function VideosSurface({
   onOpenProject,
   onClose,
   onAskAssistant,
+  onSendToAssistant,
   onSignIn,
 }: {
   profileId: string;
@@ -206,6 +207,8 @@ export function VideosSurface({
   onOpenProject: (projectId: string | null) => void;
   onClose: () => void;
   onAskAssistant: (text: string, context: VideoAskContext) => void;
+  /// Send a complete request to the assistant right away (see VideoEditor).
+  onSendToAssistant?: (text: string, context: VideoAskContext) => void;
   /// The session expired: sign in again.
   onSignIn?: () => void;
 }) {
@@ -270,6 +273,7 @@ export function VideosSurface({
           projectId={projectId}
           onClose={() => onOpenProject(null)}
           onAskAssistant={onAskAssistant}
+          onSendToAssistant={onSendToAssistant}
           onSignIn={onSignIn}
         />
       </section>

@@ -149,6 +149,29 @@ first load the inner frame's `allow` is narrowed to `autoplay` (no
 the app) and the player's fullscreen button is hidden. The app CSP is
 unchanged (`frame-src nan-site:` already existed).
 
+Our own "Full screen" button (`VideoPlayer`) enlarges the PLAYER element in
+the app document, never the composition frame: the `<figure>` gets a fixed
+full-window overlay class (pure CSS, so it works in WKWebView, WebView2 and
+WebKitGTK alike) and, best effort, `requestFullscreen()` (or
+`webkitRequestFullscreen()`) on that same element, which takes the whole
+screen where the webview grants the Fullscreen API to app elements and is
+simply ignored where it does not. No Tauri window permission is needed. The
+element is never moved in the DOM (moving the iframe would reload it).
+Escape (an escape layer: the side panel behind it does not close on the
+same key), the button again, or the webview's own exit leaves it.
+
+## Following the assistant
+
+`create_video` / `edit_video` emit `video://changed` after every write
+(the editor's own saves do not: they already show their result).
+`useVideoRevision(projectId)` folds a burst of them into one bump after
+400 ms of quiet. The side panel then loads a fresh preview while the old
+one stays on screen, swaps it in at the same playhead and releases the old
+token (a failed reload keeps the last good preview). The editor reloads the
+project the same way; a field the user is in (title, texts, numbers, hex
+codes) is never re-synced while focused, and a save in flight finishes
+before the reload, so neither typing nor a save's answer is lost.
+
 ## Editor
 
 `video_get` / `video_update` (title, aspect, values, scene order and
@@ -157,13 +180,20 @@ image variable, music, voice; the core opens the native dialog, applies the
 chat-attachment refusals: app data, credential stores, key files; checks
 type and magic; names the asset itself) / `video_delete` (after a
 confirmation in the app's own dialog: the macOS webview has no JavaScript
-confirm panel). The renderer never sends a path or HTML. A change reloads
+confirm panel). The renderer never sends a path or HTML. A color has its swatch
+plus its code typed by hand (`#0a0a0a`, `#FFF`, `fff`): normalized to
+lowercase `#rrggbb`, applied on Enter or on leaving the box when valid; an
+invalid code shows a short error and changes nothing. A change reloads
 the preview at the same playhead (or at the start of the scene that was
 edited).
 
-"Ask for a change in this scene" and "Ask the assistant to fix it" add a
-plain request to the composer (never replacing what the user typed), e.g.
-`Escena «Mensaje» (0:07 a 0:11): `, and attach the technical details (project
+"Ask for a change in this scene" adds a plain request to the composer
+(never replacing what the user typed), e.g. `Escena «Mensaje» (0:07 a
+0:11): `, for the user to finish in their own words. "Ask the assistant to
+fix it" (the automatic check) is a complete request, so it is SENT right
+away as if the user had typed it, without touching the composer's draft or
+its video chip; when it cannot go out (a reply is still streaming, or the
+send fails) it falls back to the composer. Both attach the technical details (project
 id, scene id and window, playhead, check findings) as `chat_send`'s
 `videoContext`. The core validates it (`video/context.rs`) and, for that
 reply only (never stored or shown), adds ONE system note holding ONLY
@@ -190,6 +220,20 @@ credit shown in the gallery. Authoring helper: `VIDEO_TEMPLATE_DUMP=<dir>
 cargo test --lib dump_template_previews -- --ignored` writes every assembled
 preview for a browser check.
 
+Layout check (run it after touching any template): `node
+test/template-layout-check.mjs [--shots <dir>]` dumps the previews, opens
+each one in headless Chrome at its real size (1920x1080, 1080x1920,
+1080x1080), seeks every scene and fails if visible text or an image touches
+the frame edge, or is off-frame when the scene settles. `--shots` writes a
+mid and an end frame per template and aspect to look at. Layouts must be
+relative to the composition (`vmin`, `%`, flex/grid) with per-aspect rules
+in media queries (`max-aspect-ratio: 3/4` portrait, `min-aspect-ratio: 3/4)
+and (max-aspect-ratio: 5/4` square): the preview frame's viewport is the
+composition size. Separately, the player stage keeps the composition's
+ratio (`.video-stage` max-width tied to `--video-ratio`, the player pinned
+with `inset: 0`; `src/video/videoStage.css.test.ts`): without it WebKit
+crops the lower half of a 9:16 preview.
+
 ## Export (contract §2)
 
 1. `video_export_start`: the core validates the project, builds a
@@ -214,6 +258,32 @@ preview for a browser check.
    a subscription/quota refusal and "Volver a iniciar sesión" after an
    expired session, and checks the session before calling a render gone on
    a 404 (the enterprise "no credential").
+
+Several formats (round 24): the panel lists 16:9, 9:16 and 1:1 as
+checkboxes (the project's own preselected) and shows what they cost before
+starting (ceil(duration) per format, against the remaining balance; it
+refuses to start when they do not fit). `video_export_start` and
+`video_export_download` take an optional `aspect`: another format than the
+project's is built IN MEMORY by `render::with_aspect`, which applies what
+the editor's format switch writes (`video.json` aspect, regenerated
+`index.html`, every scene root fitted with `with_root_canvas`; a test
+checks it equals a real switch byte for byte) and never touches the project
+on disk. Files are named after the format (`promo-vertical.mp4`,
+`-horizontal`, `-square`). The formats run through ONE queue per project
+(`src/video/exportQueue.ts`, shared by the editor and the side panel and
+kept while the panel is closed): strictly one after another, so we never
+hold more than one active render or burst creates; a 429
+(`too_many_active`, `rate_limited`) or 503 `busy` anyway waits
+`Retry-After` (30 s without it, at most 10 waits) and tries again. Each
+format has its own row (progress, Cancel, Open / Show in folder / Save a
+copy); "Cancel the rest" cancels every format not finished; a refusal that
+applies to all (quota, subscription, session, size, invalid project) skips
+the remaining ones. Only the render in flight is remembered across a reopen
+(with its format), not the formats still waiting.
+
+The side panel's "Export" button opens the same `ExportPanel` under the
+player (lazy `PreviewExport`: it loads the project and runs the lint, so a
+video with check errors cannot be exported from there either).
 
 The routes are a closed set (`render::Route`); render ids are validated
 (`[A-Za-z0-9_-]{1,64}`); every API code maps to a typed error with plain
@@ -254,3 +324,10 @@ ids.
    switch to 1:1; the preview follows each change.
 5. Export against staging: quota line, progress, download, Open, Show in
    folder; a 402 and a 413 show their messages.
+6. Full screen: the player's button fills the screen (macOS and Windows);
+   Escape leaves it and the side panel stays open.
+7. Several formats: export 16:9 + 9:16 from a 16:9 project; they run one
+   after another, the project stays 16:9, the files are
+   `<title>-horizontal.mp4` / `<title>-vertical.mp4`.
+8. Ask the assistant to change an open video: the side panel (and the
+   editor, if open) shows the new version by itself, at the same playhead.

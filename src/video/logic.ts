@@ -3,7 +3,7 @@
 // components so it is tested directly.
 
 import type { Strings } from "../i18n";
-import { formatDuration, formatTime, type ExportError, type VideoAskContext, type VideoScene } from "./api";
+import { formatDuration, formatTime, type Aspect, type ExportError, type VideoAskContext, type VideoScene } from "./api";
 
 export interface SceneWindow {
   scene: VideoScene;
@@ -112,6 +112,21 @@ export function exportCharge(durationS: number): number {
   return Math.ceil(durationS);
 }
 
+/// Seconds a queue of `formats` exports of the same video costs (each
+/// render is charged on its own).
+export function queueCharge(durationS: number, formats: number): number {
+  return exportCharge(durationS) * Math.max(0, formats);
+}
+
+/// A color typed by hand: `#rgb` or `#rrggbb` (any case, `#` optional) as
+/// lowercase `#rrggbb`; `null` when it is not one.
+export function normalizeHex(raw: string): string | null {
+  const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw.trim());
+  if (!match) return null;
+  const hex = match[1].toLowerCase();
+  return `#${hex.length === 3 ? [...hex].map((c) => c + c).join("") : hex}`;
+}
+
 /// "You have N min of export time left this month" (whole minutes, never
 /// rounded up; under a minute, seconds).
 export function quotaLine(t: Strings, remainingSeconds: number): string {
@@ -175,12 +190,32 @@ export function uploadTooSlow(sent: number, total: number, elapsedS: number): bo
 /// storage may be unavailable, and then nothing is remembered.
 const RENDER_KEY = (projectId: string) => `video.render.${projectId}`;
 
-export function rememberRender(projectId: string, renderId: string | null): void {
+const ASPECT_KEY = (projectId: string) => `video.render.${projectId}.aspect`;
+const ASPECTS: readonly Aspect[] = ["16:9", "9:16", "1:1"];
+
+/// `aspect`: the format the render was asked in (so a resumed download
+/// gets the right file name).
+export function rememberRender(projectId: string, renderId: string | null, aspect?: Aspect): void {
   try {
-    if (renderId) localStorage.setItem(RENDER_KEY(projectId), renderId);
-    else localStorage.removeItem(RENDER_KEY(projectId));
+    if (renderId) {
+      localStorage.setItem(RENDER_KEY(projectId), renderId);
+      if (aspect) localStorage.setItem(ASPECT_KEY(projectId), aspect);
+      else localStorage.removeItem(ASPECT_KEY(projectId));
+    } else {
+      localStorage.removeItem(RENDER_KEY(projectId));
+      localStorage.removeItem(ASPECT_KEY(projectId));
+    }
   } catch {
     /* storage unavailable: nothing to remember */
+  }
+}
+
+export function rememberedAspect(projectId: string): Aspect | null {
+  try {
+    const value = localStorage.getItem(ASPECT_KEY(projectId));
+    return ASPECTS.find((a) => a === value) ?? null;
+  } catch {
+    return null;
   }
 }
 

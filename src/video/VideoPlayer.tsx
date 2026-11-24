@@ -15,9 +15,20 @@
 // `allow` is narrowed to `autoplay` (no `fullscreen`: a hostile composition
 // must not be able to take the whole screen and imitate the app). The
 // player's own fullscreen button is hidden too.
+//
+// Our own "Full screen" button (round 24) enlarges the PLAYER, never the
+// composition frame: the figure becomes a fixed full-window overlay (CSS,
+// works in every webview: WKWebView on macOS, WebView2 on Windows, WebKitGTK)
+// and, where the webview allows the Fullscreen API on app elements
+// (`requestFullscreen`, or `webkitRequestFullscreen` on older WebKit), the
+// same element also goes to the screen's full screen. The element is never
+// moved in the DOM (moving an iframe reloads it). Escape, or the button
+// again, leaves it.
 
-import { useEffect, useImperativeHandle, useRef, useState, type CSSProperties, type Ref } from "react";
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type CSSProperties, type Ref } from "react";
 import { useT } from "../i18n";
+import { isTopLayer, useEscapeLayer } from "../escapeLayers";
+import { IconFit } from "../icons";
 import { formatDuration, type VideoPreviewInfo } from "./api";
 import "./video.css";
 
@@ -36,6 +47,39 @@ interface PlayerElement extends HTMLElement {
   seek?: (seconds: number) => void;
   pause?: () => void;
   iframeElement?: HTMLIFrameElement | null;
+}
+
+type FullscreenElement = HTMLElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+type FullscreenDocument = Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => Promise<void> | void };
+
+/// Ask the webview for real full screen on `el` (best effort: the overlay
+/// already fills the window when it is not available).
+export function enterNativeFullscreen(el: HTMLElement): void {
+  const node = el as FullscreenElement;
+  try {
+    const request = node.requestFullscreen ?? node.webkitRequestFullscreen;
+    const result = request?.call(node);
+    if (result && typeof (result as Promise<void>).catch === "function") (result as Promise<void>).catch(() => undefined);
+  } catch {
+    /* not allowed here: the overlay is enough */
+  }
+}
+
+function nativeFullscreenElement(): Element | null {
+  const doc = document as FullscreenDocument;
+  return doc.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+}
+
+function exitNativeFullscreen(): void {
+  const doc = document as FullscreenDocument;
+  if (!nativeFullscreenElement()) return;
+  try {
+    const exit = doc.exitFullscreen ?? doc.webkitExitFullscreen;
+    const result = exit?.call(doc);
+    if (result && typeof (result as Promise<void>).catch === "function") (result as Promise<void>).catch(() => undefined);
+  } catch {
+    /* already out */
+  }
 }
 
 let playerModule: Promise<unknown> | null = null;
@@ -71,6 +115,8 @@ export function VideoPlayer({
   const [defined, setDefined] = useState(false);
   const [failed, setFailed] = useState(false);
   const [ready, setReady] = useState(false);
+  const figure = useRef<HTMLElement | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
   const startRef = useRef(startAt);
   startRef.current = startAt;
   const onTimeRef = useRef(onTime);
@@ -128,9 +174,52 @@ export function VideoPlayer({
     [],
   );
 
+  // Full screen is an escape layer: Escape leaves it (and nothing behind it,
+  // such as the side panel, closes on the same key).
+  const layer = useEscapeLayer(fullscreen);
+  useLayoutEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.isComposing || e.defaultPrevented || !isTopLayer(layer)) return;
+      e.preventDefault();
+      setFullscreen(false);
+    };
+    // The webview left its own full screen (its Escape, a gesture).
+    let wasNative = false;
+    const onChange = () => {
+      const now = nativeFullscreenElement() === figure.current;
+      if (wasNative && !now) setFullscreen(false);
+      wasNative = now;
+    };
+    window.addEventListener("keydown", onKey, true);
+    document.addEventListener("fullscreenchange", onChange);
+    document.addEventListener("webkitfullscreenchange", onChange);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("fullscreenchange", onChange);
+      document.removeEventListener("webkitfullscreenchange", onChange);
+      exitNativeFullscreen();
+    };
+  }, [fullscreen, layer]);
+
+  const toggleFullscreen = () => {
+    if (fullscreen) {
+      setFullscreen(false);
+      return;
+    }
+    setFullscreen(true);
+    if (figure.current) enterNativeFullscreen(figure.current);
+  };
+
   const quiet = compact || autoplay;
   return (
-    <figure className={`video-player${compact ? " compact" : ""}`}>
+    <figure
+      ref={figure}
+      className={`video-player${compact ? " compact" : ""}${fullscreen ? " fullscreen" : ""}`}
+      role={fullscreen ? "dialog" : undefined}
+      aria-modal={fullscreen ? "true" : undefined}
+      aria-label={fullscreen ? t.video.playerLabel(info.title) : undefined}
+    >
       <div
         className="video-stage"
         style={
@@ -169,6 +258,18 @@ export function VideoPlayer({
           </span>
           <span>{formatDuration(info.duration)}</span>
           <span>{t.video.fps(info.fps)}</span>
+          {!autoplay && (
+            <button
+              type="button"
+              className="icon-btn video-fullscreen"
+              aria-label={fullscreen ? t.video.exitFullscreen : t.video.fullscreen}
+              aria-pressed={fullscreen}
+              title={fullscreen ? t.video.exitFullscreen : t.video.fullscreen}
+              onClick={toggleFullscreen}
+            >
+              <IconFit size={15} />
+            </button>
+          )}
         </figcaption>
       )}
     </figure>

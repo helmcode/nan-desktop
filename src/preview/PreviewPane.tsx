@@ -3,7 +3,7 @@
 // (inside active grants only); web pages go through the platform fetch
 // wrapper, with a branded open-in-browser card as the fallback.
 
-import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   fetchArtifactLinkPreview,
@@ -19,7 +19,7 @@ import { SitePreview } from "./sitePreview";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { folderName, hostOf } from "../copy";
 import { useT } from "../i18n";
-import { IconExternal, IconFolder, IconGlobe, IconPencil, IconShare, IconX } from "../icons";
+import { IconDownload, IconExternal, IconFolder, IconGlobe, IconPencil, IconShare, IconX } from "../icons";
 import { BrandMark } from "../brand";
 import { Markdown, openExternal } from "../Markdown";
 import { isEditableImagePath } from "../studio/studio";
@@ -28,8 +28,10 @@ import { isArtifactShareUrl, previewKind, targetKey, type PreviewTarget } from "
 import { revealInFolder } from "./reveal";
 import { shareSourceFor, type ShareSource } from "../artifacts/artifacts";
 import { videoPreview, type VideoPreviewInfo } from "../video/api";
+import { useVideoRevision } from "../video/useVideoRevision";
 
 const VideoPlayer = lazy(() => import("../video/VideoPlayer").then((m) => ({ default: m.VideoPlayer })));
+const PreviewExport = lazy(() => import("../video/PreviewExport"));
 
 const Renderers = {
   image: lazy(() => import("./renderers").then((m) => ({ default: m.ImagePreview }))),
@@ -172,9 +174,56 @@ function releaseVideo(info: VideoPreviewInfo): void {
 }
 
 /// R-V1: a project of the user's video library in the sandboxed player.
-function VideoBody({ profileId, projectId }: { profileId: string; projectId: string }) {
+///
+/// Round 24: it follows the assistant. Every `create_video`/`edit_video`
+/// write of this project (debounced, see useVideoRevision) loads a fresh
+/// preview; the current one stays on screen until the new one is ready
+/// (no blank flash, no loop), the new player resumes at the same playhead,
+/// and the old preview token goes back to the core. A reload that fails
+/// keeps the last good preview.
+function VideoBody({
+  profileId,
+  projectId,
+  exporting,
+  onSignIn,
+}: {
+  profileId: string;
+  projectId: string;
+  exporting: boolean;
+  onSignIn?: () => void;
+}) {
   const t = useT();
-  const state = useLoad<VideoPreviewInfo>(`video:${projectId}`, () => videoPreview(profileId, projectId), releaseVideo);
+  const changes = useVideoRevision(projectId);
+  const [state, setState] = useState<LoadState<VideoPreviewInfo>>({ status: "loading" });
+  const [startAt, setStartAt] = useState(0);
+  const shown = useRef<VideoPreviewInfo | null>(null);
+  const time = useRef(0);
+  useEffect(() => {
+    let cancelled = false;
+    videoPreview(profileId, projectId)
+      .then((info) => {
+        if (cancelled) return releaseVideo(info);
+        const previous = shown.current;
+        shown.current = info;
+        setStartAt(previous ? Math.min(time.current, Math.max(0, info.duration - 0.05)) : 0);
+        setState({ status: "ready", value: info });
+        if (previous) releaseVideo(previous);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled && !shown.current) setState({ status: "error", kind: rejectionKind(err) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileId, projectId, changes]);
+  // The last preview's token goes back when the panel closes.
+  useEffect(
+    () => () => {
+      if (shown.current) releaseVideo(shown.current);
+      shown.current = null;
+    },
+    [],
+  );
   if (state.status === "loading") return <p className="preview-note">{t.video.loading}</p>;
   if (state.status === "error") {
     const message =
@@ -184,7 +233,15 @@ function VideoBody({ profileId, projectId }: { profileId: string; projectId: str
   return (
     <article className="preview-video">
       <h2 className="preview-web-title">{state.value.title}</h2>
-      <VideoPlayer info={state.value} />
+      <VideoPlayer
+        key={state.value.url}
+        info={state.value}
+        startAt={startAt}
+        onTime={(seconds) => {
+          time.current = seconds;
+        }}
+      />
+      {exporting && <PreviewExport profileId={profileId} projectId={projectId} revision={changes} onSignIn={onSignIn} />}
     </article>
   );
 }
@@ -255,6 +312,7 @@ export default function PreviewPane({
   onRemove,
   onShare,
   onOpenVideo,
+  onSignIn,
 }: {
   target: PreviewTarget;
   profileId: string;
@@ -273,6 +331,8 @@ export default function PreviewPane({
   /// R-V1: when set, a video shows "Edit video", which opens the Videos
   /// editor on it.
   onOpenVideo?: (projectId: string) => void;
+  /// R-V1: the session expired during a video export: sign in again.
+  onSignIn?: () => void;
 }) {
   const t = useT();
   const isWeb = target.kind === "web";
@@ -292,6 +352,9 @@ export default function PreviewPane({
     revealInFolder(profileId, target.ref).catch(() => setRevealFailedFor(key));
   };
   const shareSource = onShare ? shareSourceFor(target) : null;
+  // R-V1: the video's export section, opened from the header.
+  const [exportingFor, setExportingFor] = useState<string | null>(null);
+  const exporting = isVideo && exportingFor === key;
 
   // Round 17 review (U1): the pane is an escape layer like every other inner
   // surface. A surface opened after it (a row menu, a dialog) sits above it
@@ -326,6 +389,17 @@ export default function PreviewPane({
             onClick={() => openExternal(target.ref)}
           >
             <IconExternal size={16} />
+          </button>
+        )}
+        {isVideo && previewKind(target) === "video" && (
+          <button
+            type="button"
+            className={`btn btn-sm preview-export ${exporting ? "btn-primary" : "btn-secondary"}`}
+            aria-expanded={exporting}
+            onClick={() => setExportingFor(exporting ? null : key)}
+          >
+            <IconDownload size={14} />
+            {t.video.previewExport}
           </button>
         )}
         {isVideo && onOpenVideo && (
@@ -397,7 +471,7 @@ export default function PreviewPane({
               <img className="preview-image" src={convertFileSrc(target.ref)} alt={title} />
             ) : isVideo ? (
               previewKind(target) === "video" ? (
-                <VideoBody profileId={profileId} projectId={target.ref} />
+                <VideoBody profileId={profileId} projectId={target.ref} exporting={exporting} onSignIn={onSignIn} />
               ) : (
                 <p className="preview-note">{t.preview.unsupported}</p>
               )

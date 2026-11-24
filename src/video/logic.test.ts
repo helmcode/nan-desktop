@@ -11,7 +11,10 @@ import {
   moveScene,
   parseDuration,
   quotaLine,
+  normalizeHex,
+  queueCharge,
   rememberRender,
+  rememberedAspect,
   rememberedRender,
   sceneAt,
   sceneWindows,
@@ -191,5 +194,40 @@ describe("render ids survive a reopen", () => {
     });
     expect(() => rememberRender("p3", "r")).not.toThrow();
     expect(rememberedRender("p3")).toBeNull();
+  });
+});
+
+describe("hex colors typed by hand", () => {
+  it("accepts #rgb and #rrggbb in any case, with or without #, as lowercase #rrggbb", () => {
+    expect(normalizeHex("#0a0a0a")).toBe("#0a0a0a");
+    expect(normalizeHex("#FFFFFF")).toBe("#ffffff");
+    expect(normalizeHex("FFFFFF")).toBe("#ffffff");
+    expect(normalizeHex("  #AbC ")).toBe("#aabbcc");
+    expect(normalizeHex("f0a")).toBe("#ff00aa");
+  });
+
+  it("refuses everything else", () => {
+    for (const bad of ["", "#", "#ff", "#ffff", "#fffff", "#fffffff", "#ggg", "red", "rgb(0,0,0)", "##fff", "#ff ff ff"]) {
+      expect(normalizeHex(bad), bad).toBeNull();
+    }
+  });
+});
+
+describe("several formats in one go", () => {
+  it("charges whole seconds per format", () => {
+    expect(queueCharge(7.5, 1)).toBe(8);
+    expect(queueCharge(7.5, 3)).toBe(24);
+    expect(queueCharge(10, 2)).toBe(20);
+    expect(queueCharge(7.5, 0)).toBe(0);
+  });
+
+  it("remembers the format of a render in flight", () => {
+    rememberRender("p4", "r-4", "9:16");
+    expect(rememberedRender("p4")).toBe("r-4");
+    expect(rememberedAspect("p4")).toBe("9:16");
+    rememberRender("p4", null);
+    expect(rememberedAspect("p4")).toBeNull();
+    localStorage.setItem("video.render.p5.aspect", "4:3");
+    expect(rememberedAspect("p5")).toBeNull();
   });
 });

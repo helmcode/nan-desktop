@@ -2006,10 +2006,13 @@ function ChatShell({
   // `queuedFiles`: the attachments of a queued message being flushed (the
   // tray is not involved). Otherwise the tray's files go with what the user
   // typed, never with a fixed text.
+  // `videoOverride` (round 24): a fixed video request's hidden context (the
+  // automatic check's "fix it"); the composer's own video chip is untouched.
   const send = useCallback(async (
     override?: string,
     continuation = false,
     queuedFiles?: readonly PendingAttachment[],
+    videoOverride?: VideoAskContext,
   ): Promise<boolean> => {
     const text = (override ?? composer).trim();
     const fromTray = queuedFiles === undefined && override === undefined && attach.items.length > 0;
@@ -2031,7 +2034,7 @@ function ChatShell({
     // ...and its skill: only the id is sent; the core reads the text.
     const skillId = activeSkill?.id ?? null;
     // ...and a video request's hidden context (typed messages only).
-    const videoContext = override === undefined && queuedFiles === undefined ? videoAsk : null;
+    const videoContext = videoOverride ?? (override === undefined && queuedFiles === undefined ? videoAsk : null);
     try {
       conversationId = await ensureConversation();
       if (conversationId === null) return false;
@@ -2075,7 +2078,7 @@ function ChatShell({
         ...(artifactsAccess.availability !== "off" ? { artifacts: artifactsAccess.availability } : {}),
         ...(videoContext ? { videoContext } : {}),
       });
-      if (videoContext) setVideoAsk(null);
+      if (videoContext && !videoOverride) setVideoAsk(null);
       void refreshConversations();
       return true;
     } catch (err) {
@@ -2249,6 +2252,20 @@ function ChatShell({
     focusChatOnReturn.current = true;
     setView("chat");
   }, []);
+  // The automatic check's "Ask the assistant to fix it" (round 24): a
+  // complete request, so it is SENT right away, as if the user had typed and
+  // sent it, without touching the composer (its draft and its video chip
+  // stay). When it cannot go out now (a reply is still streaming, or the
+  // send failed) it falls back to the composer, so it is never lost.
+  const sendAssistantAboutVideo = useCallback(
+    (text: string, context: VideoAskContext): void => {
+      setView("chat");
+      void send(text, false, undefined, context).then((sent) => {
+        if (!sent) askAssistantAboutVideo(text, context);
+      });
+    },
+    [send, askAssistantAboutVideo],
+  );
 
   useEffect(() => {
     if (view !== "chat" || !focusChatOnReturn.current) return;
@@ -2910,6 +2927,7 @@ function ChatShell({
               onOpenProject={openVideos}
               onClose={() => setView("chat")}
               onAskAssistant={askAssistantAboutVideo}
+              onSendToAssistant={sendAssistantAboutVideo}
               onSignIn={onSignOut}
             />
           </Suspense>
@@ -3236,6 +3254,7 @@ function ChatShell({
                     onChange={changeSelection}
                     onAskComputerWide={() => setAskComputerWide(true)}
                     onOpenSettings={() => openSettings("folders")}
+                    locked={streamingActive}
                   />
                   <div className="composer-tools">
                     {imageMode && (
@@ -3415,6 +3434,7 @@ function ChatShell({
                   onRemove={removeFromPreview}
                   onShare={artifactsOn ? openShare : undefined}
                   onOpenVideo={openVideos}
+                  onSignIn={onSignOut}
                 />
               </Suspense>
             )}

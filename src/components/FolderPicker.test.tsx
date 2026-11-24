@@ -35,7 +35,7 @@ function workspace(overrides: Partial<Workspace> = {}): Workspace {
   };
 }
 
-function renderPicker(ws: Workspace, selected: string[], locale: "en" | "es" = "en") {
+function renderPicker(ws: Workspace, selected: string[], locale: "en" | "es" = "en", locked = false) {
   const onChange = vi.fn();
   const onAskComputerWide = vi.fn();
   render(
@@ -46,6 +46,7 @@ function renderPicker(ws: Workspace, selected: string[], locale: "en" | "es" = "
         onChange={onChange}
         onAskComputerWide={onAskComputerWide}
         onOpenSettings={vi.fn()}
+        locked={locked}
       />
     </I18nProvider>,
   );
@@ -131,5 +132,55 @@ describe("FolderPicker", () => {
     expect(screen.getByRole("menuitemcheckbox", { name: "Ninguna" })).toBeTruthy();
     expect(screen.getByRole("menuitemcheckbox", { name: "Todas" })).toBeTruthy();
     expect(screen.getByText("Carpetas de este chat")).toBeTruthy();
+  });
+
+  // R24: the running reply uses the selection it was sent with (the core
+  // takes it with chat_send), so the chip must never show a change the reply
+  // is not using.
+  it("is locked while the conversation replies: shows its selection and cannot change it", () => {
+    const pickFolder = vi.fn(async () => null);
+    const { onChange } = renderPicker(workspace({ pickFolder }), ["g1"], "en", true);
+    const locked = screen.getByTitle("You can change the folders when the reply ends");
+    expect(locked.textContent).toBe("Proyecto");
+    expect(locked.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(locked);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+    // Not even the add-a-folder shortcut of a profile without folders.
+    cleanup();
+    renderPicker(workspace({ folders: [], pickFolder }), [], "en", true);
+    fireEvent.click(screen.getByTitle("You can change the folders when the reply ends"));
+    expect(pickFolder).not.toHaveBeenCalled();
+  });
+
+  it("closes an open menu when a reply starts", () => {
+    const ws = workspace();
+    const props = { workspace: ws, selected: ["g1"], onChange: vi.fn(), onAskComputerWide: vi.fn(), onOpenSettings: vi.fn() };
+    const { rerender } = render(
+      <I18nProvider initial="en">
+        <FolderPicker {...props} />
+      </I18nProvider>,
+    );
+    fireEvent.click(chip());
+    expect(screen.getByRole("menu")).toBeTruthy();
+    rerender(
+      <I18nProvider initial="en">
+        <FolderPicker {...props} locked />
+      </I18nProvider>,
+    );
+    expect(screen.queryByRole("menu")).toBeNull();
+    rerender(
+      <I18nProvider initial="en">
+        <FolderPicker {...props} />
+      </I18nProvider>,
+    );
+    expect(chip().getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(chip());
+    expect(screen.getByRole("menu")).toBeTruthy();
+  });
+
+  it("explains the lock in Spanish", () => {
+    renderPicker(workspace(), ["g1"], "es", true);
+    expect(screen.getByTitle("Podrás cambiar las carpetas cuando termine la respuesta")).toBeTruthy();
   });
 });
