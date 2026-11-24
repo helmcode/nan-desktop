@@ -222,6 +222,12 @@ mod watchdog {
         let _ = ARMED.compare_exchange(attempt, 0, Ordering::SeqCst, Ordering::SeqCst);
     }
 
+    /// The attempt that is armed now (0 = none).
+    #[cfg(test)]
+    pub fn armed() -> u64 {
+        ARMED.load(Ordering::SeqCst)
+    }
+
     fn hard_exit() -> ! {
         #[cfg(unix)]
         unsafe {
@@ -250,12 +256,16 @@ fn relaunch(env: &tauri::Env) {
         if let Some(bundle) = exe.ancestors().nth(3)
             && bundle.extension().is_some_and(|ext| ext == "app")
         {
-            let _ = crate::process::hidden_command("/usr/bin/open")
+            let opened = crate::process::hidden_command("/usr/bin/open")
                 .arg("-n")
                 .arg(bundle)
                 .stdin(std::process::Stdio::null())
-                .output();
-            return;
+                .output()
+                .is_ok_and(|out| out.status.success());
+            if opened {
+                return;
+            }
+            // As Tauri does: fall back to starting the binary directly.
         }
     }
     let _ = crate::process::hidden_command(exe)
@@ -407,6 +417,16 @@ mod tests {
         // Attempt 1 failed and was disarmed, attempt 2 is armed: the
         // sleeping thread of attempt 1 must not act on attempt 2.
         assert!(!fires(1, 2));
+    }
+
+    #[test]
+    fn disarming_an_old_attempt_keeps_the_current_one_armed() {
+        let old = watchdog::arm();
+        let current = watchdog::arm();
+        watchdog::disarm(old);
+        assert_eq!(watchdog::armed(), current);
+        watchdog::disarm(current);
+        assert_eq!(watchdog::armed(), 0);
     }
 
     #[test]
