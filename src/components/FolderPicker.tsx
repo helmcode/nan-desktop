@@ -3,6 +3,12 @@
 // plus the profile-level actions: add a folder through the native picker,
 // whole-computer mode and Settings. The selection is a renderer preference
 // sent with each message; the Rust core enforces it.
+//
+// `locked` (R24): while the conversation is replying, its turn runs on the
+// selection it was sent with (the core takes it with `chat_send` and the
+// model's instructions are fixed for the turn). The chip then stays as it
+// is and cannot be changed, so it never shows a folder the running reply is
+// not using; it unlocks when the reply ends.
 
 import { useEffect, useRef, useState } from "react";
 import { allFolders, isAllSelected, pruneSelection, toggleFolder } from "../chat/folderSelection";
@@ -17,6 +23,7 @@ export function FolderPicker({
   onChange,
   onAskComputerWide,
   onOpenSettings,
+  locked = false,
 }: {
   workspace: Workspace;
   /// Selected grant ids of the open conversation.
@@ -24,6 +31,8 @@ export function FolderPicker({
   onChange: (grantIds: string[]) => void;
   onAskComputerWide: () => void;
   onOpenSettings: () => void;
+  /// The conversation is replying: the selection cannot change now.
+  locked?: boolean;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -41,6 +50,11 @@ export function FolderPicker({
       : first
         ? t.workspace.folderLabel(folderName(first.canonical_path), rest.length)
         : t.workspace.noFolder;
+
+  // A reply that starts while the menu is open closes it.
+  useEffect(() => {
+    if (locked) setOpen(false);
+  }, [locked]);
 
   useEffect(() => {
     if (!open) return;
@@ -79,8 +93,12 @@ export function FolderPicker({
         className={`ws-chip${wide ? " ws-chip-wide" : ""}${noGrants || (noneSelected && !wide) ? " ws-chip-empty" : ""}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        title={t.workspace.chipTitle}
+        // aria-disabled (not `disabled`) keeps the explanation reachable as
+        // a tooltip and by keyboard focus.
+        aria-disabled={locked || undefined}
+        title={locked ? t.workspace.lockedTitle : t.workspace.chipTitle}
         onClick={() => {
+          if (locked) return;
           if (noGrants) {
             void addAndSelect();
           } else {
@@ -93,7 +111,7 @@ export function FolderPicker({
         <span className="ws-chip-label">{label}</span>
         {!noGrants && <IconChevronDown size={14} />}
       </button>
-      {open && (
+      {open && !locked && (
         <div className="ws-menu" role="menu" aria-label={t.workspace.menuLabel}>
           <p className="ws-menu-heading">{t.workspace.selectionHeading}</p>
           <button

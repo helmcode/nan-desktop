@@ -7,6 +7,7 @@ import { useI18n } from "../i18n";
 import { releaseSitePreview } from "../core";
 import { IconArrowLeft, IconFilm, IconPlus, IconTrash } from "../icons";
 import {
+  ASPECTS,
   formatDuration,
   templatePoster,
   videoCreateFromTemplate,
@@ -26,7 +27,6 @@ import { VideoEditor, rovingKeys } from "./VideoEditor";
 import { VideoPlayer } from "./VideoPlayer";
 import "./video.css";
 
-const ASPECTS: Aspect[] = ["16:9", "9:16", "1:1"];
 
 type Tab = "mine" | "templates";
 
@@ -197,6 +197,7 @@ export function VideosSurface({
   onOpenProject,
   onClose,
   onAskAssistant,
+  onSendToAssistant,
   onSignIn,
 }: {
   profileId: string;
@@ -206,6 +207,8 @@ export function VideosSurface({
   onOpenProject: (projectId: string | null) => void;
   onClose: () => void;
   onAskAssistant: (text: string, context: VideoAskContext) => void;
+  /// Send a complete request to the assistant right away (see VideoEditor).
+  onSendToAssistant?: (text: string, context: VideoAskContext) => void;
   /// The session expired: sign in again.
   onSignIn?: () => void;
 }) {
@@ -270,6 +273,7 @@ export function VideosSurface({
           projectId={projectId}
           onClose={() => onOpenProject(null)}
           onAskAssistant={onAskAssistant}
+          onSendToAssistant={onSendToAssistant}
           onSignIn={onSignIn}
         />
       </section>

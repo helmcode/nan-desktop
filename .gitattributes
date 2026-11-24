@@ -3,4 +3,4 @@
 # on every OS. Keep LF on Windows checkouts (core.autocrlf would add CR).
 src-tauri/vendor/hyperframes/** -text
 src-tauri/src/video/testdata/** -text
-src-tauri/video-templates/** eol=lf
+src-tauri/video-templates/** -text

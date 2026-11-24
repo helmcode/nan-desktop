@@ -19,6 +19,13 @@
       .step-1-title { font-size: 10vmin; }
       .step-1-text { font-size: 4.6vmin; }
     }
+    /* Square: a smaller numeral keeps the stacked step inside the safe area. */
+    @media (min-aspect-ratio: 4/5) and (max-aspect-ratio: 5/4) {
+      .step-1-stage { gap: 4vmin; padding: 8vmin 10vmin 14vmin; }
+      .step-1-num { font-size: 26vmin; }
+      .step-1-title { font-size: 8.5vmin; }
+      .step-1-text { font-size: 4.2vmin; }
+    }
     @keyframes step-1-num { from { opacity: 0; transform: translateY(10vmin) scale(0.9); } to { opacity: 1; transform: none; } }
     @keyframes step-1-fade { from { opacity: 0; } to { opacity: 0.55; } }
     @keyframes step-1-in { from { opacity: 0; transform: translateX(6vmin); } to { opacity: 1; transform: none; } }

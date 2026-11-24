@@ -424,20 +424,36 @@ fn mock_download_allowed() -> bool {
         && std::env::var("NAN_DESKTOP_MOCK_PLATFORM").is_ok_and(|m| !m.trim().is_empty())
 }
 
+/// An optional export format from the renderer (`16:9`, `9:16`, `1:1`).
+fn parse_aspect(raw: Option<&str>) -> Result<Option<project::Aspect>, render::ExportError> {
+    match raw {
+        None => Ok(None),
+        Some(raw) => project::Aspect::parse(raw)
+            .map(Some)
+            .ok_or_else(|| render::ExportError::new("invalid")),
+    }
+}
+
 /// Zip the project, check the 90 MiB cap, and start a server render.
+/// `aspect` renders it in another format than its own (in memory; the
+/// project is never changed).
 #[tauri::command]
 pub async fn video_export_start(
     app: AppHandle,
     profile_id: String,
     project_id: String,
     quality: String,
+    aspect: Option<String>,
 ) -> Result<render::Started, render::ExportError> {
+    let aspect = parse_aspect(aspect.as_deref())?;
     let realm = export_realm(&app, &profile_id)?;
     let (base, token) = platform(&profile_id)?;
     let project_for_events = project_id.clone();
-    let (meta, bundle) = tauri::async_runtime::spawn_blocking(move || {
+    let (meta, bundle, rendered) = tauri::async_runtime::spawn_blocking(move || {
         let dir = library::project_dir(&realm, &project_id)?;
-        render::prepare(&dir, &quality)
+        let own = library::read_meta(&dir)?.aspect;
+        let (meta, bundle) = render::prepare(&dir, &quality, aspect)?;
+        Ok::<_, render::ExportError>((meta, bundle, aspect.unwrap_or(own)))
     })
     .await
     .map_err(|_| render::ExportError::new("io"))??;
@@ -471,7 +487,46 @@ pub async fn video_export_start(
     uploads.remove(&project_for_events);
     // An aborted upload closed the connection before the server admitted
     // the render: nothing was charged.
-    result.unwrap_or_else(|_| Err(render::ExportError::new("canceled")))
+    let started = result.unwrap_or_else(|_| Err(render::ExportError::new("canceled")))?;
+    if aspect.is_some() {
+        RenderAspects::global().record(&started.render_id, rendered);
+    }
+    Ok(started)
+}
+
+/// The format each render of this run was STARTED with, by render id, so
+/// the downloaded file's name comes from what the core actually rendered,
+/// not from what the renderer says at download time. A render resumed
+/// after a restart is not here: then the renderer's value (a closed set,
+/// it only picks the name's suffix) is used.
+pub struct RenderAspects(std::sync::Mutex<std::collections::HashMap<String, project::Aspect>>);
+
+impl RenderAspects {
+    /// Renders remembered at most (oldest dropped first is not needed:
+    /// any entry can go, it only names a file).
+    const CAP: usize = 64;
+
+    pub fn global() -> &'static RenderAspects {
+        static ASPECTS: std::sync::OnceLock<RenderAspects> = std::sync::OnceLock::new();
+        ASPECTS
+            .get_or_init(|| RenderAspects(std::sync::Mutex::new(std::collections::HashMap::new())))
+    }
+
+    pub fn record(&self, render_id: &str, aspect: project::Aspect) {
+        if let Ok(mut map) = self.0.lock() {
+            if map.len() >= Self::CAP
+                && let Some(key) = map.keys().next().cloned()
+            {
+                map.remove(&key);
+            }
+            map.insert(render_id.to_string(), aspect);
+        }
+    }
+
+    /// The recorded format of a render (forgotten once read).
+    pub fn take(&self, render_id: &str) -> Option<project::Aspect> {
+        self.0.lock().ok().and_then(|mut map| map.remove(render_id))
+    }
 }
 
 /// Uploads in flight, by project: "Cancel" during the upload aborts the
@@ -573,7 +628,9 @@ pub async fn video_export_download(
     profile_id: String,
     project_id: String,
     render_id: String,
+    aspect: Option<String>,
 ) -> Result<editor::ExportView, render::ExportError> {
+    let claimed = parse_aspect(aspect.as_deref())?;
     let realm = export_realm(&app, &profile_id)?;
     let (base, token) = platform(&profile_id)?;
     let (status, url) = render::status(&base, &token, &render_id).await?;
@@ -584,7 +641,12 @@ pub async fn video_export_download(
     };
     let dir = library::project_dir(&realm, &project_id)?;
     let title = library::read_meta(&dir)?.title;
-    let name = render::export_name(&dir, &title);
+    // The format recorded when the core started it wins over the claim.
+    let aspect = match claimed {
+        Some(claimed) => Some(RenderAspects::global().take(&render_id).unwrap_or(claimed)),
+        None => RenderAspects::global().take(&render_id),
+    };
+    let name = render::export_name(&dir, &title, aspect);
     let emitter = app.clone();
     let pid = project_id.clone();
     let size = render::download(
@@ -715,9 +777,23 @@ mod tests {
         assert!(intro.contains("data-width=\"1080\" data-height=\"1920\""));
         // Ready to preview and to export.
         preview::assemble_project(&dir).unwrap();
-        render::prepare(&dir, "standard").unwrap();
+        render::prepare(&dir, "standard", None).unwrap();
         assert!(create_from_template_in(&realm, "nope", None, "es").is_err());
         assert_eq!(library::list_projects(&realm).len(), 1);
+    }
+
+    #[test]
+    fn a_render_is_named_after_the_format_it_was_started_with() {
+        let aspects = RenderAspects(std::sync::Mutex::new(std::collections::HashMap::new()));
+        aspects.record("r-1", project::Aspect::Portrait);
+        assert_eq!(aspects.take("r-1"), Some(project::Aspect::Portrait));
+        assert_eq!(aspects.take("r-1"), None, "read once");
+        for n in 0..(RenderAspects::CAP + 10) {
+            aspects.record(&format!("r-{n}"), project::Aspect::Square);
+        }
+        assert!(aspects.0.lock().unwrap().len() <= RenderAspects::CAP);
+        assert_eq!(parse_aspect(Some("4:3")).unwrap_err().kind, "invalid");
+        assert_eq!(parse_aspect(None).unwrap(), None);
     }
 
     #[test]

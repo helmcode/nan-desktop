@@ -95,6 +95,12 @@ jobs:
       - name: Auto-update wiring check
         run: node test/updater-check.mjs
 
+      # Video templates keep text and images inside the frame in every aspect
+      # (real layout in headless Chrome; the runner ships Chrome).
+      - name: Video template layout check
+        if: runner.os == 'Linux'
+        run: node test/template-layout-check.mjs
+
       # Release signing scripts: lint everywhere they can be linted, and run
       # the macOS seal spec (reproduces the "damaged app" defect and proves
       # the ad-hoc fallback repairs both the .app and the app inside the dmg).

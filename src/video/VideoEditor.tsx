@@ -11,13 +11,13 @@ import { useI18n } from "../i18n";
 import { releaseSitePreview } from "../core";
 import { IconArrowLeft, IconChevronDown, IconImage, IconSparkles, IconTrash, IconX } from "../icons";
 import {
+  ASPECTS,
   formatDuration,
   formatTime,
   videoGet,
   videoPickAsset,
   videoPreview,
   videoUpdate,
-  type Aspect,
   type EditorPatch,
   type VideoAskContext,
   type VideoPreviewInfo,
@@ -27,10 +27,10 @@ import {
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ExportPanel } from "./ExportPanel";
 import { lintProject, problemsForAssistant, type LintProblem } from "./lint";
-import { changeRequest, groupVariables, moveScene, parseDuration, sceneAt, sceneWindows } from "./logic";
+import { changeRequest, groupVariables, moveScene, normalizeHex, parseDuration, sceneAt, sceneWindows } from "./logic";
+import { useVideoRevision } from "./useVideoRevision";
 import { VideoPlayer, type PlayerHandle } from "./VideoPlayer";
 
-const ASPECTS: Aspect[] = ["16:9", "9:16", "1:1"];
 /// How long typing, a color drag or a volume drag waits before it is saved.
 export const TEXT_SAVE_MS = 700;
 
@@ -79,6 +79,11 @@ function useDebouncedField(value: string, onCommit: (value: string) => void, val
       if (timer.current) clearTimeout(timer.current);
       timer.current = valid(next) ? setTimeout(() => commit(next), TEXT_SAVE_MS) : null;
     },
+    /// Save `next` right away (Enter in a field next to this one).
+    commitNow: (next: string) => {
+      setDraft(next);
+      commit(next);
+    },
   };
 }
 
@@ -104,17 +109,85 @@ function TextField({ variable, onCommit }: { variable: VideoVariable; onCommit: 
   );
 }
 
+/// A color: the swatch (system picker) plus its code typed by hand
+/// (`#0a0a0a`, `#FFF`, `fff`). The code applies on Enter or on leaving the
+/// box when it is valid (normalized to lowercase `#rrggbb`); an invalid one
+/// says so and changes nothing. The box follows the swatch.
 function ColorField({ variable, onCommit }: { variable: VideoVariable; onCommit: (value: string) => void }) {
+  const { t } = useI18n();
   const field = useDebouncedField(variable.value, onCommit);
+  const [hex, setHex] = useState(field.draft);
+  const [invalid, setInvalid] = useState(false);
+  const typing = useRef(false);
+  useEffect(() => {
+    if (!typing.current) {
+      setHex(field.draft);
+      setInvalid(false);
+    }
+  }, [field.draft]);
+  const applyHex = () => {
+    // Emptied by the user: back to the saved color, nothing to complain about.
+    if (hex.trim() === "") {
+      setHex(field.draft);
+      setInvalid(false);
+      return;
+    }
+    const normalized = normalizeHex(hex);
+    if (normalized === null) {
+      setInvalid(true);
+      return;
+    }
+    setInvalid(false);
+    setHex(normalized);
+    // Saved only when it differs from the saved value.
+    field.commitNow(normalized);
+  };
+  const errorId = `video-var-${variable.id}-hex-error`;
   return (
-    <input
-      id={`video-var-${variable.id}`}
-      type="color"
-      value={field.draft.length === 7 ? field.draft : "#000000"}
-      onFocus={field.onFocus}
-      onBlur={field.onBlur}
-      onChange={(e) => field.onChange(e.currentTarget.value)}
-    />
+    <div className="video-color-field">
+      <input
+        id={`video-var-${variable.id}`}
+        type="color"
+        value={field.draft.length === 7 ? field.draft : "#000000"}
+        onFocus={field.onFocus}
+        onBlur={field.onBlur}
+        onChange={(e) => field.onChange(e.currentTarget.value)}
+      />
+      <input
+        type="text"
+        className="video-hex"
+        aria-label={t.video.hexLabel(variable.label)}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        maxLength={7}
+        value={hex}
+        aria-invalid={invalid ? "true" : undefined}
+        aria-describedby={invalid ? errorId : undefined}
+        onFocus={() => {
+          typing.current = true;
+        }}
+        onBlur={() => {
+          typing.current = false;
+          applyHex();
+        }}
+        onChange={(e) => {
+          setHex(e.currentTarget.value);
+          if (invalid) setInvalid(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            applyHex();
+          }
+        }}
+      />
+      {invalid && (
+        <p id={errorId} className="inline-error video-hex-error" role="alert">
+          {t.video.hexInvalid}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -162,7 +235,7 @@ function VolumeField({ label, volume, onCommit }: { label: string; volume: numbe
 }
 
 /// Arrow keys move the choice in a radio group (roving tabindex).
-export function rovingKeys<T>(options: T[], current: T, choose: (value: T) => void) {
+export function rovingKeys<T>(options: readonly T[], current: T, choose: (value: T) => void) {
   return (e: KeyboardEvent<HTMLElement>) => {
     const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
     if (step === 0) return;
@@ -185,6 +258,7 @@ export function VideoEditor({
   projectId,
   onClose,
   onAskAssistant,
+  onSendToAssistant,
   onSignIn,
 }: {
   profileId: string;
@@ -193,6 +267,10 @@ export function VideoEditor({
   /// Go to the chat with a short request in the composer and the technical
   /// context attached for the model only.
   onAskAssistant: (text: string, context: VideoAskContext) => void;
+  /// Go to the chat and SEND a complete request right away (the automatic
+  /// check's "fix it": nothing for the user to add). Falls back to
+  /// `onAskAssistant` when absent.
+  onSendToAssistant?: (text: string, context: VideoAskContext) => void;
   /// The session expired: sign in again.
   onSignIn?: () => void;
 }) {
@@ -208,6 +286,11 @@ export function VideoEditor({
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const player = useRef<PlayerHandle | null>(null);
+  const titleFocused = useRef(false);
+  // Editor saves in flight, and an assistant change that arrived meanwhile
+  // (applied once they are done, so a save's answer is never lost).
+  const inflight = useRef(0);
+  const refreshQueued = useRef(false);
   const previewRef = useRef<VideoPreviewInfo | null>(null);
   const revision = useRef(0);
   const request = useRef(0);
@@ -224,7 +307,8 @@ export function VideoEditor({
   const showProject = useCallback(
     (next: VideoProject) => {
       setProject(next);
-      setTitleDraft(next.meta.title);
+      // Never under the user's fingers: the title box keeps what is typed.
+      if (!titleFocused.current) setTitleDraft(next.meta.title);
       const mine = ++revision.current;
       setProblems(null);
       videoPreview(profileId, next.id)
@@ -263,16 +347,51 @@ export function VideoEditor({
       const mine = ++request.current;
       resumeAt.current = at ?? timeRef.current;
       setSave("saving");
+      inflight.current += 1;
       videoUpdate(profileId, projectId, patch)
         .then((next) => {
           if (mine !== request.current) return;
           setSave("saved");
           showProject(next);
         })
-        .catch(() => mine === request.current && setSave("failed"));
+        .catch(() => mine === request.current && setSave("failed"))
+        .finally(() => {
+          inflight.current -= 1;
+          if (inflight.current === 0 && refreshQueued.current) {
+            refreshQueued.current = false;
+            reloadRef.current();
+          }
+        });
     },
     [profileId, projectId, showProject],
   );
+
+  // R-V1 (round 24): the assistant changed this video while it is open:
+  // reload it at the same playhead. The fields keep whatever the user is
+  // typing (they never re-sync while focused); a save in flight finishes
+  // first.
+  const reloadRef = useRef<() => void>(() => undefined);
+  reloadRef.current = () => {
+    if (inflight.current > 0) {
+      refreshQueued.current = true;
+      return;
+    }
+    const mine = request.current;
+    videoGet(profileId, projectId)
+      .then((next) => {
+        if (inflight.current > 0 || mine !== request.current) {
+          refreshQueued.current = true;
+          return;
+        }
+        resumeAt.current = timeRef.current;
+        showProject(next);
+      })
+      .catch(() => undefined);
+  };
+  const changes = useVideoRevision(projectId);
+  useEffect(() => {
+    if (changes > 0) reloadRef.current();
+  }, [changes]);
 
   const pick = (slot: Parameters<typeof videoPickAsset>[2]) => {
     setPickFailed(false);
@@ -375,7 +494,14 @@ export function VideoEditor({
             maxLength={120}
             aria-labelledby="video-editor-title"
             onChange={(e) => setTitleDraft(e.currentTarget.value)}
-            onBlur={() => titleDraft.trim() && titleDraft !== meta.title && apply({ title: titleDraft })}
+            onFocus={() => {
+              titleFocused.current = true;
+            }}
+            onBlur={() => {
+              titleFocused.current = false;
+              if (titleDraft.trim() && titleDraft !== meta.title) apply({ title: titleDraft });
+              else setTitleDraft(meta.title);
+            }}
             onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
           />
         </label>
@@ -626,7 +752,7 @@ export function VideoEditor({
                   type="button"
                   className="btn btn-secondary btn-sm"
                   onClick={() =>
-                    onAskAssistant(t.video.askFixText, {
+                    (onSendToAssistant ?? onAskAssistant)(t.video.askFixText, {
                       project_id: project.id,
                       title: meta.title,
                       problems: problemsForAssistant(problems)

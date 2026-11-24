@@ -25,6 +25,16 @@
     @keyframes quote-star { from { opacity: 0; transform: scale(0) rotate(-72deg); } to { opacity: 1; transform: none; } }
     @keyframes quote-reveal { from { opacity: 0.2; clip-path: inset(0 0 100% 0); transform: translateY(2vmin); } to { opacity: 1; clip-path: inset(0 0 -10% 0); transform: none; } }
     @keyframes quote-up { from { opacity: 0; transform: translateY(3vmin); } to { opacity: 1; transform: none; } }
+    /* Square: a tighter card so the quote mark above it stays in frame. */
+    @media (min-aspect-ratio: 3/4) and (max-aspect-ratio: 5/4) {
+      .quote-stage { padding: 14vmin 8vmin 8vmin; }
+      .quote-card { padding: 9vmin 8vmin 7vmin; gap: 3vmin; }
+      .quote-mark { top: -8vmin; left: 5vmin; font-size: 24vmin; }
+      .quote-text { font-size: 5.6vmin; }
+      .quote-avatar { width: 10vmin; height: 10vmin; font-size: 3.6vmin; }
+      .quote-name { font-size: 3.8vmin; }
+      .quote-role { font-size: 2.9vmin; }
+    }
     @media (max-aspect-ratio: 3/4) {
       .quote-card { padding: 9vmin 7vmin 7vmin; gap: 3.5vmin; }
       .quote-mark { top: -8vmin; left: 5vmin; font-size: 26vmin; }

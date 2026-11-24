@@ -2,8 +2,9 @@
 // R-V1: the simple editor writes ONLY through the core commands (values,
 // scene order and length, picked files by slot), never a path or HTML, and
 // hands scene changes to the assistant with the project and time context.
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 vi.mock("@tauri-apps/api/core", async () => (await import("../test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("../test/tauriMock")).eventModule());
@@ -15,7 +16,8 @@ vi.mock("./lint", () => ({
 }));
 
 import { I18nProvider } from "../i18n";
-import { invokedWith, resetTauri } from "../test/tauriMock";
+import { emit, invokedWith, resetTauri } from "../test/tauriMock";
+import { VIDEO_REFRESH_MS } from "./useVideoRevision";
 import { VideoEditor, TEXT_SAVE_MS } from "./VideoEditor";
 import { PREVIEW, PROJECT_ID, TOKEN, project } from "./fixtures";
 
@@ -327,5 +329,142 @@ describe("VideoEditor", () => {
     await waitFor(() => expect(document.querySelector("hyperframes-player")).not.toBeNull());
     view.unmount();
     await waitFor(() => expect(invokedWith("preview_release_site")).toContainEqual({ token: TOKEN }));
+  });
+
+  it("takes a color typed as a hex code, normalized, and refuses a wrong one", async () => {
+    setup();
+    const hex = (await screen.findByRole("textbox", { name: "Código de color de Color de acento" })) as HTMLInputElement;
+    expect(hex.value).toBe("#7c6cff");
+    fireEvent.focus(hex);
+    fireEvent.change(hex, { target: { value: "#FFF" } });
+    fireEvent.keyDown(hex, { key: "Enter" });
+    await waitFor(() => expect(invokedWith("video_update")).toEqual([{ profileId: "nan", projectId: PROJECT_ID, patch: { values: { accent: "#ffffff" } } }]));
+    expect(hex.value).toBe("#ffffff");
+    expect((screen.getByLabelText("Color de acento") as HTMLInputElement).value).toBe("#ffffff");
+    // Without # and upper case.
+    fireEvent.change(hex, { target: { value: "0A0A0A" } });
+    fireEvent.blur(hex);
+    await waitFor(() => expect(invokedWith("video_update").length).toBe(2));
+    expect(invokedWith("video_update")[1]).toEqual({ profileId: "nan", projectId: PROJECT_ID, patch: { values: { accent: "#0a0a0a" } } });
+    // A wrong code says so and saves nothing.
+    fireEvent.focus(hex);
+    fireEvent.change(hex, { target: { value: "#12" } });
+    fireEvent.keyDown(hex, { key: "Enter" });
+    expect((await screen.findByRole("alert")).textContent).toBe("Escribe un código como #0a0a0a o #fff.");
+    expect(hex.getAttribute("aria-invalid")).toBe("true");
+    fireEvent.blur(hex);
+    expect(invokedWith("video_update").length).toBe(2);
+  });
+
+  it("puts the saved color back when the hex code is emptied", async () => {
+    setup();
+    const hex = (await screen.findByRole("textbox", { name: "Código de color de Color de acento" })) as HTMLInputElement;
+    fireEvent.focus(hex);
+    fireEvent.change(hex, { target: { value: "" } });
+    fireEvent.blur(hex);
+    expect(hex.value).toBe("#7c6cff");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(invokedWith("video_update")).toEqual([]);
+  });
+
+  it("shows a wrong hex code's message on its own line under the field", async () => {
+    setup();
+    const hex = (await screen.findByRole("textbox", { name: "Código de color de Color de acento" })) as HTMLInputElement;
+    fireEvent.change(hex, { target: { value: "zz" } });
+    fireEvent.keyDown(hex, { key: "Enter" });
+    const message = await screen.findByRole("alert");
+    expect(message.parentElement?.classList.contains("video-color-field")).toBe(true);
+    expect(message.classList.contains("video-hex-error")).toBe(true);
+    expect(hex.getAttribute("aria-describedby")).toBe(message.id);
+    // The row wraps and the message takes a whole line (the row is flex).
+    const css = readFileSync("src/video/video.css", "utf8");
+    expect(css).toMatch(/\.video-color-field \{[^}]*flex-wrap: wrap;/);
+    expect(css).toMatch(/\.video-hex-error \{[^}]*flex-basis: 100%;/);
+  });
+
+  it("keeps the hex code in step with the color picker", async () => {
+    setup();
+    const color = (await screen.findByLabelText("Color de acento")) as HTMLInputElement;
+    fireEvent.focus(color);
+    fireEvent.change(color, { target: { value: "#112233" } });
+    expect((screen.getByRole("textbox", { name: "Código de color de Color de acento" }) as HTMLInputElement).value).toBe("#112233");
+  });
+
+  it("sends the check's fix request right away when it can", async () => {
+    lintResult.problems = [{ file: "compositions/intro.html", severity: "error", code: "missing_root", message: "x" }];
+    const ask = vi.fn();
+    const send = vi.fn();
+    resetTauri({
+      video_get: () => project(),
+      video_preview: () => PREVIEW,
+      video_export_quota: () => ({ included_seconds: 0, used_seconds: 0, remaining_seconds: 0, period_end: null }),
+      preview_release_site: () => null,
+    });
+    render(
+      <I18nProvider initial="es">
+        <VideoEditor profileId="nan" projectId={PROJECT_ID} onClose={() => {}} onAskAssistant={ask} onSendToAssistant={send} />
+      </I18nProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Pedir al asistente que lo arregle" }));
+    expect(send).toHaveBeenCalledWith("Arregla los problemas que ha encontrado la revisión automática de este vídeo.", {
+      project_id: PROJECT_ID,
+      title: "Promo",
+      problems: ["missing_root"],
+    });
+    expect(ask).not.toHaveBeenCalled();
+    // "Ask for a change in this scene" still waits for the user's words.
+    fireEvent.click(screen.getByRole("button", { name: "Pedir al asistente un cambio en Inicio" }));
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows the assistant's edits: one reload per burst, same playhead, typing kept", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const seeks: number[] = [];
+    const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
+    proto.seek = (t: number) => seeks.push(t);
+    try {
+      let n = 0;
+      let title = "Promo";
+      resetTauri({
+        video_get: () => {
+          const p = project();
+          p.meta.title = title;
+          return p;
+        },
+        video_preview: () => ({ ...PREVIEW, url: `nan-site://localhost/${String(++n).padStart(32, "0")}` }),
+        video_export_quota: () => ({ included_seconds: 0, used_seconds: 0, remaining_seconds: 0, period_end: null }),
+        preview_release_site: () => null,
+      });
+      render(
+        <I18nProvider initial="es">
+          <VideoEditor profileId="nan" projectId={PROJECT_ID} onClose={() => {}} onAskAssistant={() => {}} />
+        </I18nProvider>,
+      );
+      await waitFor(() => expect(document.querySelector("hyperframes-player")?.getAttribute("src")).toContain("01"));
+      document.querySelector("hyperframes-player")!.dispatchEvent(new CustomEvent("timeupdate", { detail: { currentTime: 4 } }));
+      const box = screen.getByRole("textbox", { name: "Título" }) as HTMLInputElement;
+      fireEvent.focus(box);
+      fireEvent.change(box, { target: { value: "Mi título a medias" } });
+      title = "Promo 2";
+      await act(async () => {
+        emit("video://changed", { conversation_id: 7, project_id: "f".repeat(32), title: "Otro" });
+        emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo 2" });
+        emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo 2" });
+        emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo 2" });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(VIDEO_REFRESH_MS + 10);
+      });
+      await waitFor(() => expect(document.querySelector("hyperframes-player")?.getAttribute("src")).toContain("02"));
+      expect(invokedWith("video_get").length).toBe(2);
+      document.querySelector("hyperframes-player")!.dispatchEvent(new CustomEvent("ready"));
+      expect(seeks.at(-1)).toBe(4);
+      // What the user is typing stays.
+      expect(box.value).toBe("Mi título a medias");
+      expect(invokedWith("preview_release_site")).toContainEqual({ token: "1".padStart(32, "0") });
+    } finally {
+      delete proto.seek;
+    }
   });
 });

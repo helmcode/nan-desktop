@@ -8,6 +8,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Aspect = "16:9" | "9:16" | "1:1";
 
+/// Every format, in the order the app lists them.
+export const ASPECTS: readonly Aspect[] = ["16:9", "9:16", "1:1"];
+
 /// `video_preview`: the sandboxed document's URL and the canvas.
 export interface VideoPreviewInfo {
   url: string;
@@ -256,8 +259,15 @@ export function exportAbort(projectId: string): Promise<boolean> {
   return invoke<boolean>("video_export_abort", { projectId });
 }
 
-export function exportStart(profileId: string, projectId: string, quality: "standard" | "draft"): Promise<RenderStarted> {
-  return invoke<RenderStarted>("video_export_start", { profileId, projectId, quality });
+/// `aspect`: the format to render (the project's own when omitted). Another
+/// format is built in memory by the core; the project is never changed.
+export function exportStart(
+  profileId: string,
+  projectId: string,
+  quality: "standard" | "draft",
+  aspect?: Aspect,
+): Promise<RenderStarted> {
+  return invoke<RenderStarted>("video_export_start", { profileId, projectId, quality, ...(aspect ? { aspect } : {}) });
 }
 
 export function exportStatus(profileId: string, renderId: string): Promise<RenderStatus> {
@@ -272,8 +282,9 @@ export function exportQuota(profileId: string): Promise<RenderQuota> {
   return invoke<RenderQuota>("video_export_quota", { profileId });
 }
 
-export function exportDownload(profileId: string, projectId: string, renderId: string): Promise<VideoExport> {
-  return invoke<VideoExport>("video_export_download", { profileId, projectId, renderId });
+/// `aspect` names the file after the format (`promo-vertical.mp4`).
+export function exportDownload(profileId: string, projectId: string, renderId: string, aspect?: Aspect): Promise<VideoExport> {
+  return invoke<VideoExport>("video_export_download", { profileId, projectId, renderId, ...(aspect ? { aspect } : {}) });
 }
 
 export function exportOpen(profileId: string, projectId: string, name: string): Promise<void> {

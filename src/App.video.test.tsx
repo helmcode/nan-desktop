@@ -10,7 +10,11 @@ import { emit, invokedWith, resetTauri } from "./test/tauriMock";
 vi.mock("@tauri-apps/api/core", async () => (await import("./test/tauriMock")).coreModule());
 vi.mock("@tauri-apps/api/event", async () => (await import("./test/tauriMock")).eventModule());
 vi.mock("@hyperframes/player", () => ({}));
-vi.mock("./video/lint", () => ({ lintProject: async () => [], problemsForAssistant: () => "" }));
+const lintResult = vi.hoisted(() => ({ problems: [] as unknown[] }));
+vi.mock("./video/lint", () => ({
+  lintProject: async () => lintResult.problems,
+  problemsForAssistant: (p: { code: string }[]) => p.map((x) => `- ${x.code}`).join("\n"),
+}));
 
 import App from "./App";
 import { I18nProvider } from "./i18n";
@@ -45,7 +49,10 @@ beforeEach(() => {
     chat_send: () => undefined,
   });
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  lintResult.problems = [];
+});
 
 describe("R-V1: videos in the shell", () => {
   it("opens the video the assistant made, then the editor, then asks for a scene change", async () => {
@@ -111,4 +118,59 @@ describe("R-V1: videos in the shell", () => {
     expect(await screen.findByRole("heading", { name: "Vídeos" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Plantillas" })).toBeTruthy();
   });
+
+  it("sends the automatic check's fix request right away and keeps the user's draft", async () => {
+    lintResult.problems = [{ file: "compositions/intro.html", severity: "error", code: "missing_root", message: "x" }];
+    render(
+      <I18nProvider initial="es">
+        <App />
+      </I18nProvider>,
+    );
+    const box = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "Mi borrador" } });
+    await act(async () => emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo" }));
+    const pane = await screen.findByRole("complementary", { name: "Vista previa" });
+    fireEvent.click(await within(pane).findByRole("button", { name: "Editar vídeo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Pedir al asistente que lo arregle" }));
+    await waitFor(() => expect(invokedWith("chat_send").length).toBe(1));
+    const sent = invokedWith("chat_send")[0]!;
+    expect(sent.content).toBe("Arregla los problemas que ha encontrado la revisión automática de este vídeo.");
+    expect(sent.videoContext).toEqual({ project_id: PROJECT_ID, title: "Promo", problems: ["missing_root"] });
+    // Back in the chat, the draft is untouched and no video chip was added.
+    const again = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
+    expect(again.value).toBe("Mi borrador");
+    expect(screen.queryByText("Sobre el vídeo «Promo»")).toBeNull();
+  });
+
+  it("queues the fix request while a reply runs, and sends it after, with its context", async () => {
+    lintResult.problems = [{ file: "compositions/intro.html", severity: "error", code: "missing_root", message: "x" }];
+    render(
+      <I18nProvider initial="es">
+        <App />
+      </I18nProvider>,
+    );
+    const box = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "primera" } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await screen.findByRole("button", { name: "Detener" });
+    fireEvent.change(box, { target: { value: "Mi borrador" } });
+    await act(async () => emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo" }));
+    const pane = await screen.findByRole("complementary", { name: "Vista previa" });
+    fireEvent.click(await within(pane).findByRole("button", { name: "Editar vídeo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Pedir al asistente que lo arregle" }));
+    // Queued like any message sent meanwhile; the draft stays.
+    const queue = await screen.findByRole("region", { name: "Mensajes en cola" });
+    expect(within(queue).getByText("Arregla los problemas que ha encontrado la revisión automática de este vídeo.")).toBeTruthy();
+    expect(((await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement).value).toBe("Mi borrador");
+    expect(invokedWith("chat_send").length).toBe(1);
+    await act(async () => emit("chat://done", { conversation_id: 7, reason: "stop" }));
+    await waitFor(() => expect(invokedWith("chat_send").length).toBe(2));
+    const sent = invokedWith("chat_send")[1]!;
+    expect(sent.content).toBe("Arregla los problemas que ha encontrado la revisión automática de este vídeo.");
+    expect(sent.videoContext).toEqual({ project_id: PROJECT_ID, title: "Promo", problems: ["missing_root"] });
+    expect(sent.skillId).toBeUndefined();
+  });
 });
+

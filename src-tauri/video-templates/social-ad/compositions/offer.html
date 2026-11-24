@@ -16,6 +16,16 @@
     @keyframes offer-up { from { opacity: 0; transform: translateY(6vmin); } to { opacity: 1; transform: none; } }
     @keyframes offer-stamp { from { opacity: 0; transform: scale(2.2) rotate(-25deg); } to { opacity: 1; transform: scale(1) rotate(-8deg); } }
     @keyframes offer-spin { from { transform: rotate(0deg); } to { transform: rotate(40deg); } }
+    /* Square: the copy and the badge side by side do not fit in 1:1. */
+    @media (min-aspect-ratio: 3/4) and (max-aspect-ratio: 5/4) {
+      .offer-stage { flex-direction: column; gap: 6vmin; padding: 0 8vmin; }
+      .offer-copy { align-items: center; text-align: center; max-width: 84vmin; gap: 3vmin; }
+      .offer-name { font-size: 12vmin; }
+      .offer-line { font-size: 5.4vmin; }
+      .offer-badge { width: 34vmin; height: 34vmin; }
+      .offer-discount { font-size: 10vmin; }
+      .offer-note { font-size: 2.6vmin; max-width: 24vmin; }
+    }
     @media (max-aspect-ratio: 3/4) {
       .offer-stage { flex-direction: column; gap: 7vmin; padding: 0 7vmin; }
       .offer-copy { align-items: center; text-align: center; max-width: 86vmin; gap: 3vmin; }

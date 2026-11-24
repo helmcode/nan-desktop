@@ -224,8 +224,98 @@ pub struct RenderMeta {
     pub title: String,
 }
 
-/// Validate the project for export and build `(meta, bundle)`.
-pub fn prepare(dir: &Path, quality: &str) -> Result<(RenderMeta, Vec<u8>), ExportError> {
+/// The bundle files of the same project in another format, built in
+/// memory only: `video.json` with `aspect`, the regenerated `index.html`
+/// and every scene root fitted to the new canvas. This is exactly what the
+/// editor's format switch writes (`library::apply`), so a "vertical too"
+/// export looks like switching the format, rendering, and switching back,
+/// without ever touching the project on disk.
+pub fn with_aspect(
+    files: Vec<(String, Vec<u8>)>,
+    aspect: project::Aspect,
+) -> Result<Vec<(String, Vec<u8>)>, ExportError> {
+    let invalid = || ExportError::new("invalid_project");
+    let json = files
+        .iter()
+        .find(|(name, _)| name == "video.json")
+        .ok_or_else(invalid)?;
+    let mut meta: project::VideoMeta = serde_json::from_slice(&json.1).map_err(|_| invalid())?;
+    meta.aspect = aspect;
+    let theme = files
+        .iter()
+        .find(|(name, _)| name == "theme.css")
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .unwrap_or_default();
+    let (width, height) = aspect.size();
+    files
+        .into_iter()
+        .map(|(name, bytes)| {
+            let bytes = if name == "video.json" {
+                serde_json::to_vec_pretty(&meta).map_err(|_| invalid())?
+            } else if name == "index.html" {
+                project::generate_index(&meta, &theme).into_bytes()
+            } else if let Some(id) = name
+                .strip_prefix("compositions/")
+                .and_then(|rest| rest.strip_suffix(".html"))
+            {
+                let html = String::from_utf8(bytes).map_err(|_| invalid())?;
+                project::with_root_canvas(&html, id, width, height).into_bytes()
+            } else {
+                bytes
+            };
+            Ok((name, bytes))
+        })
+        .collect()
+}
+
+/// The project checks (`validate_meta`, every scene through the preview
+/// assembly: no network, determinism, structure) on in-memory bundle files.
+pub fn check_bundle(files: &[(String, Vec<u8>)]) -> Result<(), ExportError> {
+    let invalid = || ExportError::new("invalid_project");
+    let file = |name: &str| files.iter().find(|(n, _)| n == name).map(|(_, b)| b);
+    let meta: project::VideoMeta =
+        serde_json::from_slice(file("video.json").ok_or_else(invalid)?).map_err(|_| invalid())?;
+    project::validate_meta(&meta, &|rel| {
+        rel.starts_with("assets/") && file(rel).is_some()
+    })
+    .map_err(|_| invalid())?;
+    let theme = match file("theme.css") {
+        Some(bytes) => String::from_utf8(bytes.clone()).map_err(|_| invalid())?,
+        None => String::new(),
+    };
+    let mut scenes = std::collections::BTreeMap::new();
+    for scene in &meta.scenes {
+        let bytes = file(&format!("compositions/{}.html", scene.id)).ok_or_else(invalid)?;
+        scenes.insert(
+            scene.id.clone(),
+            String::from_utf8(bytes.clone()).map_err(|_| invalid())?,
+        );
+    }
+    let asset = |rel: &str| {
+        if rel.starts_with("assets/") {
+            file(rel).cloned()
+        } else {
+            None
+        }
+    };
+    super::preview::assemble(&super::preview::Parts {
+        meta: &meta,
+        theme: &theme,
+        scenes: &scenes,
+        asset: &asset,
+    })
+    .map_err(ExportError::from)?;
+    Ok(())
+}
+
+/// Validate the project for export and build `(meta, bundle)`. `aspect`
+/// renders the project in another format than its own (see
+/// [`with_aspect`]); the project itself is never changed.
+pub fn prepare(
+    dir: &Path,
+    quality: &str,
+    aspect: Option<project::Aspect>,
+) -> Result<(RenderMeta, Vec<u8>), ExportError> {
     if !matches!(quality, "standard" | "draft") {
         return Err(ExportError::new("invalid"));
     }
@@ -235,9 +325,16 @@ pub fn prepare(dir: &Path, quality: &str) -> Result<(RenderMeta, Vec<u8>), Expor
         .map_err(|_| ExportError::new("invalid_project"))?;
     // The same checks as the preview: every scene passes the rules.
     super::preview::assemble_project(dir).map_err(ExportError::from)?;
-    let files = bundle_files(dir)?;
+    let mut files = bundle_files(dir)?;
+    let aspect = aspect.unwrap_or(meta.aspect);
+    if aspect != meta.aspect {
+        files = with_aspect(files, aspect)?;
+        // The variant is what ships: it passes the same checks as the
+        // project itself before anything is uploaded.
+        check_bundle(&files)?;
+    }
     let bundle = zip_stored(&files, MAX_BUNDLE_BYTES)?;
-    let (width, height) = meta.aspect.size();
+    let (width, height) = aspect.size();
     Ok((
         RenderMeta {
             duration_s: meta.duration(),
@@ -538,14 +635,27 @@ pub fn download_url_allowed(url: &str, allow_loopback_http: bool) -> bool {
 /// The only hosts a rendered MP4 is downloaded from (Cloudflare R2).
 pub const R2_HOST_SUFFIX: &str = ".r2.cloudflarestorage.com";
 
-/// A free `exports/` name for a title: `<slug>.mp4`, `<slug>-2.mp4`...
-pub fn export_name(dir: &Path, title: &str) -> String {
+/// The file-name word for a format (export names are `[a-z0-9-]`).
+pub fn aspect_suffix(aspect: project::Aspect) -> &'static str {
+    match aspect {
+        project::Aspect::Landscape => "horizontal",
+        project::Aspect::Portrait => "vertical",
+        project::Aspect::Square => "square",
+    }
+}
+
+/// A free `exports/` name for a title: `<slug>.mp4`, `<slug>-2.mp4`...;
+/// with a format, `<slug>-vertical.mp4`, `<slug>-vertical-2.mp4`...
+pub fn export_name(dir: &Path, title: &str, aspect: Option<project::Aspect>) -> String {
     let mut slug = crate::tools::website::slug(title);
     if slug == "site" {
         slug = "video".into();
     }
     slug.truncate(60);
-    let slug = slug.trim_end_matches('-').to_string();
+    let mut slug = slug.trim_end_matches('-').to_string();
+    if let Some(aspect) = aspect {
+        slug = format!("{slug}-{}", aspect_suffix(aspect));
+    }
     let existing = library::list_exports(dir);
     (1..)
         .map(|n| {
@@ -843,7 +953,7 @@ mod tests {
     #[test]
     fn prepare_checks_quality_and_builds_meta() {
         let (_tmp, _realm, _id, dir) = fresh_project();
-        let (meta, bundle) = prepare(&dir, "standard").unwrap();
+        let (meta, bundle) = prepare(&dir, "standard", None).unwrap();
         assert_eq!(
             meta,
             RenderMeta {
@@ -856,7 +966,7 @@ mod tests {
             }
         );
         assert!(!bundle.is_empty());
-        assert_eq!(prepare(&dir, "ultra").unwrap_err().kind, "invalid");
+        assert_eq!(prepare(&dir, "ultra", None).unwrap_err().kind, "invalid");
         // A remote reference written behind the app's back never ships.
         for remote in [
             "https://cdn.example/a.png",
@@ -870,7 +980,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                prepare(&dir, "standard").unwrap_err().kind,
+                prepare(&dir, "standard", None).unwrap_err().kind,
                 "invalid_project",
                 "{remote}"
             );
@@ -881,16 +991,142 @@ mod tests {
             "<template><script src=x></script></template>",
         )
         .unwrap();
-        assert_eq!(prepare(&dir, "draft").unwrap_err().kind, "invalid_project");
+        assert_eq!(
+            prepare(&dir, "draft", None).unwrap_err().kind,
+            "invalid_project"
+        );
     }
 
     #[test]
     fn export_names_never_collide() {
         let (_tmp, _realm, _id, dir) = fresh_project();
-        assert_eq!(export_name(&dir, "Mi Vídeo"), "mi-video.mp4");
+        assert_eq!(export_name(&dir, "Mi Vídeo", None), "mi-video.mp4");
         std::fs::write(dir.join("exports/mi-video.mp4"), b"x").unwrap();
-        assert_eq!(export_name(&dir, "Mi Vídeo"), "mi-video-2.mp4");
-        assert_eq!(export_name(&dir, "¡¡"), "video.mp4");
+        assert_eq!(export_name(&dir, "Mi Vídeo", None), "mi-video-2.mp4");
+        assert_eq!(export_name(&dir, "¡¡", None), "video.mp4");
+    }
+
+    #[test]
+    fn export_names_say_the_format() {
+        let (_tmp, _realm, _id, dir) = fresh_project();
+        let vertical = export_name(&dir, "Mi Vídeo", Some(project::Aspect::Portrait));
+        assert_eq!(vertical, "mi-video-vertical.mp4");
+        assert!(library::valid_export_name(&vertical));
+        assert_eq!(
+            export_name(&dir, "Mi Vídeo", Some(project::Aspect::Landscape)),
+            "mi-video-horizontal.mp4"
+        );
+        assert_eq!(
+            export_name(&dir, "Mi Vídeo", Some(project::Aspect::Square)),
+            "mi-video-square.mp4"
+        );
+        std::fs::write(dir.join("exports/mi-video-vertical.mp4"), b"x").unwrap();
+        assert_eq!(
+            export_name(&dir, "Mi Vídeo", Some(project::Aspect::Portrait)),
+            "mi-video-vertical-2.mp4"
+        );
+        // A long title still leaves room for the format and the counter.
+        let long = export_name(&dir, &"palabra ".repeat(40), Some(project::Aspect::Square));
+        assert!(library::valid_export_name(&long), "{long}");
+        assert!(long.ends_with("-square.mp4"));
+    }
+
+    /// Every file of a project directory except `exports/` (for comparing
+    /// what is on disk before and after).
+    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        bundle_files(dir).unwrap()
+    }
+
+    fn unzip_names(bundle: &[u8]) -> Vec<String> {
+        // Local file headers of a STORED zip: name length at 26, data size at 18.
+        let mut names = Vec::new();
+        let mut at = 0;
+        while at + 30 <= bundle.len() && bundle[at..at + 4] == 0x0403_4b50u32.to_le_bytes() {
+            let size = u32::from_le_bytes(bundle[at + 18..at + 22].try_into().unwrap()) as usize;
+            let len = u16::from_le_bytes(bundle[at + 26..at + 28].try_into().unwrap()) as usize;
+            names.push(String::from_utf8(bundle[at + 30..at + 30 + len].to_vec()).unwrap());
+            at += 30 + len + size;
+        }
+        names
+    }
+
+    #[test]
+    fn another_format_is_built_in_memory_like_the_editor_switch_and_never_touches_the_project() {
+        let (tmp, _realm, _id, dir) = fresh_project();
+        let before = snapshot(&dir);
+        let (meta, bundle) = prepare(&dir, "standard", Some(project::Aspect::Portrait)).unwrap();
+        assert_eq!((meta.width, meta.height), (1080, 1920));
+        assert_eq!(meta.duration_s, 5.0);
+        // The project on disk is exactly as it was (still 16:9).
+        assert_eq!(snapshot(&dir), before);
+        assert_eq!(
+            library::read_meta(&dir).unwrap().aspect,
+            project::Aspect::Landscape
+        );
+
+        // The bundle holds what the editor's format switch would write.
+        let copy = tmp.path().join("copy");
+        std::fs::create_dir(&copy).unwrap();
+        for (name, bytes) in &before {
+            let path = copy.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        super::super::editor::apply_patch(
+            &copy,
+            &super::super::editor::EditorPatch {
+                aspect: Some("9:16".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let switched = snapshot(&copy);
+        let variant = with_aspect(before.clone(), project::Aspect::Portrait).unwrap();
+        assert_eq!(variant, switched);
+        assert_eq!(
+            bundle,
+            zip_stored(&switched, MAX_BUNDLE_BYTES).unwrap(),
+            "byte for byte"
+        );
+        assert!(unzip_names(&bundle).contains(&"video.json".to_string()));
+
+        // The variant passes the project checks; a broken one is refused.
+        check_bundle(&switched).unwrap();
+        let broken: Vec<(String, Vec<u8>)> = switched
+            .iter()
+            .map(|(name, bytes)| {
+                if name == "compositions/outro.html" {
+                    (
+                        name.clone(),
+                        b"<template><script src=x></script></template>".to_vec(),
+                    )
+                } else {
+                    (name.clone(), bytes.clone())
+                }
+            })
+            .collect();
+        assert_eq!(check_bundle(&broken).unwrap_err().kind, "invalid_project");
+        let remote: Vec<(String, Vec<u8>)> = switched
+            .iter()
+            .map(|(name, bytes)| {
+                if name == "compositions/outro.html" {
+                    let html = String::from_utf8(bytes.clone()).unwrap();
+                    (
+                        name.clone(),
+                        html.replace("</h1>", "</h1><img src=\"https://x/a.png\" alt=\"\">")
+                            .into_bytes(),
+                    )
+                } else {
+                    (name.clone(), bytes.clone())
+                }
+            })
+            .collect();
+        assert_eq!(check_bundle(&remote).unwrap_err().kind, "invalid_project");
+
+        // The project's own format (or none) is the plain bundle.
+        let (same, plain) = prepare(&dir, "standard", Some(project::Aspect::Landscape)).unwrap();
+        assert_eq!((same.width, same.height), (1920, 1080));
+        assert_eq!(plain, prepare(&dir, "standard", None).unwrap().1);
     }
 
     /// A one-shot loopback server: answers with `reply` and returns the
@@ -1143,7 +1379,7 @@ mod tests {
         let (_tmp, _realm, _id, dir) = fresh_project();
         tauri::async_runtime::block_on(async {
             let before = quota(&base, "fake-jwt").await.unwrap();
-            let (meta, bundle) = prepare(&dir, "draft").unwrap();
+            let (meta, bundle) = prepare(&dir, "draft", None).unwrap();
             let started = start(&base, "fake-jwt", &meta, bundle, |_, _| {})
                 .await
                 .unwrap();
@@ -1171,12 +1407,12 @@ mod tests {
             assert!(seen.contains(&"rendering".to_string()), "{seen:?}");
             let (done, _) = status(&base, "fake-jwt", &started.render_id).await.unwrap();
             assert_eq!(done.charge_seconds, Some(5));
-            let name = export_name(&dir, "Demo");
+            let name = export_name(&dir, "Demo", None);
             let size = download(&url, &dir, &name, true, |_, _| {}).await.unwrap();
             assert_eq!(size, 4096);
             assert!(library::list_exports(&dir).contains_key("demo.mp4"));
             // Cancel refunds an unfinished render; quota and too-large refusals are typed.
-            let (meta, bundle) = prepare(&dir, "standard").unwrap();
+            let (meta, bundle) = prepare(&dir, "standard", None).unwrap();
             let second = start(&base, "fake-jwt", &meta, bundle, |_, _| {})
                 .await
                 .unwrap();
@@ -1190,7 +1426,7 @@ mod tests {
             assert_eq!(status.status, "canceled");
             let mut trigger = meta.clone();
             trigger.title = "trigger-402".into();
-            let (_, bundle) = prepare(&dir, "standard").unwrap();
+            let (_, bundle) = prepare(&dir, "standard", None).unwrap();
             assert_eq!(
                 start(&base, "fake-jwt", &trigger, bundle, |_, _| {})
                     .await
@@ -1199,7 +1435,7 @@ mod tests {
                 "subscription_required"
             );
             trigger.title = "trigger-429".into();
-            let (_, bundle) = prepare(&dir, "standard").unwrap();
+            let (_, bundle) = prepare(&dir, "standard", None).unwrap();
             let limited = start(&base, "fake-jwt", &trigger, bundle, |_, _| {})
                 .await
                 .unwrap_err();
@@ -1209,14 +1445,14 @@ mod tests {
             );
             let mut long = meta.clone();
             long.duration_s = 599.0;
-            let (_, bundle) = prepare(&dir, "standard").unwrap();
+            let (_, bundle) = prepare(&dir, "standard", None).unwrap();
             let quota_err = start(&base, "fake-jwt", &long, bundle, |_, _| {}).await;
             if let Err(err) = quota_err {
                 assert_eq!(err.kind, "quota_exhausted");
                 assert!(err.period_end.is_some());
             }
             trigger.title = "trigger-busy".into();
-            let (_, bundle) = prepare(&dir, "standard").unwrap();
+            let (_, bundle) = prepare(&dir, "standard", None).unwrap();
             let busy = start(&base, "fake-jwt", &trigger, bundle, |_, _| {})
                 .await
                 .unwrap_err();
