@@ -99,7 +99,6 @@ export function ExportPanel({
     // Once per project (the queue): `own` changing later must not resume
     // again, and `project.id` is already part of `queue`.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run on opening a project only
-    // Only on opening the project.
   }, [queue]);
 
   const refreshQuota = useCallback(() => {
