@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.19 - 2026-11-24 - Videos
 
 ### New
 - Videos: pidele al asistente un video ("hazme un video de 15 segundos presentando mi panaderia") y lo crea con escenas animadas, textos, colores, imagenes generadas y, si quieres, voz en off. Se abre en la vista previa lateral con su reproductor.
