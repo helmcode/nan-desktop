@@ -291,6 +291,9 @@ pub fn run() {
                 // Telemetry: install id, queue (+ last launch's crash),
                 // panic hook, `app_start`; then the background flusher.
                 telemetry::init(&dir, &app.package_info().version.to_string());
+                // How the last update ended (`update_applied` /
+                // `update_not_applied`), from the marker written before it.
+                updater::report_pending_update(&dir, &app.package_info().version.to_string());
                 telemetry::spawn_flusher();
                 // Round 6: best-effort cleanup of generated images no
                 // conversation references any more (background, never fails

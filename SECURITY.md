@@ -268,6 +268,9 @@ durations and fixed lists; tests pin every builder):
 | `error_shown` | `surface` (`chat`, `images`, `sign_in`, `memory`), `kind` (the classified error kind, e.g. `rate_limited`, `network`) |
 | `attachment_added` | `kind` (`image`, `pdf`, `docx`, `sheet`, `text`, `other`), `count` (how many files of that kind one sent message carried; one event per kind) |
 | `vision_routed` | `from_model`, `to_model` (only ids from the app's built-in model list, else `other`): a reply with images went to the model that can see them because the selected one cannot |
+| `update_install` | `from`, `to` (app versions): the user clicked Update, before the download |
+| `update_applied` | `from`, `to`, `seconds`: the next launch runs the new version; seconds from the click to that launch |
+| `update_not_applied` | `from`, `to`, `running`: the next launch still runs an older version |
 | `crash` | `source` (`rust_panic`, `renderer`), `location` (Rust: `file:line` where the panic happened, the app's or a library's source file, build-machine path prefixes removed; renderer: the error name, only standard error classes such as `TypeError` or the `typeof` of a non-Error rejection, anything else is sent as `Error`) |
 
 The `tool` list includes the in-app browser tools (`browser_open`,

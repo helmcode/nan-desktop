@@ -220,7 +220,7 @@ contract (events, fields, what is never sent, delivery rules) lives in
 implementation map (`src-tauri/src/telemetry.rs`):
 
 - **Builders** (`app_start`, `turn_end`, `tool_call`, `error_shown`,
-  `crash_rust`, `crash_renderer`, `attachment_added`, `vision_routed`) are the only way to make an event. Props
+  `crash_rust`, `crash_renderer`, `attachment_added`, `vision_routed`, `update_install`, `update_applied`, `update_not_applied`) are the only way to make an event. Props
   come from enums (`TurnEndReason`, `ToolOutcome`, `Surface`, the
   `ErrorKind` enums via their serde spelling), counters, durations and two
   fixed lists (`TOOL_NAMES`, the `chat-models.json` allowlist). A test

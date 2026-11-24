@@ -48,7 +48,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::profile;
 use crate::turn::TurnSummary;
@@ -317,6 +317,41 @@ pub fn app_start() -> EventSpec {
     spec("app_start", Value::Object(Map::new()))
 }
 
+/// A version for an update event: the app's own grammar, else `unknown`.
+fn version_prop(raw: &str) -> &str {
+    if valid_app_version(raw) {
+        raw
+    } else {
+        "unknown"
+    }
+}
+
+/// `update_install {from, to}`: the user clicked Update (before download).
+pub fn update_install(from: &str, to: &str) -> EventSpec {
+    spec(
+        "update_install",
+        json!({ "from": version_prop(from), "to": version_prop(to) }),
+    )
+}
+
+/// `update_applied {from, to, seconds}`: the next launch runs the new
+/// version; `seconds` from the click to that launch.
+pub fn update_applied(from: &str, to: &str, seconds: u64) -> EventSpec {
+    spec(
+        "update_applied",
+        json!({ "from": version_prop(from), "to": version_prop(to), "seconds": seconds }),
+    )
+}
+
+/// `update_not_applied {from, to, running}`: the next launch still runs an
+/// older version (the install did not take).
+pub fn update_not_applied(from: &str, to: &str, running: &str) -> EventSpec {
+    spec(
+        "update_not_applied",
+        json!({ "from": version_prop(from), "to": version_prop(to), "running": version_prop(running) }),
+    )
+}
+
 /// `turn_end` from the single turn summary (`turn::report_turn`).
 pub fn turn_end(summary: &TurnSummary) -> EventSpec {
     spec(
@@ -471,6 +506,9 @@ pub fn catalogue_keys(name: &str) -> Option<&'static [&'static str]> {
         "crash" => &["source", "location"],
         "attachment_added" => &["kind", "count"],
         "vision_routed" => &["from_model", "to_model"],
+        "update_install" => &["from", "to"],
+        "update_applied" => &["from", "to", "seconds"],
+        "update_not_applied" => &["from", "to", "running"],
         _ => return None,
     })
 }
@@ -1282,6 +1320,18 @@ pub fn spawn_flusher() {
             let _ = tokio::time::timeout(FLUSH_INTERVAL, runtime.wake.notified()).await;
         }
     });
+}
+
+/// Best-effort flush right before an update installs (the process ends
+/// without an exit-time flush), bounded by [`EXIT_FLUSH_TIMEOUT`].
+pub async fn flush_before_update() {
+    let Some(runtime) = RUNTIME.get() else {
+        return;
+    };
+    if let Ok(daily) = runtime.daily.lock() {
+        daily.save(&runtime.dir);
+    }
+    let _ = tokio::time::timeout(EXIT_FLUSH_TIMEOUT, flush_all()).await;
 }
 
 /// Best-effort flush when the app exits, bounded by [`EXIT_FLUSH_TIMEOUT`].
