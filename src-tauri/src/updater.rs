@@ -106,13 +106,16 @@ pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
 /// install and had to be force-quit; on reopening it was updated. So the
 /// install itself works and the exit/relaunch is what stalls. Hardening:
 /// - the old `app.restart()` ran on a tokio worker, parked it forever and
-///   relied on an event-loop exit request; now install + relaunch run on the
-///   main thread (Tauri's direct path: cleanup, relaunch, exit), and on
-///   Windows the updater's own `exit(0)` also runs there instead of on a
-///   worker while WebView2 is alive;
+///   relied on an event-loop exit request; now install and relaunch run on
+///   the main thread: the app starts the installed version itself and then
+///   exits (on Windows the updater's own installer launch + exit runs there
+///   too, instead of on a worker while WebView2 is alive);
 /// - telemetry is flushed BEFORE the install (no exit-time flush needed);
 /// - a watchdog ends the process if it is still alive [`WATCHDOG_AFTER`]
-///   later, relaunching the new version first when nothing did;
+///   after the relaunch started (it never relaunches: no double instance).
+///   On macOS / Linux it is armed only AFTER the install returned, because
+///   the install may wait on an admin password dialog; on Windows before
+///   it, because a successful install never returns;
 /// - `update_install` / `update_applied` / `update_not_applied` events (a
 ///   marker file bridges the two launches) show in the data where an update
 ///   stops.
@@ -122,135 +125,101 @@ pub async fn update_install(app: AppHandle) -> Result<(), String> {
     let update = state.take()?;
     let (from, to) = (update.current_version.clone(), update.version.clone());
     crate::telemetry::record(None, crate::telemetry::update_install(&from, &to));
-    let bytes = match update.download(|_, _| {}, || {}).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            state.restore(update);
-            return Err(err.to_string());
-        }
-    };
     let data_dir = app.path().app_data_dir().ok();
     if let Some(dir) = &data_dir {
         write_marker(dir, &PendingUpdate::new(&from, &to, unix_now()));
     }
+    let forget_marker = || {
+        if let Some(dir) = &data_dir {
+            remove_marker(dir);
+        }
+    };
+    let bytes = match update.download(|_, _| {}, || {}).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            forget_marker();
+            state.restore(update);
+            return Err(err.to_string());
+        }
+    };
     crate::telemetry::flush_before_update().await;
 
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
     let handle = app.clone();
+    let backup = update.clone();
     let scheduled = app.run_on_main_thread(move || {
-        watchdog::arm(handle.env());
+        let attempt = if cfg!(windows) {
+            Some(watchdog::arm())
+        } else {
+            None
+        };
         // Windows: runs the installer and exits the process from here.
         if let Err(err) = update.install(&bytes) {
-            watchdog::disarm();
+            if let Some(attempt) = attempt {
+                watchdog::disarm(attempt);
+            }
             handle.state::<UpdaterState>().restore(update);
             let _ = tx.send(err.to_string());
             return;
         }
         // macOS / Linux: the new version is in place.
-        watchdog::mark_relaunching();
-        handle.restart()
+        watchdog::arm();
+        relaunch(&handle.env());
+        std::process::exit(0)
     });
     let failed = match scheduled {
-        Ok(()) => rx.await.ok(),
-        Err(err) => Some(err.to_string()),
-    };
-    match failed {
         // The process normally ends before this: a closed channel means the
         // relaunch is under way.
+        Ok(()) => rx.await.ok(),
+        Err(err) => {
+            state.restore(backup);
+            Some(err.to_string())
+        }
+    };
+    match failed {
         None => Ok(()),
         Some(message) => {
-            if let Some(dir) = &data_dir {
-                remove_marker(dir);
-            }
+            forget_marker();
             Err(message)
         }
     }
 }
 
-/// How long the old process may take to end after the install before the
-/// watchdog ends it.
+/// How long the old process may take to end once the relaunch started
+/// before the watchdog ends it.
 pub const WATCHDOG_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Last resort when the post-install exit stalls: relaunch the installed
-/// version if the app never got to, then end this process without running
-/// exit handlers (whatever stalled the normal exit cannot stall this).
+/// Last resort when the post-install exit stalls: end this process without
+/// running exit handlers (whatever stalled the normal exit cannot stall
+/// this). It never relaunches, so it can never start a second instance.
 mod watchdog {
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    const IDLE: u8 = 0;
-    const ARMED: u8 = 1;
-    const RELAUNCHING: u8 = 2;
+    /// The armed attempt (0 = none). Each `arm` takes a new number, so a
+    /// sleeping thread from an earlier, disarmed attempt never fires.
+    static ARMED: AtomicU64 = AtomicU64::new(0);
+    static NEXT: AtomicU64 = AtomicU64::new(1);
 
-    static STATE: AtomicU8 = AtomicU8::new(IDLE);
-
-    /// What the watchdog does when it fires in `state`.
-    #[derive(Debug, PartialEq, Eq)]
-    pub enum Action {
-        Nothing,
-        /// The relaunch was never started (Windows: the installer
-        /// relaunches; elsewhere the exit stalled before it).
-        RelaunchThenExit,
-        ExitOnly,
+    /// Whether the watchdog of `attempt` fires when `armed` is current.
+    pub fn fires(attempt: u64, armed: u64) -> bool {
+        attempt != 0 && attempt == armed
     }
 
-    pub fn decide(state: u8, windows: bool) -> Action {
-        match state {
-            IDLE => Action::Nothing,
-            RELAUNCHING => Action::ExitOnly,
-            _ if windows => Action::ExitOnly,
-            _ => Action::RelaunchThenExit,
-        }
-    }
-
-    pub fn arm(env: tauri::Env) {
-        if STATE.swap(ARMED, Ordering::SeqCst) != IDLE {
-            return;
-        }
+    pub fn arm() -> u64 {
+        let attempt = NEXT.fetch_add(1, Ordering::SeqCst);
+        ARMED.store(attempt, Ordering::SeqCst);
         std::thread::spawn(move || {
             std::thread::sleep(super::WATCHDOG_AFTER);
-            match decide(STATE.load(Ordering::SeqCst), cfg!(windows)) {
-                Action::Nothing => {}
-                Action::RelaunchThenExit => {
-                    relaunch(&env);
-                    hard_exit();
-                }
-                Action::ExitOnly => hard_exit(),
+            if fires(attempt, ARMED.load(Ordering::SeqCst)) {
+                hard_exit();
             }
         });
+        attempt
     }
 
-    pub fn disarm() {
-        STATE.store(IDLE, Ordering::SeqCst);
-    }
-
-    pub fn mark_relaunching() {
-        STATE.store(RELAUNCHING, Ordering::SeqCst);
-    }
-
-    fn relaunch(env: &tauri::Env) {
-        let Ok(exe) = tauri::process::current_binary(env) else {
-            return;
-        };
-        #[cfg(target_os = "macos")]
-        {
-            // Contents/MacOS/<bin> -> the .app bundle, opened as a new
-            // instance through LaunchServices (as Tauri's own relaunch).
-            if let Some(bundle) = exe.ancestors().nth(3)
-                && bundle.extension().is_some_and(|ext| ext == "app")
-            {
-                let _ = crate::process::hidden_command("/usr/bin/open")
-                    .arg("-n")
-                    .arg(bundle)
-                    .stdin(std::process::Stdio::null())
-                    .output();
-                return;
-            }
-        }
-        let _ = crate::process::hidden_command(exe)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+    /// Disarm `attempt` only (a newer attempt stays armed).
+    pub fn disarm(attempt: u64) {
+        let _ = ARMED.compare_exchange(attempt, 0, Ordering::SeqCst, Ordering::SeqCst);
     }
 
     fn hard_exit() -> ! {
@@ -267,6 +236,33 @@ mod watchdog {
         #[cfg(not(any(unix, windows)))]
         std::process::abort()
     }
+}
+
+/// Start the installed version as a new process (macOS: the .app through
+/// LaunchServices, so a renamed binary is found from Info.plist; Linux: the
+/// AppImage or binary Tauri resolves for this install).
+fn relaunch(env: &tauri::Env) {
+    let Ok(exe) = tauri::process::current_binary(env) else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle) = exe.ancestors().nth(3)
+            && bundle.extension().is_some_and(|ext| ext == "app")
+        {
+            let _ = crate::process::hidden_command("/usr/bin/open")
+                .arg("-n")
+                .arg(bundle)
+                .stdin(std::process::Stdio::null())
+                .output();
+            return;
+        }
+    }
+    let _ = crate::process::hidden_command(exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// The marker written right before installing, read by the next launch.
@@ -401,17 +397,16 @@ mod tests {
     }
 
     #[test]
-    fn the_watchdog_only_acts_once_armed_and_never_relaunches_twice() {
-        use watchdog::{Action, decide};
-        assert_eq!(decide(0, false), Action::Nothing);
-        assert_eq!(decide(0, true), Action::Nothing);
-        // Armed, the install never reached the relaunch: start the new version.
-        assert_eq!(decide(1, false), Action::RelaunchThenExit);
-        // Windows: the installer relaunches the app itself.
-        assert_eq!(decide(1, true), Action::ExitOnly);
-        // The relaunch already started: only end the stalled process.
-        assert_eq!(decide(2, false), Action::ExitOnly);
-        assert_eq!(decide(2, true), Action::ExitOnly);
+    fn a_stale_watchdog_never_fires_on_a_newer_attempt() {
+        use watchdog::fires;
+        // Nothing armed.
+        assert!(!fires(1, 0));
+        assert!(!fires(0, 0));
+        // The armed attempt fires.
+        assert!(fires(3, 3));
+        // Attempt 1 failed and was disarmed, attempt 2 is armed: the
+        // sleeping thread of attempt 1 must not act on attempt 2.
+        assert!(!fires(1, 2));
     }
 
     #[test]

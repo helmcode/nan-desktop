@@ -335,7 +335,7 @@ pub fn update_install(from: &str, to: &str) -> EventSpec {
 }
 
 /// `update_applied {from, to, seconds}`: the next launch runs the new
-/// version; `seconds` from the click to that launch.
+/// version; `seconds` from the click on Update to that launch.
 pub fn update_applied(from: &str, to: &str, seconds: u64) -> EventSpec {
     spec(
         "update_applied",
@@ -1580,6 +1580,11 @@ mod tests {
         }
         out.push(vision_routed("glm5.3", "glm5.3-flash"));
         out.push(vision_routed("made-up", "glm5.3-flash"));
+        out.push(update_install("0.2.19", "0.2.20"));
+        out.push(update_applied("0.2.19", "0.2.20", 45));
+        out.push(update_not_applied("0.2.19", "0.2.20", "0.2.19"));
+        // Anything outside the version grammar is reported as `unknown`.
+        out.push(update_install("0.2.19\n/Users/x", ""));
         out
     }
 
@@ -1617,6 +1622,11 @@ mod tests {
             ),
             ("attachment_added", "count") => value.is_u64(),
             ("vision_routed", "from_model" | "to_model") => s.is_some_and(|m| model_id(m) == m),
+            ("update_install" | "update_applied" | "update_not_applied", "from" | "to")
+            | ("update_not_applied", "running") => {
+                s.is_some_and(|v| v == "unknown" || valid_app_version(v))
+            }
+            ("update_applied", "seconds") => value.is_u64(),
             ("crash", "location") => s.is_some_and(|l| {
                 l.len() <= MAX_PROP_STRING_CHARS
                     && l.chars().all(|c| {
@@ -1645,6 +1655,9 @@ mod tests {
                 "crash",
                 "attachment_added",
                 "vision_routed",
+                "update_install",
+                "update_applied",
+                "update_not_applied",
             ])
         );
         for event in &events {
