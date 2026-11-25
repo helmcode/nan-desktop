@@ -554,12 +554,15 @@ fn verified_scratch_dir(base: &Path, leaf: &Path, create: bool) -> Result<PathBu
         current.push(name);
         match std::fs::symlink_metadata(&current) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound && create => {
-                let mut builder = std::fs::DirBuilder::new();
                 #[cfg(unix)]
-                {
+                let builder = {
                     use std::os::unix::fs::DirBuilderExt;
+                    let mut builder = std::fs::DirBuilder::new();
                     builder.mode(0o700);
-                }
+                    builder
+                };
+                #[cfg(not(unix))]
+                let builder = std::fs::DirBuilder::new();
                 match builder.create(&current) {
                     Ok(()) => {}
                     Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
