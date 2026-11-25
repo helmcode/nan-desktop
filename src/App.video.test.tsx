@@ -16,6 +16,17 @@ vi.mock("./video/lint", () => ({
   problemsForAssistant: (p: { code: string }[]) => p.map((x) => `- ${x.code}`).join("\n"),
 }));
 
+// Round 25: the layout check (real layout needs a webview): each test says
+// what it finds; by default every format fits.
+const layout = vi.hoisted(() => ({ report: {} as Record<string, unknown>, calls: [] as unknown[][] }));
+vi.mock("./video/layoutCheck", async (original) => ({
+  ...(await original<typeof import("./video/layoutCheck")>()),
+  checkLayout: async (...args: unknown[]) => {
+    layout.calls.push(args);
+    return layout.report;
+  },
+}));
+
 import App from "./App";
 import { I18nProvider } from "./i18n";
 import type { ChatMessageRow } from "./types";
@@ -52,6 +63,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   lintResult.problems = [];
+  layout.report = {};
+  layout.calls = [];
 });
 
 describe("R-V1: videos in the shell", () => {
@@ -172,5 +185,55 @@ describe("R-V1: videos in the shell", () => {
     expect(sent.videoContext).toEqual({ project_id: PROJECT_ID, title: "Promo", problems: ["missing_root"] });
     expect(sent.skillId).toBeUndefined();
   });
-});
 
+  it("after a turn that changed a video, asks the assistant to fix a cut-off format, at most twice in a row", async () => {
+    const cut = { scene: "intro", time: 1, kind: "clipped", element: '#intro-title "Hola"' };
+    layout.report = { "16:9": [], "9:16": [], "1:1": [cut] };
+    render(
+      <I18nProvider initial="es">
+        <App />
+      </I18nProvider>,
+    );
+    const box = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "hazme un reel vertical" } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await waitFor(() => expect(invokedWith("chat_send").length).toBe(1));
+    // The assistant makes the video; nothing is checked until its turn ends.
+    await act(async () => emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo" }));
+    expect(layout.calls).toEqual([]);
+    await act(async () => emit("chat://done", { conversation_id: 7, reason: "completed" }));
+    expect(layout.calls).toEqual([["nan", PROJECT_ID, ["16:9", "9:16", "1:1"]]]);
+    await waitFor(() => expect(invokedWith("chat_send").length).toBe(2));
+    const fix = invokedWith("chat_send")[1]!;
+    expect(fix.content).toBe(
+      "Revisión automática de «Promo»: en el formato cuadrado (1:1) hay partes del vídeo que se salen del encuadre o quedan cortadas. Corrígelo para que se vea completo en los tres formatos.",
+    );
+    expect(fix.videoContext).toEqual({
+      project_id: PROJECT_ID,
+      title: "Promo",
+      problems: ['1:1 (1080x1080): scene intro at 1 s: #intro-title "Hola" is cut off at the edge of the frame'],
+    });
+    expect(fix.skillId).toBeUndefined();
+    // The fix did not fit either: one more automatic round, then it stops.
+    for (let round = 0; round < 3; round++) {
+      await act(async () => emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo" }));
+      await act(async () => emit("chat://done", { conversation_id: 7, reason: "completed" }));
+    }
+    await waitFor(() => expect(invokedWith("chat_send").length).toBe(3));
+    await act(async () => new Promise((r) => setTimeout(r, 50)));
+    expect(invokedWith("chat_send").length).toBe(3);
+    // A turn that fits says nothing.
+    layout.report = { "16:9": [], "9:16": [], "1:1": [] };
+    fireEvent.change(box, { target: { value: "ahora más rápido" } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await waitFor(() => expect(invokedWith("chat_send").length).toBe(4));
+    await act(async () => emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo" }));
+    await act(async () => emit("chat://done", { conversation_id: 7, reason: "completed" }));
+    await act(async () => new Promise((r) => setTimeout(r, 50)));
+    expect(invokedWith("chat_send").length).toBe(4);
+  });
+});

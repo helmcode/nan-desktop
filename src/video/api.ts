@@ -49,6 +49,12 @@ export function videoPreview(profileId: string, projectId: string): Promise<Vide
   return invoke<VideoPreviewInfo>("video_preview", { profileId, projectId });
 }
 
+/// Round 25: the project assembled at `aspect` with the layout probe, for
+/// the hidden layout check (layoutCheck.ts). Release its URL when done.
+export function videoLayoutProbe(profileId: string, projectId: string, aspect: Aspect): Promise<VideoPreviewInfo> {
+  return invoke<VideoPreviewInfo>("video_layout_probe", { profileId, projectId, aspect });
+}
+
 export function videoList(profileId: string): Promise<VideoSummary[]> {
   return invoke<VideoSummary[]>("video_list", { profileId });
 }

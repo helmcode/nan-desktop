@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";
-import { videoGet, type VideoProject } from "./api";
+import { videoGet, type VideoAskContext, type VideoProject } from "./api";
 import { ExportPanel } from "./ExportPanel";
 import { lintProject } from "./lint";
 
@@ -17,12 +17,15 @@ export default function PreviewExport({
   projectId,
   revision,
   onSignIn,
+  onFixLayout,
 }: {
   profileId: string;
   projectId: string;
   /// Bumps when the assistant changed the video (reload it).
   revision: number;
   onSignIn?: () => void;
+  /// The layout gate's "Fix with the assistant".
+  onFixLayout?: (text: string, context: VideoAskContext) => void;
 }) {
   const t = useT();
   const [project, setProject] = useState<VideoProject | null | "failed">(null);
@@ -88,7 +91,7 @@ export default function PreviewExport({
           {t.video.previewCheckFailed}
         </p>
       )}
-      <ExportPanel profileId={profileId} project={project} blocked={blocked !== false} onExported={onExported} onSignIn={onSignIn} />
+      <ExportPanel profileId={profileId} project={project} blocked={blocked !== false} onExported={onExported} onSignIn={onSignIn} onFixLayout={onFixLayout} />
     </div>
   );
 }

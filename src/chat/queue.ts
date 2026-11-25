@@ -43,6 +43,9 @@ export interface QueuedMessage {
   videoContext?: VideoAskContext;
   /** Sent without the conversation's active skill (an app-made request). */
   skipSkill?: boolean;
+  /** The app's automatic layout fix (video/layoutAutoFix.ts): its turn does
+   * not renew the automatic-fix allowance the way a user message does. */
+  autoFix?: boolean;
 }
 
 import type { PendingAttachment } from "./attachments";
@@ -81,7 +84,7 @@ export function enqueue(
   text: string,
   id: number,
   attachments: readonly PendingAttachment[] = [],
-  extra: Pick<QueuedMessage, "videoContext" | "skipSkill"> = {},
+  extra: Pick<QueuedMessage, "videoContext" | "skipSkill" | "autoFix"> = {},
 ): Queues {
   const trimmed = text.trim();
   if (!trimmed && attachments.length === 0) return queues;

@@ -605,6 +605,22 @@ export const en = {
     queueSkipped: "Not exported.",
     cancelFormat: (name: string) => `Cancel ${name}`,
     cancelRest: "Cancel the rest",
+    // Round 25: the layout check (does each format show the video whole?).
+    aspectInline: { "16:9": "horizontal (16:9)", "9:16": "vertical (9:16)", "1:1": "square (1:1)" },
+    /// "the square (1:1) format" / "the vertical (9:16) and square (1:1) formats".
+    formatsPhrase: (...names: string[]) =>
+      names.length === 1 ? `the ${names[0]} format` : `the ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]} formats`,
+    layoutChecking: "Checking that the video fits each format...",
+    layoutBroken: (formats: string) => `In ${formats}, parts of the video go outside the frame or get cut off.`,
+    layoutFormatLine: (name: string, count: number, scenes: string) =>
+      `${name}: ${count === 1 ? "1 element" : `${count} elements`} cut off (${scenes}).`,
+    layoutOthersExporting: "The other formats are exporting normally.",
+    layoutFix: "Fix with the assistant",
+    layoutExportAnyway: "Export anyway",
+    layoutFixText: (formats: string) =>
+      `In ${formats}, parts of this video go outside the frame or get cut off. Adjust the layout so it shows whole in all three formats.`,
+    layoutAutoFixText: (title: string, formats: string) =>
+      `Automatic check of "${title}": in ${formats}, parts of the video go outside the frame or get cut off. Fix it so it shows whole in all three formats.`,
     hexLabel: (label: string) => `Color code for ${label}`,
     hexInvalid: "Type a code like #0a0a0a or #fff.",
     fullscreen: "Full screen",

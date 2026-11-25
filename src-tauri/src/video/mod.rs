@@ -188,6 +188,33 @@ pub async fn video_preview(
     Ok(preview::info(&meta, crate::site_preview::site_url(&token)))
 }
 
+/// Round 25: a project assembled at `aspect` with the layout probe
+/// (`preview::assemble_probe`), for the renderer's hidden layout check
+/// (src/video/layoutCheck.ts). Nothing is written; the renderer releases
+/// the token (`preview_release_site`) as soon as the frame reported.
+#[tauri::command]
+pub async fn video_layout_probe(
+    app: AppHandle,
+    profile_id: String,
+    project_id: String,
+    aspect: String,
+) -> Result<preview::PreviewInfo, Rejection> {
+    let aspect = project::Aspect::parse(&aspect)
+        .ok_or_else(|| Rejection::new("invalid", "unknown aspect"))?;
+    let realm = realm_dir(&app, &profile_id)?;
+    let (meta, doc) = tauri::async_runtime::spawn_blocking(move || {
+        let dir = library::project_dir(&realm, &project_id)?;
+        preview::assemble_probe(&dir, aspect)
+    })
+    .await
+    .map_err(|_| Rejection::new("io", "interrupted"))??;
+    let registry = app
+        .try_state::<crate::site_preview::SiteRegistry>()
+        .ok_or_else(|| Rejection::new("io", "preview unavailable"))?;
+    let token = registry.register_probe(doc.into_bytes());
+    Ok(preview::info(&meta, crate::site_preview::site_url(&token)))
+}
+
 fn locale(raw: &str) -> &'static str {
     if raw == "en" { "en" } else { "es" }
 }

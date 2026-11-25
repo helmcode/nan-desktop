@@ -607,6 +607,20 @@ export const es: Strings = {
     queueSkipped: "No se ha exportado.",
     cancelFormat: (name: string) => `Cancelar ${name}`,
     cancelRest: "Cancelar el resto",
+    aspectInline: { "16:9": "horizontal (16:9)", "9:16": "vertical (9:16)", "1:1": "cuadrado (1:1)" },
+    formatsPhrase: (...names: string[]) =>
+      names.length === 1 ? `el formato ${names[0]}` : `los formatos ${names.slice(0, -1).join(", ")} y ${names[names.length - 1]}`,
+    layoutChecking: "Comprobando que el vídeo cabe en cada formato...",
+    layoutBroken: (formats: string) => `En ${formats} hay partes del vídeo que se salen del encuadre o quedan cortadas.`,
+    layoutFormatLine: (name: string, count: number, scenes: string) =>
+      `${name}: ${count === 1 ? "1 elemento cortado" : `${count} elementos cortados`} (${scenes}).`,
+    layoutOthersExporting: "Los demás formatos se están exportando con normalidad.",
+    layoutFix: "Arreglar con el asistente",
+    layoutExportAnyway: "Exportar igualmente",
+    layoutFixText: (formats: string) =>
+      `En ${formats} hay partes de este vídeo que se salen del encuadre o quedan cortadas. Ajusta el diseño para que se vea completo en los tres formatos.`,
+    layoutAutoFixText: (title: string, formats: string) =>
+      `Revisión automática de «${title}»: en ${formats} hay partes del vídeo que se salen del encuadre o quedan cortadas. Corrígelo para que se vea completo en los tres formatos.`,
     hexLabel: (label: string) => `Código de color de ${label}`,
     hexInvalid: "Escribe un código como #0a0a0a o #fff.",
     fullscreen: "Pantalla completa",

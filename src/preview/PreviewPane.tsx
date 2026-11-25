@@ -27,7 +27,7 @@ import { isTopLayer, useEscapeLayer } from "../escapeLayers";
 import { isArtifactShareUrl, previewKind, targetKey, type PreviewTarget } from "./kind";
 import { revealInFolder } from "./reveal";
 import { shareSourceFor, type ShareSource } from "../artifacts/artifacts";
-import { videoPreview, type VideoPreviewInfo } from "../video/api";
+import { videoPreview, type VideoAskContext, type VideoPreviewInfo } from "../video/api";
 import { useVideoRevision } from "../video/useVideoRevision";
 
 const VideoPlayer = lazy(() => import("../video/VideoPlayer").then((m) => ({ default: m.VideoPlayer })));
@@ -186,11 +186,13 @@ function VideoBody({
   projectId,
   exporting,
   onSignIn,
+  onFixLayout,
 }: {
   profileId: string;
   projectId: string;
   exporting: boolean;
   onSignIn?: () => void;
+  onFixLayout?: (text: string, context: VideoAskContext) => void;
 }) {
   const t = useT();
   const changes = useVideoRevision(projectId);
@@ -245,7 +247,9 @@ function VideoBody({
           time.current = seconds;
         }}
       />
-      {exporting && <PreviewExport profileId={profileId} projectId={projectId} revision={changes} onSignIn={onSignIn} />}
+      {exporting && (
+        <PreviewExport profileId={profileId} projectId={projectId} revision={changes} onSignIn={onSignIn} onFixLayout={onFixLayout} />
+      )}
     </article>
   );
 }
@@ -317,6 +321,7 @@ export default function PreviewPane({
   onShare,
   onOpenVideo,
   onSignIn,
+  onFixLayout,
 }: {
   target: PreviewTarget;
   profileId: string;
@@ -337,6 +342,9 @@ export default function PreviewPane({
   onOpenVideo?: (projectId: string) => void;
   /// R-V1: the session expired during a video export: sign in again.
   onSignIn?: () => void;
+  /// Round 25: send the assistant the request to fix video formats that
+  /// come out cut off (the export's layout gate).
+  onFixLayout?: (text: string, context: VideoAskContext) => void;
 }) {
   const t = useT();
   const isWeb = target.kind === "web";
@@ -476,7 +484,7 @@ export default function PreviewPane({
               <img className="preview-image" src={convertFileSrc(target.ref)} alt={title} />
             ) : isVideo ? (
               previewKind(target) === "video" ? (
-                <VideoBody profileId={profileId} projectId={target.ref} exporting={exporting} onSignIn={onSignIn} />
+                <VideoBody profileId={profileId} projectId={target.ref} exporting={exporting} onSignIn={onSignIn} onFixLayout={onFixLayout} />
               ) : (
                 <p className="preview-note">{t.preview.unsupported}</p>
               )

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- La carpeta temporal del chat ya no pide permiso para guardar o cambiar archivos: es un espacio de la propia app. Ejecutar ordenes ahi sigue tus permisos de carpeta.
+
+### Fixed
+- Videos en varios formatos: exportar en horizontal, vertical o cuadrado un video pensado para otro formato ya no da un MP4 con partes cortadas sin avisar. Antes de generar cada formato se comprueba que todo cabe; si alguno saldria cortado, la app te dice cual y te ofrece "Arreglar con el asistente" o "Exportar igualmente". Los formatos que estan bien se exportan normalmente.
+- El asistente disena los videos para que se vean bien en los tres formatos y, al terminar de crear o cambiar uno, la app lo comprueba en los tres. Si algo se corta, le pide que lo arregle automaticamente (como mucho dos veces seguidas).
+
 ## 0.2.20 - 2026-11-24 - Actualizar sin cuelgues y mejoras de videos
 
 ### Fixed

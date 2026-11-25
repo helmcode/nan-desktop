@@ -69,6 +69,7 @@ const APP_COMMANDS: &[&str] = &[
     "artifact_link_preview",
     "video_list",
     "video_preview",
+    "video_layout_probe",
     "video_templates",
     "video_template_preview",
     "video_create_from_template",
