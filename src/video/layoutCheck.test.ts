@@ -102,6 +102,8 @@ describe("checkAspect", () => {
     expect(el.style.height).toBe("1920px");
     const box = el.parentElement!;
     expect(box.getAttribute("aria-hidden")).toBe("true");
+    // Cannot take focus, keys or clicks.
+    expect(box.hasAttribute("inert")).toBe(true);
     expect(box.style.opacity).toBe("0");
     expect(box.style.overflow).toBe("hidden");
     expect(box.style.pointerEvents).toBe("none");
@@ -126,13 +128,27 @@ describe("checkAspect", () => {
 
   it("a frame that never answers counts as not checked, and is cleaned up", async () => {
     vi.useFakeTimers();
-    const result = checkAspect("nan", "p1", "1:1", 1000);
+    const result = checkAspect("nan", "p1", "1:1", { timeoutMs: 1000 });
     await vi.advanceTimersByTimeAsync(0);
     expect(document.querySelector(".video-layout-probe iframe")).not.toBeNull();
     await vi.advanceTimersByTimeAsync(1001);
     expect(await result).toBeNull();
     expect(document.querySelector(".video-layout-probe")).toBeNull();
     expect(releaseSitePreview).toHaveBeenCalled();
+  });
+
+  it("an abort ends it right away, cleaned up, as not checked", async () => {
+    const abort = new AbortController();
+    const result = checkAspect("nan", "p1", "1:1", { signal: abort.signal });
+    await frame();
+    abort.abort();
+    expect(await result).toBeNull();
+    expect(document.querySelector(".video-layout-probe")).toBeNull();
+    expect(releaseSitePreview).toHaveBeenCalled();
+    // Already aborted: the core is not even asked.
+    videoLayoutProbe.mockClear();
+    expect(await checkAspect("nan", "p1", "1:1", { signal: abort.signal })).toBeNull();
+    expect(videoLayoutProbe).not.toHaveBeenCalled();
   });
 
   it("a project the core cannot assemble counts as not checked", async () => {
@@ -153,6 +169,36 @@ describe("checkLayout", () => {
     const second = await frame();
     post(second.contentWindow, { type: PROBE_MESSAGE, complete: true, issues: [issue()] });
     expect(await report).toEqual({ "9:16": [], "1:1": [issue()] });
+  });
+
+  it("says which format it is checking", async () => {
+    const seen: string[] = [];
+    const report = checkLayout("nan", "p1", ["16:9", "1:1"], { onAspect: (a) => seen.push(a) });
+    post((await frame()).contentWindow, { type: PROBE_MESSAGE, complete: true, issues: [] });
+    await vi.waitFor(() => expect(seen).toEqual(["16:9", "1:1"]));
+    post((await frame()).contentWindow, { type: PROBE_MESSAGE, complete: true, issues: [] });
+    expect(await report).toEqual({ "16:9": [], "1:1": [] });
+  });
+
+  it("never takes more than its total budget: formats not reached in time are not checked", async () => {
+    vi.useFakeTimers();
+    const report = checkLayout("nan", "p1", ["16:9", "9:16", "1:1"], { budgetMs: 20000 });
+    // The first frame never answers: it gets 15 s, the second the 5 s left,
+    // the third nothing.
+    await vi.advanceTimersByTimeAsync(15001);
+    expect(document.querySelector(".video-layout-probe iframe")?.getAttribute("src")).toBe("nan-site://localhost/916");
+    await vi.advanceTimersByTimeAsync(5001);
+    expect(await report).toEqual({ "16:9": null, "9:16": null, "1:1": null });
+    expect(videoLayoutProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it("an abort marks the remaining formats as not checked", async () => {
+    const abort = new AbortController();
+    const report = checkLayout("nan", "p1", ["16:9", "1:1"], { signal: abort.signal });
+    await frame();
+    abort.abort();
+    expect(await report).toEqual({ "16:9": null, "1:1": null });
+    expect(videoLayoutProbe).toHaveBeenCalledTimes(1);
   });
 
   it("a second check waits for the first (one in the whole app)", async () => {

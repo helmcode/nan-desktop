@@ -610,17 +610,19 @@ export const en = {
     /// "the square (1:1) format" / "the vertical (9:16) and square (1:1) formats".
     formatsPhrase: (...names: string[]) =>
       names.length === 1 ? `the ${names[0]} format` : `the ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]} formats`,
-    layoutChecking: "Checking that the video fits each format...",
+    layoutChecking: "Checking that the video fits each format…",
+    layoutCheckingFormat: (format: string) => `Checking the ${format} format…`,
+    layoutCancel: "Cancel export",
     layoutBroken: (formats: string) => `In ${formats}, parts of the video go outside the frame or get cut off.`,
     layoutFormatLine: (name: string, count: number, scenes: string) =>
-      `${name}: ${count === 1 ? "1 element" : `${count} elements`} cut off (${scenes}).`,
+      `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${count === 1 ? "1 element" : `${count} elements`} cut off (${scenes}).`,
     layoutOthersExporting: "The other formats are exporting normally.",
     layoutFix: "Fix with the assistant",
     layoutExportAnyway: "Export anyway",
     layoutFixText: (formats: string) =>
       `In ${formats}, parts of this video go outside the frame or get cut off. Adjust the layout so it shows whole in all three formats.`,
-    layoutAutoFixText: (title: string, formats: string) =>
-      `Automatic check of "${title}": in ${formats}, parts of the video go outside the frame or get cut off. Fix it so it shows whole in all three formats.`,
+    layoutAutoFixText: (formats: string) =>
+      `Automatic check of this video: in ${formats}, parts of the video go outside the frame or get cut off. Fix it so it shows whole in all three formats.`,
     hexLabel: (label: string) => `Color code for ${label}`,
     hexInvalid: "Type a code like #0a0a0a or #fff.",
     fullscreen: "Full screen",

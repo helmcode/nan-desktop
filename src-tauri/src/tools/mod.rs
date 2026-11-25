@@ -525,17 +525,79 @@ pub fn scratch_grant_mode(action: &ToolAction, inherited: ApprovalMode) -> Appro
 }
 
 /// Create (owner-only on unix) and canonicalize a session temp folder.
-fn ensure_scratch_dir(path: &Path) -> Result<PathBuf, Rejection> {
-    std::fs::create_dir_all(path)
-        .map_err(|err| io_rejection("cannot create the session temp folder", err))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|err| io_rejection("cannot protect the session temp folder", err))?;
+fn ensure_scratch_dir(state: &ToolsState, conversation_id: i64) -> Result<PathBuf, Rejection> {
+    verified_scratch_dir(
+        &state.scratch_base,
+        &state.scratch_dir(conversation_id),
+        true,
+    )
+}
+
+/// The session temp folder `leaf` (under `base`, the system temp dir),
+/// verified level by level before it is trusted as a workspace whose file
+/// actions never prompt (R25). The system temp dir can be shared with
+/// other local users, so every level below `base` must be a real
+/// directory (never a symlink); on unix it must also be owned by this user
+/// and closed to others (a level this user owns with looser bits, e.g.
+/// created by an older version with the umask, is tightened to 0700).
+/// Finally the canonical path must be exactly `canonical(base)/<levels>`,
+/// so nothing can redirect the folder elsewhere. `create` makes missing
+/// levels (mode 0700 on unix).
+fn verified_scratch_dir(base: &Path, leaf: &Path, create: bool) -> Result<PathBuf, Rejection> {
+    let unsafe_folder = || Rejection::new("scope", "the session temp folder is not safe to use");
+    let rel = leaf.strip_prefix(base).map_err(|_| unsafe_folder())?;
+    let mut current = base.to_path_buf();
+    for part in rel.components() {
+        let std::path::Component::Normal(name) = part else {
+            return Err(unsafe_folder());
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && create => {
+                let mut builder = std::fs::DirBuilder::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    builder.mode(0o700);
+                }
+                match builder.create(&current) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(err) => {
+                        return Err(io_rejection("cannot create the session temp folder", err));
+                    }
+                }
+            }
+            Err(err) => return Err(io_rejection("cannot open the session temp folder", err)),
+            Ok(_) => {}
+        }
+        let meta = std::fs::symlink_metadata(&current)
+            .map_err(|err| io_rejection("cannot open the session temp folder", err))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(unsafe_folder());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // SAFETY: getuid has no preconditions and cannot fail.
+            if meta.uid() != unsafe { libc::getuid() } {
+                return Err(unsafe_folder());
+            }
+            if meta.mode() & 0o077 != 0 {
+                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|err| io_rejection("cannot protect the session temp folder", err))?;
+            }
+        }
     }
-    std::fs::canonicalize(path)
-        .map_err(|err| io_rejection("cannot resolve the session temp folder", err))
+    let canonical = std::fs::canonicalize(leaf)
+        .map_err(|err| io_rejection("cannot resolve the session temp folder", err))?;
+    let expected = std::fs::canonicalize(base)
+        .map_err(|err| io_rejection("cannot resolve the temp folder", err))?
+        .join(rel);
+    if canonical != expected {
+        return Err(unsafe_folder());
+    }
+    Ok(canonical)
 }
 
 /// The grants one conversation may use (S-folder-picker):
@@ -558,7 +620,7 @@ pub fn effective_store(
     };
     let mut scoped = store.scoped_to(profile_id, &selected);
     if scoped.grants_for(profile_id).is_empty() {
-        let canonical = ensure_scratch_dir(&state.scratch_dir(conversation_id))?;
+        let canonical = ensure_scratch_dir(state, conversation_id)?;
         scoped
             .grants
             .push(scratch_grant(profile_id, conversation_id, canonical));
@@ -582,7 +644,7 @@ fn with_session_scratch(
     }
     let conversation_id = conversation_id
         .ok_or_else(|| Rejection::new("protocol", "a session temp folder needs a conversation"))?;
-    let canonical = ensure_scratch_dir(&state.scratch_dir(conversation_id))?;
+    let canonical = ensure_scratch_dir(state, conversation_id)?;
     store.grants = vec![scratch_grant(profile_id, conversation_id, canonical)];
     Ok(store)
 }
@@ -599,7 +661,11 @@ fn session_grants(state: &ToolsState, proposal: &PendingProposal) -> Vec<grants:
     if !touches {
         return Vec::new();
     }
-    match std::fs::canonicalize(state.scratch_dir(conversation_id)) {
+    match verified_scratch_dir(
+        &state.scratch_base,
+        &state.scratch_dir(conversation_id),
+        false,
+    ) {
         Ok(canonical) => vec![scratch_grant(
             &proposal.profile_id,
             conversation_id,
@@ -6994,6 +7060,134 @@ mod tests {
             approve_in_scratch(&dir, &st, &approver, &scratch_write(&st)),
             ApprovalRoute::Auto
         );
+    }
+
+    #[test]
+    fn the_temp_folder_is_created_owner_only_and_resolves_under_the_base() {
+        let (base, _guard) = tempdir();
+        let leaf = base
+            .join("helmcode-desktop")
+            .join("s")
+            .join("conversation-1");
+        let canonical = verified_scratch_dir(&base, &leaf, true).expect("created");
+        assert_eq!(
+            canonical,
+            canon(&base).join("helmcode-desktop/s/conversation-1")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for level in [
+                "helmcode-desktop",
+                "helmcode-desktop/s",
+                "helmcode-desktop/s/conversation-1",
+            ] {
+                let mode = fs::metadata(base.join(level))
+                    .expect("meta")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o700, "{level} is owner-only");
+            }
+            // A level left open by an older version is tightened.
+            fs::set_permissions(
+                base.join("helmcode-desktop"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .expect("loosen");
+            verified_scratch_dir(&base, &leaf, false).expect("still ours");
+            let mode = fs::metadata(base.join("helmcode-desktop"))
+                .expect("meta")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // Without `create`, a missing folder is an error, never created.
+        let other = base
+            .join("helmcode-desktop")
+            .join("s")
+            .join("conversation-2");
+        assert!(verified_scratch_dir(&base, &other, false).is_err());
+        assert!(!other.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_temp_folder_level_is_refused() {
+        let (base, _guard) = tempdir();
+        let (victim, _guard2) = tempdir();
+        let root = base.join("helmcode-desktop");
+        fs::create_dir(&root).expect("root");
+        // Another user swapped the session folder for a link elsewhere.
+        std::os::unix::fs::symlink(&victim, root.join("s")).expect("link");
+        let leaf = root.join("s").join("conversation-1");
+        let err = verified_scratch_dir(&base, &leaf, true).expect_err("refused");
+        assert_eq!(err.kind, "scope");
+        assert!(
+            !victim.join("conversation-1").exists(),
+            "nothing created through the link"
+        );
+        // A symlinked leaf is refused too.
+        fs::remove_file(root.join("s")).expect("unlink");
+        fs::create_dir(root.join("s")).expect("session");
+        std::os::unix::fs::symlink(&victim, &leaf).expect("leaf link");
+        assert_eq!(
+            verified_scratch_dir(&base, &leaf, false)
+                .expect_err("refused")
+                .kind,
+            "scope"
+        );
+        // And the approval routing never builds a temp grant from it.
+        let st = state_with_scratch(&base);
+        assert!(verified_scratch_dir(&st.scratch_base, &st.scratch_dir(1), false).is_err());
+    }
+
+    #[test]
+    fn a_move_from_a_selected_folder_into_the_temp_folder_is_never_auto_approved() {
+        let TwoFolders {
+            dir,
+            a,
+            st,
+            _guards,
+            ..
+        } = two_folder_layout();
+        // g1 (a) asks; with folders selected the temp folder is not part of
+        // the workspace, so a move there is refused outright rather than
+        // inheriting the temp folder's no-prompt mode.
+        st.set_conversation_scope(1, Some(vec!["g1".into()]));
+        fs::write(a.join("nota.md"), "x").expect("seed");
+        let scratch = ensure_scratch_dir(&st, 1).expect("scratch");
+        let action = ToolAction::MovePath {
+            from: path_str(&a.join("nota.md")),
+            to: path_str(&scratch.join("nota.md")),
+            overwrite: false,
+        };
+        let err = propose(&dir, &st, "nan", Some(1), &action).expect_err("outside");
+        assert_eq!(err.kind, "escape");
+        assert!(a.join("nota.md").exists());
+    }
+
+    #[test]
+    fn an_asking_folder_that_covers_the_temp_folder_still_asks() {
+        let TwoFolders {
+            dir, st, _guards, ..
+        } = two_folder_layout();
+        let scratch = ensure_scratch_dir(&st, 1).expect("scratch");
+        // The user shared a folder (in ask) that contains the temp folder.
+        let mut store = grants::load_or_seed(&dir).expect("load");
+        store
+            .add_grant("g3".into(), "nan", canon(&st.scratch_base), "t".into())
+            .expect("add");
+        grants::save(&dir, &store).expect("save");
+        let approver = FakeApprover::answering(true);
+        let action = ToolAction::WriteFile {
+            path: path_str(&scratch.join("a.css")),
+            content: "body{}".into(),
+        };
+        let proposal = propose(&dir, &st, "nan", Some(1), &action).expect("proposed");
+        let route =
+            tauri::async_runtime::block_on(approve_proposal(&dir, &st, &approver, &proposal))
+                .expect("approved");
+        assert_eq!(route, ApprovalRoute::Inline, "the covering ask grant wins");
     }
 
     #[test]

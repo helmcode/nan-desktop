@@ -844,14 +844,17 @@ function ChatShell({
       const formats = strings.formatsPhrase(...broken.map((aspect) => strings.aspectInline[aspect]));
       queueSeq.current += 1;
       const seq = queueSeq.current;
+      // The visible text never quotes the (model-written) title: it rides
+      // only in the hidden context, which the core cleans and escapes.
       setQueues((prev) =>
-        enqueue(prev, conversationId, strings.layoutAutoFixText(title, formats), seq, [], {
+        enqueue(prev, conversationId, strings.layoutAutoFixText(formats), seq, [], {
           videoContext: { project_id: projectId, title, problems: layoutProblems(report, broken) },
           skipSkill: true,
           autoFix: true,
         }),
       );
     },
+    isActive: (conversationId) => activeConvRef.current === conversationId,
   });
   // Round 14/S1: the newer version the updater found. ONE check (owned by
   // the app window, before sign-in) feeds the banner, the user menu and
@@ -1011,6 +1014,11 @@ function ChatShell({
   // chip before passive effects ran keyed the preview to "new chat".
   useLayoutEffect(() => {
     activeConvRef.current = activeConvId;
+  }, [activeConvId]);
+  // Round 25: videos whose turn ended while their conversation was off
+  // screen are checked again (as they are now) when it comes back.
+  useEffect(() => {
+    if (activeConvId !== null) void layoutFixRef.current?.activated(activeConvId);
   }, [activeConvId]);
   const messageCountRef = useRef(0);
   useEffect(() => {
@@ -2301,6 +2309,8 @@ function ChatShell({
   // sends meanwhile.
   const sendAssistantAboutVideo = useCallback(
     (text: string, context: VideoAskContext): void => {
+      // Coming from the Videos surface, the keyboard goes to the composer.
+      if (viewRef.current !== "chat") focusChatOnReturn.current = true;
       setView("chat");
       const id = activeConvRef.current;
       if (id !== null && (streamingIds.has(id) || queueOf(queuesRef.current, id).items.length > 0)) {
