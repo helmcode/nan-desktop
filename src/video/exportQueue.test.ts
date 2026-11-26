@@ -93,6 +93,39 @@ describe("ExportQueue", () => {
     expect(queue.busy).toBe(true);
   });
 
+  it("append keeps the batch on screen; a format joining a batch refused for every format is skipped", async () => {
+    resetTauri({
+      video_export_start: () => {
+        throw { kind: "subscription_required" };
+      },
+    });
+    const queue = exportQueueFor("nan", PROJECT_ID);
+    queue.enqueue(["16:9"], "draft");
+    await vi.waitFor(() => expect(kinds(queue.getSnapshot())).toEqual(["error"]));
+    queue.enqueue(["9:16"], "draft", true);
+    expect(kinds(queue.getSnapshot())).toEqual(["error", "skipped"]);
+    expect(invokedWith("video_export_start").length).toBe(1);
+    // A new batch (no append) clears the old rows.
+    queue.enqueue(["1:1"], "draft");
+    await vi.waitFor(() => expect(kinds(queue.getSnapshot())).toEqual(["error"]));
+    expect(queue.getSnapshot()[0].aspect).toBe("1:1");
+  });
+
+  it("cancelNotStarted cancels only that format's queued renders", async () => {
+    resetTauri({
+      video_export_start: () => ({ render_id: "r-1", charge_seconds: 8 }),
+      video_export_status: () => QUEUED,
+      video_export_cancel: () => null,
+    });
+    const queue = exportQueueFor("nan", PROJECT_ID);
+    queue.enqueue(["16:9", "9:16", "1:1"], "draft");
+    await vi.waitFor(() => expect(kinds(queue.getSnapshot())).toEqual(["rendering", "pending", "pending"]));
+    expect(queue.cancelNotStarted("16:9")).toBe(false);
+    expect(queue.cancelNotStarted("9:16")).toBe(true);
+    expect(kinds(queue.getSnapshot())).toEqual(["rendering", "canceled", "pending"]);
+    expect(invokedWith("video_export_cancel")).toEqual([]);
+  });
+
   it("is one queue per project and profile", () => {
     expect(exportQueueFor("nan", PROJECT_ID)).toBe(exportQueueFor("nan", PROJECT_ID));
     expect(exportQueueFor("helmcode", PROJECT_ID)).not.toBe(exportQueueFor("nan", PROJECT_ID));

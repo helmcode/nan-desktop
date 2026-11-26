@@ -87,6 +87,14 @@ describe("composer queue", () => {
     expect(release(EMPTY_QUEUES, 8)).toBe(EMPTY_QUEUES);
   });
 
+  it("an automatic message (autoFix) never releases a queue the user held", () => {
+    let q = enqueue(EMPTY_QUEUES, 8, "mine", 1);
+    q = hold(q, 8, "stopped");
+    q = enqueue(q, 8, "fix it", 2, [], { autoFix: true, exportFix: 5 });
+    expect(queueOf(q, 8).held).toBe("stopped");
+    expect(wantsFlush(q, 8)).toBe(false);
+  });
+
   it("a new message releases a held queue (sending again means go)", () => {
     let q = hold(enqueue(EMPTY_QUEUES, 8, "a", 1), 8, "stopped");
     q = enqueue(q, 8, "b", 2);

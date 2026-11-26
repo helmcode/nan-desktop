@@ -46,6 +46,9 @@ export interface QueuedMessage {
   /** The app's automatic layout fix (video/layoutAutoFix.ts): its turn does
    * not renew the automatic-fix allowance the way a user message does. */
   autoFix?: boolean;
+  /** An export's fix request (video/exportFix.ts): its id. The turn it
+   * starts is the one that export waits for. */
+  exportFix?: number;
 }
 
 import type { PendingAttachment } from "./attachments";
@@ -77,21 +80,24 @@ function withQueue(queues: Queues, conversationId: number, queue: ConversationQu
 }
 
 /** Add a message at the end. Sending again means "go": it releases a held
- * queue. Blank text without attachments is ignored. */
+ * queue (not an automatic message: `autoFix`). Blank text without
+ * attachments is ignored. */
 export function enqueue(
   queues: Queues,
   conversationId: number,
   text: string,
   id: number,
   attachments: readonly PendingAttachment[] = [],
-  extra: Pick<QueuedMessage, "videoContext" | "skipSkill" | "autoFix"> = {},
+  extra: Pick<QueuedMessage, "videoContext" | "skipSkill" | "autoFix" | "exportFix"> = {},
 ): Queues {
   const trimmed = text.trim();
   if (!trimmed && attachments.length === 0) return queues;
   const current = queueOf(queues, conversationId);
   const base: QueuedMessage = attachments.length > 0 ? { id, text: trimmed, attachments } : { id, text: trimmed };
   const message: QueuedMessage = { ...base, ...extra };
-  return withQueue(queues, conversationId, { items: [...current.items, message], held: false });
+  // Sending again means "go", but only the user says that: an app-made
+  // automatic message never releases a queue the user held.
+  return withQueue(queues, conversationId, { items: [...current.items, message], held: extra.autoFix ? current.held : false });
 }
 
 /** Drop the head (it is being sent). */

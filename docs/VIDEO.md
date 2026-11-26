@@ -24,6 +24,7 @@ uploads, and downloads the result.
 | Export | `video/render.rs`, `src/video/ExportPanel.tsx` | zip, upload, poll, download |
 | Player | `src/video/VideoPlayer.tsx` | `@hyperframes/player`, sealed |
 | Lint | `src/video/lint.ts` | `@hyperframes/lint` on the project sources |
+| Motion lint | `video/motion.rs` | warnings for stutter-prone scenes, in the tool result |
 
 ## HyperFrames version
 
@@ -249,8 +250,11 @@ crops the lower half of a 9:16 preview.
 
 An export in a format other than the project's own only resizes the canvas
 (`render::with_aspect`), so a layout written for one shape can come out cut
-off in another. Every format the user downloads is checked first, and the
-assistant's videos are checked as they are made.
+off in another. The assistant builds a video in ONE format, the project's
+own (the one the user asked for), and only that format is checked while it
+is made. Another format is checked only when the user selects it in the
+export panel; if it comes out cut off, the assistant fixes it and it
+downloads by itself, while the own format is already exporting.
 
 - **The probe**: `src-tauri/src/video/layout_probe.js`, ONE classic script
   shared by the app, CI (`test/template-layout-check.mjs` evaluates it in
@@ -285,35 +289,99 @@ assistant's videos are checked as they are made.
   `onAspect` reports the format being checked. A timeout, an error or a cut-short check that found nothing is
   `null` = "could not check", which never holds or triggers anything. The
   token is released as soon as the frame answers.
-- **Export gate** (`ExportPanel`): "Export" first checks every selected
-  format (verdicts are remembered per version of the video, keyed on meta,
-  sources and assets, not on the exports list; a `null` "could not check"
-  is NOT remembered, so the next export tries again). One check at a time:
-  while it runs Export is disabled and a second start is ignored. If the
-  video changes while it is checked, the check stays on screen, its
-  verdict is dropped (nothing queued, nothing shown) and the same formats
-  are checked again for the new version, so a format is never queued twice
-  nor judged on an old version. While it runs the panel
-  says which format it is checking ("Checking the vertical (9:16) format…")
-  with **Cancel export**: it aborts the check and exports NOTHING (a
-  canceled check is never a pass). The formats that fit are
-  queued right away; a format that would come out cut off is held and named
-  (`role="alert"`, a line per format with how many elements are cut and in
-  which scenes), with **Fix with the assistant** (primary, focused: sends
-  the fix request directly with the findings as hidden context, the same
-  path as the check's other fix button) and **Export anyway**. The list
-  uses the same format labels as the sentence and names scenes by title
-  ("Scene N" by position when untitled). When a gate button goes away the
-  keyboard lands on the Export button, or (while it is disabled) a queue
-  control, or the section heading, never on `<body>`; a fix sent from the
-  Videos surface takes the keyboard to the chat composer.
+- **Export on demand** (`ExportPanel` + `src/video/exportFix.ts`):
+  "Export" queues the project's own format right away, UNCHECKED (the user
+  saw it in the preview and the generation check covers it). Every other
+  selected format is checked meanwhile (verdicts are remembered per version
+  of the video, keyed on meta, sources and assets, not on the exports list;
+  a `null` "could not check" is NOT remembered, so the next export tries
+  again). One check at a time: while it runs Export is disabled and a
+  second start is ignored. If the video changes while it is checked, the
+  check stays on screen, its verdict is dropped (nothing queued, nothing
+  shown) and the same formats are checked again for the new version, so a
+  format is never queued twice nor judged on an old version. While it runs
+  the panel says which format it is checking with **Don't export
+  <formats>**: it aborts the check and those formats are not exported (the
+  own one keeps going; it has its own Cancel in the queue). The formats
+  that fit (or could not be checked) join the queue behind the own one
+  (`enqueue(..., append)`: the rows on screen stay; if the batch already
+  hit a refusal that applies to every format, the new rows are skipped).
+  A format that would come out cut off is NOT put to the user as a choice:
+  the panel says (`role="status"`) that it needs adjustments, the assistant
+  is fixing it and it will download automatically when ready, lists what is
+  cut per format (scene titles, "Scene N" when untitled), and offers
+  **Don't export <formats>**. The fix flow (one per project, outlives the
+  panel like the export queue):
+  1. sends ONE request for those formats ("To export this video in the
+     square (1:1) format, parts of it go outside the frame or get cut off.
+     Adjust the layout so it shows whole there, without changing how it
+     looks in the horizontal (16:9) format.", findings as hidden video
+     context, no skill). Each request has an id. `App.tsx` puts it in the
+     send queue of the conversation that last created or changed the video
+     (`video://changed`, this session; else the one on screen), marked
+     `autoFix` + `exportFix: <id>`; it goes out when that conversation is
+     idle and on screen, the user sees it there and can remove it. With no
+     conversation at all it starts one. The view is NOT switched. Until its
+     turn starts the panel says it is waiting for the assistant (and, when
+     the conversation is not on screen, names it: "The request is waiting in
+     the conversation “X”: it goes out when you open it"); once it starts,
+     that the assistant is fixing it. Only that sentence is live
+     (`role="status"`); the attempt number and details are not.
+  2. waits for THAT turn: the turn that starts with the request is bound to
+     its flow by id (`exportFixTurnStarted`; another export's binding in the
+     same conversation is ended as "did not finish", never overwritten
+     silently); its `chat://done` `completed` drives the flow; a cut turn
+     waits for its continuation; `chat://stopped` / `chat://error` end it.
+     A request that leaves the queue unsent ends it too
+     (`exportFixDropped`): removed or edited by the user, or its
+     conversation deleted ("taken out of the chat queue"); in a queue held
+     after a Stop or a failed send it is also taken out of that queue, so it
+     never goes out after the export gave up ("the chat was stopped or
+     failed"); a deleted conversation says so. An automatic message (this
+     request or the generation's fix) NEVER releases a queue the user held:
+     `enqueue` keeps `held` for `autoFix` messages, and both senders skip a
+     held queue (the export ends as "held"). The target conversation must
+     still be listed, else the one on screen is used. When the chat goes
+     away (sign-out, another profile or realm) queued requests count as
+     removed and every export waiting on that chat ends
+     (`exportFixChatClosed`), so another chat's turns (same conversation
+     ids) cannot drive them. The generation check (below) skips that turn:
+     the flow re-checks it itself.
+  3. re-checks the fixed formats AND the own format, then queues every
+     fixed format that fits (or could not be checked) and says "The
+     assistant fixed ...; it was added to the export". While a format is
+     being fixed, every queue row names its format, and the formats already
+     exporting are named ("The horizontal (16:9) format is already
+     exporting.").
+  4. repeats for what is still cut off: at most `MAX_EXPORT_FIX_ROUNDS` (2)
+     requests per export ("Attempt 2 of 2"). Then a final state
+     (`role="alert"`): **Export anyway**, **Fix it in the chat** (the same
+     request through the manual path, which opens the chat) and **Don't
+     export**. Same final state when the request cannot be sent.
+  5. if a fix breaks the own format it says so (`role="alert"`, with what
+     is cut): a render of the own format that had not started is held back
+     (it would zip the broken version), one already under way keeps the
+     earlier version; no further fix is sent automatically (**Fix it in the
+     chat** / **OK**).
+  **Don't export** while it fixes takes the queued request back (if it has
+  not gone out) and exports nothing more; when the assistant was already
+  working on it, the panel says it may keep editing the video in the chat
+  and can be stopped there. One export check per project at a time across
+  panels (`beginCheck` / `endCheck` on the flow): a panel opened while
+  another one checks shows "Checking…" with Export disabled. Keyboard: when the flow moves on, focus
+  follows to its first control, but only if it was in the panel (or
+  nowhere), never taken from the chat composer; when a panel goes away it
+  lands on the Export button, or (while it is disabled) a queue control,
+  or the section heading, never on `<body>`.
 - **While the assistant makes the video** (`src/video/layoutAutoFix.ts`,
   wired in `App.tsx`): `video://changed` marks the video for its
   conversation; when that turn completes (`chat://done` `completed`; a cut
   turn passes it on to its continuation, a stopped or failed one forgets
-  it) the app checks all three formats and, if one is cut off, queues ONE
+  it) the app checks the video in ITS OWN format only (`video_get` gives
+  the aspect) and, if it is cut off, queues ONE
   automatic message for that conversation ("Automatic check of this
-  video: ...", the findings as hidden video context, no skill). The
+  video: ...", the findings as hidden video context, no skill). The other
+  formats are never checked or reported here: nobody asked for them yet. The
   visible text never quotes the video title: it is model-written, so it
   travels only in the hidden context, which the core cleans
   (`project::clean_title` and `context::clean` drop controls and invisible
@@ -326,9 +394,10 @@ assistant's videos are checked as they are made.
   part of making the video. Bounded: at most 2 automatic messages in a row
   per conversation; only a message the user sends renews the allowance (an
   automatic continuation does not). Once the allowance is used up no check
-  is run at all (checks share one queue with the export gate). A check
+  is run at all (checks share one queue with the export). A check
   overtaken by a new turn is redone when that turn ends; if that turn has
-  already ended, it is dropped (never left for a later, unrelated turn).
+  already ended, it is dropped (never left for a later, unrelated turn). A
+  turn carrying an export's fix request is skipped (the export re-checks it).
 - **Authoring rules** (`video::tool::GUIDANCE`): every video must work in
   all three formats: content centered with flex/grid and a 6% safe area,
   type and spacing in `vmin`/`clamp()`, no fixed pixel positions or widths
@@ -339,6 +408,44 @@ Why a renderer check and not a core tool the model calls: the check needs
 real layout, which only a webview has; a tool would have to round-trip to
 the renderer and wait mid-turn, and the model could skip it. Checking when
 the turn ends costs the model nothing and cannot be skipped.
+
+## Smooth motion (round 26)
+
+How scenes move, measured by seeking the pinned runtime frame by frame in
+headless Chrome (what the render service does; the preview seeks the same
+way on every tick, so the MP4 and the preview show the same motion):
+
+- The CSS adapter pauses every CSS animation and sets its `currentTime` to
+  `time - start of its closest [data-start]` on each frame. Animations are
+  therefore deterministic: `animation-delay` counts from the clip's
+  `data-start` and `animation-fill-mode` behaves as in a browser. Repaint
+  cost cannot make the MP4 stutter; only the composition's design can.
+- Outside its window the runtime hides a `.clip` that is in the normal flow
+  (position static, relative or sticky) and holds no timed descendant with
+  `display: none`; an absolutely positioned clip only gets `visibility:
+  hidden`. A scene that wraps each staggered line of a flex/grid layout in
+  its own `.clip` therefore re-lays out when each one appears or ends, and
+  every visible sibling jumps in ONE frame. A tester's 6-scene video had 76
+  such one-frame jumps, all at clip boundaries; the same scenes with one
+  stage and `animation-delay` had none, and no bundled template has any.
+
+Rules (`video::tool::GUIDANCE`): ONE stage `.clip` per scene
+(`position:absolute; inset:0`, covering the scene) holding the layout;
+entrances staggered with `animation-delay` on its children; more `.clip`
+elements only for absolute overlays; animations on the element that moves,
+never on the `.clip`; `animation-fill-mode: both`; only `transform` and
+`opacity`; entrances of 0.4 to 0.8 s finished 0.5 s before the scene ends.
+
+The motion lint (`video::motion::lint_scene`) checks every scene a
+`create_video` / `edit_video` call writes or retimes and adds WARNINGS to the
+result (the scene is still written; GUIDANCE tells the model to fix them):
+an in-flow `.clip` with siblings that appears or ends mid-scene, keyframes
+on layout properties (width, height, margin, padding, font-size...), an
+animation that ends after its scene, and a fill mode that pops (delayed
+without a backwards fill, or hidden at rest without a forwards fill). It is
+conservative: selectors it does not understand count as "not animated" and
+as "maybe absolutely positioned", and every bundled template passes it
+(`templates::tests::every_template_passes_the_motion_lint`).
 
 ## Export (contract §2)
 

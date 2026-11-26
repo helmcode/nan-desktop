@@ -7,11 +7,14 @@
 // every failure in plain words, and what to do with each file (open, show
 // in folder, save a copy).
 //
-// Round 25, the layout gate: before the renders start, every selected
-// format is checked (layoutCheck.ts). The formats that show the video whole
-// export right away; a format that would come out cut off is held, named,
-// with "Fix with the assistant" (the automatic fix request, sent directly)
-// and "Export anyway". A check that cannot run never holds anything.
+// Export on demand: the project's own format (the one the assistant built
+// and the user saw) exports right away, unchecked. Any OTHER selected
+// format is checked first (layoutCheck.ts): the ones that show the video
+// whole join the queue as soon as the check ends; a format that would come
+// out cut off is not put to the user as a choice: the panel says it needs
+// adjustments, the assistant is fixing it and it will download by itself,
+// and exportFix.ts drives that (fix message, re-check, export, bounded).
+// A check that cannot run never holds anything.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useI18n } from "../i18n";
@@ -30,6 +33,7 @@ import {
   type VideoProject,
 } from "./api";
 import { brokenAspects, checkLayout, layoutProblems, type LayoutReport } from "./layoutCheck";
+import { exportFixFor, MAX_EXPORT_FIX_ROUNDS } from "./exportFix";
 import { openExternal } from "../Markdown";
 import { exportQueueFor, isSettled, type Quality, type QueueItem } from "./exportQueue";
 import { exportCharge, exportErrorMessage, queueCharge, quotaLine, rememberedAspect, rememberedRender, shortDate } from "./logic";
@@ -47,13 +51,11 @@ export function exportOrder(selected: Aspect[], own: Aspect): Aspect[] {
   return [own, ...ASPECTS.filter((a) => a !== own)].filter((a) => selected.includes(a));
 }
 
-/// The layout gate: idle, checking the formats, or holding the ones that
-/// would come out cut off.
+/// The layout gate: idle, or checking the other formats.
 type Gate =
   | { kind: "idle" }
   /// `aspect`: the format being checked now (null: waiting to start).
-  | { kind: "checking"; aspect: Aspect | null }
-  | { kind: "broken"; aspects: Aspect[]; report: LayoutReport; quality: Quality; othersExporting: boolean };
+  | { kind: "checking"; aspects: Aspect[]; aspect: Aspect | null };
 
 /// What the layout of a project depends on (not its exports list: a new
 /// MP4 landing must not drop a verdict on screen).
@@ -95,7 +97,8 @@ export function ExportPanel({
   onExported: () => void;
   /// The session expired: sign in again.
   onSignIn?: () => void;
-  /// Send the assistant the request to fix formats that come out cut off.
+  /// Send the assistant a request to fix formats that come out cut off
+  /// (and go to the chat): the way out once the automatic fix gave up.
   onFixLayout?: (text: string, context: VideoAskContext) => void;
 }) {
   const { t, locale } = useI18n();
@@ -118,8 +121,13 @@ export function ExportPanel({
   const [gate, setGate] = useState<Gate>({ kind: "idle" });
   const key = useMemo(() => layoutKey(project), [project]);
   const verdicts = useRef<{ key: string; report: LayoutReport }>({ key, report: {} });
-  const fixButton = useRef<HTMLButtonElement | null>(null);
-  const anywayButton = useRef<HTMLButtonElement | null>(null);
+  // The assistant fixing a cut-off format (outlives the panel).
+  const flow = useMemo(() => exportFixFor(profileId, project.id), [profileId, project.id]);
+  const fix = useSyncExternalStore(flow.subscribe, flow.getSnapshot);
+  const fixPanel = useRef<HTMLDivElement | null>(null);
+  const ownPanel = useRef<HTMLDivElement | null>(null);
+  const section = useRef<HTMLElement | null>(null);
+  const [, rerender] = useState(0);
   const exportButton = useRef<HTMLButtonElement | null>(null);
   const heading = useRef<HTMLHeadingElement | null>(null);
   const queueList = useRef<HTMLUListElement | null>(null);
@@ -154,10 +162,33 @@ export function ExportPanel({
     // notices the new version when it ends and checks that one instead.
     setGate((prev) => (prev.kind === "checking" ? prev : { kind: "idle" }));
   }, [key]);
-  // Held formats: the keyboard goes to the way out.
+  // The fix flow moving on: the keyboard follows it, but only when it was
+  // in this panel (or nowhere): it is never taken from the chat composer.
+  const fixKind = fix.status.kind;
+  const prevFixKind = useRef(fixKind);
   useEffect(() => {
-    if (gate.kind === "broken") (fixButton.current ?? anywayButton.current)?.focus();
-  }, [gate]);
+    const before = prevFixKind.current;
+    prevFixKind.current = fixKind;
+    if (before === fixKind) return;
+    const active = document.activeElement;
+    const ours = !active || active === document.body || (section.current?.contains(active) ?? false);
+    if (!ours) return;
+    if (fixKind === "idle") {
+      // A note about the own format takes the keyboard instead (below).
+      if (flow.getSnapshot().ownBroken) return;
+      refocus.current = { awaitQueue: 5 };
+      rerender((n) => n + 1);
+      return;
+    }
+    fixPanel.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+  }, [fixKind, flow]);
+  const ownBroken = fix.ownBroken !== null;
+  useEffect(() => {
+    if (!ownBroken || fixKind !== "idle") return;
+    const active = document.activeElement;
+    if (!active || active === document.body || (section.current?.contains(active) ?? false))
+      ownPanel.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [ownBroken, fixKind]);
 
   // The format switch in the editor changes the preselected one.
   useEffect(() => setSelected([own]), [own]);
@@ -213,7 +244,9 @@ export function ExportPanel({
   const charge = queueCharge(project.duration, order.length);
   const short = quota !== null && quota !== "failed" && charge > quota.remaining_seconds;
   const renewal = quota && quota !== "failed" ? shortDate(quota.period_end, locale) : null;
-  const many = items.length > 1;
+  // Rows name their format when there are several, or while a format is
+  // being fixed (the one row on screen is then not the only format).
+  const many = items.length > 1 || fix.status.kind !== "idle" || fix.fixed.length > 0;
   // "Cancel the rest": the formats not started yet, while another one runs
   // or several wait.
   const rest = items.filter((item) => item.phase.kind === "pending" || item.phase.kind === "waiting");
@@ -223,41 +256,51 @@ export function ExportPanel({
     setSelected((prev) => (prev.includes(aspect) ? prev.filter((a) => a !== aspect) : [...prev, aspect]));
 
   // The version and project a running check must still match when it ends.
-  const current = useRef({ key, projectId: project.id });
-  current.current = { key, projectId: project.id };
+  const current = useRef({ key, projectId: project.id, own, title: project.meta.title });
+  current.current = { key, projectId: project.id, own, title: project.meta.title };
 
   /// Check `wanted` (the verdicts of this version are reused), then queue
-  /// the formats that fit and hold the others. ONE check at a time: while
-  /// one runs, Export is disabled and a second start is ignored, so a
-  /// format can never be queued twice.
-  const runGate = (wanted: Aspect[], chosen: Quality) => {
+  /// the formats that fit (`append`: after the own format, already queued)
+  /// and hand the others to the assistant. ONE check at a time: while one
+  /// runs, Export is disabled and a second start is ignored, so a format
+  /// can never be queued twice (the flow also tells every panel of this
+  /// project that a check runs, so a panel opened meanwhile waits too).
+  /// `end` releases that, once.
+  const runGate = (wanted: Aspect[], chosen: Quality, append: boolean, end: () => void) => {
     const atKey = current.current.key;
     const projectId = current.current.projectId;
     const known = verdicts.current.key === atKey ? verdicts.current.report : {};
     const missing = wanted.filter((aspect) => !(aspect in known));
     const abort = new AbortController();
     checkAbort.current = abort;
-    setGate({ kind: "checking", aspect: null });
+    setGate({ kind: "checking", aspects: wanted, aspect: null });
     const checked: Promise<LayoutReport> =
       missing.length > 0
         ? checkLayout(profileId, projectId, missing, {
             signal: abort.signal,
             onAspect: (aspect) => {
-              if (alive.current && !abort.signal.aborted) setGate({ kind: "checking", aspect });
+              if (alive.current && !abort.signal.aborted) setGate({ kind: "checking", aspects: wanted, aspect });
             },
           }).catch(() => ({}))
         : Promise.resolve({});
     void checked.then((fresh) => {
-      // "Cancel export": nothing goes out, and the partial verdict is not kept.
-      if (abort.signal.aborted) return;
+      // "Don't export": nothing goes out, and the partial verdict is not kept.
+      if (abort.signal.aborted) {
+        end();
+        return;
+      }
       if (checkAbort.current === abort) checkAbort.current = null;
       if (current.current.key !== atKey) {
         // The video changed while it was checked: this verdict is about an
         // old version. Nothing is queued or shown from it; the same formats
         // are checked again for the version on screen (another project
         // entirely, or a closed panel: dropped).
-        if (alive.current && current.current.projectId === projectId) runGate(wanted, chosen);
-        else if (alive.current) setGate({ kind: "idle" });
+        if (alive.current && current.current.projectId === projectId) {
+          runGate(wanted, chosen, append, end);
+          return;
+        }
+        end();
+        if (alive.current) setGate({ kind: "idle" });
         return;
       }
       const report = { ...known, ...fresh };
@@ -270,45 +313,91 @@ export function ExportPanel({
       const broken = brokenAspects(report, wanted);
       const fine = wanted.filter((aspect) => !broken.includes(aspect));
       // The formats that fit go now (also when the panel closed meanwhile:
-      // the queue outlives it); the others wait for the user.
-      if (fine.length > 0) queue.enqueue(fine, chosen);
+      // the queue outlives it); the assistant fixes the others, which then
+      // download by themselves (the flow outlives the panel too).
+      if (fine.length > 0) queue.enqueue(fine, chosen, append);
+      if (broken.length > 0) flow.start({ aspects: broken, report, quality: chosen, own: current.current.own, title: current.current.title });
+      end();
       if (!alive.current) return;
-      setGate(broken.length > 0 ? { kind: "broken", aspects: broken, report, quality: chosen, othersExporting: fine.length > 0 } : { kind: "idle" });
+      setGate({ kind: "idle" });
     });
   };
 
+  // Releases the running check's hold on the project's panels.
+  const endCheck = useRef<(() => void) | null>(null);
   const start = () => {
-    if (checkAbort.current) return;
+    if (checkAbort.current || flow.active || queue.busy) return;
+    const others = order.filter((aspect) => aspect !== own);
+    // One export check per project, whichever panel runs it.
+    if (others.length > 0 && !flow.beginCheck()) return;
     setFileError(false);
-    runGate(order, quality);
+    flow.reset();
+    // The own format is the one the assistant built and the user saw: it
+    // goes right away. The others are checked meanwhile.
+    const withOwn = order.includes(own);
+    if (withOwn) queue.enqueue([own], quality);
+    if (others.length > 0) {
+      let ended = false;
+      const end = () => {
+        if (ended) return;
+        ended = true;
+        if (endCheck.current === end) endCheck.current = null;
+        flow.endCheck();
+      };
+      endCheck.current = end;
+      runGate(others, quality, withOwn, end);
+    }
   };
 
   const cancelCheck = () => {
     checkAbort.current?.abort();
     checkAbort.current = null;
+    endCheck.current?.();
     refocus.current = { awaitQueue: 0 };
     setGate({ kind: "idle" });
   };
 
+  const phrase = (aspects: Aspect[]) => t.video.formatsPhrase(...aspects.map((aspect) => t.video.aspectInline[aspect]));
+
+  // Final state of a fix: export as it is, or take it to the chat.
   const exportAnyway = () => {
-    if (gate.kind !== "broken") return;
     refocus.current = { awaitQueue: 5 };
-    setGate({ kind: "idle" });
-    queue.enqueue(gate.aspects, gate.quality);
+    flow.exportAnyway();
   };
-
-  const fixLayout = () => {
-    if (gate.kind !== "broken" || !onFixLayout) return;
-    const formats = t.video.formatsPhrase(...gate.aspects.map((aspect) => t.video.aspectInline[aspect]));
-    // Stays sensible when the panel stays on screen (the side panel); the
-    // app takes the keyboard to the chat when it switches to it.
+  const fixInChat = () => {
+    const status = fix.status;
+    if (status.kind !== "stuck" || !onFixLayout) return;
     refocus.current = { awaitQueue: 0 };
-    setGate({ kind: "idle" });
-    onFixLayout(t.video.layoutFixText(formats), {
+    flow.dismiss();
+    onFixLayout(t.video.layoutFixText(phrase(status.aspects), phrase([fix.own])), {
       project_id: project.id,
       title: project.meta.title,
-      problems: layoutProblems(gate.report, gate.aspects),
+      problems: layoutProblems(status.report, status.aspects),
     });
+  };
+  const discardFix = () => {
+    refocus.current = { awaitQueue: 0 };
+    flow.dismiss();
+  };
+  const cancelFix = () => {
+    refocus.current = { awaitQueue: 0 };
+    flow.cancel();
+  };
+  // The own format broke after a fix.
+  const fixOwnInChat = () => {
+    if (!fix.ownBroken || !onFixLayout) return;
+    const report: LayoutReport = { [fix.own]: fix.ownBroken };
+    refocus.current = { awaitQueue: 0 };
+    flow.dismissOwn();
+    onFixLayout(t.video.layoutOwnFixText(phrase([fix.own])), {
+      project_id: project.id,
+      title: project.meta.title,
+      problems: layoutProblems(report, [fix.own]),
+    });
+  };
+  const dismissOwn = () => {
+    refocus.current = { awaitQueue: 0 };
+    flow.dismissOwn();
   };
 
   // A scene without a title is "Scene N" (its position), as in the editor.
@@ -318,6 +407,23 @@ export function ExportPanel({
     return project.meta.scenes[index].title.trim() || t.video.sceneUntitled(index + 1);
   };
   const checking = gate.kind === "checking";
+  const fixing = fix.status.kind === "fixing" || fix.status.kind === "checking";
+  // The formats exporting while another one is fixed, in the app's order.
+  const exportingNow = ASPECTS.filter((aspect) => items.some((item) => item.aspect === aspect && !isSettled(item)));
+  const ownState: "exported" | "held" | "none" = fix.ownHeld
+    ? "held"
+    : items.some((item) => item.aspect === fix.own && item.phase.kind !== "canceled" && item.phase.kind !== "skipped")
+      ? "exported"
+      : "none";
+  const issueLines = (aspects: Aspect[], report: LayoutReport) => (
+    <ul className="video-layout-list">
+      {aspects.map((aspect) => {
+        const issues = report[aspect] ?? [];
+        const scenes = [...new Set(issues.map((issue) => issue.scene))].map(sceneTitle).join(", ");
+        return <li key={aspect}>{t.video.layoutFormatLine(t.video.aspectInline[aspect], issues.length, scenes)}</li>;
+      })}
+    </ul>
+  );
 
   const fileAction = (action: Promise<unknown>) => {
     setFileError(false);
@@ -451,7 +557,7 @@ export function ExportPanel({
   };
 
   return (
-    <section className="video-section video-export" aria-labelledby="video-export-title">
+    <section ref={section} className="video-section video-export" aria-labelledby="video-export-title">
       <h2 id="video-export-title" ref={heading} className="video-section-title" tabIndex={-1}>
         {t.video.sectionExport}
       </h2>
@@ -483,7 +589,7 @@ export function ExportPanel({
           className="btn btn-primary btn-sm"
           ref={exportButton}
           onClick={start}
-          disabled={busy || checking || blocked || short || order.length === 0}
+          disabled={busy || checking || fix.gateChecking || fixing || blocked || short || order.length === 0}
           aria-busy={checking || undefined}
         >
           <IconDownload size={14} />
@@ -516,32 +622,94 @@ export function ExportPanel({
           <span role="status">{gate.aspect ? t.video.layoutCheckingFormat(t.video.aspectInline[gate.aspect]) : t.video.layoutChecking}</span>
           <button type="button" className="btn btn-ghost btn-sm" onClick={cancelCheck}>
             <IconStop size={13} />
-            {t.video.layoutCancel}
+            {t.video.layoutCancelFormats(phrase(gate.aspects))}
           </button>
         </div>
       )}
-      {gate.kind === "broken" && (
-        <div className="video-layout-gate">
-          <p className="video-warn" role="alert">
-            {t.video.layoutBroken(t.video.formatsPhrase(...gate.aspects.map((aspect) => t.video.aspectInline[aspect])))}
+      {gate.kind !== "checking" && fix.gateChecking && (
+        <p className="video-progress video-layout-checking" role="status">
+          {t.video.layoutChecking}
+        </p>
+      )}
+      {fix.status.kind === "fixing" && (
+        <div className="video-layout-gate" ref={fixPanel}>
+          {/* Only this sentence is live: it changes when the assistant
+              takes the request, not on every detail below. */}
+          <p className="video-hint" role="status">
+            {t.video.layoutFixing(phrase(fix.status.aspects), fix.status.aspects.length, fix.status.started)}
           </p>
-          <ul className="video-layout-list">
-            {gate.aspects.map((aspect) => {
-              const issues = gate.report[aspect] ?? [];
-              const scenes = [...new Set(issues.map((issue) => issue.scene))].map(sceneTitle).join(", ");
-              return <li key={aspect}>{t.video.layoutFormatLine(t.video.aspectInline[aspect], issues.length, scenes)}</li>;
-            })}
-          </ul>
-          {gate.othersExporting && <p className="video-hint">{t.video.layoutOthersExporting}</p>}
+          {fix.status.round > 1 && <p className="video-hint">{t.video.layoutFixingRound(fix.status.round, MAX_EXPORT_FIX_ROUNDS)}</p>}
+          {fix.waitingIn && (
+            <p className="video-warn" role="status">
+              {t.video.layoutFixWaitingIn(fix.waitingIn.title)}
+            </p>
+          )}
+          {issueLines(fix.status.aspects, fix.status.report)}
+          {exportingNow.length > 0 && <p className="video-hint">{t.video.layoutFixingOthers(phrase(exportingNow), exportingNow.length)}</p>}
           <div className="video-export-actions">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={cancelFix}>
+              <IconStop size={13} />
+              {t.video.layoutCancelFormats(phrase(fix.status.aspects))}
+            </button>
+          </div>
+        </div>
+      )}
+      {fix.status.kind === "checking" && (
+        <div className="video-progress video-layout-checking" ref={fixPanel}>
+          <span role="status">{t.video.layoutFixChecking(phrase(fix.status.aspects))}</span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={cancelFix}>
+            <IconStop size={13} />
+            {t.video.layoutCancelFormats(phrase(fix.status.aspects))}
+          </button>
+        </div>
+      )}
+      {fix.status.kind === "stuck" && (
+        <div className="video-layout-gate" ref={fixPanel}>
+          <p className="video-warn" role="alert">
+            {t.video.layoutStuck(phrase(fix.status.aspects), fix.status.aspects.length, fix.status.why)}
+          </p>
+          {fix.status.why === "rounds" && issueLines(fix.status.aspects, fix.status.report)}
+          <div className="video-export-actions">
+            <button type="button" className="btn btn-secondary btn-sm" onClick={exportAnyway}>
+              {t.video.layoutExportAnyway}
+            </button>
             {onFixLayout && (
-              <button type="button" ref={fixButton} className="btn btn-primary btn-sm" onClick={fixLayout}>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={fixInChat}>
                 <IconSparkles size={13} />
-                {t.video.layoutFix}
+                {t.video.layoutFixInChat}
               </button>
             )}
-            <button type="button" ref={anywayButton} className="btn btn-secondary btn-sm" onClick={exportAnyway}>
-              {t.video.layoutExportAnyway}
+            <button type="button" className="btn btn-ghost btn-sm" onClick={discardFix}>
+              {t.video.layoutDiscard}
+            </button>
+          </div>
+        </div>
+      )}
+      {fix.status.kind === "idle" && fix.canceledMidTurn && (
+        <p className="video-hint" role="status">
+          {t.video.layoutFixCanceledMidTurn}
+        </p>
+      )}
+      {fix.status.kind === "idle" && fix.fixed.length > 0 && (
+        <p className="video-ok" role="status">
+          {t.video.layoutFixed(phrase(fix.fixed), fix.fixed.length)}
+        </p>
+      )}
+      {fix.ownBroken && (
+        <div className="video-layout-gate" ref={ownPanel}>
+          <p className="video-warn" role="alert">
+            {t.video.layoutOwnBroken(phrase([fix.own]), ownState)}
+          </p>
+          {issueLines([fix.own], { [fix.own]: fix.ownBroken })}
+          <div className="video-export-actions">
+            {onFixLayout && (
+              <button type="button" className="btn btn-secondary btn-sm" onClick={fixOwnInChat}>
+                <IconSparkles size={13} />
+                {t.video.layoutFixInChat}
+              </button>
+            )}
+            <button type="button" className="btn btn-ghost btn-sm" onClick={dismissOwn}>
+              {t.video.layoutOwnDismiss}
             </button>
           </div>
         </div>

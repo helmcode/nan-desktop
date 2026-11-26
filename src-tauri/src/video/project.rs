@@ -668,7 +668,7 @@ fn check_css_rules(low_css: &str) -> Result<(), String> {
 }
 
 /// The bodies between `open` and `close` in a lowercased document.
-fn blocks<'a>(low: &'a str, open: &str, close: &str) -> Vec<&'a str> {
+pub(crate) fn blocks<'a>(low: &'a str, open: &str, close: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut i = 0;
     while let Some(at) = low[i..].find(open) {
