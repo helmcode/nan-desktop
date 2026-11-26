@@ -28,7 +28,7 @@
 //! scene gets fewer warnings, never more. Every bundled template is clean
 //! (`templates::tests::every_template_passes_the_motion_lint`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::project;
 use crate::tools::website;
@@ -52,6 +52,12 @@ const MAX_RESOLVED: usize = 1_000_000;
 /// Most comma-separated layers in one `animation*` declaration; more and
 /// the scene is not linted (no real scene stacks that many).
 const MAX_LAYERS: usize = 32;
+/// Longest animation or keyframes name the lint follows; a longer one is
+/// treated as unknown (no warning), so per-element copies stay small.
+const MAX_NAME: usize = 128;
+/// Nesting of `@media` / `@supports` blocks followed (each level re-scans
+/// its body); deeper rules are ignored.
+const MAX_CSS_DEPTH: usize = 8;
 
 /// Properties whose animation re-lays out the scene (moves neighbours,
 /// re-wraps text). Positioning offsets (`left`, `top`) are not listed: on an
@@ -97,7 +103,7 @@ pub fn lint_scene(scene: &str, html: &str, duration: f64) -> Vec<String> {
     };
     let mut css = Css::default();
     for style in project::blocks(&low, "<style", "</style>") {
-        parse_css(&strip_comments(style), &mut css);
+        parse_css(&strip_comments(style), &mut css, 0);
     }
     if css.rules.len() > MAX_RULES {
         return Vec::new();
@@ -114,7 +120,13 @@ pub fn lint_scene(scene: &str, html: &str, duration: f64) -> Vec<String> {
         .rules
         .iter()
         .flat_map(|rule| rule.selectors.iter())
-        .map(|selector| (selector.len() + 1).saturating_mul(elements.len()))
+        .map(|selector| {
+            selector
+                .iter()
+                .map(|(_, compound)| compound.weight())
+                .fold(1usize, usize::saturating_add)
+                .saturating_mul(elements.len())
+        })
         .fold(0, usize::saturating_add);
     if work > MAX_WORK {
         return Vec::new();
@@ -139,9 +151,11 @@ pub fn lint_scene(scene: &str, html: &str, duration: f64) -> Vec<String> {
         loose_hits,
         layers: Vec::new(),
         uncertain: Vec::new(),
+        starts: Vec::new(),
     };
+    doc.starts = clip_starts(&doc.elements);
     doc.layers = (0..doc.elements.len())
-        .map(|at| Animation::from_decls(&doc.decls(at, true)).layers())
+        .map(|at| Animation::resolve(&doc.anim_decls(at)).layers())
         .collect();
     doc.uncertain = (0..doc.elements.len())
         .map(|at| doc.animation_uncertain(at))
@@ -197,7 +211,11 @@ struct Element {
     tag: String,
     id: String,
     classes: Vec<String>,
+    /// The same classes, for selector matching in O(compound classes).
+    class_set: HashSet<String>,
     style: Vec<(String, String)>,
+    /// The inline `animation*` declarations, parsed once.
+    anims: Vec<AnimDecl>,
     start: Option<String>,
     duration: Option<String>,
     is_root: bool,
@@ -212,15 +230,59 @@ struct Element {
 struct Rule {
     selectors: Vec<Selector>,
     decls: Vec<(String, String)>,
+    /// Its `animation*` declarations, parsed once, in source order.
+    anims: Vec<AnimDecl>,
 }
 
 /// One keyframe step: its selector (`from`, `50%`) and declarations.
 type Step = (String, Vec<(String, String)>);
 
+/// What the checks need from a `@keyframes`, computed ONCE when it is
+/// parsed (never per element or per layer).
+#[derive(Debug, Default)]
+struct KeyInfo {
+    /// The first step moves (transform) or hides (opacity < 0.99).
+    first_moves: bool,
+    /// The last step shows the element (opacity > 0.01).
+    shows: bool,
+    /// Layout properties any step animates, sorted and unique.
+    layout_props: Vec<&'static str>,
+}
+
+fn key_info(steps: &[Step]) -> KeyInfo {
+    fn at<'a>(
+        steps: &'a [Step],
+        offsets: &'static [&'static str],
+    ) -> impl Iterator<Item = &'a (String, String)> {
+        steps
+            .iter()
+            .filter(move |(sel, _)| sel.split(',').any(|s| offsets.contains(&s.trim())))
+            .flat_map(|(_, decls)| decls.iter())
+    }
+    let first_moves = at(steps, &["from", "0%"]).any(|(p, v)| {
+        TRANSFORM_PROPS.contains(&p.as_str())
+            || (p == "opacity" && opacity(v).is_some_and(|o| o < 0.99))
+    });
+    let shows = at(steps, &["to", "100%"])
+        .any(|(p, v)| p == "opacity" && opacity(v).is_some_and(|o| o > 0.01));
+    let mut layout_props: Vec<&'static str> = steps
+        .iter()
+        .flat_map(|(_, decls)| decls.iter())
+        .filter_map(|(p, _)| LAYOUT_PROPS.iter().find(|l| **l == p.as_str()).copied())
+        .collect();
+    layout_props.sort_unstable();
+    layout_props.dedup();
+    KeyInfo {
+        first_moves,
+        shows,
+        layout_props,
+    }
+}
+
 #[derive(Debug, Default)]
 struct Css {
     rules: Vec<Rule>,
-    keyframes: BTreeMap<String, Vec<Step>>,
+    keyframes: BTreeMap<String, KeyInfo>,
 }
 
 struct Doc {
@@ -235,6 +297,22 @@ struct Doc {
     /// A rule the strict matcher does not understand (`li:nth-child(2)`)
     /// may set this element's animation: its timing is not known.
     uncertain: Vec<bool>,
+    /// Start (scene seconds) of each element's closest timed
+    /// ancestor-or-self.
+    starts: Vec<f64>,
+}
+
+/// `Doc::starts`, in one pass (a parent comes before its children).
+fn clip_starts(elements: &[Element]) -> Vec<f64> {
+    let mut starts: Vec<f64> = Vec::with_capacity(elements.len());
+    for el in elements {
+        let start = match &el.start {
+            Some(start) => start.parse::<f64>().unwrap_or(0.0).max(0.0),
+            None => el.parent.map_or(0.0, |p| starts[p]),
+        };
+        starts.push(start);
+    }
+    starts
 }
 
 const VOID: &[&str] = &[
@@ -246,9 +324,20 @@ const VOID: &[&str] = &[
 fn parse_elements(html: &str, low: &str) -> Option<Vec<Element>> {
     let mut elements: Vec<Element> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
+    // How many of each tag are open: a closing tag with none open is
+    // skipped without scanning the stack (every scan then pops what it
+    // passes, so closing tags cost O(elements) in total).
+    let mut open: HashMap<String, usize> = HashMap::new();
     website::for_each_tag(html, low, |name, attributes| {
         if let Some(closing) = name.strip_prefix('/') {
-            if let Some(at) = stack.iter().rposition(|&i| elements[i].tag == closing) {
+            if open.get(closing).copied().unwrap_or(0) > 0
+                && let Some(at) = stack.iter().rposition(|&i| elements[i].tag == closing)
+            {
+                for &i in &stack[at..] {
+                    if let Some(count) = open.get_mut(&elements[i].tag) {
+                        *count -= 1;
+                    }
+                }
                 stack.truncate(at);
             }
             return Ok(());
@@ -263,15 +352,19 @@ fn parse_elements(html: &str, low: &str) -> Option<Vec<Element>> {
             return Err("too many elements".into());
         }
         let parent = stack.last().copied();
+        let classes: Vec<String> = value("class")
+            .unwrap_or_default()
+            .split_ascii_whitespace()
+            .map(str::to_string)
+            .collect();
+        let style = value("style").map(|s| parse_decls(&s)).unwrap_or_default();
         let element = Element {
             tag: name.to_string(),
             id: value("id").unwrap_or_default(),
-            classes: value("class")
-                .unwrap_or_default()
-                .split_ascii_whitespace()
-                .map(str::to_string)
-                .collect(),
-            style: value("style").map(|s| parse_decls(&s)).unwrap_or_default(),
+            class_set: classes.iter().cloned().collect(),
+            classes,
+            anims: style.iter().filter_map(AnimDecl::parse).collect(),
+            style,
             start: value("data-start"),
             duration: value("data-duration"),
             is_root: value("data-composition-id").is_some(),
@@ -279,7 +372,11 @@ fn parse_elements(html: &str, low: &str) -> Option<Vec<Element>> {
             ..Element::default()
         };
         if element.start.is_some() {
-            for &i in &stack {
+            // An ancestor already marked had all ITS ancestors marked then.
+            for &i in stack.iter().rev() {
+                if elements[i].timed_descendant {
+                    break;
+                }
                 elements[i].timed_descendant = true;
             }
         }
@@ -289,6 +386,7 @@ fn parse_elements(html: &str, low: &str) -> Option<Vec<Element>> {
         elements.push(element);
         if !VOID.contains(&name) {
             stack.push(elements.len() - 1);
+            *open.entry(name.to_string()).or_default() += 1;
         }
         Ok(())
     })
@@ -330,7 +428,7 @@ fn block(css: &str, open: usize) -> (&str, usize) {
     (&css[open + 1..], css.len())
 }
 
-fn parse_css(css: &str, out: &mut Css) {
+fn parse_css(css: &str, out: &mut Css, depth: usize) {
     let mut i = 0;
     while i < css.len() {
         let Some(open) = css[i..].find('{').map(|at| i + at) else {
@@ -346,18 +444,22 @@ fn parse_css(css: &str, out: &mut Css) {
                 .unwrap_or((at_rule, ""));
             if keyword.ends_with("keyframes") {
                 out.keyframes
-                    .insert(rest.trim().to_string(), parse_steps(body));
-            } else if matches!(keyword, "media" | "supports" | "container" | "layer") {
-                parse_css(body, out);
+                    .insert(rest.trim().to_string(), key_info(&parse_steps(body)));
+            } else if matches!(keyword, "media" | "supports" | "container" | "layer")
+                && depth < MAX_CSS_DEPTH
+            {
+                parse_css(body, out, depth + 1);
             }
         } else if !prelude.is_empty() {
+            let decls = parse_decls(body);
             out.rules.push(Rule {
                 selectors: split_top(prelude, ',')
                     .into_iter()
                     .map(parse_selector)
                     .filter(|s| !s.is_empty())
                     .collect(),
-                decls: parse_decls(body),
+                anims: decls.iter().filter_map(AnimDecl::parse).collect(),
+                decls,
             });
         }
         i = end;
@@ -546,13 +648,24 @@ fn parse_selector(selector: &str) -> Selector {
     parts
 }
 
+impl Compound {
+    /// What matching it against one element costs: its parts and the bytes
+    /// hashed or compared (never the element's own class count).
+    fn weight(&self) -> usize {
+        let text = self.tag.as_ref().map_or(0, String::len)
+            + self.ids.iter().map(String::len).sum::<usize>()
+            + self.classes.iter().map(String::len).sum::<usize>();
+        1 + self.ids.len() + self.classes.len() + text
+    }
+}
+
 fn compound_matches(c: &Compound, el: &Element, strict: bool) -> bool {
     if c.pseudo_element || (strict && c.other) {
         return false;
     }
     c.tag.as_ref().is_none_or(|t| *t == el.tag)
         && c.ids.iter().all(|id| *id == el.id)
-        && c.classes.iter().all(|cls| el.classes.contains(cls))
+        && c.classes.iter().all(|cls| el.class_set.contains(cls))
 }
 
 /// Which elements a rule applies to. Strict: the whole chain must match
@@ -625,13 +738,26 @@ impl Doc {
         out
     }
 
+    /// The parsed `animation*` declarations that apply (strict), in
+    /// cascade order.
+    fn anim_decls(&self, at: usize) -> Vec<&AnimDecl> {
+        let mut out: Vec<&AnimDecl> = self
+            .css
+            .rules
+            .iter()
+            .zip(&self.strict_hits)
+            .filter(|(_, hit)| hit[at])
+            .flat_map(|(rule, _)| rule.anims.iter())
+            .collect();
+        out.extend(self.elements[at].anims.iter());
+        out
+    }
+
     /// A rule that may apply (loose) but did not match strictly sets an
     /// animation property.
     fn animation_uncertain(&self, at: usize) -> bool {
         self.css.rules.iter().enumerate().any(|(r, rule)| {
-            self.loose_hits[r][at]
-                && !self.strict_hits[r][at]
-                && rule.decls.iter().any(|(p, _)| p.starts_with("animation"))
+            self.loose_hits[r][at] && !self.strict_hits[r][at] && !rule.anims.is_empty()
         })
     }
 
@@ -649,18 +775,6 @@ impl Doc {
             .rev()
             .find(|(p, _)| p == prop)
             .map(|(_, v)| v.clone())
-    }
-
-    /// Start (scene seconds) of the closest timed ancestor-or-self.
-    fn clip_start(&self, at: usize) -> f64 {
-        let mut cursor = Some(at);
-        while let Some(i) = cursor {
-            if let Some(start) = &self.elements[i].start {
-                return start.parse::<f64>().unwrap_or(0.0).max(0.0);
-            }
-            cursor = self.elements[i].parent;
-        }
-        0.0
     }
 
     fn label(&self, at: usize) -> String {
@@ -700,7 +814,7 @@ struct Layer {
     fill: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Animation {
     names: Vec<String>,
     durations: Vec<f64>,
@@ -745,31 +859,88 @@ fn parse_time(token: &str) -> Option<f64> {
     token.strip_suffix('s')?.parse::<f64>().ok()
 }
 
-impl Animation {
-    fn from_decls(decls: &[&(String, String)]) -> Self {
-        let mut a = Animation::default();
-        for (prop, value) in decls {
-            let layers = || split_top(value, ',').into_iter().map(str::trim);
-            match prop.as_str() {
-                "animation" => {
-                    a = Animation::default();
-                    for layer in layers() {
-                        a.push_shorthand(layer);
-                    }
+/// An animation name the lint follows: up to `MAX_NAME` bytes (longer is
+/// "unknown", the empty name, which no check uses).
+fn bounded_name(name: &str) -> String {
+    if name.len() > MAX_NAME {
+        String::new()
+    } else {
+        name.to_string()
+    }
+}
+
+/// One `animation*` declaration, parsed once where it is written (a rule or
+/// a style attribute), never per element.
+#[derive(Debug, Clone)]
+enum AnimDecl {
+    Shorthand(Animation),
+    Names(Vec<String>),
+    Durations(Vec<f64>),
+    Delays(Vec<f64>),
+    Iterations(Vec<f64>),
+    Fills(Vec<String>),
+}
+
+impl AnimDecl {
+    fn parse((prop, value): &(String, String)) -> Option<Self> {
+        let layers = || split_top(value, ',').into_iter().map(str::trim);
+        Some(match prop.as_str() {
+            "animation" => {
+                let mut a = Animation::default();
+                for layer in layers() {
+                    a.push_shorthand(layer);
                 }
-                "animation-name" => a.names = layers().map(str::to_string).collect(),
-                "animation-duration" => {
-                    a.durations = layers().map(|t| parse_time(t).unwrap_or(0.0)).collect()
-                }
-                "animation-delay" => {
-                    a.delays = layers().map(|t| parse_time(t).unwrap_or(0.0)).collect()
-                }
-                "animation-iteration-count" => {
-                    a.iterations = layers().map(iteration_count).collect()
-                }
-                "animation-fill-mode" => a.fills = layers().map(str::to_string).collect(),
-                _ => {}
+                AnimDecl::Shorthand(a)
             }
+            "animation-name" => AnimDecl::Names(layers().map(bounded_name).collect()),
+            "animation-duration" => {
+                AnimDecl::Durations(layers().map(|t| parse_time(t).unwrap_or(0.0)).collect())
+            }
+            "animation-delay" => {
+                AnimDecl::Delays(layers().map(|t| parse_time(t).unwrap_or(0.0)).collect())
+            }
+            "animation-iteration-count" => {
+                AnimDecl::Iterations(layers().map(iteration_count).collect())
+            }
+            "animation-fill-mode" => AnimDecl::Fills(
+                layers()
+                    .map(|f| FILL_WORDS.iter().find(|w| **w == f).unwrap_or(&"none"))
+                    .map(|f| f.to_string())
+                    .collect(),
+            ),
+            _ => return None,
+        })
+    }
+}
+
+impl Animation {
+    /// The animation the cascade leaves: the last shorthand, then the LAST
+    /// of each longhand after it (earlier ones are overridden). At most six
+    /// small copies per element, however many declarations apply.
+    fn resolve(decls: &[&AnimDecl]) -> Self {
+        let last_shorthand = decls
+            .iter()
+            .rposition(|d| matches!(d, AnimDecl::Shorthand(_)));
+        let mut a = match last_shorthand.map(|i| decls[i]) {
+            Some(AnimDecl::Shorthand(a)) => a.clone(),
+            _ => Animation::default(),
+        };
+        let after = &decls[last_shorthand.map_or(0, |i| i + 1)..];
+        let last = |pick: fn(&AnimDecl) -> bool| after.iter().rev().find(|d| pick(d));
+        if let Some(AnimDecl::Names(v)) = last(|d| matches!(d, AnimDecl::Names(_))) {
+            a.names = v.clone();
+        }
+        if let Some(AnimDecl::Durations(v)) = last(|d| matches!(d, AnimDecl::Durations(_))) {
+            a.durations = v.clone();
+        }
+        if let Some(AnimDecl::Delays(v)) = last(|d| matches!(d, AnimDecl::Delays(_))) {
+            a.delays = v.clone();
+        }
+        if let Some(AnimDecl::Iterations(v)) = last(|d| matches!(d, AnimDecl::Iterations(_))) {
+            a.iterations = v.clone();
+        }
+        if let Some(AnimDecl::Fills(v)) = last(|d| matches!(d, AnimDecl::Fills(_))) {
+            a.fills = v.clone();
         }
         a
     }
@@ -789,7 +960,7 @@ impl Animation {
             } else if token == "none" {
                 saw_none = true;
             } else if !TIMING_WORDS.contains(&token) && !token.contains('(') {
-                name = Some(token.to_string());
+                name = Some(bounded_name(token));
             }
         }
         let name = name.unwrap_or_else(|| if saw_none { "none" } else { "" }.to_string());
@@ -829,25 +1000,13 @@ impl Animation {
 
 fn opacity(value: &str) -> Option<f64> {
     let value = value.trim();
+    if value.len() > 32 {
+        return None;
+    }
     match value.strip_suffix('%') {
         Some(pct) => pct.trim().parse::<f64>().ok().map(|v| v / 100.0),
         None => value.parse().ok(),
     }
-}
-
-/// `(first step, last step)` of a keyframes rule, by offset.
-/// Declarations borrowed from the parsed CSS.
-type DeclRefs<'a> = Vec<&'a (String, String)>;
-
-fn edge_steps(steps: &[Step]) -> (DeclRefs<'_>, DeclRefs<'_>) {
-    let at = |offsets: &[&str]| -> DeclRefs<'_> {
-        steps
-            .iter()
-            .filter(|(sel, _)| sel.split(',').any(|s| offsets.contains(&s.trim())))
-            .flat_map(|(_, decls)| decls.iter())
-            .collect()
-    };
-    (at(&["from", "0%"]), at(&["to", "100%"]))
 }
 
 fn named(labels: &[String]) -> String {
@@ -893,20 +1052,13 @@ fn in_flow_clips(scene: &str, doc: &Doc, duration: f64) -> Option<String> {
 }
 
 fn layout_keyframes(scene: &str, doc: &Doc) -> Vec<String> {
-    let used: std::collections::HashSet<&String> =
-        doc.layers.iter().flatten().map(|l| &l.name).collect();
+    let used: HashSet<&String> = doc.layers.iter().flatten().map(|l| &l.name).collect();
     doc.css
         .keyframes
         .iter()
         .filter(|(name, _)| used.contains(*name))
-        .filter_map(|(name, steps)| {
-            let mut props: Vec<&str> = steps
-                .iter()
-                .flat_map(|(_, decls)| decls.iter().map(|(p, _)| p.as_str()))
-                .filter(|p| LAYOUT_PROPS.contains(p))
-                .collect();
-            props.sort_unstable();
-            props.dedup();
+        .filter_map(|(name, info)| {
+            let props = &info.layout_props;
             (!props.is_empty()).then(|| {
                 format!(
                     "scene \"{scene}\": @keyframes {} animates {}, which re-lays out the scene on every frame (text re-wraps, neighbours move). Animate transform (translate, scale) and opacity instead",
@@ -921,7 +1073,7 @@ fn layout_keyframes(scene: &str, doc: &Doc) -> Vec<String> {
 fn cut_by_scene_end(scene: &str, doc: &Doc, duration: f64) -> Option<String> {
     let mut labels = Vec::new();
     for at in 0..doc.elements.len() {
-        let start = doc.clip_start(at);
+        let start = doc.starts[at];
         // A loop (`infinite`) never "ends": it is not cut, it just runs.
         let end = doc.layers[at]
             .iter()
@@ -959,25 +1111,17 @@ fn popping_fills(scene: &str, doc: &Doc) -> Option<String> {
         let resting_opacity = doc.resting(at, "opacity").and_then(|v| opacity(&v));
         let hidden_at_rest = resting_opacity.is_some_and(|o| o <= 0.01);
         for layer in &doc.layers[at] {
-            let Some(steps) = doc.css.keyframes.get(&layer.name) else {
+            let Some(info) = doc.css.keyframes.get(&layer.name) else {
                 continue;
             };
-            let (first, last) = edge_steps(steps);
             let backwards = matches!(layer.fill.as_str(), "backwards" | "both");
             let forwards = matches!(layer.fill.as_str(), "forwards" | "both");
             // Delayed, not filled backwards: rests visibly, then snaps to
             // its first keyframe when the delay ends.
-            let first_moves = first.iter().any(|(p, v)| {
-                TRANSFORM_PROPS.contains(&p.as_str())
-                    || (p == "opacity" && opacity(v).is_some_and(|o| o < 0.99))
-            });
-            let snaps_in = layer.delay > EPS && !backwards && !hidden_at_rest && first_moves;
+            let snaps_in = layer.delay > EPS && !backwards && !hidden_at_rest && info.first_moves;
             // Hidden at rest, shown by the animation, not filled forwards:
             // vanishes when the entrance ends.
-            let shows = last
-                .iter()
-                .any(|(p, v)| p == "opacity" && opacity(v).is_some_and(|o| o > 0.01));
-            let vanishes = hidden_at_rest && !forwards && shows;
+            let vanishes = hidden_at_rest && !forwards && info.shows;
             if snaps_in || vanishes {
                 labels.push(doc.label(at));
                 break;
@@ -1278,7 +1422,9 @@ mod tests {
 
     #[test]
     fn huge_layer_lists_and_declaration_floods_are_bounded() {
-        let elements = "<p class=\"s-p\">a</p>".repeat(1999);
+        // Just under MAX_ELEMENTS with the template and root, so every case
+        // below is stopped by the budget it is about, not the element cap.
+        let elements = "<p class=\"s-p\">a</p>".repeat(MAX_ELEMENTS - 10);
         let check = |css: &str, body: &str| {
             let started = std::time::Instant::now();
             let warnings = lint_scene("s", &scene(css, body), 4.0);
@@ -1310,6 +1456,57 @@ mod tests {
         assert_eq!(
             check(&format!("p{{{flood}}}"), &elements),
             Vec::<String>::new()
+        );
+        // A @keyframes with 120k steps used 32 times on every <p> (was 73 s):
+        // its steps are read once, not per element and layer.
+        let steps = "a{}".repeat(120_000);
+        let uses = vec!["k 1s .5s"; MAX_LAYERS].join(",");
+        let css = format!(
+            "@keyframes k{{{steps}from{{opacity:0}}to{{opacity:1}}}}p{{opacity:0;animation:{uses}}}"
+        );
+        let w = check(&css, &elements);
+        assert!(w.iter().any(|w| w.contains("pops")), "{w:?}");
+        // Thousands of declarations inside keyframe steps: read once.
+        let decls = "width:1px;".repeat(30_000);
+        let css = format!("@keyframes k{{from{{{decls}}}}}p{{animation:{uses}}}");
+        assert!(
+            check(&css, &elements)
+                .iter()
+                .any(|w| w.contains("animates width"))
+        );
+        // Many longhands after a shorthand on every element: only the last
+        // of each kind is copied.
+        let longhands = "animation-delay:.1s,.2s,.3s;".repeat(5_000);
+        check(
+            &format!("@keyframes k{{from{{opacity:0}}}}p{{animation:{uses};{longhands}}}"),
+            &elements[..20_000],
+        );
+        // Deeply nested @media (each level re-scans its body): capped.
+        let deep = format!(
+            "{}p{{position:absolute}}{}",
+            "@media x{".repeat(50_000),
+            "}".repeat(50_000)
+        );
+        check(&deep, &elements);
+        // Closing tags for elements that are not open, under a deep stack.
+        let body = format!("{}{}", "<div>".repeat(1500), "</span>".repeat(60_000));
+        check("", &body);
+        // A long class list on every element, and a compound with many
+        // classes: matching hashes the compound's classes, not the list.
+        let classes = (0..400)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let body = format!("<p class=\"{classes}\">a</p>").repeat(500);
+        let compound = (0..400).map(|i| format!(".c{i}")).collect::<String>();
+        check(&format!("{compound}{{color:red}}"), &body);
+        // Huge values and names are read once and ignored.
+        let huge = "0".repeat(200_000);
+        check(&format!("p{{opacity:{huge}}}"), &elements);
+        let name = "n".repeat(200_000);
+        check(
+            &format!("@keyframes {name}{{from{{width:0}}}}p{{animation:{name} 1s}}"),
+            &elements,
         );
         // Within the caps it still lints: MAX_LAYERS layers on every <p>.
         let ok = vec!["a 1s"; MAX_LAYERS].join(",");
