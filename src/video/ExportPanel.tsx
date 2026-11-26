@@ -639,7 +639,11 @@ export function ExportPanel({
             {t.video.layoutFixing(phrase(fix.status.aspects), fix.status.aspects.length, fix.status.started)}
           </p>
           {fix.status.round > 1 && <p className="video-hint">{t.video.layoutFixingRound(fix.status.round, MAX_EXPORT_FIX_ROUNDS)}</p>}
-          {fix.waitingIn && <p className="video-warn">{t.video.layoutFixWaitingIn(fix.waitingIn.title)}</p>}
+          {fix.waitingIn && (
+            <p className="video-warn" role="status">
+              {t.video.layoutFixWaitingIn(fix.waitingIn.title)}
+            </p>
+          )}
           {issueLines(fix.status.aspects, fix.status.report)}
           {exportingNow.length > 0 && <p className="video-hint">{t.video.layoutFixingOthers(phrase(exportingNow), exportingNow.length)}</p>}
           <div className="video-export-actions">

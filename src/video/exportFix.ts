@@ -67,15 +67,18 @@ export interface SentFix {
   conversationId: number | null;
 }
 
-/// Hand the fix request to the assistant; null when it could not be.
-export type ExportFixSender = (request: ExportFixRequest) => Promise<SentFix | null>;
+/// Hand the fix request to the assistant; null when it could not be,
+/// "held" when the target conversation's queue is held by the user (a Stop
+/// or a failed send: an automatic request never releases it).
+export type ExportFixSender = (request: ExportFixRequest) => Promise<SentFix | "held" | null>;
 
 /// Why a fix ended without exporting: `rounds` still cut off after the last
 /// fix (or the fix broke the own format); `unsent` the request could not
-/// reach the assistant; `removed` it left the chat queue unsent; `held` the
-/// chat queue was paused (a Stop or a failed send); `stopped` its turn was
-/// stopped or failed.
-export type StuckReason = "rounds" | "unsent" | "removed" | "held" | "stopped";
+/// reach the assistant; `removed` it left the chat queue unsent; `deleted`
+/// its conversation was deleted; `held` the chat queue was paused (a Stop
+/// or a failed send); `stopped` its turn was stopped or failed.
+export type StuckReason = "rounds" | "unsent" | "removed" | "deleted" | "held" | "stopped";
+export type DropReason = "removed" | "deleted" | "held";
 
 export type FixStatus =
   | { kind: "idle" }
@@ -223,7 +226,7 @@ export class ExportFixFlow {
   /// to stop in the chat (the panel says so).
   cancel(): void {
     const status = this.snapshot.status;
-    const midTurn = (status.kind === "fixing" && status.started) || status.kind === "checking";
+    const midTurn = status.kind === "fixing" && status.started;
     this.stopRun();
     this.update({ status: IDLE, canceledMidTurn: midTurn });
   }
@@ -262,7 +265,7 @@ export class ExportFixFlow {
 
   /// Request `fixId` left the chat queue without being sent (or came back
   /// to it, held, after its send failed).
-  dropped(fixId: number, why: "removed" | "held"): void {
+  dropped(fixId: number, why: DropReason): void {
     const status = this.snapshot.status;
     if (status.kind !== "fixing" || status.fixId !== fixId) return;
     this.stopRun();
@@ -303,7 +306,7 @@ export class ExportFixFlow {
     waiting.set(fixId, this);
     this.update({ status: { kind: "fixing", aspects, report, round, fixId, started: false, conversationId: null } });
     const sender = this.deps.sender();
-    let sent: SentFix | null = null;
+    let sent: SentFix | "held" | null = null;
     try {
       sent = sender
         ? await sender({ fixId, projectId: this.projectId, title: this.title, own: this.snapshot.own, aspects, report, round })
@@ -313,12 +316,12 @@ export class ExportFixFlow {
     }
     if (this.currentFix !== fixId) {
       // Canceled (or overtaken) while it was handed over.
-      sent?.withdraw();
+      if (sent && sent !== "held") sent.withdraw();
       return;
     }
-    if (!sent) {
+    if (!sent || sent === "held") {
       this.stopRun();
-      this.update({ status: { kind: "stuck", aspects, report, why: "unsent" } });
+      this.update({ status: { kind: "stuck", aspects, report, why: sent === "held" ? "held" : "unsent" } });
       return;
     }
     this.withdraw = sent.withdraw;
@@ -426,11 +429,22 @@ export function exportFixTurnEnded(conversationId: number, reason: string | unde
 }
 
 /// App: fix request `fixId` left the chat queue without being sent.
-export function exportFixDropped(fixId: number, why: "removed" | "held"): void {
+export function exportFixDropped(fixId: number, why: DropReason): void {
   const flow = waiting.get(fixId);
   if (!flow) return;
   waiting.delete(fixId);
   flow.dropped(fixId, why);
+}
+
+/// App: the chat went away (sign-out, another profile or realm). Its
+/// conversation ids mean nothing to the next chat: every export still
+/// waiting on it ends ("the assistant did not finish"), and no turn of the
+/// next chat can drive it.
+export function exportFixChatClosed(): void {
+  const pending = new Set([...waiting.values(), ...bound.values()]);
+  waiting.clear();
+  bound.clear();
+  for (const flow of pending) flow.turnEnded("stopped");
 }
 
 const flows = new Map<string, ExportFixFlow>();

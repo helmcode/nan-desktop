@@ -416,4 +416,61 @@ describe("R-V1: videos in the shell", () => {
     expect(invokedWith("chat_send").length).toBe(0);
     expect(screen.queryByRole("region", { name: "Mensajes en cola" })).toBeNull();
   });
+
+  it("an export's fix request never releases a queue the user held with Stop", async () => {
+    resetTauri({ ...HANDLERS, video_export_start: () => new Promise(() => {}) });
+    render(
+      <I18nProvider initial="es">
+        <App />
+      </I18nProvider>,
+    );
+    await startReply();
+    const box = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "mi mensaje en cola" } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await act(async () => emit("chat://stopped", { conversation_id: 7 }));
+    const queue = await screen.findByRole("region", { name: "Mensajes en cola" });
+    expect(within(queue).getByRole("button", { name: "Enviar ahora" })).toBeTruthy();
+    const pane = await exportWithCutVertical();
+    expect((await within(pane).findByRole("alert")).textContent).toBe(
+      "El chat se detuvo o falló antes de enviar la petición para corregir el formato vertical (9:16), así que no se ha exportado.",
+    );
+    // Still held with the user's message only; nothing went out.
+    await act(async () => new Promise((r) => setTimeout(r, 50)));
+    const still = screen.getByRole("region", { name: "Mensajes en cola" });
+    expect(within(still).getByText("mi mensaje en cola")).toBeTruthy();
+    expect(within(still).getByRole("button", { name: "Enviar ahora" })).toBeTruthy();
+    expect(screen.queryByText(FIX_TEXT)).toBeNull();
+    expect(invokedWith("chat_send").length).toBe(1);
+  });
+
+  it("the generation's automatic fix never releases a queue the user held with Stop", async () => {
+    const cut = { scene: "intro", time: 1, kind: "clipped", element: '#intro-title "Hola"' };
+    layout.report = { "16:9": [cut] };
+    render(
+      <I18nProvider initial="es">
+        <App />
+      </I18nProvider>,
+    );
+    await startReply();
+    const box = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "mi mensaje en cola" } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await act(async () => emit("chat://stopped", { conversation_id: 7 }));
+    // A late video change and turn end for that conversation: checked, cut
+    // off, but the held queue is left alone.
+    await act(async () => emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo" }));
+    await act(async () => emit("chat://done", { conversation_id: 7, reason: "completed" }));
+    await act(async () => new Promise((r) => setTimeout(r, 50)));
+    expect(layout.calls).toEqual([["nan", PROJECT_ID, ["16:9"]]]);
+    const queue = screen.getByRole("region", { name: "Mensajes en cola" });
+    expect(within(queue).getByText("mi mensaje en cola")).toBeTruthy();
+    expect(within(queue).getByRole("button", { name: "Enviar ahora" })).toBeTruthy();
+    expect(screen.queryByText(/Revisión automática/)).toBeNull();
+    expect(invokedWith("chat_send").length).toBe(1);
+  });
 });

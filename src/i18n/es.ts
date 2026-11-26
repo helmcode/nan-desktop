@@ -628,10 +628,11 @@ export const es: Strings = {
     layoutFixed: (formats: string, count: number) =>
       `El asistente ha corregido ${formats} y se ${count === 1 ? "ha" : "han"} añadido a la exportación.`,
     layoutFixCanceledMidTurn: "Puede que el asistente siga editando el vídeo en el chat; puedes detenerlo allí.",
-    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "removed" | "held" | "stopped") => {
+    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "removed" | "deleted" | "held" | "stopped") => {
       const not = count === 1 ? "no se ha exportado" : "no se han exportado";
       if (why === "unsent") return `No se ha podido pedir al asistente que corrija ${formats}, así que ${not}.`;
       if (why === "removed") return `La petición para corregir ${formats} se quitó de la cola del chat, así que ${not}.`;
+      if (why === "deleted") return `Se borró la conversación donde esperaba la petición para corregir ${formats}, así que ${not}.`;
       if (why === "held") return `El chat se detuvo o falló antes de enviar la petición para corregir ${formats}, así que ${not}.`;
       if (why === "stopped") return `El asistente no ha terminado de corregir ${formats}, así que ${not}.`;
       return `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "sigue saliendo cortado" : "siguen saliendo cortados"} tras los cambios del asistente, así que ${not}.`;

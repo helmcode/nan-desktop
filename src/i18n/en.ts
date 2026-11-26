@@ -632,10 +632,11 @@ export const en = {
     layoutFixed: (formats: string, count: number) =>
       `The assistant fixed ${formats}; ${count === 1 ? "it was" : "they were"} added to the export.`,
     layoutFixCanceledMidTurn: "The assistant may keep editing the video in the chat; you can stop it there.",
-    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "removed" | "held" | "stopped") => {
+    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "removed" | "deleted" | "held" | "stopped") => {
       const not = count === 1 ? "it was not exported" : "they were not exported";
       if (why === "unsent") return `The fix for ${formats} could not be sent to the assistant, so ${not}.`;
       if (why === "removed") return `The request to fix ${formats} was taken out of the chat queue, so ${not}.`;
+      if (why === "deleted") return `The conversation where the request to fix ${formats} was waiting was deleted, so ${not}.`;
       if (why === "held") return `The chat was stopped or failed before the request to fix ${formats} went out, so ${not}.`;
       if (why === "stopped") return `The assistant did not finish fixing ${formats}, so ${not}.`;
       return `${formats.charAt(0).toUpperCase()}${formats.slice(1)} still ${count === 1 ? "comes" : "come"} out cut off after the assistant's changes, so ${not}.`;

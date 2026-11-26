@@ -8,6 +8,7 @@ import type { Aspect } from "./api";
 import {
   ExportFixFlow,
   MAX_EXPORT_FIX_ROUNDS,
+  exportFixChatClosed,
   exportFixDropped,
   exportFixFor,
   exportFixTurnEnded,
@@ -307,5 +308,39 @@ describe("ExportFixFlow", () => {
     expect(flow.getSnapshot().fixed).toEqual(["1:1"]);
     flow.reset();
     expect(flow.getSnapshot().fixed).toEqual([]);
+  });
+
+  it("a deleted conversation, or a held queue at hand-over, ends the wait with its reason", async () => {
+    const { flow, sent } = setup();
+    flow.start(START);
+    await settle();
+    exportFixDropped(sent[0].fixId, "deleted");
+    expect(flow.getSnapshot().status).toMatchObject({ kind: "stuck", why: "deleted" });
+    const held = setup([], async () => "held");
+    held.flow.start(START);
+    await settle();
+    expect(held.flow.getSnapshot().status).toMatchObject({ kind: "stuck", why: "held" });
+  });
+
+  it("the chat going away ends every export waiting on it; the next chat's turns cannot drive them", async () => {
+    const { flow, sent, checks } = setup([{ "9:16": [], "1:1": [] }]);
+    flow.start(START);
+    await settle();
+    exportFixTurnStarted(7, sent[0].fixId);
+    exportFixChatClosed();
+    expect(flow.getSnapshot().status).toMatchObject({ kind: "stuck", why: "stopped" });
+    exportFixTurnEnded(7, "completed");
+    await settle();
+    expect(checks).toEqual([]);
+  });
+
+  it("cancel during the re-check is not 'mid-turn' (the assistant is done)", async () => {
+    const { flow, sent, deps } = setup();
+    deps.check = () => new Promise<LayoutReport>(() => undefined);
+    flow.start(START);
+    await settle();
+    await fixTurn(sent);
+    flow.cancel();
+    expect(flow.getSnapshot().canceledMidTurn).toBe(false);
   });
 });

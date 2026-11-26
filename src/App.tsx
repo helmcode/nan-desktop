@@ -83,6 +83,7 @@ import { onVideoChanged, videoGet, videoList, type Aspect, type VideoAskContext 
 import { checkLayout, layoutProblems } from "./video/layoutCheck";
 import { LayoutAutoFix } from "./video/layoutAutoFix";
 import {
+  exportFixChatClosed,
   exportFixDropped,
   exportFixTurnEnded,
   exportFixTurnStarted,
@@ -860,6 +861,9 @@ function ChatShell({
     send: ({ conversationId, projectId, title, broken, report }) => {
       const strings = tRef.current.video;
       const formats = strings.formatsPhrase(...broken.map((aspect) => strings.aspectInline[aspect]));
+      // The user stopped that conversation on purpose: an automatic message
+      // never releases (nor joins) a held queue.
+      if (queueOf(queuesRef.current, conversationId).held) return;
       queueSeq.current += 1;
       const seq = queueSeq.current;
       // The visible text never quotes the (model-written) title: it rides
@@ -1772,6 +1776,7 @@ function ChatShell({
       attach.discardFor(conversationId);
       for (const item of queueOf(queuesRef.current, conversationId).items) {
         for (const file of item.attachments ?? []) void discardAttachment(file.id).catch(() => {});
+        if (item.exportFix) exportFixDropped(item.exportFix, "deleted");
       }
       setQueues((prev) => dropQueue(prev, conversationId));
       setSelections((prev) => {
@@ -2369,7 +2374,11 @@ function ChatShell({
         const text = strings.layoutFixText(phrase(aspects), phrase([own]));
         const context: VideoAskContext = { project_id: projectId, title, problems: layoutProblems(report, aspects) };
         const made = videoConversationRef.current.get(projectId);
-        const target = made !== undefined && !deletedConvsRef.current.has(made) ? made : activeConvRef.current;
+        const listed = made !== undefined && !deletedConvsRef.current.has(made) && conversationsRef.current.some((c) => c.id === made);
+        const target = listed ? made : activeConvRef.current;
+        // The user stopped that conversation on purpose: an automatic
+        // request never releases a held queue (their messages would go).
+        if (target !== null && queueOf(queuesRef.current, target).held) return "held";
         if (target !== null) {
           queueSeq.current += 1;
           const seq = queueSeq.current;
@@ -2381,6 +2390,21 @@ function ChatShell({
         const sent = await sendRef.current(text, false, undefined, context, true, true, fixId);
         return sent ? { withdraw: () => undefined, conversationId: null } : null;
       }),
+    [],
+  );
+  const conversationsRef = useRef(conversations);
+  useLayoutEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+  // This chat going away (sign-out, another profile or realm): its queues
+  // go with it, so every fix request still queued is lost, and no turn of
+  // another chat (same conversation ids) may drive those exports.
+  useEffect(
+    () => () => {
+      for (const [, queue] of queuesRef.current)
+        for (const message of queue.items) if (message.exportFix) exportFixDropped(message.exportFix, "removed");
+      exportFixChatClosed();
+    },
     [],
   );
   // The panel names the conversation a request waits in.
@@ -2404,7 +2428,10 @@ function ChatShell({
       }
     }
     for (const fixId of queuedFixesRef.current) {
-      if (!present.has(fixId) && !sentFixesRef.current.has(fixId)) exportFixDropped(fixId, "removed");
+      if (present.has(fixId)) continue;
+      // Taken out to be sent: its turn drives the export from here.
+      if (sentFixesRef.current.delete(fixId)) continue;
+      exportFixDropped(fixId, "removed");
     }
     queuedFixesRef.current = present;
     if (held.length > 0) setQueues((prev) => held.reduce((acc, [conversationId, id]) => removeQueued(acc, conversationId, id), prev));

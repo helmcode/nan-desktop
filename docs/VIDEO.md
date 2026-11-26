@@ -337,8 +337,16 @@ downloads by itself, while the own format is already exporting.
      conversation deleted ("taken out of the chat queue"); in a queue held
      after a Stop or a failed send it is also taken out of that queue, so it
      never goes out after the export gave up ("the chat was stopped or
-     failed"). The generation check (below) skips that turn: the flow
-     re-checks it itself.
+     failed"); a deleted conversation says so. An automatic message (this
+     request or the generation's fix) NEVER releases a queue the user held:
+     `enqueue` keeps `held` for `autoFix` messages, and both senders skip a
+     held queue (the export ends as "held"). The target conversation must
+     still be listed, else the one on screen is used. When the chat goes
+     away (sign-out, another profile or realm) queued requests count as
+     removed and every export waiting on that chat ends
+     (`exportFixChatClosed`), so another chat's turns (same conversation
+     ids) cannot drive them. The generation check (below) skips that turn:
+     the flow re-checks it itself.
   3. re-checks the fixed formats AND the own format, then queues every
      fixed format that fits (or could not be checked) and says "The
      assistant fixed ...; it was added to the export". While a format is

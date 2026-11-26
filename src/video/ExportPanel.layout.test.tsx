@@ -424,6 +424,20 @@ describe("ExportPanel: export on demand", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(
       "La petición para corregir el formato vertical (9:16) se quitó de la cola del chat, así que no se ha exportado.",
     );
+  });
+
+  it("a deleted conversation is named as the reason", async () => {
+    connectAssistant();
+    checkLayout.mockResolvedValueOnce({ "9:16": [cut("intro")] });
+    renderPanel();
+    pick("Vertical 9:16");
+    fireEvent.click(screen.getByRole("button", { name: "Exportar 2 MP4" }));
+    await screen.findByText(FIXING_VERTICAL);
+    await waitFor(() => expect(requests).toHaveLength(1));
+    act(() => exportFixDropped(requests[0].fixId, "deleted"));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Se borró la conversación donde esperaba la petición para corregir el formato vertical (9:16), así que no se ha exportado.",
+    );
     expect(screen.getByRole("button", { name: "Exportar igualmente" })).toBeTruthy();
     expect((screen.getByRole("button", { name: "Exportar 2 MP4" }) as HTMLButtonElement).disabled).toBe(true);
   });
@@ -434,7 +448,8 @@ describe("ExportPanel: export on demand", () => {
     renderPanel();
     pick("Vertical 9:16");
     fireEvent.click(screen.getByRole("button", { name: "Exportar 2 MP4" }));
-    expect(await screen.findByText("La petición espera en la conversación «Reel de verano»: se enviará cuando la abras.")).toBeTruthy();
+    const waitingLine = await screen.findByText("La petición espera en la conversación «Reel de verano»: se enviará cuando la abras.");
+    expect(waitingLine.getAttribute("role")).toBe("status");
     act(() => setExportFixScreen(3, () => "Reel de verano"));
     expect(screen.queryByText(/La petición espera/)).toBeNull();
   });
