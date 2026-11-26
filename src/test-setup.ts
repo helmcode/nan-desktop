@@ -14,3 +14,10 @@ const local: Storage = {
 };
 Object.defineProperty(window, "localStorage", { value: local, configurable: true });
 Object.defineProperty(window, "sessionStorage", { value: local, configurable: true });
+
+// CI runners (macOS and Windows above all) are often slower than a laptop: the
+// full App tests mount the whole shell, and testing-library's default 1 s for
+// findBy*/waitFor made them fail on timing alone. Waits that succeed are not
+// slowed down; only a wait that would fail takes longer to report it.
+import { configure } from "@testing-library/react";
+configure({ asyncUtilTimeout: 5000 });

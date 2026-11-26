@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.22 - 2026-11-26 - Videos sin tirones y formatos que se corrigen al exportar
 
 ### Changed
 - Formatos al exportar: el asistente prepara el video solo en el formato que pediste y ya no lo revisa en los tres formatos despues de cada respuesta. Al exportar, ese formato empieza a descargarse en seguida. Si eliges otro formato y algo saldria cortado, la app te avisa, el asistente lo corrige por su cuenta y ese formato se descarga solo cuando esta listo (como mucho dos intentos; si no lo consigue, puedes exportarlo igualmente o arreglarlo en el chat).
