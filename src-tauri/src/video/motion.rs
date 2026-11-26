@@ -45,6 +45,13 @@ const MAX_RULES: usize = 1000;
 /// Most compound-selector checks one scene may cost (each selector costs
 /// its compounds times the elements); above it the scene is not linted.
 const MAX_WORK: usize = 4_000_000;
+/// Most declarations (plus animation layers) the cascade may resolve over
+/// all elements; above it the scene is not linted (bounded time and memory:
+/// every resolved animation layer becomes a struct per element).
+const MAX_RESOLVED: usize = 1_000_000;
+/// Most comma-separated layers in one `animation*` declaration; more and
+/// the scene is not linted (no real scene stacks that many).
+const MAX_LAYERS: usize = 32;
 
 /// Properties whose animation re-lays out the scene (moves neighbours,
 /// re-wraps text). Positioning offsets (`left`, `top`) are not listed: on an
@@ -95,6 +102,14 @@ pub fn lint_scene(scene: &str, html: &str, duration: f64) -> Vec<String> {
     if css.rules.len() > MAX_RULES {
         return Vec::new();
     }
+    let inline = elements.iter().flat_map(|el| el.style.iter());
+    let all_decls = css.rules.iter().flat_map(|rule| rule.decls.iter());
+    if inline
+        .chain(all_decls)
+        .any(|decl| animation_layers(decl) > MAX_LAYERS)
+    {
+        return Vec::new();
+    }
     let work: usize = css
         .rules
         .iter()
@@ -104,16 +119,19 @@ pub fn lint_scene(scene: &str, html: &str, duration: f64) -> Vec<String> {
     if work > MAX_WORK {
         return Vec::new();
     }
-    let strict_hits = css
+    let strict_hits: Vec<Vec<bool>> = css
         .rules
         .iter()
         .map(|rule| rule_hits(rule, &elements, true))
         .collect();
-    let loose_hits = css
+    let loose_hits: Vec<Vec<bool>> = css
         .rules
         .iter()
         .map(|rule| rule_hits(rule, &elements, false))
         .collect();
+    if resolved_cost(&css, &elements, &strict_hits, &loose_hits) > MAX_RESOLVED {
+        return Vec::new();
+    }
     let mut doc = Doc {
         elements,
         css,
@@ -134,6 +152,42 @@ pub fn lint_scene(scene: &str, html: &str, duration: f64) -> Vec<String> {
     out.extend(cut_by_scene_end(scene, &doc, duration));
     out.extend(popping_fills(scene, &doc));
     out
+}
+
+/// Layers in an `animation*` declaration (0 for any other property).
+fn animation_layers((prop, value): &(String, String)) -> usize {
+    if prop.starts_with("animation") {
+        split_top(value, ',').len()
+    } else {
+        0
+    }
+}
+
+/// What resolving the cascade costs over all elements: every declaration a
+/// rule hands an element (strict and loose, the passes that copy them) plus
+/// every animation layer it parses, and the inline declarations.
+fn resolved_cost(
+    css: &Css,
+    elements: &[Element],
+    strict_hits: &[Vec<bool>],
+    loose_hits: &[Vec<bool>],
+) -> usize {
+    let mut cost = 0usize;
+    for (r, rule) in css.rules.iter().enumerate() {
+        let per_element = rule
+            .decls
+            .iter()
+            .map(|decl| 1 + animation_layers(decl))
+            .fold(0usize, usize::saturating_add);
+        let hits = strict_hits[r].iter().filter(|h| **h).count()
+            + loose_hits[r].iter().filter(|h| **h).count();
+        cost = cost.saturating_add(per_element.saturating_mul(hits));
+    }
+    elements
+        .iter()
+        .flat_map(|el| el.style.iter())
+        .map(|decl| 1 + animation_layers(decl))
+        .fold(cost, usize::saturating_add)
 }
 
 // ------------------------------------------------------------ model --
@@ -839,11 +893,12 @@ fn in_flow_clips(scene: &str, doc: &Doc, duration: f64) -> Option<String> {
 }
 
 fn layout_keyframes(scene: &str, doc: &Doc) -> Vec<String> {
-    let used: Vec<&String> = doc.layers.iter().flatten().map(|l| &l.name).collect();
+    let used: std::collections::HashSet<&String> =
+        doc.layers.iter().flatten().map(|l| &l.name).collect();
     doc.css
         .keyframes
         .iter()
-        .filter(|(name, _)| used.contains(name))
+        .filter(|(name, _)| used.contains(*name))
         .filter_map(|(name, steps)| {
             let mut props: Vec<&str> = steps
                 .iter()
@@ -1219,6 +1274,51 @@ mod tests {
             Vec::<String>::new()
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn huge_layer_lists_and_declaration_floods_are_bounded() {
+        let elements = "<p class=\"s-p\">a</p>".repeat(1999);
+        let check = |css: &str, body: &str| {
+            let started = std::time::Instant::now();
+            let warnings = lint_scene("s", &scene(css, body), 4.0);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "{:?}",
+                started.elapsed()
+            );
+            warnings
+        };
+        // 50k layers in one declaration (was 25 s and 11 GB): skipped.
+        let many = vec!["a 9s"; 50_000].join(",");
+        assert_eq!(
+            check(&format!("p{{animation:{many}}}"), &elements),
+            Vec::<String>::new()
+        );
+        // Also as a longhand and inline.
+        let names = vec!["a"; MAX_LAYERS + 1].join(",");
+        assert_eq!(
+            check(&format!("p{{animation-name:{names}}}"), &elements),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            check("", &format!("<p style=\"animation:{names}\">a</p>")),
+            Vec::<String>::new()
+        );
+        // 100k plain declarations handed to 1999 elements: over budget.
+        let flood = "b:c;".repeat(100_000);
+        assert_eq!(
+            check(&format!("p{{{flood}}}"), &elements),
+            Vec::<String>::new()
+        );
+        // Within the caps it still lints: MAX_LAYERS layers on every <p>.
+        let ok = vec!["a 1s"; MAX_LAYERS].join(",");
+        let css = format!("@keyframes a{{from{{width:0}}to{{width:1px}}}}.s-p{{animation:{ok}}}");
+        let w = check(&css, &"<p class=\"s-p\">a</p>".repeat(500));
+        assert!(
+            w.iter().any(|w| w.contains("@keyframes a animates width")),
+            "{w:?}"
+        );
     }
 
     #[test]
