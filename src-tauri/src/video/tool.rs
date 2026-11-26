@@ -101,9 +101,9 @@ boxes and images (object-fit: contain), overflow-wrap: anywhere on long \
 words; no text wider than the narrowest canvas (1080 px). For a different \
 arrangement per shape use @media (max-aspect-ratio: 3/4) for vertical and \
 (min-aspect-ratio: 3/4) and (max-aspect-ratio: 5/4) for square. When a turn \
-creates or changes a video, the app checks it in the three formats and, if \
-something is cut off, sends you the findings to fix: change only the layout \
-it names.\n\
+creates or changes a video, the app checks it in its own format; when the \
+user exports another format, the app checks that one too. If something is \
+cut off, it sends you the findings to fix: change only the layout it names.\n\
 - Keep it readable and bold: big type, high contrast, generous margins (safe \
 area), one idea per scene, 2 to 8 seconds per scene, a clear final scene.\n\
 - If the tool answers ok:false, fix exactly what it says and call it again. If it \

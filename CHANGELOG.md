@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Formatos al exportar: el asistente prepara el video solo en el formato que pediste y ya no lo revisa en los tres formatos despues de cada respuesta. Al exportar, ese formato empieza a descargarse en seguida. Si eliges otro formato y algo saldria cortado, la app te avisa, el asistente lo corrige por su cuenta y ese formato se descarga solo cuando esta listo (como mucho dos intentos; si no lo consigue, puedes exportarlo igualmente o arreglarlo en el chat).
+
+### Fixed
+- Videos con tirones: los textos que aparecian uno a uno hacian saltar el resto de la escena en cada entrada. El asistente ahora monta cada escena sobre un escenario fijo y anima solo posicion y transparencia, y la app le avisa si un video tiene movimientos que darian saltos o se cortarian antes de terminar.
+
 ## 0.2.21 - 2026-11-26 - Videos que se ven bien en todos los formatos
 
 ### Changed
