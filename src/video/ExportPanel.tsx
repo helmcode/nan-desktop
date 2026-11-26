@@ -128,15 +128,23 @@ export function ExportPanel({
   // The gate's buttons go away when used: the keyboard lands on the Export
   // button, or (while it is disabled) a queue control, or the heading;
   // never on <body>. Resolved after the render that removed them.
-  const refocus = useRef(false);
+  // `awaitQueue` ("Export anyway"): the queue fills a render or two after
+  // the gate goes away, so the heading fallback waits a few renders for a
+  // queue control instead of grabbing the focus first.
+  const refocus = useRef<false | { awaitQueue: number }>(false);
   useEffect(() => {
-    if (!refocus.current) return;
-    refocus.current = false;
-    const target =
+    const pending = refocus.current;
+    if (!pending) return;
+    const control =
       (exportButton.current && !exportButton.current.disabled ? exportButton.current : null) ??
       queueList.current?.querySelector<HTMLButtonElement>("button:not(:disabled)") ??
-      heading.current;
-    target?.focus();
+      null;
+    if (!control && pending.awaitQueue > 0) {
+      refocus.current = { awaitQueue: pending.awaitQueue - 1 };
+      return;
+    }
+    refocus.current = false;
+    (control ?? heading.current)?.focus();
   });
   // A changed video: an earlier verdict no longer applies.
   useEffect(() => {
@@ -278,13 +286,13 @@ export function ExportPanel({
   const cancelCheck = () => {
     checkAbort.current?.abort();
     checkAbort.current = null;
-    refocus.current = true;
+    refocus.current = { awaitQueue: 0 };
     setGate({ kind: "idle" });
   };
 
   const exportAnyway = () => {
     if (gate.kind !== "broken") return;
-    refocus.current = true;
+    refocus.current = { awaitQueue: 5 };
     setGate({ kind: "idle" });
     queue.enqueue(gate.aspects, gate.quality);
   };
@@ -294,7 +302,7 @@ export function ExportPanel({
     const formats = t.video.formatsPhrase(...gate.aspects.map((aspect) => t.video.aspectInline[aspect]));
     // Stays sensible when the panel stays on screen (the side panel); the
     // app takes the keyboard to the chat when it switches to it.
-    refocus.current = true;
+    refocus.current = { awaitQueue: 0 };
     setGate({ kind: "idle" });
     onFixLayout(t.video.layoutFixText(formats), {
       project_id: project.id,
