@@ -27,6 +27,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use super::library::{self, Change};
+use super::motion;
 use super::project::{self, Aspect, AudioTrack, Scene, Variable, VariableKind, VideoMeta};
 use crate::tools::Rejection;
 
@@ -52,13 +53,25 @@ data-composition-id=\"<scene-id>\" data-width=\"W\" data-height=\"H\"> and its \
 content. Size the root with position:absolute; inset:0. Canvas: 1920x1080 for 16:9, \
 1080x1920 for 9:16, 1080x1080 for 1:1. Prefix every id and class with the scene id \
 (#intro-title) so ids stay unique across scenes.\n\
-- Timing: every timed element has class=\"clip\" plus data-start and data-duration \
-in seconds, local to the scene; a scene lasts its duration (set in the scenes list). \
-An element shows over [start, start+duration).\n\
-- Animate with CSS @keyframes (or the Web Animations API with fill:\"both\" then \
-pause()). Put the animation on a CHILD of a .clip, not on the .clip itself; \
-animation-delay counts from the clip's data-start; use animation-fill-mode: both and \
-a finite iteration count. Animate transform and opacity. Never use GSAP, \
+- Timing: a scene lasts its duration (set in the scenes list). Put its content in \
+ONE stage, <div id=\"<scene>-stage\" class=\"clip <scene>-stage\" data-start=\"0\" \
+data-duration=\"<the scene's duration>\"> with position:absolute; inset:0, which holds \
+the layout. A .clip shows over [data-start, data-start+data-duration), seconds local \
+to the scene, and outside that window a .clip in the page flow takes NO space: a \
+.clip per line that appears or ends mid-scene makes everything around it jump. \
+Never wrap the lines of a layout in their own .clip; stagger them with \
+animation-delay on the stage's children (they keep their place while invisible). \
+Use more .clip elements only for position:absolute overlays.\n\
+- Motion: animate with CSS @keyframes (or the Web Animations API with fill:\"both\" \
+then pause()). Put each animation on the element that moves (a child of the \
+stage), never on the .clip itself; one entrance per element. animation-delay \
+counts from the clip's data-start; always animation-fill-mode: both (without it a \
+delayed element shows before its entrance, or vanishes after it) and a finite \
+iteration count. Animate only transform and opacity, never width, height, margin, \
+padding or font-size (that re-lays out the scene on every frame: text re-wraps, \
+neighbours move). Entrances 0.4 to 0.8 s, ease-out, 0.1 to 0.3 s apart, all \
+finished at least 0.5 s before the scene ends (data-start + delay + duration). \
+Never use GSAP, \
 Date.now, Math.random (use a seeded generator), timers, requestAnimationFrame, \
 fetch or anything that depends on the wall clock: the film must look the same \
 every time it is rendered.\n\
@@ -81,7 +94,7 @@ Images: call generate_image first, then pass its returned path in images \
 - Every video must work in ALL THREE formats: the user can export the same \
 project as 16:9, 9:16 and 1:1 at once, which only changes the canvas size. Lay \
 each scene out to fit any canvas: center content with flexbox or grid inside \
-the root and a padding of at least 6% (the safe area); size type and spacing \
+the stage and a padding of at least 6% (the safe area); size type and spacing \
 with vmin or clamp() (font-size: clamp(32px, 7vmin, 120px)), never fixed \
 pixel positions or widths that assume one shape; max-width: 100% on text \
 boxes and images (object-fit: contain), overflow-wrap: anywhere on long \
@@ -93,7 +106,8 @@ something is cut off, sends you the findings to fix: change only the layout \
 it names.\n\
 - Keep it readable and bold: big type, high contrast, generous margins (safe \
 area), one idea per scene, 2 to 8 seconds per scene, a clear final scene.\n\
-- If the tool answers ok:false, fix exactly what it says and call it again.";
+- If the tool answers ok:false, fix exactly what it says and call it again. If it \
+answers ok:true with warnings, fix them with edit_video before you finish.";
 
 // ------------------------------------------------------------- args --
 
@@ -656,6 +670,7 @@ where
             project::fmt_seconds(meta.duration())
         ));
     }
+    warnings.extend(motion_warnings(&dir, &plan, &meta));
     let scenes: Vec<_> = meta
         .scenes
         .iter()
@@ -676,6 +691,36 @@ where
             "note": "The video is open in the preview. The user exports the MP4 from there.",
         }),
     ))
+}
+
+/// The motion lint (`video::motion`) of every scene this call wrote or
+/// retimed, against its duration now; untouched scenes are not repeated.
+fn motion_warnings(dir: &Path, plan: &Plan, meta: &VideoMeta) -> Vec<String> {
+    let retimed = |id: &str| {
+        plan.edit
+            .scenes
+            .iter()
+            .any(|(s, _, duration)| s == id && duration.is_some())
+    };
+    let mut out = Vec::new();
+    for scene in &meta.scenes {
+        let written = plan.scenes.iter().find(|(s, _)| *s == scene.id);
+        let html = match written {
+            Some((_, html)) => Some(html.clone()),
+            None if retimed(&scene.id) => library::read_text(
+                dir,
+                &format!("compositions/{}.html", scene.id),
+                project::MAX_SCENE_BYTES as u64,
+            )
+            .ok()
+            .flatten(),
+            None => None,
+        };
+        if let Some(html) = html {
+            out.extend(motion::lint_scene(&scene.id, &html, scene.duration));
+        }
+    }
+    out
 }
 
 /// The tool result for a failure, worded for the model.
@@ -954,6 +999,44 @@ mod tests {
     }
 
     #[test]
+    fn motion_problems_come_back_as_warnings_not_errors() {
+        let (_tmp, realm) = realm();
+        let spoken = std::sync::Mutex::new(Vec::new());
+        // One in-flow .clip per line (the tester's video): written, but the
+        // model is told why it will jump.
+        let jumpy = "<template id=\"a-template\"><style>#root{position:absolute;inset:0;display:flex;flex-direction:column}\
+            .a-line{animation:a-in .6s ease-out both}@keyframes a-in{from{opacity:0}to{opacity:1}}</style>\
+            <div id=\"root\" data-composition-id=\"a\" data-width=\"1920\" data-height=\"1080\">\
+            <div class=\"clip\" data-start=\"0\" data-duration=\"3\"><p class=\"a-line\">one</p></div>\
+            <div class=\"clip\" data-start=\"1\" data-duration=\"2\"><p class=\"a-line\">two</p></div>\
+            </div></template>";
+        let args = serde_json::json!({
+            "title": "x", "aspect": "16:9",
+            "scenes": [
+                { "id": "a", "duration": 3, "html": jumpy },
+                { "id": "b", "duration": 2, "html": scene_html("b") }
+            ]
+        });
+        let (id, result) = go(&realm, parse_create(&args.to_string()).unwrap(), &spoken).unwrap();
+        assert_eq!(result["ok"], true);
+        let warnings = result["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].as_str().unwrap().starts_with("scene \"a\":"));
+        assert!(warnings[0].as_str().unwrap().contains("jump"));
+        // Retiming a scene re-checks it from disk: the entrance of .a-line
+        // in the clip at 1 s now outlasts a 1.2 s scene.
+        let edit =
+            serde_json::json!({ "project_id": id, "scenes": [{ "id": "a", "duration": 1.2 }] });
+        let (_, result) = go(&realm, parse_edit(&edit.to_string()).unwrap(), &spoken).unwrap();
+        let text = result["warnings"].to_string();
+        assert!(text.contains("lasts 1.2 s"), "{text}");
+        // Untouched scenes are not reported again.
+        let edit = serde_json::json!({ "project_id": id, "title": "y" });
+        let (_, result) = go(&realm, parse_edit(&edit.to_string()).unwrap(), &spoken).unwrap();
+        assert_eq!(result["warnings"], serde_json::json!([]));
+    }
+
+    #[test]
     fn wav_length_comes_from_the_header() {
         assert_eq!(wav_seconds(&wav(3)), Some(3.0));
         assert_eq!(wav_seconds(b"RIFF"), None);
@@ -974,9 +1057,19 @@ mod tests {
             "edit_video",
             "<template id=",
             "data-composition-id",
-            "class=\"clip\"",
+            "ONE stage",
+            "class=\"clip <scene>-stage\"",
             "data-start",
+            "takes NO space",
+            "Never wrap the lines of a layout in their own .clip",
+            "animation-delay",
             "CSS @keyframes",
+            "never on the .clip itself",
+            "animation-fill-mode: both",
+            "Animate only transform and opacity",
+            "never width, height, margin",
+            "before the scene ends",
+            "warnings",
             "Never use GSAP",
             "Math.random",
             "assets/",

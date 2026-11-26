@@ -244,6 +244,21 @@ mod tests {
     use crate::video::library;
     use crate::video::preview;
 
+    /// The templates are what the model and the user copy: they must be the
+    /// reference for smooth motion (one stage per scene, staggered with
+    /// animation-delay), so the motion lint finds nothing in any of them.
+    #[test]
+    fn every_template_passes_the_motion_lint() {
+        for id in ids() {
+            let m = materialize(id, None, "en").unwrap();
+            for scene in &m.meta.scenes {
+                let html = &m.scenes[&scene.id];
+                let warnings = crate::video::motion::lint_scene(&scene.id, html, scene.duration);
+                assert!(warnings.is_empty(), "{id}/{}: {warnings:?}", scene.id);
+            }
+        }
+    }
+
     #[test]
     fn the_gallery_ships_the_promised_templates() {
         let listed = list("es");

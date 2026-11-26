@@ -21,6 +21,7 @@
 pub mod context;
 pub mod editor;
 pub mod library;
+pub mod motion;
 pub mod preview;
 pub mod project;
 pub mod render;

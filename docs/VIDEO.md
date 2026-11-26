@@ -24,6 +24,7 @@ uploads, and downloads the result.
 | Export | `video/render.rs`, `src/video/ExportPanel.tsx` | zip, upload, poll, download |
 | Player | `src/video/VideoPlayer.tsx` | `@hyperframes/player`, sealed |
 | Lint | `src/video/lint.ts` | `@hyperframes/lint` on the project sources |
+| Motion lint | `video/motion.rs` | warnings for stutter-prone scenes, in the tool result |
 
 ## HyperFrames version
 
@@ -339,6 +340,44 @@ Why a renderer check and not a core tool the model calls: the check needs
 real layout, which only a webview has; a tool would have to round-trip to
 the renderer and wait mid-turn, and the model could skip it. Checking when
 the turn ends costs the model nothing and cannot be skipped.
+
+## Smooth motion (round 26)
+
+How scenes move, measured by seeking the pinned runtime frame by frame in
+headless Chrome (what the render service does; the preview seeks the same
+way on every tick, so the MP4 and the preview show the same motion):
+
+- The CSS adapter pauses every CSS animation and sets its `currentTime` to
+  `time - start of its closest [data-start]` on each frame. Animations are
+  therefore deterministic: `animation-delay` counts from the clip's
+  `data-start` and `animation-fill-mode` behaves as in a browser. Repaint
+  cost cannot make the MP4 stutter; only the composition's design can.
+- Outside its window the runtime hides a `.clip` that is in the normal flow
+  (position static, relative or sticky) and holds no timed descendant with
+  `display: none`; an absolutely positioned clip only gets `visibility:
+  hidden`. A scene that wraps each staggered line of a flex/grid layout in
+  its own `.clip` therefore re-lays out when each one appears or ends, and
+  every visible sibling jumps in ONE frame. A tester's 6-scene video had 76
+  such one-frame jumps, all at clip boundaries; the same scenes with one
+  stage and `animation-delay` had none, and no bundled template has any.
+
+Rules (`video::tool::GUIDANCE`): ONE stage `.clip` per scene
+(`position:absolute; inset:0`, covering the scene) holding the layout;
+entrances staggered with `animation-delay` on its children; more `.clip`
+elements only for absolute overlays; animations on the element that moves,
+never on the `.clip`; `animation-fill-mode: both`; only `transform` and
+`opacity`; entrances of 0.4 to 0.8 s finished 0.5 s before the scene ends.
+
+The motion lint (`video::motion::lint_scene`) checks every scene a
+`create_video` / `edit_video` call writes or retimes and adds WARNINGS to the
+result (the scene is still written; GUIDANCE tells the model to fix them):
+an in-flow `.clip` with siblings that appears or ends mid-scene, keyframes
+on layout properties (width, height, margin, padding, font-size...), an
+animation that ends after its scene, and a fill mode that pops (delayed
+without a backwards fill, or hidden at rest without a forwards fill). It is
+conservative: selectors it does not understand count as "not animated" and
+as "maybe absolutely positioned", and every bundled template passes it
+(`templates::tests::every_template_passes_the_motion_lint`).
 
 ## Export (contract §2)
 
