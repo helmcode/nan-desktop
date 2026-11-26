@@ -42,6 +42,9 @@ const MAX_LABEL: usize = 40;
 /// Bigger scenes are not linted (bounded cost; no warning is safe).
 const MAX_ELEMENTS: usize = 2000;
 const MAX_RULES: usize = 1000;
+/// Most compound-selector checks one scene may cost (each selector costs
+/// its compounds times the elements); above it the scene is not linted.
+const MAX_WORK: usize = 4_000_000;
 
 /// Properties whose animation re-lays out the scene (moves neighbours,
 /// re-wraps text). Positioning offsets (`left`, `top`) are not listed: on an
@@ -82,17 +85,40 @@ const TRANSFORM_PROPS: &[&str] = &["transform", "translate", "scale", "rotate"];
 /// The warnings for one scene (`html` as written, `duration` in seconds).
 pub fn lint_scene(scene: &str, html: &str, duration: f64) -> Vec<String> {
     let low = html.to_ascii_lowercase();
-    let elements = parse_elements(html, &low);
+    let Some(elements) = parse_elements(html, &low) else {
+        return Vec::new();
+    };
     let mut css = Css::default();
     for style in project::blocks(&low, "<style", "</style>") {
         parse_css(&strip_comments(style), &mut css);
     }
-    if elements.len() > MAX_ELEMENTS || css.rules.len() > MAX_RULES {
+    if css.rules.len() > MAX_RULES {
         return Vec::new();
     }
+    let work: usize = css
+        .rules
+        .iter()
+        .flat_map(|rule| rule.selectors.iter())
+        .map(|selector| (selector.len() + 1).saturating_mul(elements.len()))
+        .fold(0, usize::saturating_add);
+    if work > MAX_WORK {
+        return Vec::new();
+    }
+    let strict_hits = css
+        .rules
+        .iter()
+        .map(|rule| rule_hits(rule, &elements, true))
+        .collect();
+    let loose_hits = css
+        .rules
+        .iter()
+        .map(|rule| rule_hits(rule, &elements, false))
+        .collect();
     let mut doc = Doc {
         elements,
         css,
+        strict_hits,
+        loose_hits,
         layers: Vec::new(),
         uncertain: Vec::new(),
     };
@@ -146,6 +172,10 @@ struct Css {
 struct Doc {
     elements: Vec<Element>,
     css: Css,
+    /// `[rule][element]`: the rule applies (strict matching).
+    strict_hits: Vec<Vec<bool>>,
+    /// `[rule][element]`: the rule may apply (subject compound only).
+    loose_hits: Vec<Vec<bool>>,
     /// Each element's animation layers (strictly matched rules + inline).
     layers: Vec<Vec<Layer>>,
     /// A rule the strict matcher does not understand (`li:nth-child(2)`)
@@ -158,10 +188,11 @@ const VOID: &[&str] = &[
     "wbr",
 ];
 
-fn parse_elements(html: &str, low: &str) -> Vec<Element> {
+/// The element tree, or `None` past `MAX_ELEMENTS` (the walk stops there).
+fn parse_elements(html: &str, low: &str) -> Option<Vec<Element>> {
     let mut elements: Vec<Element> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
-    let _ = website::for_each_tag(html, low, |name, attributes| {
+    website::for_each_tag(html, low, |name, attributes| {
         if let Some(closing) = name.strip_prefix('/') {
             if let Some(at) = stack.iter().rposition(|&i| elements[i].tag == closing) {
                 stack.truncate(at);
@@ -174,6 +205,9 @@ fn parse_elements(html: &str, low: &str) -> Vec<Element> {
                 .find(|(n, _)| *n == attr)
                 .map(|(_, v)| v.trim().to_ascii_lowercase())
         };
+        if elements.len() >= MAX_ELEMENTS {
+            return Err("too many elements".into());
+        }
         let parent = stack.last().copied();
         let element = Element {
             tag: name.to_string(),
@@ -203,8 +237,9 @@ fn parse_elements(html: &str, low: &str) -> Vec<Element> {
             stack.push(elements.len() - 1);
         }
         Ok(())
-    });
-    elements
+    })
+    .ok()?;
+    Some(elements)
 }
 
 fn strip_comments(css: &str) -> String {
@@ -220,8 +255,10 @@ fn strip_comments(css: &str) -> String {
     out
 }
 
-/// The index just after the `}` matching the `{` at `open`.
-fn block_end(css: &str, open: usize) -> usize {
+/// The block opened by the `{` at `open`: `(body, index after the block)`.
+/// An unclosed block runs to the end of the text. Every index is at an
+/// ASCII brace or the end, so the slices are always on char boundaries.
+fn block(css: &str, open: usize) -> (&str, usize) {
     let mut depth = 0usize;
     for (i, c) in css[open..].char_indices() {
         match c {
@@ -229,13 +266,14 @@ fn block_end(css: &str, open: usize) -> usize {
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return open + i + 1;
+                    let close = open + i;
+                    return (&css[open + 1..close], close + 1);
                 }
             }
             _ => {}
         }
     }
-    css.len()
+    (&css[open + 1..], css.len())
 }
 
 fn parse_css(css: &str, out: &mut Css) {
@@ -247,8 +285,7 @@ fn parse_css(css: &str, out: &mut Css) {
         // A stray `}` before the next block ends nothing: skip past it.
         let prelude_raw = &css[i..open];
         let prelude = prelude_raw.rsplit('}').next().unwrap_or(prelude_raw).trim();
-        let end = block_end(css, open);
-        let body = &css[open + 1..end.saturating_sub(1).max(open + 1)];
+        let (body, end) = block(css, open);
         if let Some(at_rule) = prelude.strip_prefix('@') {
             let (keyword, rest) = at_rule
                 .split_once(|c: char| c.is_ascii_whitespace())
@@ -277,13 +314,12 @@ fn parse_steps(body: &str) -> Vec<Step> {
     let mut steps = Vec::new();
     let mut i = 0;
     while let Some(open) = body[i..].find('{').map(|at| i + at) {
-        let end = block_end(body, open);
+        let (inner, end) = block(body, open);
         let selector = body[i..open]
             .trim()
             .trim_start_matches('}')
             .trim()
             .to_string();
-        let inner = &body[open + 1..end.saturating_sub(1).max(open + 1)];
         steps.push((selector, parse_decls(inner)));
         i = end;
     }
@@ -465,67 +501,71 @@ fn compound_matches(c: &Compound, el: &Element, strict: bool) -> bool {
         && c.classes.iter().all(|cls| el.classes.contains(cls))
 }
 
-/// Strict: the whole chain must match with descendant/child combinators
-/// only (anything else is "no match"). Loose: only the subject compound.
-fn selector_matches(parts: &Selector, elements: &[Element], at: usize, strict: bool) -> bool {
-    let Some((_, subject)) = parts.last() else {
-        return false;
-    };
-    if !compound_matches(subject, &elements[at], strict) {
-        return false;
-    }
-    if !strict {
-        return true;
-    }
-    chain_matches(parts, parts.len() - 1, elements, at)
-}
-
-fn chain_matches(
-    parts: &[(char, Compound)],
-    index: usize,
-    elements: &[Element],
-    at: usize,
-) -> bool {
-    if index == 0 {
-        return true;
-    }
-    let combinator = parts[index].0;
-    let wanted = &parts[index - 1].1;
-    let mut parent = elements[at].parent;
-    match combinator {
-        '>' => parent.is_some_and(|p| {
-            compound_matches(wanted, &elements[p], true)
-                && chain_matches(parts, index - 1, elements, p)
-        }),
-        ' ' => {
-            while let Some(p) = parent {
-                if compound_matches(wanted, &elements[p], true)
-                    && chain_matches(parts, index - 1, elements, p)
-                {
-                    return true;
-                }
-                parent = elements[p].parent;
+/// Which elements a rule applies to. Strict: the whole chain must match
+/// with descendant/child combinators only (anything else is "no match").
+/// Loose: only the subject compound.
+///
+/// Dynamic programming over the tree, never backtracking: elements are in
+/// document order (a parent before its children), `here[e]` says the
+/// selector's first `k + 1` compounds match with `e` as the k-th, and
+/// `below[e]` that `e` or one of its ancestors does. O(compounds x elements)
+/// per selector, whatever the nesting.
+fn rule_hits(rule: &Rule, elements: &[Element], strict: bool) -> Vec<bool> {
+    let mut hits = vec![false; elements.len()];
+    for parts in &rule.selectors {
+        let Some((_, subject)) = parts.last() else {
+            continue;
+        };
+        if !strict {
+            for (hit, el) in hits.iter_mut().zip(elements) {
+                *hit |= compound_matches(subject, el, false);
             }
-            false
+            continue;
         }
-        _ => false,
+        let mut here: Vec<bool> = elements
+            .iter()
+            .map(|el| compound_matches(&parts[0].1, el, true))
+            .collect();
+        for (combinator, compound) in &parts[1..] {
+            let mut below = vec![false; elements.len()];
+            for (e, el) in elements.iter().enumerate() {
+                below[e] = here[e] || el.parent.is_some_and(|p| below[p]);
+            }
+            here = elements
+                .iter()
+                .map(|el| {
+                    compound_matches(compound, el, true)
+                        && match combinator {
+                            '>' => el.parent.is_some_and(|p| here[p]),
+                            ' ' => el.parent.is_some_and(|p| below[p]),
+                            _ => false,
+                        }
+                })
+                .collect();
+        }
+        for (hit, matched) in hits.iter_mut().zip(here) {
+            *hit |= matched;
+        }
     }
+    hits
 }
 
 impl Doc {
     /// The declarations that apply to an element, in cascade order
     /// (approximate: source order, inline last).
     fn decls(&self, at: usize, strict: bool) -> Vec<&(String, String)> {
+        let hits = if strict {
+            &self.strict_hits
+        } else {
+            &self.loose_hits
+        };
         let mut out: Vec<&(String, String)> = self
             .css
             .rules
             .iter()
-            .filter(|rule| {
-                rule.selectors
-                    .iter()
-                    .any(|s| selector_matches(s, &self.elements, at, strict))
-            })
-            .flat_map(|rule| rule.decls.iter())
+            .zip(hits)
+            .filter(|(_, hit)| hit[at])
+            .flat_map(|(rule, _)| rule.decls.iter())
             .collect();
         out.extend(self.elements[at].style.iter());
         out
@@ -534,16 +574,10 @@ impl Doc {
     /// A rule that may apply (loose) but did not match strictly sets an
     /// animation property.
     fn animation_uncertain(&self, at: usize) -> bool {
-        self.css.rules.iter().any(|rule| {
-            rule.decls.iter().any(|(p, _)| p.starts_with("animation"))
-                && rule
-                    .selectors
-                    .iter()
-                    .any(|s| selector_matches(s, &self.elements, at, false))
-                && !rule
-                    .selectors
-                    .iter()
-                    .any(|s| selector_matches(s, &self.elements, at, true))
+        self.css.rules.iter().enumerate().any(|(r, rule)| {
+            self.loose_hits[r][at]
+                && !self.strict_hits[r][at]
+                && rule.decls.iter().any(|(p, _)| p.starts_with("animation"))
         })
     }
 
@@ -589,12 +623,16 @@ impl Doc {
         } else {
             format!("<{}>", el.tag)
         };
-        label
-            .chars()
-            .filter(|c| c.is_ascii_graphic() || *c == ' ')
-            .take(MAX_LABEL)
-            .collect()
+        printable(&label)
     }
+}
+
+/// Model-written text quoted back in a warning: printable ASCII, clipped.
+fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(MAX_LABEL)
+        .collect()
 }
 
 // --------------------------------------------------------- animation --
@@ -637,6 +675,15 @@ const TIMING_WORDS: &[&str] = &[
 ];
 const FILL_WORDS: &[&str] = &["forwards", "backwards", "both"];
 
+/// `animation-iteration-count`: a number or `infinite` (never ends).
+fn iteration_count(token: &str) -> f64 {
+    if token == "infinite" {
+        f64::INFINITY
+    } else {
+        token.parse().unwrap_or(1.0)
+    }
+}
+
 fn parse_time(token: &str) -> Option<f64> {
     if let Some(ms) = token.strip_suffix("ms") {
         return ms.parse::<f64>().ok().map(|v| v / 1000.0);
@@ -664,7 +711,7 @@ impl Animation {
                     a.delays = layers().map(|t| parse_time(t).unwrap_or(0.0)).collect()
                 }
                 "animation-iteration-count" => {
-                    a.iterations = layers().map(|t| t.parse().unwrap_or(1.0)).collect()
+                    a.iterations = layers().map(iteration_count).collect()
                 }
                 "animation-fill-mode" => a.fills = layers().map(str::to_string).collect(),
                 _ => {}
@@ -681,8 +728,8 @@ impl Animation {
         for token in split_top(&layer, ' ').into_iter().filter(|t| !t.is_empty()) {
             if let Some(t) = parse_time(token) {
                 times.push(t);
-            } else if let Ok(n) = token.parse::<f64>() {
-                iterations = Some(n);
+            } else if token == "infinite" || token.parse::<f64>().is_ok() {
+                iterations = Some(iteration_count(token));
             } else if FILL_WORDS.contains(&token) {
                 fill = Some(token.to_string());
             } else if token == "none" {
@@ -808,7 +855,7 @@ fn layout_keyframes(scene: &str, doc: &Doc) -> Vec<String> {
             (!props.is_empty()).then(|| {
                 format!(
                     "scene \"{scene}\": @keyframes {} animates {}, which re-lays out the scene on every frame (text re-wraps, neighbours move). Animate transform (translate, scale) and opacity instead",
-                    name.chars().take(MAX_LABEL).collect::<String>(),
+                    printable(name),
                     props.join(", ")
                 )
             })
@@ -820,9 +867,12 @@ fn cut_by_scene_end(scene: &str, doc: &Doc, duration: f64) -> Option<String> {
     let mut labels = Vec::new();
     for at in 0..doc.elements.len() {
         let start = doc.clip_start(at);
+        // A loop (`infinite`) never "ends": it is not cut, it just runs.
         let end = doc.layers[at]
             .iter()
+            .filter(|l| l.iterations.is_finite())
             .map(|l| start + l.delay + l.duration * l.iterations.max(0.0))
+            .filter(|end| end.is_finite())
             .fold(0.0, f64::max);
         if end > duration + EPS {
             labels.push(format!(
@@ -1087,6 +1137,126 @@ mod tests {
         assert_eq!(
             lint_scene("s", &scene(css, body), 1.0),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn unclosed_blocks_ending_in_a_multibyte_char_never_panic() {
+        // The body of an unclosed block runs to the end; slicing one byte
+        // short would split the `é` (a panic aborts the release app).
+        for html in [
+            "<style>a{b:\u{e9}</style>",
+            "<style>@keyframes k{from{b:\u{e9}</style>",
+            "<style>@media x{a{b:\u{e9}</style>",
+            "<style>a{b:\u{1f422}",
+        ] {
+            let _ = lint_scene("s", html, 2.0);
+        }
+        // Every truncation of a multibyte-heavy scene (at char boundaries:
+        // the input is a &str).
+        let full = scene(
+            "@keyframes \u{e9}l\u{e8}ve{from{opacity:0;transform:translateY(1vmin)}to{opacity:1;content:\"\u{1f422}\u{e9}\"}}\
+             .s-\u{e9}{opacity:0;animation:\u{e9}l\u{e8}ve .6s ease-out .2s both}\
+             @media (max-aspect-ratio:3/4){.s-\u{e9}{width:\u{e9}m\u{e9}}}",
+            "<div class=\"clip s-\u{e9}\" data-start=\"1\" data-duration=\"1\">tortuga \u{1f422} \u{f1}and\u{fa}</div><p>\u{e9}t\u{e9}</p>",
+        );
+        for (at, _) in full.char_indices() {
+            let _ = lint_scene("s", &full[..at], 2.0);
+        }
+    }
+
+    #[test]
+    fn deep_nesting_with_long_descendant_selectors_is_fast() {
+        // Backtracking descendant matching is C(depth, steps): this took
+        // tens of seconds before. Now O(steps x elements).
+        let depth = 200;
+        let body = format!(
+            "{}<span class=\"s-x\">x</span>{}",
+            "<div>".repeat(depth),
+            "</div>".repeat(depth)
+        );
+        let css = "@keyframes x{from{width:0}to{width:1px}}\
+            span div div div div div div div{animation:x 1s}\
+            div div div div div div div span{animation:x 1s both}\
+            div div div div div div div div{position:absolute}";
+        let started = std::time::Instant::now();
+        let warnings = lint_scene("s", &scene(css, &body), 4.0);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        // And it still matches correctly at depth.
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("@keyframes x animates width")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn work_and_size_budgets_skip_the_lint() {
+        // Too many elements: the walk stops and nothing is reported.
+        let many = format!(
+            "<p>a</p>{}",
+            "<div class=\"clip\" data-start=\"1\" data-duration=\"1\">x</div>"
+                .repeat(MAX_ELEMENTS + 1)
+        );
+        assert_eq!(
+            lint_scene("s", &scene("", &many), 4.0),
+            Vec::<String>::new()
+        );
+        // Selectors x elements past the work budget: skipped, not slow.
+        let rules: String = (0..900)
+            .map(|i| format!(".a{i} .b .c .d .e .f{{color:red}}"))
+            .collect();
+        let body =
+            "<div class=\"clip\" data-start=\"1\" data-duration=\"1\">x</div><p>a</p>".repeat(900);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            lint_scene("s", &scene(&rules, &body), 4.0),
+            Vec::<String>::new()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn infinite_loops_are_parsed_and_never_reported_as_cut() {
+        let css = "@keyframes pulse{0%,100%{scale:1}50%{scale:1.1}}\
+            .s-a{animation:pulse 2s ease-in-out infinite}\
+            .s-b{animation:pulse 2s;animation-iteration-count:infinite}\
+            .s-c{animation:pulse 2s ease-in-out 3}";
+        let body = "<p class=\"s-a\">a</p><p class=\"s-b\">b</p><p class=\"s-c\">c</p>";
+        let w = lint_scene("s", &scene(css, body), 4.0);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains(".s-c (ends at 6 s)"), "{w:?}");
+        assert!(!w[0].contains("s-a") && !w[0].contains("s-b"), "{w:?}");
+        // The name is the keyframes, not "infinite".
+        let mut a = Animation::default();
+        a.push_shorthand("pulse 2s ease-in-out infinite");
+        assert_eq!(a.names, ["pulse"]);
+        assert!(a.iterations[0].is_infinite());
+    }
+
+    #[test]
+    fn keyframe_names_are_quoted_printable_and_clipped() {
+        let name = format!("k{}\u{202e}{}", "\u{e9}".repeat(3), "z".repeat(80));
+        let css = format!(
+            "@keyframes {name}{{from{{width:0}}to{{width:9px}}}}.s-a{{animation:{name} 1s both}}"
+        );
+        let w = lint_scene("s", &scene(&css, "<p class=\"s-a\">a</p>"), 4.0);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            !w[0].contains('\u{202e}') && !w[0].contains('\u{e9}'),
+            "{w:?}"
+        );
+        assert!(
+            w[0].contains(&format!(
+                "@keyframes k{} animates",
+                "z".repeat(MAX_LABEL - 1)
+            )),
+            "{w:?}"
         );
     }
 
