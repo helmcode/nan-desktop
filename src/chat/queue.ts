@@ -46,9 +46,9 @@ export interface QueuedMessage {
   /** The app's automatic layout fix (video/layoutAutoFix.ts): its turn does
    * not renew the automatic-fix allowance the way a user message does. */
   autoFix?: boolean;
-  /** An export's fix request (video/exportFix.ts): the turn it starts is
-   * the one that export waits for. */
-  exportFix?: boolean;
+  /** An export's fix request (video/exportFix.ts): its id. The turn it
+   * starts is the one that export waits for. */
+  exportFix?: number;
 }
 
 import type { PendingAttachment } from "./attachments";

@@ -315,9 +315,105 @@ describe("R-V1: videos in the shell", () => {
     layout.report = { "16:9": [], "9:16": [] };
     await act(async () => emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo" }));
     await act(async () => emit("chat://done", { conversation_id: 7, reason: "completed" }));
-    expect(await screen.findByText("El asistente ha corregido el formato vertical (9:16); ya se está descargando.")).toBeTruthy();
+    expect(await screen.findByText("El asistente ha corregido el formato vertical (9:16) y se ha añadido a la exportación.")).toBeTruthy();
     expect(layout.calls.slice(1).map((c) => c[2])).toEqual([["16:9", "9:16"]]);
     expect(await screen.findByText("En cola, empieza cuando termine el anterior.")).toBeTruthy();
     expect(invokedWith("chat_send").length).toBe(1);
+  });
+
+  /// Open the side pane's export for the video made in conversation 7
+  /// (last changed in `lastChangedIn`), pick the vertical format too and
+  /// export (the 9:16 format is cut off).
+  async function exportWithCutVertical(lastChangedIn = 7) {
+    const cut = { scene: "intro", time: 1, kind: "clipped", element: '#intro-title "Hola"' };
+    layout.report = { "16:9": [], "9:16": [cut] };
+    await act(async () => emit("video://changed", { conversation_id: 7, project_id: PROJECT_ID, title: "Promo" }));
+    const pane = await screen.findByRole("complementary", { name: "Vista previa" });
+    fireEvent.click(await within(pane).findByRole("button", { name: "Exportar" }));
+    if (lastChangedIn !== 7)
+      await act(async () => emit("video://changed", { conversation_id: lastChangedIn, project_id: PROJECT_ID, title: "Promo" }));
+    fireEvent.click(await within(pane).findByRole("checkbox", { name: "Vertical 9:16" }));
+    fireEvent.click(within(pane).getByRole("button", { name: "Exportar 2 MP4" }));
+    await within(pane).findByText(/El formato vertical \(9:16\) necesita ajustes/);
+    return pane;
+  }
+
+  /// Send a user message so a reply runs (the fix request then queues).
+  async function startReply() {
+    const box = (await screen.findByRole("textbox", { name: "Mensaje" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "primera" } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: "Enter" });
+    });
+    await screen.findByRole("button", { name: "Detener" });
+  }
+
+  const FIX_TEXT =
+    "Para exportar este vídeo en el formato vertical (9:16), hay partes que se salen del encuadre o quedan cortadas. Ajusta el diseño para que se vea completo ahí, sin cambiar cómo se ve en el formato horizontal (16:9).";
+
+  it("a fix request the user removes from the chat queue ends the export's wait", async () => {
+    resetTauri({ ...HANDLERS, video_export_start: () => new Promise(() => {}) });
+    render(
+      <I18nProvider initial="es">
+        <App />
+      </I18nProvider>,
+    );
+    await startReply();
+    const pane = await exportWithCutVertical();
+    // Queued behind the running reply: "waiting", not "fixing".
+    expect(within(pane).getByText(/Esperando a que el asistente lo corrija/)).toBeTruthy();
+    const queue = await screen.findByRole("region", { name: "Mensajes en cola" });
+    expect(within(queue).getByText(FIX_TEXT)).toBeTruthy();
+    fireEvent.click(within(queue).getByRole("button", { name: "Quitar" }));
+    expect((await within(pane).findByRole("alert")).textContent).toBe(
+      "La petición para corregir el formato vertical (9:16) se quitó de la cola del chat, así que no se ha exportado.",
+    );
+    // The reply ends: nothing goes out for it.
+    await act(async () => emit("chat://done", { conversation_id: 7, reason: "completed" }));
+    await act(async () => new Promise((r) => setTimeout(r, 50)));
+    expect(invokedWith("chat_send").length).toBe(1);
+  });
+
+  it("Stop with a fix request queued: the request is taken out and the export says why", async () => {
+    resetTauri({ ...HANDLERS, video_export_start: () => new Promise(() => {}) });
+    render(
+      <I18nProvider initial="es">
+        <App />
+      </I18nProvider>,
+    );
+    await startReply();
+    const pane = await exportWithCutVertical();
+    await screen.findByRole("region", { name: "Mensajes en cola" });
+    await act(async () => emit("chat://stopped", { conversation_id: 7 }));
+    expect((await within(pane).findByRole("alert")).textContent).toBe(
+      "El chat se detuvo o falló antes de enviar la petición para corregir el formato vertical (9:16), así que no se ha exportado.",
+    );
+    expect(screen.queryByText(FIX_TEXT)).toBeNull();
+    await act(async () => new Promise((r) => setTimeout(r, 50)));
+    expect(invokedWith("chat_send").length).toBe(1);
+  });
+
+  it("the request goes to the conversation that last changed the video, named when it is not on screen", async () => {
+    resetTauri({
+      ...HANDLERS,
+      conversation_list: () => [
+        { id: 7, title: "Vídeo", updated_at: "", last_message: null },
+        { id: 8, title: "Reel de verano", updated_at: "", last_message: null },
+      ],
+      video_export_start: () => new Promise(() => {}),
+    });
+    render(
+      <I18nProvider initial="es">
+        <App />
+      </I18nProvider>,
+    );
+    await screen.findByText("hazme un vídeo");
+    // The video was last changed in conversation 8; conversation 7 is on screen.
+    const pane = await exportWithCutVertical(8);
+    expect(await within(pane).findByText("La petición espera en la conversación «Reel de verano»: se enviará cuando la abras.")).toBeTruthy();
+    // Nothing went to the conversation on screen.
+    await act(async () => new Promise((r) => setTimeout(r, 50)));
+    expect(invokedWith("chat_send").length).toBe(0);
+    expect(screen.queryByRole("region", { name: "Mensajes en cola" })).toBeNull();
   });
 });

@@ -19,7 +19,15 @@ vi.mock("./layoutCheck", async (original) => ({
 import { I18nProvider } from "../i18n";
 import { invokedWith, resetTauri } from "../test/tauriMock";
 import { ExportPanel, layoutKey } from "./ExportPanel";
-import { exportFixTurnEnded, exportFixTurnStarted, resetExportFixes, setExportFixSender, type ExportFixRequest } from "./exportFix";
+import {
+  exportFixDropped,
+  exportFixTurnEnded,
+  exportFixTurnStarted,
+  resetExportFixes,
+  setExportFixScreen,
+  setExportFixSender,
+  type ExportFixRequest,
+} from "./exportFix";
 import { resetExportQueues } from "./exportQueue";
 import { PROJECT_ID, project } from "./fixtures";
 import type { LayoutReport } from "./layoutCheck";
@@ -27,7 +35,9 @@ import type { LayoutReport } from "./layoutCheck";
 const QUOTA = { included_seconds: 7200, used_seconds: 0, remaining_seconds: 7200, period_end: "2026-12-01T00:00:00Z" };
 const cut = (scene: string) => ({ scene, time: 1, kind: "clipped" as const, element: '#t "Hola"' });
 const FIXING_VERTICAL =
-  "El formato vertical (9:16) necesita ajustes: hay partes del vídeo que se salen del encuadre o quedan cortadas. El asistente lo está corrigiendo y se descargará automáticamente cuando esté listo.";
+  "El formato vertical (9:16) necesita ajustes: hay partes del vídeo que se salen del encuadre o quedan cortadas. Esperando a que el asistente lo corrija; se descargará automáticamente cuando esté listo.";
+const FIXING_VERTICAL_STARTED =
+  "El formato vertical (9:16) necesita ajustes: hay partes del vídeo que se salen del encuadre o quedan cortadas. El asistente lo está corrigiendo; se descargará automáticamente cuando esté listo.";
 
 function renderPanel(props: Partial<Parameters<typeof ExportPanel>[0]> = {}, locale: "es" | "en" = "es") {
   return render(
@@ -45,19 +55,23 @@ function pick(...names: string[]) {
 /// The assistant: records each fix request; `withdrawn` counts take-backs.
 let requests: ExportFixRequest[] = [];
 let withdrawn = 0;
-function connectAssistant() {
+function connectAssistant(conversationId = 7) {
+  setExportFixScreen(7, (id) => (id === 3 ? "Reel de verano" : null));
   setExportFixSender(async (request) => {
     requests.push(request);
-    return () => {
-      withdrawn += 1;
+    return {
+      withdraw: () => {
+        withdrawn += 1;
+      },
+      conversationId,
     };
   });
 }
 
-/// The fix turn runs in conversation 7 and ends.
+/// The last request's turn runs in conversation 7 and ends.
 async function fixTurn(reason = "completed") {
   await act(async () => {
-    exportFixTurnStarted(7, PROJECT_ID);
+    exportFixTurnStarted(7, requests[requests.length - 1].fixId);
     exportFixTurnEnded(7, reason);
     await new Promise((r) => setTimeout(r, 0));
   });
@@ -119,7 +133,9 @@ describe("ExportPanel: export on demand", () => {
     expect(screen.getByText(FIXING_VERTICAL).getAttribute("role")).toBe("status");
     // What is cut, by scene title; the own format keeps exporting.
     expect(screen.getByText("Vertical (9:16): 2 elementos cortados (Inicio, Cierre).")).toBeTruthy();
-    expect(screen.getByText("Los demás formatos ya se están exportando.")).toBeTruthy();
+    // The format already exporting is named, and so is its queue row.
+    expect(screen.getByText("El formato horizontal (16:9) ya se está exportando.")).toBeTruthy();
+    expect(document.querySelector(".video-queue-format")?.textContent).toBe("Horizontal 16:9");
     expect(started()).toEqual(["16:9"]);
     // No choice to make, and the keyboard lands on the way out.
     expect(screen.queryByRole("button", { name: "Exportar igualmente" })).toBeNull();
@@ -128,6 +144,7 @@ describe("ExportPanel: export on demand", () => {
     // The assistant got ONE request for that format, keeping the own one.
     expect(requests).toEqual([
       {
+        fixId: expect.any(Number),
         projectId: PROJECT_ID,
         title: "Promo",
         own: "16:9",
@@ -136,11 +153,14 @@ describe("ExportPanel: export on demand", () => {
         round: 1,
       },
     ]);
-    // Its turn completes: the fixed format AND the own one are checked again.
+    // Its turn starts: the assistant is on it now.
+    act(() => exportFixTurnStarted(7, requests[0].fixId));
+    expect(screen.getByText(FIXING_VERTICAL_STARTED)).toBeTruthy();
+    // It completes: the fixed format AND the own one are checked again.
     checkLayout.mockResolvedValueOnce({ "16:9": [], "9:16": [] });
     await fixTurn();
     expect(checkLayout.mock.calls[1].slice(0, 3)).toEqual(["nan", PROJECT_ID, ["16:9", "9:16"]]);
-    expect(await screen.findByText("El asistente ha corregido el formato vertical (9:16); ya se está descargando.")).toBeTruthy();
+    expect(await screen.findByText("El asistente ha corregido el formato vertical (9:16) y se ha añadido a la exportación.")).toBeTruthy();
     // It joined the export by itself, behind the own format (whose row stays).
     expect(screen.getByText("En cola, empieza cuando termine el anterior.")).toBeTruthy();
     expect(screen.queryByText(FIXING_VERTICAL)).toBeNull();
@@ -162,7 +182,9 @@ describe("ExportPanel: export on demand", () => {
     await screen.findByText(FIXING_VERTICAL);
     await fixTurn();
     await waitFor(() => expect(requests).toHaveLength(2));
-    expect(screen.getByText(`${FIXING_VERTICAL} Intento 2 de 2.`)).toBeTruthy();
+    // The attempt is said apart from the live sentence (one announcement).
+    expect(screen.getByText(FIXING_VERTICAL).getAttribute("role")).toBe("status");
+    expect(screen.getByText("Intento 2 de 2.").getAttribute("role")).toBeNull();
     await fixTurn();
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toBe(
@@ -383,10 +405,74 @@ describe("ExportPanel: export on demand", () => {
     fireEvent.click(screen.getByRole("button", { name: "Export 3 MP4s" }));
     expect(
       await screen.findByText(
-        "The vertical (9:16) and square (1:1) formats need adjustments: parts of the video go outside the frame or get cut off. The assistant is fixing them, and they will download automatically when ready.",
+        "The vertical (9:16) and square (1:1) formats need adjustments: parts of the video go outside the frame or get cut off. Waiting for the assistant to fix them; they will download automatically when ready.",
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Don't export the vertical (9:16) and square (1:1) formats" })).toBeTruthy();
-    expect(screen.getByText("The other formats are already exporting.")).toBeTruthy();
+    expect(screen.getByText("The horizontal (16:9) format is already exporting.")).toBeTruthy();
+  });
+
+  it("a request taken out of the chat queue ends the wait with a clear final state", async () => {
+    connectAssistant();
+    checkLayout.mockResolvedValueOnce({ "9:16": [cut("intro")] });
+    renderPanel({ onFixLayout: vi.fn() });
+    pick("Vertical 9:16");
+    fireEvent.click(screen.getByRole("button", { name: "Exportar 2 MP4" }));
+    await screen.findByText(FIXING_VERTICAL);
+    await waitFor(() => expect(requests).toHaveLength(1));
+    act(() => exportFixDropped(requests[0].fixId, "removed"));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "La petición para corregir el formato vertical (9:16) se quitó de la cola del chat, así que no se ha exportado.",
+    );
+    expect(screen.getByRole("button", { name: "Exportar igualmente" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Exportar 2 MP4" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("names the conversation the request waits in when it is not on screen", async () => {
+    connectAssistant(3);
+    checkLayout.mockResolvedValueOnce({ "9:16": [cut("intro")] });
+    renderPanel();
+    pick("Vertical 9:16");
+    fireEvent.click(screen.getByRole("button", { name: "Exportar 2 MP4" }));
+    expect(await screen.findByText("La petición espera en la conversación «Reel de verano»: se enviará cuando la abras.")).toBeTruthy();
+    act(() => setExportFixScreen(3, () => "Reel de verano"));
+    expect(screen.queryByText(/La petición espera/)).toBeNull();
+  });
+
+  it("'Don't export' once the assistant is working says it may keep editing in the chat", async () => {
+    connectAssistant();
+    checkLayout.mockResolvedValueOnce({ "9:16": [cut("intro")] });
+    renderPanel();
+    pick("Vertical 9:16");
+    fireEvent.click(screen.getByRole("button", { name: "Exportar 2 MP4" }));
+    await screen.findByText(FIXING_VERTICAL);
+    await waitFor(() => expect(requests).toHaveLength(1));
+    act(() => exportFixTurnStarted(7, requests[0].fixId));
+    fireEvent.click(screen.getByRole("button", { name: "No exportar el formato vertical (9:16)" }));
+    expect(screen.getByText("Puede que el asistente siga editando el vídeo en el chat; puedes detenerlo allí.")).toBeTruthy();
+    expect(withdrawn).toBe(1);
+  });
+
+  it("a panel opened while another one checks cannot start the same export twice", async () => {
+    let finish: (r: LayoutReport) => void = () => undefined;
+    checkLayout.mockReturnValueOnce(new Promise<LayoutReport>((r) => (finish = r)));
+    resetTauri({ video_export_quota: () => QUOTA, video_export_start: () => new Promise(() => {}) });
+    // The own format is not exported: only the other one, checked.
+    const first = renderPanel();
+    pick("Horizontal 16:9", "Vertical 9:16");
+    fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
+    first.unmount();
+    renderPanel();
+    pick("Horizontal 16:9", "Vertical 9:16");
+    const exportButton = screen.getByRole("button", { name: "Exportar MP4" }) as HTMLButtonElement;
+    expect(exportButton.disabled).toBe(true);
+    expect(screen.getByText("Comprobando que el vídeo cabe en los demás formatos…").getAttribute("role")).toBe("status");
+    fireEvent.click(exportButton);
+    expect(checkLayout).toHaveBeenCalledTimes(1);
+    // The first panel's check still lands (the queue outlives it), once.
+    await act(async () => finish({ "9:16": [] }));
+    await waitFor(() => expect(started()).toEqual(["9:16"]));
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    expect(started()).toEqual(["9:16"]);
   });
 });

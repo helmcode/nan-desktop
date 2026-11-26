@@ -82,7 +82,13 @@ import {
 import { onVideoChanged, videoGet, videoList, type Aspect, type VideoAskContext } from "./video/api";
 import { checkLayout, layoutProblems } from "./video/layoutCheck";
 import { LayoutAutoFix } from "./video/layoutAutoFix";
-import { exportFixTurnEnded, exportFixTurnStarted, setExportFixSender } from "./video/exportFix";
+import {
+  exportFixDropped,
+  exportFixTurnEnded,
+  exportFixTurnStarted,
+  setExportFixScreen,
+  setExportFixSender,
+} from "./video/exportFix";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { useEscape } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
@@ -837,6 +843,13 @@ function ChatShell({
   // if it comes out cut off, queue ONE automatic fix message for that
   // conversation (bounded, see video/layoutAutoFix.ts).
   const layoutFixRef = useRef<LayoutAutoFix | null>(null);
+  // The conversation that last created or changed each video (this app
+  // session): an export's fix request goes there.
+  const videoConversationRef = useRef<Map<string, number>>(new Map());
+  // Export fix requests (by id) sitting in a send queue, and the ones taken
+  // out to be sent: one that disappears otherwise left unsent.
+  const queuedFixesRef = useRef<Set<number>>(new Set());
+  const sentFixesRef = useRef<Set<number>>(new Set());
   layoutFixRef.current ??= new LayoutAutoFix({
     check: async (projectId) => {
       const profileId = activeProfileRef.current;
@@ -1420,6 +1433,7 @@ function ChatShell({
       // R-V1: a video the assistant just created or changed opens in that
       // conversation's preview pane right away (before the turn ends).
       onVideoChanged((changed) => {
+        videoConversationRef.current.set(changed.project_id, changed.conversation_id);
         layoutFixRef.current?.videoChanged(changed.conversation_id, changed.project_id, changed.title);
         setPreviews((prev) =>
           new Map(prev).set(changed.conversation_id, {
@@ -2062,7 +2076,7 @@ function ChatShell({
     videoOverride?: VideoAskContext,
     skipSkill = false,
     autoFix = false,
-    exportFix = false,
+    exportFix = 0,
   ): Promise<boolean> => {
     const text = (override ?? composer).trim();
     const fromTray = queuedFiles === undefined && override === undefined && attach.items.length > 0;
@@ -2109,9 +2123,9 @@ function ChatShell({
       if (override === undefined) setComposer("");
       // Only what the user sends renews the automatic-fix allowance (an
       // automatic continuation of a cut reply does not).
-      layoutFixRef.current?.turnStarted(id, autoFix || continuation, exportFix);
+      layoutFixRef.current?.turnStarted(id, autoFix || continuation, exportFix > 0);
       // An export's fix request: its turn's end drives that export.
-      if (exportFix) exportFixTurnStarted(id, videoContext?.project_id);
+      if (exportFix) exportFixTurnStarted(id, exportFix);
       setStreamingIds((prev) => new Set(prev).add(id));
       setDrafts((prev) => new Map(prev).set(id, ""));
       declaredOutputsRef.current.delete(id);
@@ -2339,31 +2353,62 @@ function ChatShell({
 
   // Export on demand (video/exportFix.ts): a format the user exports that
   // comes out cut off is fixed by the assistant without leaving the export
-  // panel. The request joins the send queue of the conversation on screen
-  // (it goes out when that conversation is idle; the user sees it there and
-  // can remove it), without the active skill, as an automatic message. With
-  // no conversation open it starts one. The view is not switched: the panel
-  // says what is happening and downloads the format when it is fixed.
+  // panel. The request joins the send queue of the conversation that made
+  // or last changed the video (else the one on screen); it goes out when
+  // that conversation is idle and on screen, and the user sees it there and
+  // can remove it. It goes without the active skill, as an automatic
+  // message. With no conversation at all it starts one. The view is not
+  // switched: the panel says what is happening (and, when the request waits
+  // in a conversation that is not on screen, which one).
   useEffect(
     () =>
-      setExportFixSender(async ({ projectId, title, own, aspects, report }) => {
+      setExportFixSender(async ({ fixId, projectId, title, own, aspects, report }) => {
         const strings = tRef.current.video;
         const phrase = (list: readonly Aspect[]) => strings.formatsPhrase(...list.map((aspect) => strings.aspectInline[aspect]));
         // The visible text never quotes the (model-written) title.
         const text = strings.layoutFixText(phrase(aspects), phrase([own]));
         const context: VideoAskContext = { project_id: projectId, title, problems: layoutProblems(report, aspects) };
-        const id = activeConvRef.current;
-        if (id !== null) {
+        const made = videoConversationRef.current.get(projectId);
+        const target = made !== undefined && !deletedConvsRef.current.has(made) ? made : activeConvRef.current;
+        if (target !== null) {
           queueSeq.current += 1;
           const seq = queueSeq.current;
-          setQueues((prev) => enqueue(prev, id, text, seq, [], { videoContext: context, skipSkill: true, autoFix: true, exportFix: true }));
-          return () => setQueues((prev) => removeQueued(prev, id, seq));
+          setQueues((prev) =>
+            enqueue(prev, target, text, seq, [], { videoContext: context, skipSkill: true, autoFix: true, exportFix: fixId }),
+          );
+          return { withdraw: () => setQueues((prev) => removeQueued(prev, target, seq)), conversationId: target };
         }
-        const sent = await sendRef.current(text, false, undefined, context, true, true, true);
-        return sent ? () => undefined : null;
+        const sent = await sendRef.current(text, false, undefined, context, true, true, fixId);
+        return sent ? { withdraw: () => undefined, conversationId: null } : null;
       }),
     [],
   );
+  // The panel names the conversation a request waits in.
+  useEffect(() => {
+    setExportFixScreen(activeConvId, (id) => conversations.find((c) => c.id === id)?.title.trim() || null);
+  }, [activeConvId, conversations]);
+  // A fix request that leaves a send queue unsent (removed, edited, its
+  // conversation deleted) ends its export's wait; one in a held queue (a
+  // Stop, a failed send) is taken out, so it never goes out after the
+  // export gave up on it.
+  useEffect(() => {
+    const present = new Set<number>();
+    const held: [number, number][] = [];
+    for (const [conversationId, queue] of queues) {
+      for (const message of queue.items) {
+        if (!message.exportFix) continue;
+        if (queue.held) {
+          held.push([conversationId, message.id]);
+          exportFixDropped(message.exportFix, "held");
+        } else present.add(message.exportFix);
+      }
+    }
+    for (const fixId of queuedFixesRef.current) {
+      if (!present.has(fixId) && !sentFixesRef.current.has(fixId)) exportFixDropped(fixId, "removed");
+    }
+    queuedFixesRef.current = present;
+    if (held.length > 0) setQueues((prev) => held.reduce((acc, [conversationId, id]) => removeQueued(acc, conversationId, id), prev));
+  }, [queues]);
 
   useEffect(() => {
     if (view !== "chat" || !focusChatOnReturn.current) return;
@@ -2546,6 +2591,8 @@ function ChatShell({
     const message = nextToSend(queues, id);
     if (!message) return;
     setFlushing(true);
+    // An export's fix request leaving to be sent is not "removed".
+    if (message.exportFix) sentFixesRef.current.add(message.exportFix);
     setQueues((prev) => takeQueued(prev, id));
     setAutoRetryConvId((prev) => (prev === id ? null : prev));
     void sendRef
@@ -2556,7 +2603,7 @@ function ChatShell({
         message.videoContext,
         message.skipSkill ?? false,
         message.autoFix ?? false,
-        message.exportFix ?? false,
+        message.exportFix ?? 0,
       )
       .then((sent) => {
         if (sent) return;
@@ -2564,6 +2611,7 @@ function ChatShell({
         // its files go.
         if (deletedConvsRef.current.has(id)) {
           for (const file of message.attachments ?? []) void discardAttachment(file.id).catch(() => {});
+          if (message.exportFix) exportFixDropped(message.exportFix, "removed");
           return;
         }
         // Refused files: held with the reason (Edit to fix it).

@@ -615,16 +615,24 @@ export const es: Strings = {
     layoutCancelFormats: (formats: string) => `No exportar ${formats}`,
     layoutFormatLine: (name: string, count: number, scenes: string) =>
       `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${count === 1 ? "1 elemento cortado" : `${count} elementos cortados`} (${scenes}).`,
-    layoutFixing: (formats: string, count: number) =>
-      `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "necesita" : "necesitan"} ajustes: hay partes del vídeo que se salen del encuadre o quedan cortadas. El asistente ${count === 1 ? "lo" : "los"} está corrigiendo y se ${count === 1 ? "descargará" : "descargarán"} automáticamente cuando ${count === 1 ? "esté listo" : "estén listos"}.`,
-    layoutFixingOthers: "Los demás formatos ya se están exportando.",
+    layoutFixing: (formats: string, count: number, started: boolean) =>
+      `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "necesita" : "necesitan"} ajustes: hay partes del vídeo que se salen del encuadre o quedan cortadas. ${started ? `El asistente ${count === 1 ? "lo" : "los"} está corrigiendo` : `Esperando a que el asistente ${count === 1 ? "lo" : "los"} corrija`}; se ${count === 1 ? "descargará" : "descargarán"} automáticamente cuando ${count === 1 ? "esté listo" : "estén listos"}.`,
+    layoutFixWaitingIn: (title: string | null) =>
+      title
+        ? `La petición espera en la conversación «${title}»: se enviará cuando la abras.`
+        : "La petición espera en otra conversación: se enviará cuando la abras.",
+    layoutFixingOthers: (formats: string, count: number) =>
+      `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ya se ${count === 1 ? "está" : "están"} exportando.`,
     layoutFixingRound: (round: number, max: number) => `Intento ${round} de ${max}.`,
     layoutFixChecking: (formats: string) => `El asistente ha terminado. Comprobando de nuevo ${formats}…`,
     layoutFixed: (formats: string, count: number) =>
-      `El asistente ha corregido ${formats}; ya se ${count === 1 ? "está" : "están"} descargando.`,
-    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "stopped") => {
+      `El asistente ha corregido ${formats} y se ${count === 1 ? "ha" : "han"} añadido a la exportación.`,
+    layoutFixCanceledMidTurn: "Puede que el asistente siga editando el vídeo en el chat; puedes detenerlo allí.",
+    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "removed" | "held" | "stopped") => {
       const not = count === 1 ? "no se ha exportado" : "no se han exportado";
       if (why === "unsent") return `No se ha podido pedir al asistente que corrija ${formats}, así que ${not}.`;
+      if (why === "removed") return `La petición para corregir ${formats} se quitó de la cola del chat, así que ${not}.`;
+      if (why === "held") return `El chat se detuvo o falló antes de enviar la petición para corregir ${formats}, así que ${not}.`;
       if (why === "stopped") return `El asistente no ha terminado de corregir ${formats}, así que ${not}.`;
       return `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "sigue saliendo cortado" : "siguen saliendo cortados"} tras los cambios del asistente, así que ${not}.`;
     },

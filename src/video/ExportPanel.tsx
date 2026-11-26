@@ -244,7 +244,9 @@ export function ExportPanel({
   const charge = queueCharge(project.duration, order.length);
   const short = quota !== null && quota !== "failed" && charge > quota.remaining_seconds;
   const renewal = quota && quota !== "failed" ? shortDate(quota.period_end, locale) : null;
-  const many = items.length > 1;
+  // Rows name their format when there are several, or while a format is
+  // being fixed (the one row on screen is then not the only format).
+  const many = items.length > 1 || fix.status.kind !== "idle" || fix.fixed.length > 0;
   // "Cancel the rest": the formats not started yet, while another one runs
   // or several wait.
   const rest = items.filter((item) => item.phase.kind === "pending" || item.phase.kind === "waiting");
@@ -261,8 +263,10 @@ export function ExportPanel({
   /// the formats that fit (`append`: after the own format, already queued)
   /// and hand the others to the assistant. ONE check at a time: while one
   /// runs, Export is disabled and a second start is ignored, so a format
-  /// can never be queued twice.
-  const runGate = (wanted: Aspect[], chosen: Quality, append: boolean) => {
+  /// can never be queued twice (the flow also tells every panel of this
+  /// project that a check runs, so a panel opened meanwhile waits too).
+  /// `end` releases that, once.
+  const runGate = (wanted: Aspect[], chosen: Quality, append: boolean, end: () => void) => {
     const atKey = current.current.key;
     const projectId = current.current.projectId;
     const known = verdicts.current.key === atKey ? verdicts.current.report : {};
@@ -280,16 +284,23 @@ export function ExportPanel({
           }).catch(() => ({}))
         : Promise.resolve({});
     void checked.then((fresh) => {
-      // "Cancel export": nothing goes out, and the partial verdict is not kept.
-      if (abort.signal.aborted) return;
+      // "Don't export": nothing goes out, and the partial verdict is not kept.
+      if (abort.signal.aborted) {
+        end();
+        return;
+      }
       if (checkAbort.current === abort) checkAbort.current = null;
       if (current.current.key !== atKey) {
         // The video changed while it was checked: this verdict is about an
         // old version. Nothing is queued or shown from it; the same formats
         // are checked again for the version on screen (another project
         // entirely, or a closed panel: dropped).
-        if (alive.current && current.current.projectId === projectId) runGate(wanted, chosen, append);
-        else if (alive.current) setGate({ kind: "idle" });
+        if (alive.current && current.current.projectId === projectId) {
+          runGate(wanted, chosen, append, end);
+          return;
+        }
+        end();
+        if (alive.current) setGate({ kind: "idle" });
         return;
       }
       const report = { ...known, ...fresh };
@@ -306,26 +317,42 @@ export function ExportPanel({
       // download by themselves (the flow outlives the panel too).
       if (fine.length > 0) queue.enqueue(fine, chosen, append);
       if (broken.length > 0) flow.start({ aspects: broken, report, quality: chosen, own: current.current.own, title: current.current.title });
+      end();
       if (!alive.current) return;
       setGate({ kind: "idle" });
     });
   };
 
+  // Releases the running check's hold on the project's panels.
+  const endCheck = useRef<(() => void) | null>(null);
   const start = () => {
-    if (checkAbort.current || flow.active) return;
+    if (checkAbort.current || flow.active || queue.busy) return;
+    const others = order.filter((aspect) => aspect !== own);
+    // One export check per project, whichever panel runs it.
+    if (others.length > 0 && !flow.beginCheck()) return;
     setFileError(false);
     flow.reset();
     // The own format is the one the assistant built and the user saw: it
     // goes right away. The others are checked meanwhile.
     const withOwn = order.includes(own);
     if (withOwn) queue.enqueue([own], quality);
-    const others = order.filter((aspect) => aspect !== own);
-    if (others.length > 0) runGate(others, quality, withOwn);
+    if (others.length > 0) {
+      let ended = false;
+      const end = () => {
+        if (ended) return;
+        ended = true;
+        if (endCheck.current === end) endCheck.current = null;
+        flow.endCheck();
+      };
+      endCheck.current = end;
+      runGate(others, quality, withOwn, end);
+    }
   };
 
   const cancelCheck = () => {
     checkAbort.current?.abort();
     checkAbort.current = null;
+    endCheck.current?.();
     refocus.current = { awaitQueue: 0 };
     setGate({ kind: "idle" });
   };
@@ -381,6 +408,8 @@ export function ExportPanel({
   };
   const checking = gate.kind === "checking";
   const fixing = fix.status.kind === "fixing" || fix.status.kind === "checking";
+  // The formats exporting while another one is fixed, in the app's order.
+  const exportingNow = ASPECTS.filter((aspect) => items.some((item) => item.aspect === aspect && !isSettled(item)));
   const ownState: "exported" | "held" | "none" = fix.ownHeld
     ? "held"
     : items.some((item) => item.aspect === fix.own && item.phase.kind !== "canceled" && item.phase.kind !== "skipped")
@@ -560,7 +589,7 @@ export function ExportPanel({
           className="btn btn-primary btn-sm"
           ref={exportButton}
           onClick={start}
-          disabled={busy || checking || fixing || blocked || short || order.length === 0}
+          disabled={busy || checking || fix.gateChecking || fixing || blocked || short || order.length === 0}
           aria-busy={checking || undefined}
         >
           <IconDownload size={14} />
@@ -597,14 +626,22 @@ export function ExportPanel({
           </button>
         </div>
       )}
+      {gate.kind !== "checking" && fix.gateChecking && (
+        <p className="video-progress video-layout-checking" role="status">
+          {t.video.layoutChecking}
+        </p>
+      )}
       {fix.status.kind === "fixing" && (
         <div className="video-layout-gate" ref={fixPanel}>
+          {/* Only this sentence is live: it changes when the assistant
+              takes the request, not on every detail below. */}
           <p className="video-hint" role="status">
-            {t.video.layoutFixing(phrase(fix.status.aspects), fix.status.aspects.length)}
-            {fix.status.round > 1 && ` ${t.video.layoutFixingRound(fix.status.round, MAX_EXPORT_FIX_ROUNDS)}`}
+            {t.video.layoutFixing(phrase(fix.status.aspects), fix.status.aspects.length, fix.status.started)}
           </p>
+          {fix.status.round > 1 && <p className="video-hint">{t.video.layoutFixingRound(fix.status.round, MAX_EXPORT_FIX_ROUNDS)}</p>}
+          {fix.waitingIn && <p className="video-warn">{t.video.layoutFixWaitingIn(fix.waitingIn.title)}</p>}
           {issueLines(fix.status.aspects, fix.status.report)}
-          {items.some((item) => !isSettled(item)) && <p className="video-hint">{t.video.layoutFixingOthers}</p>}
+          {exportingNow.length > 0 && <p className="video-hint">{t.video.layoutFixingOthers(phrase(exportingNow), exportingNow.length)}</p>}
           <div className="video-export-actions">
             <button type="button" className="btn btn-ghost btn-sm" onClick={cancelFix}>
               <IconStop size={13} />
@@ -643,6 +680,11 @@ export function ExportPanel({
             </button>
           </div>
         </div>
+      )}
+      {fix.status.kind === "idle" && fix.canceledMidTurn && (
+        <p className="video-hint" role="status">
+          {t.video.layoutFixCanceledMidTurn}
+        </p>
       )}
       {fix.status.kind === "idle" && fix.fixed.length > 0 && (
         <p className="video-ok" role="status">

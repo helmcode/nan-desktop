@@ -316,20 +316,35 @@ downloads by itself, while the own format is already exporting.
      square (1:1) format, parts of it go outside the frame or get cut off.
      Adjust the layout so it shows whole there, without changing how it
      looks in the horizontal (16:9) format.", findings as hidden video
-     context, no skill). `App.tsx` puts it in the send queue of the
-     conversation on screen (marked `autoFix` + `exportFix`; it goes out
-     when that conversation is idle, the user sees it there and can remove
-     it) or, with no conversation open, starts one. The view is NOT
-     switched: the user stays on the export panel.
-  2. waits for THAT turn: the turn that starts with an `exportFix` message
-     is bound to its project's flow (`exportFixTurnStarted`); its
-     `chat://done` `completed` drives the flow; a cut turn waits for its
-     continuation; `chat://stopped` / `chat://error` end it ("the
-     assistant did not finish"). The generation check (below) skips that
-     turn: the flow re-checks it itself.
+     context, no skill). Each request has an id. `App.tsx` puts it in the
+     send queue of the conversation that last created or changed the video
+     (`video://changed`, this session; else the one on screen), marked
+     `autoFix` + `exportFix: <id>`; it goes out when that conversation is
+     idle and on screen, the user sees it there and can remove it. With no
+     conversation at all it starts one. The view is NOT switched. Until its
+     turn starts the panel says it is waiting for the assistant (and, when
+     the conversation is not on screen, names it: "The request is waiting in
+     the conversation “X”: it goes out when you open it"); once it starts,
+     that the assistant is fixing it. Only that sentence is live
+     (`role="status"`); the attempt number and details are not.
+  2. waits for THAT turn: the turn that starts with the request is bound to
+     its flow by id (`exportFixTurnStarted`; another export's binding in the
+     same conversation is ended as "did not finish", never overwritten
+     silently); its `chat://done` `completed` drives the flow; a cut turn
+     waits for its continuation; `chat://stopped` / `chat://error` end it.
+     A request that leaves the queue unsent ends it too
+     (`exportFixDropped`): removed or edited by the user, or its
+     conversation deleted ("taken out of the chat queue"); in a queue held
+     after a Stop or a failed send it is also taken out of that queue, so it
+     never goes out after the export gave up ("the chat was stopped or
+     failed"). The generation check (below) skips that turn: the flow
+     re-checks it itself.
   3. re-checks the fixed formats AND the own format, then queues every
      fixed format that fits (or could not be checked) and says "The
-     assistant fixed ...; it is downloading now".
+     assistant fixed ...; it was added to the export". While a format is
+     being fixed, every queue row names its format, and the formats already
+     exporting are named ("The horizontal (16:9) format is already
+     exporting.").
   4. repeats for what is still cut off: at most `MAX_EXPORT_FIX_ROUNDS` (2)
      requests per export ("Attempt 2 of 2"). Then a final state
      (`role="alert"`): **Export anyway**, **Fix it in the chat** (the same
@@ -341,8 +356,11 @@ downloads by itself, while the own format is already exporting.
      earlier version; no further fix is sent automatically (**Fix it in the
      chat** / **OK**).
   **Don't export** while it fixes takes the queued request back (if it has
-  not gone out) and exports nothing more; a turn already running is the
-  user's to stop in the chat. Keyboard: when the flow moves on, focus
+  not gone out) and exports nothing more; when the assistant was already
+  working on it, the panel says it may keep editing the video in the chat
+  and can be stopped there. One export check per project at a time across
+  panels (`beginCheck` / `endCheck` on the flow): a panel opened while
+  another one checks shows "Checking…" with Export disabled. Keyboard: when the flow moves on, focus
   follows to its first control, but only if it was in the panel (or
   nowhere), never taken from the chat composer; when a panel goes away it
   lands on the Export button, or (while it is disabled) a queue control,

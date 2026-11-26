@@ -618,16 +618,25 @@ export const en = {
       `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${count === 1 ? "1 element" : `${count} elements`} cut off (${scenes}).`,
     // Export on demand (exportFix.ts): a selected format that comes out cut
     // off is fixed by the assistant and then downloads by itself.
-    layoutFixing: (formats: string, count: number) =>
-      `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "needs" : "need"} adjustments: parts of the video go outside the frame or get cut off. The assistant is fixing ${count === 1 ? "it" : "them"}, and ${count === 1 ? "it" : "they"} will download automatically when ready.`,
-    layoutFixingOthers: "The other formats are already exporting.",
+    layoutFixing: (formats: string, count: number, started: boolean) =>
+      `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "needs" : "need"} adjustments: parts of the video go outside the frame or get cut off. ${started ? `The assistant is fixing ${count === 1 ? "it" : "them"}` : `Waiting for the assistant to fix ${count === 1 ? "it" : "them"}`}; ${count === 1 ? "it" : "they"} will download automatically when ready.`,
+    /// The request waits in a conversation that is not on screen.
+    layoutFixWaitingIn: (title: string | null) =>
+      title
+        ? `The request is waiting in the conversation “${title}”: it goes out when you open it.`
+        : "The request is waiting in another conversation: it goes out when you open it.",
+    layoutFixingOthers: (formats: string, count: number) =>
+      `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "is" : "are"} already exporting.`,
     layoutFixingRound: (round: number, max: number) => `Attempt ${round} of ${max}.`,
     layoutFixChecking: (formats: string) => `The assistant has finished. Checking ${formats} again…`,
     layoutFixed: (formats: string, count: number) =>
-      `The assistant fixed ${formats}; ${count === 1 ? "it is" : "they are"} downloading now.`,
-    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "stopped") => {
+      `The assistant fixed ${formats}; ${count === 1 ? "it was" : "they were"} added to the export.`,
+    layoutFixCanceledMidTurn: "The assistant may keep editing the video in the chat; you can stop it there.",
+    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "removed" | "held" | "stopped") => {
       const not = count === 1 ? "it was not exported" : "they were not exported";
       if (why === "unsent") return `The fix for ${formats} could not be sent to the assistant, so ${not}.`;
+      if (why === "removed") return `The request to fix ${formats} was taken out of the chat queue, so ${not}.`;
+      if (why === "held") return `The chat was stopped or failed before the request to fix ${formats} went out, so ${not}.`;
       if (why === "stopped") return `The assistant did not finish fixing ${formats}, so ${not}.`;
       return `${formats.charAt(0).toUpperCase()}${formats.slice(1)} still ${count === 1 ? "comes" : "come"} out cut off after the assistant's changes, so ${not}.`;
     },
