@@ -124,15 +124,21 @@ export class ExportQueue {
   // ------------------------------------------------------------ actions --
 
   /// Queue these formats (in this order). What the previous batch left
-  /// (done, canceled, failed rows) is cleared first.
-  enqueue(aspects: Aspect[], quality: Quality): void {
+  /// (done, canceled, failed rows) is cleared first, unless `append`: a
+  /// format joining the batch already on screen (one the assistant fixed
+  /// while the others exported) keeps their rows; when that batch already
+  /// hit a refusal that applies to every format, the new ones are skipped
+  /// like the rest of it.
+  enqueue(aspects: Aspect[], quality: Quality, append = false): void {
     if (aspects.length === 0) return;
+    const fatal =
+      append && this.items.some((item) => item.phase.kind === "error" && FATAL_KINDS.has(item.phase.error.kind));
     this.items = [
-      ...this.items.filter((item) => !isSettled(item)),
+      ...(append ? this.items : this.items.filter((item) => !isSettled(item))),
       ...aspects.map((aspect) => {
         const key = this.nextKey++;
         this.controls.set(key, { cancel: false, renderId: null, wake: null });
-        return { key, aspect, quality, phase: { kind: "pending" } as QueuePhase };
+        return { key, aspect, quality, phase: (fatal ? { kind: "skipped" } : { kind: "pending" }) as QueuePhase };
       }),
     ];
     this.emit();
@@ -198,6 +204,20 @@ export class ExportQueue {
     for (const item of this.items) {
       if (item.phase.kind === "pending" || item.phase.kind === "waiting") this.cancel(item.key);
     }
+  }
+
+  /// Cancel the items of this format that have not started (queued or
+  /// waiting for a slot): they would zip the project as it is NOW. Whether
+  /// one was canceled.
+  cancelNotStarted(aspect: Aspect): boolean {
+    let any = false;
+    for (const item of this.items) {
+      if (item.aspect === aspect && (item.phase.kind === "pending" || item.phase.kind === "waiting")) {
+        this.cancel(item.key);
+        any = true;
+      }
+    }
+    return any;
   }
 
   /// Everything not finished yet (tests, a profile going away).

@@ -343,7 +343,7 @@ export default function PreviewPane({
   /// R-V1: the session expired during a video export: sign in again.
   onSignIn?: () => void;
   /// Round 25: send the assistant the request to fix video formats that
-  /// come out cut off (the export's layout gate).
+  /// come out cut off (once the export's automatic fix gave up).
   onFixLayout?: (text: string, context: VideoAskContext) => void;
 }) {
   const t = useT();

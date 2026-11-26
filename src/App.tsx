@@ -79,9 +79,10 @@ import {
   DEFAULT_GRANT_MODE,
   type GrantMode,
 } from "./core";
-import { onVideoChanged, videoList, ASPECTS, type VideoAskContext } from "./video/api";
+import { onVideoChanged, videoGet, videoList, type Aspect, type VideoAskContext } from "./video/api";
 import { checkLayout, layoutProblems } from "./video/layoutCheck";
 import { LayoutAutoFix } from "./video/layoutAutoFix";
+import { exportFixTurnEnded, exportFixTurnStarted, setExportFixSender } from "./video/exportFix";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { useEscape } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
@@ -831,13 +832,17 @@ function ChatShell({
   const tRef = useRef(t);
   tRef.current = t;
   // Round 25: when a turn that made or changed a video completes, check it
-  // in every format and, if one comes out cut off, queue ONE automatic fix
-  // message for that conversation (bounded, see video/layoutAutoFix.ts).
+  // in ITS OWN format (the one the user asked for; the other formats are
+  // only checked when the user exports them, see video/exportFix.ts) and,
+  // if it comes out cut off, queue ONE automatic fix message for that
+  // conversation (bounded, see video/layoutAutoFix.ts).
   const layoutFixRef = useRef<LayoutAutoFix | null>(null);
   layoutFixRef.current ??= new LayoutAutoFix({
-    check: (projectId) => {
+    check: async (projectId) => {
       const profileId = activeProfileRef.current;
-      return profileId ? checkLayout(profileId, projectId, ASPECTS) : Promise.resolve({});
+      if (!profileId) return {};
+      const { meta } = await videoGet(profileId, projectId);
+      return checkLayout(profileId, projectId, [meta.aspect]);
     },
     send: ({ conversationId, projectId, title, broken, report }) => {
       const strings = tRef.current.video;
@@ -1354,6 +1359,7 @@ function ChatShell({
         finish(id);
         void syncMemory();
         void layoutFixRef.current?.turnEnded(id, reason);
+        exportFixTurnEnded(id, reason);
       }),
       // The user pressed Stop: what arrived stays persisted.
       // D1: Stop cancels a pending "Save as skill" too: forget the ask and
@@ -1365,6 +1371,7 @@ function ChatShell({
         distilledDraftsRef.current.delete(id);
         autoRetryTurnsRef.current.delete(id);
         layoutFixRef.current?.forget(id);
+        exportFixTurnEnded(id, "stopped");
         // Stopped on purpose: queued messages wait for the user.
         setQueues((prev) => hold(prev, id, "stopped"));
         finish(id);
@@ -1373,6 +1380,7 @@ function ChatShell({
         const { conversation_id, kind } = event.payload;
         autoRetryTurnsRef.current.delete(conversation_id);
         layoutFixRef.current?.forget(conversation_id);
+        exportFixTurnEnded(conversation_id, "error");
         markStreaming(conversation_id, false);
         clearDraft(conversation_id);
         declaredOutputsRef.current.delete(conversation_id);
@@ -2054,6 +2062,7 @@ function ChatShell({
     videoOverride?: VideoAskContext,
     skipSkill = false,
     autoFix = false,
+    exportFix = false,
   ): Promise<boolean> => {
     const text = (override ?? composer).trim();
     const fromTray = queuedFiles === undefined && override === undefined && attach.items.length > 0;
@@ -2100,7 +2109,9 @@ function ChatShell({
       if (override === undefined) setComposer("");
       // Only what the user sends renews the automatic-fix allowance (an
       // automatic continuation of a cut reply does not).
-      layoutFixRef.current?.turnStarted(id, autoFix || continuation);
+      layoutFixRef.current?.turnStarted(id, autoFix || continuation, exportFix);
+      // An export's fix request: its turn's end drives that export.
+      if (exportFix) exportFixTurnStarted(id, videoContext?.project_id);
       setStreamingIds((prev) => new Set(prev).add(id));
       setDrafts((prev) => new Map(prev).set(id, ""));
       declaredOutputsRef.current.delete(id);
@@ -2326,6 +2337,34 @@ function ChatShell({
     [send, askAssistantAboutVideo, streamingIds],
   );
 
+  // Export on demand (video/exportFix.ts): a format the user exports that
+  // comes out cut off is fixed by the assistant without leaving the export
+  // panel. The request joins the send queue of the conversation on screen
+  // (it goes out when that conversation is idle; the user sees it there and
+  // can remove it), without the active skill, as an automatic message. With
+  // no conversation open it starts one. The view is not switched: the panel
+  // says what is happening and downloads the format when it is fixed.
+  useEffect(
+    () =>
+      setExportFixSender(async ({ projectId, title, own, aspects, report }) => {
+        const strings = tRef.current.video;
+        const phrase = (list: readonly Aspect[]) => strings.formatsPhrase(...list.map((aspect) => strings.aspectInline[aspect]));
+        // The visible text never quotes the (model-written) title.
+        const text = strings.layoutFixText(phrase(aspects), phrase([own]));
+        const context: VideoAskContext = { project_id: projectId, title, problems: layoutProblems(report, aspects) };
+        const id = activeConvRef.current;
+        if (id !== null) {
+          queueSeq.current += 1;
+          const seq = queueSeq.current;
+          setQueues((prev) => enqueue(prev, id, text, seq, [], { videoContext: context, skipSkill: true, autoFix: true, exportFix: true }));
+          return () => setQueues((prev) => removeQueued(prev, id, seq));
+        }
+        const sent = await sendRef.current(text, false, undefined, context, true, true, true);
+        return sent ? () => undefined : null;
+      }),
+    [],
+  );
+
   useEffect(() => {
     if (view !== "chat" || !focusChatOnReturn.current) return;
     focusChatOnReturn.current = false;
@@ -2510,7 +2549,15 @@ function ChatShell({
     setQueues((prev) => takeQueued(prev, id));
     setAutoRetryConvId((prev) => (prev === id ? null : prev));
     void sendRef
-      .current(message.text, false, message.attachments ?? [], message.videoContext, message.skipSkill ?? false, message.autoFix ?? false)
+      .current(
+        message.text,
+        false,
+        message.attachments ?? [],
+        message.videoContext,
+        message.skipSkill ?? false,
+        message.autoFix ?? false,
+        message.exportFix ?? false,
+      )
       .then((sent) => {
         if (sent) return;
         // Deleted while this send was in flight: no queue comes back, and

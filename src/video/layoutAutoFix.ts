@@ -1,17 +1,21 @@
-// Round 25: videos the assistant makes come out whole in every format.
+// Round 25: videos the assistant makes come out whole in their format.
 //
 // When a turn in which the assistant created or changed a video ENDS
 // (completed), the app runs the layout check (layoutCheck.ts) on that
-// video in all three formats. If a format comes out cut off, it sends the
-// assistant one automatic "fix it" message with the findings (the same
-// path as the editor's fix button: hidden video context, no skill), so the
-// fix happens as part of making the video, not when the user exports.
+// video in ITS OWN format (the one the user asked for: App.tsx's `check`
+// decides which formats; this module fixes whatever the report names). If
+// it comes out cut off, it sends the assistant one automatic "fix it"
+// message with the findings (the same path as the editor's fix button:
+// hidden video context, no skill), so the fix happens as part of making
+// the video. The other formats are NOT checked here: only when the user
+// exports one of them (exportFix.ts), so nothing is reported about a
+// format nobody asked for.
 //
 // Bounded: at most MAX_AUTO_FIX_ROUNDS automatic messages in a row per
 // conversation; only a message the USER sends starts a new allowance. A
-// video still broken after that is left to the export gate (ExportPanel),
-// which tells the user and offers the same fix by hand. A check that
-// cannot run (null) never triggers a message.
+// check that cannot run (null) never triggers a message. A turn that
+// carries an export's fix request is that export's business (it re-checks
+// the formats itself): its videos are not checked here.
 //
 // Why here and not a core tool the model calls: the check needs real
 // layout, which only a webview has; the core has none. A tool would have
@@ -47,7 +51,7 @@ export interface AutoFixRequest {
 }
 
 export interface AutoFixDeps {
-  /// The layout check of a project in every format.
+  /// The layout check of a project (App.tsx: in its own format).
   check: (projectId: string) => Promise<LayoutReport>;
   /// Queue the automatic fix message for that conversation.
   send: (request: AutoFixRequest) => void;
@@ -67,6 +71,8 @@ export class LayoutAutoFix {
   private readonly generation = new Map<number, number>();
   /// Conversations with a turn running now.
   private readonly running = new Set<number>();
+  /// Conversations whose running turn is an export's fix (exportFix.ts).
+  private readonly exportTurns = new Set<number>();
 
   constructor(private readonly deps: AutoFixDeps) {}
 
@@ -76,10 +82,13 @@ export class LayoutAutoFix {
   }
 
   /// A turn starts. `automatic`: it is one of our fix messages; otherwise
-  /// the user wrote, which renews the allowance.
-  turnStarted(conversationId: number, automatic: boolean): void {
+  /// the user wrote, which renews the allowance. `exportFix`: an export's
+  /// fix request (a continuation of it stays one).
+  turnStarted(conversationId: number, automatic: boolean, exportFix = false): void {
     this.generation.set(conversationId, (this.generation.get(conversationId) ?? 0) + 1);
     this.running.add(conversationId);
+    if (exportFix) this.exportTurns.add(conversationId);
+    else if (!automatic) this.exportTurns.delete(conversationId);
     if (!automatic) this.rounds.delete(conversationId);
   }
 
@@ -89,6 +98,7 @@ export class LayoutAutoFix {
     this.pending.delete(conversationId);
     this.deferred.delete(conversationId);
     this.running.delete(conversationId);
+    this.exportTurns.delete(conversationId);
   }
 
   /// Automatic messages sent since the user last wrote (tests, UI).
@@ -101,6 +111,10 @@ export class LayoutAutoFix {
   async turnEnded(conversationId: number, reason: string | undefined): Promise<void> {
     this.running.delete(conversationId);
     if (reason !== "completed") return;
+    if (this.exportTurns.delete(conversationId)) {
+      this.pending.delete(conversationId);
+      return;
+    }
     const projects = this.pending.get(conversationId);
     if (!projects || projects.size === 0) return;
     this.pending.delete(conversationId);
@@ -122,7 +136,7 @@ export class LayoutAutoFix {
 
   private async review(conversationId: number, projects: Map<string, string>): Promise<void> {
     // No message could go out anyway: do not spend a check (they share
-    // one queue with the export gate). The export gate is the backstop.
+    // one queue with the export check).
     if (this.roundsOf(conversationId) >= MAX_AUTO_FIX_ROUNDS) return;
     if (!this.deps.isActive(conversationId)) {
       this.defer(conversationId, projects);

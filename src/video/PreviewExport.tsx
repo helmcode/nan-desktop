@@ -24,7 +24,7 @@ export default function PreviewExport({
   /// Bumps when the assistant changed the video (reload it).
   revision: number;
   onSignIn?: () => void;
-  /// The layout gate's "Fix with the assistant".
+  /// The export's "Fix it in the chat" (once the automatic fix gave up).
   onFixLayout?: (text: string, context: VideoAskContext) => void;
 }) {
   const t = useT();

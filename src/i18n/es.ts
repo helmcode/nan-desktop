@@ -610,19 +610,36 @@ export const es: Strings = {
     aspectInline: { "16:9": "horizontal (16:9)", "9:16": "vertical (9:16)", "1:1": "cuadrado (1:1)" },
     formatsPhrase: (...names: string[]) =>
       names.length === 1 ? `el formato ${names[0]}` : `los formatos ${names.slice(0, -1).join(", ")} y ${names[names.length - 1]}`,
-    layoutChecking: "Comprobando que el vídeo cabe en cada formato…",
+    layoutChecking: "Comprobando que el vídeo cabe en los demás formatos…",
     layoutCheckingFormat: (format: string) => `Comprobando el formato ${format}…`,
-    layoutCancel: "Cancelar exportación",
-    layoutBroken: (formats: string) => `En ${formats} hay partes del vídeo que se salen del encuadre o quedan cortadas.`,
+    layoutCancelFormats: (formats: string) => `No exportar ${formats}`,
     layoutFormatLine: (name: string, count: number, scenes: string) =>
       `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${count === 1 ? "1 elemento cortado" : `${count} elementos cortados`} (${scenes}).`,
-    layoutOthersExporting: "Los demás formatos se están exportando con normalidad.",
-    layoutFix: "Arreglar con el asistente",
+    layoutFixing: (formats: string, count: number) =>
+      `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "necesita" : "necesitan"} ajustes: hay partes del vídeo que se salen del encuadre o quedan cortadas. El asistente ${count === 1 ? "lo" : "los"} está corrigiendo y se ${count === 1 ? "descargará" : "descargarán"} automáticamente cuando ${count === 1 ? "esté listo" : "estén listos"}.`,
+    layoutFixingOthers: "Los demás formatos ya se están exportando.",
+    layoutFixingRound: (round: number, max: number) => `Intento ${round} de ${max}.`,
+    layoutFixChecking: (formats: string) => `El asistente ha terminado. Comprobando de nuevo ${formats}…`,
+    layoutFixed: (formats: string, count: number) =>
+      `El asistente ha corregido ${formats}; ya se ${count === 1 ? "está" : "están"} descargando.`,
+    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "stopped") => {
+      const not = count === 1 ? "no se ha exportado" : "no se han exportado";
+      if (why === "unsent") return `No se ha podido pedir al asistente que corrija ${formats}, así que ${not}.`;
+      if (why === "stopped") return `El asistente no ha terminado de corregir ${formats}, así que ${not}.`;
+      return `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "sigue saliendo cortado" : "siguen saliendo cortados"} tras los cambios del asistente, así que ${not}.`;
+    },
     layoutExportAnyway: "Exportar igualmente",
-    layoutFixText: (formats: string) =>
-      `En ${formats} hay partes de este vídeo que se salen del encuadre o quedan cortadas. Ajusta el diseño para que se vea completo en los tres formatos.`,
+    layoutFixInChat: "Arreglarlo en el chat",
+    layoutDiscard: "No exportar",
+    layoutOwnBroken: (format: string, state: "exported" | "held" | "none") =>
+      `Tras los cambios del asistente, ${format} sale cortado.${state === "held" ? " Se ha detenido su exportación para no descargar la versión cortada." : state === "exported" ? " La exportación que ya estaba en marcha usa la versión anterior." : ""}`,
+    layoutOwnDismiss: "Entendido",
+    layoutFixText: (formats: string, own: string) =>
+      `Para exportar este vídeo en ${formats}, hay partes que se salen del encuadre o quedan cortadas. Ajusta el diseño para que se vea completo ahí, sin cambiar cómo se ve en ${own}.`,
+    layoutOwnFixText: (format: string) =>
+      `Tras los últimos cambios, en ${format} hay partes de este vídeo que se salen del encuadre o quedan cortadas. Ajusta el diseño para que vuelva a verse completo.`,
     layoutAutoFixText: (formats: string) =>
-      `Revisión automática de este vídeo: en ${formats} hay partes del vídeo que se salen del encuadre o quedan cortadas. Corrígelo para que se vea completo en los tres formatos.`,
+      `Revisión automática de este vídeo: en ${formats} hay partes del vídeo que se salen del encuadre o quedan cortadas. Corrígelo para que se vea completo en ese formato.`,
     hexLabel: (label: string) => `Código de color de ${label}`,
     hexInvalid: "Escribe un código como #0a0a0a o #fff.",
     fullscreen: "Pantalla completa",

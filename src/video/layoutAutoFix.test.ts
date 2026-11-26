@@ -211,4 +211,18 @@ describe("LayoutAutoFix", () => {
     await fix.turnEnded(1, "completed");
     expect(sent.map((r) => r.conversationId)).toEqual([1]);
   });
+
+  it("a turn carrying an export's fix is left to that export (and its continuation too)", async () => {
+    const { fix, sent, check } = setup();
+    fix.turnStarted(7, true, true);
+    fix.videoChanged(7, "p1", "Promo");
+    await fix.turnEnded(7, "stream_cut");
+    fix.turnStarted(7, true);
+    await fix.turnEnded(7, "completed");
+    expect(check).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+    // The next turn the user writes is checked as usual.
+    await turn(fix, false);
+    expect(check).toHaveBeenCalledTimes(1);
+  });
 });

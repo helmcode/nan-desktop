@@ -46,6 +46,9 @@ export interface QueuedMessage {
   /** The app's automatic layout fix (video/layoutAutoFix.ts): its turn does
    * not renew the automatic-fix allowance the way a user message does. */
   autoFix?: boolean;
+  /** An export's fix request (video/exportFix.ts): the turn it starts is
+   * the one that export waits for. */
+  exportFix?: boolean;
 }
 
 import type { PendingAttachment } from "./attachments";
@@ -84,7 +87,7 @@ export function enqueue(
   text: string,
   id: number,
   attachments: readonly PendingAttachment[] = [],
-  extra: Pick<QueuedMessage, "videoContext" | "skipSkill" | "autoFix"> = {},
+  extra: Pick<QueuedMessage, "videoContext" | "skipSkill" | "autoFix" | "exportFix"> = {},
 ): Queues {
   const trimmed = text.trim();
   if (!trimmed && attachments.length === 0) return queues;

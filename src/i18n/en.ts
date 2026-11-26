@@ -610,19 +610,41 @@ export const en = {
     /// "the square (1:1) format" / "the vertical (9:16) and square (1:1) formats".
     formatsPhrase: (...names: string[]) =>
       names.length === 1 ? `the ${names[0]} format` : `the ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]} formats`,
-    layoutChecking: "Checking that the video fits each format…",
+    layoutChecking: "Checking that the video fits the other formats…",
     layoutCheckingFormat: (format: string) => `Checking the ${format} format…`,
-    layoutCancel: "Cancel export",
-    layoutBroken: (formats: string) => `In ${formats}, parts of the video go outside the frame or get cut off.`,
+    /// "Don't export the square (1:1) format".
+    layoutCancelFormats: (formats: string) => `Don't export ${formats}`,
     layoutFormatLine: (name: string, count: number, scenes: string) =>
       `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${count === 1 ? "1 element" : `${count} elements`} cut off (${scenes}).`,
-    layoutOthersExporting: "The other formats are exporting normally.",
-    layoutFix: "Fix with the assistant",
+    // Export on demand (exportFix.ts): a selected format that comes out cut
+    // off is fixed by the assistant and then downloads by itself.
+    layoutFixing: (formats: string, count: number) =>
+      `${formats.charAt(0).toUpperCase()}${formats.slice(1)} ${count === 1 ? "needs" : "need"} adjustments: parts of the video go outside the frame or get cut off. The assistant is fixing ${count === 1 ? "it" : "them"}, and ${count === 1 ? "it" : "they"} will download automatically when ready.`,
+    layoutFixingOthers: "The other formats are already exporting.",
+    layoutFixingRound: (round: number, max: number) => `Attempt ${round} of ${max}.`,
+    layoutFixChecking: (formats: string) => `The assistant has finished. Checking ${formats} again…`,
+    layoutFixed: (formats: string, count: number) =>
+      `The assistant fixed ${formats}; ${count === 1 ? "it is" : "they are"} downloading now.`,
+    layoutStuck: (formats: string, count: number, why: "rounds" | "unsent" | "stopped") => {
+      const not = count === 1 ? "it was not exported" : "they were not exported";
+      if (why === "unsent") return `The fix for ${formats} could not be sent to the assistant, so ${not}.`;
+      if (why === "stopped") return `The assistant did not finish fixing ${formats}, so ${not}.`;
+      return `${formats.charAt(0).toUpperCase()}${formats.slice(1)} still ${count === 1 ? "comes" : "come"} out cut off after the assistant's changes, so ${not}.`;
+    },
     layoutExportAnyway: "Export anyway",
-    layoutFixText: (formats: string) =>
-      `In ${formats}, parts of this video go outside the frame or get cut off. Adjust the layout so it shows whole in all three formats.`,
+    layoutFixInChat: "Fix it in the chat",
+    layoutDiscard: "Don't export",
+    /// The own format broke after a fix. `exported`: its export already
+    /// started (with the earlier version); `held`: it had not, and was held.
+    layoutOwnBroken: (format: string, state: "exported" | "held" | "none") =>
+      `After the assistant's changes, ${format} comes out cut off.${state === "held" ? " Its export was held back so the cut-off version is not downloaded." : state === "exported" ? " The export already under way uses the earlier version." : ""}`,
+    layoutOwnDismiss: "OK",
+    layoutFixText: (formats: string, own: string) =>
+      `To export this video in ${formats}, parts of it go outside the frame or get cut off. Adjust the layout so it shows whole there, without changing how it looks in ${own}.`,
+    layoutOwnFixText: (format: string) =>
+      `After the last changes, parts of this video go outside the frame or get cut off in ${format}. Adjust the layout so it shows whole again.`,
     layoutAutoFixText: (formats: string) =>
-      `Automatic check of this video: in ${formats}, parts of the video go outside the frame or get cut off. Fix it so it shows whole in all three formats.`,
+      `Automatic check of this video: in ${formats}, parts of the video go outside the frame or get cut off. Fix it so it shows whole in that format.`,
     hexLabel: (label: string) => `Color code for ${label}`,
     hexInvalid: "Type a code like #0a0a0a or #fff.",
     fullscreen: "Full screen",
