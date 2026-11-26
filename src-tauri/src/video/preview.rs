@@ -38,6 +38,16 @@ pub const RUNTIME: &str = include_str!("../../vendor/hyperframes/hyperframe.runt
 #[cfg(test)]
 pub const RUNTIME_SHA256: &str = "33d00f387cea4763f02c8339022daa3f27004ca8c36ad6b01e8f1afca67d8a2c";
 
+/// The layout check (round 25): ONE script shared with the template layout
+/// check in CI (`test/template-layout-check.mjs`) and the renderer's unit
+/// tests. Appended only to a layout-check document ([`assemble_probe`]),
+/// never to the preview a player shows.
+pub const LAYOUT_PROBE: &str = include_str!("layout_probe.js");
+
+/// How long the probe may sample one aspect (milliseconds). The renderer
+/// waits a little longer before giving up on the frame.
+pub const PROBE_BUDGET_MS: u32 = 8000;
+
 /// Largest assembled preview document (assets grow by a third as base64).
 pub const MAX_PREVIEW_BYTES: usize = 160 * 1024 * 1024;
 
@@ -171,6 +181,27 @@ fn too_large() -> Rejection {
 /// Assemble a project from its folder.
 pub fn assemble_project(dir: &std::path::Path) -> Result<(VideoMeta, String), Rejection> {
     let meta = library::read_meta(dir)?;
+    let doc = assemble_from_dir(dir, &meta)?;
+    Ok((meta, doc))
+}
+
+/// A project's preview assembled at `aspect` (whatever the project's own
+/// is: exactly what an export in that format renders, `render::with_aspect`)
+/// with the layout probe appended: loaded in a hidden frame sized to the
+/// canvas, it checks every scene and posts its findings to the parent.
+pub fn assemble_probe(
+    dir: &std::path::Path,
+    aspect: project::Aspect,
+) -> Result<(VideoMeta, String), Rejection> {
+    let mut meta = library::read_meta(dir)?;
+    meta.aspect = aspect;
+    let doc = assemble_from_dir(dir, &meta)?;
+    let doc = with_probe(&doc, &meta)?;
+    Ok((meta, doc))
+}
+
+/// [`assemble`] with the theme, scenes and assets read from `dir`.
+fn assemble_from_dir(dir: &std::path::Path, meta: &VideoMeta) -> Result<String, Rejection> {
     let theme =
         library::read_text(dir, "theme.css", project::MAX_THEME_BYTES as u64)?.unwrap_or_default();
     let mut scenes = BTreeMap::new();
@@ -188,13 +219,43 @@ pub fn assemble_project(dir: &std::path::Path) -> Result<(VideoMeta, String), Re
             .ok()
             .flatten()
     };
-    let doc = assemble(&Parts {
-        meta: &meta,
+    assemble(&Parts {
+        meta,
         theme: &theme,
         scenes: &scenes,
         asset: &asset,
-    })?;
-    Ok((meta, doc))
+    })
+}
+
+/// The probe script and its call, right before `</body>`. The config holds
+/// only values the core generated or validated (scene ids, seconds).
+pub fn with_probe(doc: &str, meta: &VideoMeta) -> Result<String, Rejection> {
+    let scenes: Vec<serde_json::Value> = meta
+        .scenes
+        .iter()
+        .zip(meta.starts())
+        .map(|(scene, start)| {
+            serde_json::json!({ "id": scene.id, "start": start, "duration": scene.duration })
+        })
+        .collect();
+    let config = serde_json::json!({
+        "scenes": scenes,
+        "total": meta.duration(),
+        "budgetMs": PROBE_BUDGET_MS,
+    })
+    .to_string()
+    // Nothing in the config can open or close markup.
+    .replace('<', "\\u003c");
+    let body_end = doc
+        .rfind("</body>")
+        .ok_or_else(|| Rejection::new("io", "unexpected preview layout"))?;
+    let script = format!(
+        "<script id=\"nan-layout-probe\">{LAYOUT_PROBE}\n__nanLayoutProbe.run({config});</script>\n"
+    );
+    if doc.len() + script.len() > MAX_PREVIEW_BYTES {
+        return Err(too_large());
+    }
+    Ok(format!("{}{script}{}", &doc[..body_end], &doc[body_end..]))
 }
 
 pub fn info(meta: &VideoMeta, url: String) -> PreviewInfo {
@@ -303,6 +364,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(assemble_project(&dir).unwrap_err().kind, "invalid");
+    }
+
+    #[test]
+    fn the_layout_probe_is_safe_to_inline_and_defines_its_entry_point() {
+        assert!(
+            !LAYOUT_PROBE.contains("</script"),
+            "would end the inline script early"
+        );
+        assert!(!LAYOUT_PROBE.contains("<!--"));
+        assert!(LAYOUT_PROBE.contains("root.__nanLayoutProbe = {"));
+        assert!(LAYOUT_PROBE.contains("run: run"));
+    }
+
+    #[test]
+    fn a_probe_document_is_the_project_at_another_aspect_plus_the_probe() {
+        let (_tmp, _realm, _id, dir) = fresh_project();
+        // The project itself is 16:9; the check looks at it as a square.
+        let (meta, doc) = assemble_probe(&dir, project::Aspect::Square).unwrap();
+        assert_eq!(meta.aspect, project::Aspect::Square);
+        assert_eq!(
+            read_meta(&dir).unwrap().aspect,
+            project::Aspect::Landscape,
+            "nothing written"
+        );
+        // Every scene root sized to the square canvas (what the render gets).
+        assert!(!doc.contains("data-width=\"1920\""), "no 16:9 canvas left");
+        assert!(doc.contains("data-width=\"1080\" data-height=\"1080\""));
+        // The probe and its call, once, inside the body, after the scenes.
+        let probe = doc.find("<script id=\"nan-layout-probe\">").expect("probe");
+        assert_eq!(doc.matches("<script id=\"nan-layout-probe\">").count(), 1);
+        assert!(probe > doc.rfind("</template>").unwrap());
+        assert!(probe < doc.rfind("</body>").unwrap());
+        let call = doc.rfind("__nanLayoutProbe.run(").unwrap() + "__nanLayoutProbe.run(".len();
+        let end = call + doc[call..].find(");</script>").unwrap();
+        let config: serde_json::Value = serde_json::from_str(&doc[call..end]).unwrap();
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "scenes": [
+                    { "id": "intro", "start": 0.0, "duration": 2.0 },
+                    { "id": "outro", "start": 2.0, "duration": 3.0 }
+                ],
+                "total": 5.0,
+                "budgetMs": PROBE_BUDGET_MS
+            })
+        );
+        // The player's own preview never carries it.
+        let (_, plain) = assemble_project(&dir).unwrap();
+        assert!(!plain.contains("nan-layout-probe"));
+    }
+
+    #[test]
+    fn the_probe_config_cannot_open_markup() {
+        let mut meta = sample_meta();
+        meta.title = "</script><script>alert(1)</script>".into();
+        let doc = with_probe("<html><body></body></html>", &meta).unwrap();
+        // The title is not part of the config at all; ids and numbers only.
+        assert!(!doc.contains("alert(1)"));
+        assert!(with_probe("<html>no body</html>", &meta).is_err());
     }
 
     #[test]

@@ -6,10 +6,16 @@
 // exportQueue.ts), each format's progress, cancel (one, or the rest),
 // every failure in plain words, and what to do with each file (open, show
 // in folder, save a copy).
+//
+// Round 25, the layout gate: before the renders start, every selected
+// format is checked (layoutCheck.ts). The formats that show the video whole
+// export right away; a format that would come out cut off is held, named,
+// with "Fix with the assistant" (the automatic fix request, sent directly)
+// and "Export anyway". A check that cannot run never holds anything.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useI18n } from "../i18n";
-import { IconDownload, IconExternal, IconFolder, IconStop } from "../icons";
+import { IconDownload, IconExternal, IconFolder, IconSparkles, IconStop } from "../icons";
 import {
   ASPECTS,
   exportOpen,
@@ -19,9 +25,11 @@ import {
   formatDuration,
   type Aspect,
   type RenderQuota,
+  type VideoAskContext,
   type VideoExport,
   type VideoProject,
 } from "./api";
+import { brokenAspects, checkLayout, layoutProblems, type LayoutReport } from "./layoutCheck";
 import { openExternal } from "../Markdown";
 import { exportQueueFor, isSettled, type Quality, type QueueItem } from "./exportQueue";
 import { exportCharge, exportErrorMessage, queueCharge, quotaLine, rememberedAspect, rememberedRender, shortDate } from "./logic";
@@ -37,6 +45,20 @@ export const PLANS_URL: Record<string, string> = {
 /// The formats to queue, the project's own first.
 export function exportOrder(selected: Aspect[], own: Aspect): Aspect[] {
   return [own, ...ASPECTS.filter((a) => a !== own)].filter((a) => selected.includes(a));
+}
+
+/// The layout gate: idle, checking the formats, or holding the ones that
+/// would come out cut off.
+type Gate =
+  | { kind: "idle" }
+  /// `aspect`: the format being checked now (null: waiting to start).
+  | { kind: "checking"; aspect: Aspect | null }
+  | { kind: "broken"; aspects: Aspect[]; report: LayoutReport; quality: Quality; othersExporting: boolean };
+
+/// What the layout of a project depends on (not its exports list: a new
+/// MP4 landing must not drop a verdict on screen).
+export function layoutKey(project: VideoProject): string {
+  return JSON.stringify([project.id, project.meta, project.sources, project.assets]);
 }
 
 /// Which stage of the queue an item is in, for refreshing the quota when a
@@ -63,6 +85,7 @@ export function ExportPanel({
   blocked,
   onExported,
   onSignIn,
+  onFixLayout,
 }: {
   profileId: string;
   project: VideoProject;
@@ -72,6 +95,8 @@ export function ExportPanel({
   onExported: () => void;
   /// The session expired: sign in again.
   onSignIn?: () => void;
+  /// Send the assistant the request to fix formats that come out cut off.
+  onFixLayout?: (text: string, context: VideoAskContext) => void;
 }) {
   const { t, locale } = useI18n();
   const own = project.meta.aspect;
@@ -88,6 +113,43 @@ export function ExportPanel({
       alive.current = false;
     };
   }, []);
+
+  // The layout gate, and the verdicts for this version of the project.
+  const [gate, setGate] = useState<Gate>({ kind: "idle" });
+  const key = useMemo(() => layoutKey(project), [project]);
+  const verdicts = useRef<{ key: string; report: LayoutReport }>({ key, report: {} });
+  const fixButton = useRef<HTMLButtonElement | null>(null);
+  const anywayButton = useRef<HTMLButtonElement | null>(null);
+  const exportButton = useRef<HTMLButtonElement | null>(null);
+  const heading = useRef<HTMLHeadingElement | null>(null);
+  const queueList = useRef<HTMLUListElement | null>(null);
+  // The running check's abort ("Cancel export").
+  const checkAbort = useRef<AbortController | null>(null);
+  // The gate's buttons go away when used: the keyboard lands on the Export
+  // button, or (while it is disabled) a queue control, or the heading;
+  // never on <body>. Resolved after the render that removed them.
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (!refocus.current) return;
+    refocus.current = false;
+    const target =
+      (exportButton.current && !exportButton.current.disabled ? exportButton.current : null) ??
+      queueList.current?.querySelector<HTMLButtonElement>("button:not(:disabled)") ??
+      heading.current;
+    target?.focus();
+  });
+  // A changed video: an earlier verdict no longer applies.
+  useEffect(() => {
+    if (verdicts.current.key === key) return;
+    verdicts.current = { key, report: {} };
+    // A check in flight stays on screen (and keeps Export disabled): it
+    // notices the new version when it ends and checks that one instead.
+    setGate((prev) => (prev.kind === "checking" ? prev : { kind: "idle" }));
+  }, [key]);
+  // Held formats: the keyboard goes to the way out.
+  useEffect(() => {
+    if (gate.kind === "broken") (fixButton.current ?? anywayButton.current)?.focus();
+  }, [gate]);
 
   // The format switch in the editor changes the preselected one.
   useEffect(() => setSelected([own]), [own]);
@@ -152,10 +214,102 @@ export function ExportPanel({
   const toggle = (aspect: Aspect) =>
     setSelected((prev) => (prev.includes(aspect) ? prev.filter((a) => a !== aspect) : [...prev, aspect]));
 
-  const start = () => {
-    setFileError(false);
-    queue.enqueue(order, quality);
+  // The version and project a running check must still match when it ends.
+  const current = useRef({ key, projectId: project.id });
+  current.current = { key, projectId: project.id };
+
+  /// Check `wanted` (the verdicts of this version are reused), then queue
+  /// the formats that fit and hold the others. ONE check at a time: while
+  /// one runs, Export is disabled and a second start is ignored, so a
+  /// format can never be queued twice.
+  const runGate = (wanted: Aspect[], chosen: Quality) => {
+    const atKey = current.current.key;
+    const projectId = current.current.projectId;
+    const known = verdicts.current.key === atKey ? verdicts.current.report : {};
+    const missing = wanted.filter((aspect) => !(aspect in known));
+    const abort = new AbortController();
+    checkAbort.current = abort;
+    setGate({ kind: "checking", aspect: null });
+    const checked: Promise<LayoutReport> =
+      missing.length > 0
+        ? checkLayout(profileId, projectId, missing, {
+            signal: abort.signal,
+            onAspect: (aspect) => {
+              if (alive.current && !abort.signal.aborted) setGate({ kind: "checking", aspect });
+            },
+          }).catch(() => ({}))
+        : Promise.resolve({});
+    void checked.then((fresh) => {
+      // "Cancel export": nothing goes out, and the partial verdict is not kept.
+      if (abort.signal.aborted) return;
+      if (checkAbort.current === abort) checkAbort.current = null;
+      if (current.current.key !== atKey) {
+        // The video changed while it was checked: this verdict is about an
+        // old version. Nothing is queued or shown from it; the same formats
+        // are checked again for the version on screen (another project
+        // entirely, or a closed panel: dropped).
+        if (alive.current && current.current.projectId === projectId) runGate(wanted, chosen);
+        else if (alive.current) setGate({ kind: "idle" });
+        return;
+      }
+      const report = { ...known, ...fresh };
+      // Only real verdicts are remembered: "could not check" (null: a
+      // timeout, the budget, an error) is tried again on the next export
+      // instead of passing this version for good.
+      const kept: LayoutReport = {};
+      for (const aspect of Object.keys(report) as Aspect[]) if (report[aspect]) kept[aspect] = report[aspect];
+      if (verdicts.current.key === atKey) verdicts.current = { key: atKey, report: kept };
+      const broken = brokenAspects(report, wanted);
+      const fine = wanted.filter((aspect) => !broken.includes(aspect));
+      // The formats that fit go now (also when the panel closed meanwhile:
+      // the queue outlives it); the others wait for the user.
+      if (fine.length > 0) queue.enqueue(fine, chosen);
+      if (!alive.current) return;
+      setGate(broken.length > 0 ? { kind: "broken", aspects: broken, report, quality: chosen, othersExporting: fine.length > 0 } : { kind: "idle" });
+    });
   };
+
+  const start = () => {
+    if (checkAbort.current) return;
+    setFileError(false);
+    runGate(order, quality);
+  };
+
+  const cancelCheck = () => {
+    checkAbort.current?.abort();
+    checkAbort.current = null;
+    refocus.current = true;
+    setGate({ kind: "idle" });
+  };
+
+  const exportAnyway = () => {
+    if (gate.kind !== "broken") return;
+    refocus.current = true;
+    setGate({ kind: "idle" });
+    queue.enqueue(gate.aspects, gate.quality);
+  };
+
+  const fixLayout = () => {
+    if (gate.kind !== "broken" || !onFixLayout) return;
+    const formats = t.video.formatsPhrase(...gate.aspects.map((aspect) => t.video.aspectInline[aspect]));
+    // Stays sensible when the panel stays on screen (the side panel); the
+    // app takes the keyboard to the chat when it switches to it.
+    refocus.current = true;
+    setGate({ kind: "idle" });
+    onFixLayout(t.video.layoutFixText(formats), {
+      project_id: project.id,
+      title: project.meta.title,
+      problems: layoutProblems(gate.report, gate.aspects),
+    });
+  };
+
+  // A scene without a title is "Scene N" (its position), as in the editor.
+  const sceneTitle = (id: string) => {
+    const index = project.meta.scenes.findIndex((scene) => scene.id === id);
+    if (index < 0) return id;
+    return project.meta.scenes[index].title.trim() || t.video.sceneUntitled(index + 1);
+  };
+  const checking = gate.kind === "checking";
 
   const fileAction = (action: Promise<unknown>) => {
     setFileError(false);
@@ -290,7 +444,7 @@ export function ExportPanel({
 
   return (
     <section className="video-section video-export" aria-labelledby="video-export-title">
-      <h2 id="video-export-title" className="video-section-title" tabIndex={-1}>
+      <h2 id="video-export-title" ref={heading} className="video-section-title" tabIndex={-1}>
         {t.video.sectionExport}
       </h2>
       <p className="video-hint">{t.video.exportLede}</p>
@@ -319,8 +473,10 @@ export function ExportPanel({
         <button
           type="button"
           className="btn btn-primary btn-sm"
+          ref={exportButton}
           onClick={start}
-          disabled={busy || blocked || short || order.length === 0}
+          disabled={busy || checking || blocked || short || order.length === 0}
+          aria-busy={checking || undefined}
         >
           <IconDownload size={14} />
           {order.length > 1 ? t.video.exportButtonMany(order.length) : t.video.exportButton}
@@ -347,8 +503,43 @@ export function ExportPanel({
           {order.length > 1 ? t.video.exportCostMany(formatDuration(charge), formatDuration(each)) : t.video.exportCost(formatDuration(charge))}
         </p>
       )}
+      {gate.kind === "checking" && (
+        <div className="video-progress video-layout-checking">
+          <span role="status">{gate.aspect ? t.video.layoutCheckingFormat(t.video.aspectInline[gate.aspect]) : t.video.layoutChecking}</span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={cancelCheck}>
+            <IconStop size={13} />
+            {t.video.layoutCancel}
+          </button>
+        </div>
+      )}
+      {gate.kind === "broken" && (
+        <div className="video-layout-gate">
+          <p className="video-warn" role="alert">
+            {t.video.layoutBroken(t.video.formatsPhrase(...gate.aspects.map((aspect) => t.video.aspectInline[aspect])))}
+          </p>
+          <ul className="video-layout-list">
+            {gate.aspects.map((aspect) => {
+              const issues = gate.report[aspect] ?? [];
+              const scenes = [...new Set(issues.map((issue) => issue.scene))].map(sceneTitle).join(", ");
+              return <li key={aspect}>{t.video.layoutFormatLine(t.video.aspectInline[aspect], issues.length, scenes)}</li>;
+            })}
+          </ul>
+          {gate.othersExporting && <p className="video-hint">{t.video.layoutOthersExporting}</p>}
+          <div className="video-export-actions">
+            {onFixLayout && (
+              <button type="button" ref={fixButton} className="btn btn-primary btn-sm" onClick={fixLayout}>
+                <IconSparkles size={13} />
+                {t.video.layoutFix}
+              </button>
+            )}
+            <button type="button" ref={anywayButton} className="btn btn-secondary btn-sm" onClick={exportAnyway}>
+              {t.video.layoutExportAnyway}
+            </button>
+          </div>
+        </div>
+      )}
       {items.length > 0 && (
-        <ul className="video-queue" aria-label={t.video.exportFormats}>
+        <ul className="video-queue" ref={queueList} aria-label={t.video.exportFormats}>
           {items.map(row)}
         </ul>
       )}

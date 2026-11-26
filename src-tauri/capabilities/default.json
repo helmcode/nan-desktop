@@ -67,6 +67,7 @@
     "allow-artifact-link-preview",
     "allow-video-list",
     "allow-video-preview",
+    "allow-video-layout-probe",
     "allow-video-templates",
     "allow-video-template-preview",
     "allow-video-create-from-template",

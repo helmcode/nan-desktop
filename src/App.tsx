@@ -79,7 +79,9 @@ import {
   DEFAULT_GRANT_MODE,
   type GrantMode,
 } from "./core";
-import { onVideoChanged, videoList, type VideoAskContext } from "./video/api";
+import { onVideoChanged, videoList, ASPECTS, type VideoAskContext } from "./video/api";
+import { checkLayout, layoutProblems } from "./video/layoutCheck";
+import { LayoutAutoFix } from "./video/layoutAutoFix";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { useEscape } from "./escapeLayers";
 import { VOICE_UI } from "./flags";
@@ -826,6 +828,34 @@ function ChatShell({
     queuesRef.current = queues;
   }, [queues]);
   const queueSeq = useRef(0);
+  const tRef = useRef(t);
+  tRef.current = t;
+  // Round 25: when a turn that made or changed a video completes, check it
+  // in every format and, if one comes out cut off, queue ONE automatic fix
+  // message for that conversation (bounded, see video/layoutAutoFix.ts).
+  const layoutFixRef = useRef<LayoutAutoFix | null>(null);
+  layoutFixRef.current ??= new LayoutAutoFix({
+    check: (projectId) => {
+      const profileId = activeProfileRef.current;
+      return profileId ? checkLayout(profileId, projectId, ASPECTS) : Promise.resolve({});
+    },
+    send: ({ conversationId, projectId, title, broken, report }) => {
+      const strings = tRef.current.video;
+      const formats = strings.formatsPhrase(...broken.map((aspect) => strings.aspectInline[aspect]));
+      queueSeq.current += 1;
+      const seq = queueSeq.current;
+      // The visible text never quotes the (model-written) title: it rides
+      // only in the hidden context, which the core cleans and escapes.
+      setQueues((prev) =>
+        enqueue(prev, conversationId, strings.layoutAutoFixText(formats), seq, [], {
+          videoContext: { project_id: projectId, title, problems: layoutProblems(report, broken) },
+          skipSkill: true,
+          autoFix: true,
+        }),
+      );
+    },
+    isActive: (conversationId) => activeConvRef.current === conversationId,
+  });
   // Round 14/S1: the newer version the updater found. ONE check (owned by
   // the app window, before sign-in) feeds the banner, the user menu and
   // Settings, so a dismissed banner never hides the update; one install at a
@@ -984,6 +1014,11 @@ function ChatShell({
   // chip before passive effects ran keyed the preview to "new chat".
   useLayoutEffect(() => {
     activeConvRef.current = activeConvId;
+  }, [activeConvId]);
+  // Round 25: videos whose turn ended while their conversation was off
+  // screen are checked again (as they are now) when it comes back.
+  useEffect(() => {
+    if (activeConvId !== null) void layoutFixRef.current?.activated(activeConvId);
   }, [activeConvId]);
   const messageCountRef = useRef(0);
   useEffect(() => {
@@ -1318,6 +1353,7 @@ function ChatShell({
         if (heldReason) setQueues((prev) => hold(prev, id, heldReason));
         finish(id);
         void syncMemory();
+        void layoutFixRef.current?.turnEnded(id, reason);
       }),
       // The user pressed Stop: what arrived stays persisted.
       // D1: Stop cancels a pending "Save as skill" too: forget the ask and
@@ -1328,6 +1364,7 @@ function ChatShell({
         awaitingSkillRef.current.delete(id);
         distilledDraftsRef.current.delete(id);
         autoRetryTurnsRef.current.delete(id);
+        layoutFixRef.current?.forget(id);
         // Stopped on purpose: queued messages wait for the user.
         setQueues((prev) => hold(prev, id, "stopped"));
         finish(id);
@@ -1335,6 +1372,7 @@ function ChatShell({
       listen<ChatError>("chat://error", (event) => {
         const { conversation_id, kind } = event.payload;
         autoRetryTurnsRef.current.delete(conversation_id);
+        layoutFixRef.current?.forget(conversation_id);
         markStreaming(conversation_id, false);
         clearDraft(conversation_id);
         declaredOutputsRef.current.delete(conversation_id);
@@ -1374,6 +1412,7 @@ function ChatShell({
       // R-V1: a video the assistant just created or changed opens in that
       // conversation's preview pane right away (before the turn ends).
       onVideoChanged((changed) => {
+        layoutFixRef.current?.videoChanged(changed.conversation_id, changed.project_id, changed.title);
         setPreviews((prev) =>
           new Map(prev).set(changed.conversation_id, {
             target: { kind: "video", ref: changed.project_id },
@@ -2014,6 +2053,7 @@ function ChatShell({
     queuedFiles?: readonly PendingAttachment[],
     videoOverride?: VideoAskContext,
     skipSkill = false,
+    autoFix = false,
   ): Promise<boolean> => {
     const text = (override ?? composer).trim();
     const fromTray = queuedFiles === undefined && override === undefined && attach.items.length > 0;
@@ -2058,6 +2098,9 @@ function ChatShell({
         },
       ]);
       if (override === undefined) setComposer("");
+      // Only what the user sends renews the automatic-fix allowance (an
+      // automatic continuation of a cut reply does not).
+      layoutFixRef.current?.turnStarted(id, autoFix || continuation);
       setStreamingIds((prev) => new Set(prev).add(id));
       setDrafts((prev) => new Map(prev).set(id, ""));
       declaredOutputsRef.current.delete(id);
@@ -2266,6 +2309,8 @@ function ChatShell({
   // sends meanwhile.
   const sendAssistantAboutVideo = useCallback(
     (text: string, context: VideoAskContext): void => {
+      // Coming from the Videos surface, the keyboard goes to the composer.
+      if (viewRef.current !== "chat") focusChatOnReturn.current = true;
       setView("chat");
       const id = activeConvRef.current;
       if (id !== null && (streamingIds.has(id) || queueOf(queuesRef.current, id).items.length > 0)) {
@@ -2465,7 +2510,7 @@ function ChatShell({
     setQueues((prev) => takeQueued(prev, id));
     setAutoRetryConvId((prev) => (prev === id ? null : prev));
     void sendRef
-      .current(message.text, false, message.attachments ?? [], message.videoContext, message.skipSkill ?? false)
+      .current(message.text, false, message.attachments ?? [], message.videoContext, message.skipSkill ?? false, message.autoFix ?? false)
       .then((sent) => {
         if (sent) return;
         // Deleted while this send was in flight: no queue comes back, and
@@ -3451,6 +3496,7 @@ function ChatShell({
                   onShare={artifactsOn ? openShare : undefined}
                   onOpenVideo={openVideos}
                   onSignIn={onSignOut}
+                  onFixLayout={sendAssistantAboutVideo}
                 />
               </Suspense>
             )}

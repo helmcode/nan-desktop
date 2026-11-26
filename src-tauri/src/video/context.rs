@@ -41,9 +41,7 @@ pub struct VideoContext {
 /// collapsed, capped.
 fn clean(text: &str, max: usize) -> String {
     text.chars()
-        .filter(
-            |c| !matches!(*c as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0xFEFF),
-        )
+        .filter(|c| !project::is_invisible_format(*c))
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()
         .split_whitespace()

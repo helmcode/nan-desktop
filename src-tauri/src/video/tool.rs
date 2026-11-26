@@ -78,6 +78,19 @@ edited values move the bars.\n\
 af_heart in English); the result tells you its length, so size the scenes to it. \
 Images: call generate_image first, then pass its returned path in images \
 [{from, name}] and use assets/<name> in the scenes.\n\
+- Every video must work in ALL THREE formats: the user can export the same \
+project as 16:9, 9:16 and 1:1 at once, which only changes the canvas size. Lay \
+each scene out to fit any canvas: center content with flexbox or grid inside \
+the root and a padding of at least 6% (the safe area); size type and spacing \
+with vmin or clamp() (font-size: clamp(32px, 7vmin, 120px)), never fixed \
+pixel positions or widths that assume one shape; max-width: 100% on text \
+boxes and images (object-fit: contain), overflow-wrap: anywhere on long \
+words; no text wider than the narrowest canvas (1080 px). For a different \
+arrangement per shape use @media (max-aspect-ratio: 3/4) for vertical and \
+(min-aspect-ratio: 3/4) and (max-aspect-ratio: 5/4) for square. When a turn \
+creates or changes a video, the app checks it in the three formats and, if \
+something is cut off, sends you the findings to fix: change only the layout \
+it names.\n\
 - Keep it readable and bold: big type, high contrast, generous margins (safe \
 area), one idea per scene, 2 to 8 seconds per scene, a clear final scene.\n\
 - If the tool answers ok:false, fix exactly what it says and call it again.";
@@ -973,6 +986,9 @@ mod tests {
             "generate_image",
             "ok:false",
             "our servers",
+            "ALL THREE formats",
+            "vmin",
+            "pixel positions",
         ] {
             assert!(GUIDANCE.contains(needle), "{needle}");
         }

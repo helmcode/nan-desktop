@@ -143,7 +143,9 @@ describe("ExportPanel", () => {
       /no está disponible ahora mismo/,
     ]) {
       fireEvent.click(exportButton);
-      expect((await screen.findByRole("alert")).textContent).toMatch(text);
+      // The layout check runs first (unmocked here: it cannot run, so it
+      // never holds the format), then the refusal shows.
+      await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(text));
     }
   });
 
@@ -223,6 +225,7 @@ describe("ExportPanel", () => {
     });
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: "Exportar MP4" }));
+    await waitFor(() => expect(invokedWith("video_export_start")).toHaveLength(1));
     act(() => emit("video://upload", { project_id: PROJECT_ID, sent: 100, total: 100 }));
     expect(await screen.findByText("Preparando la exportación… (no se puede cancelar hasta que empiece)")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Cancelar" })).toBeNull();

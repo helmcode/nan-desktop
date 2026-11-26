@@ -7,9 +7,11 @@
 //    player and the render load (`cargo test --lib dump_template_previews
 //    -- --ignored`, VIDEO_TEMPLATE_DUMP=<dir>), unless a dump dir is given.
 // 2. Headless Chrome (CDP over the built-in WebSocket, no dependency) opens
-//    each document with the viewport set to the composition size, seeks the
-//    HyperFrames runtime to several times per scene and measures every
-//    visible text run and image:
+//    each document with the viewport set to the composition size and runs
+//    the app's own layout check in it (src-tauri/src/video/layout_probe.js,
+//    the same script the app runs on agent-authored videos before an
+//    export): it seeks the HyperFrames runtime to several times per scene
+//    and measures every visible text run and image:
 //    - at any time, an element that is partly in frame must not touch the
 //      edge (within MARGIN of the short side): that is clipped text;
 //    - when a scene has settled (just before it ends), nothing visible may
@@ -31,7 +33,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const MARGIN = 0.02;
 const ASPECTS = { "1920x1080": "horizontal", "1080x1920": "vertical", "1080x1080": "square" };
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -135,69 +136,8 @@ async function launch(chrome) {
   return { send, close };
 }
 
-// Runs in the page. Returns the violations at time `t`.
-function measure(t, settled, margin) {
-  const player = window.__player;
-  player.pause();
-  player.seek(t);
-  return new Promise((resolve) =>
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
-        const W = innerWidth;
-        const H = innerHeight;
-        const edge = margin * Math.min(W, H);
-        const coversFrame = (r) => r.left <= 1 && r.top <= 1 && r.right >= W - 1 && r.bottom >= H - 1;
-        const opacity = (el) => {
-          let o = 1;
-          for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
-            const cs = getComputedStyle(e);
-            if (cs.display === "none" || cs.visibility === "hidden") return 0;
-            o *= Number(cs.opacity);
-          }
-          return o;
-        };
-        const out = [];
-        const candidates = [...document.querySelectorAll("body *")].filter(
-          (e) =>
-            !e.closest("script,style,template") &&
-            (e.tagName === "IMG" || [...e.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())),
-        );
-        for (const el of candidates) {
-          if (opacity(el) < 0.05) continue;
-          let r;
-          if (el.tagName === "IMG") r = el.getBoundingClientRect();
-          else {
-            const range = document.createRange();
-            range.selectNodeContents(el);
-            r = range.getBoundingClientRect();
-          }
-          let box = { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
-          // Clipped away by a smaller overflow box (a counter slot, a mask)?
-          for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
-            const cs = getComputedStyle(a);
-            if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
-            const c = a.getBoundingClientRect();
-            if (coversFrame(c)) continue;
-            box = {
-              left: Math.max(box.left, c.left),
-              top: Math.max(box.top, c.top),
-              right: Math.min(box.right, c.right),
-              bottom: Math.min(box.bottom, c.bottom),
-            };
-          }
-          if (box.right - box.left < 1 || box.bottom - box.top < 1) continue;
-          const inFrame = box.right > 0 && box.bottom > 0 && box.left < W && box.top < H;
-          const room = Math.min(box.left, box.top, W - box.right, H - box.bottom);
-          const label = `${el.id || el.className || el.tagName} "${(el.textContent || "").trim().slice(0, 32)}"`;
-          const where = `[${Math.round(box.left)},${Math.round(box.top)} → ${Math.round(box.right)},${Math.round(box.bottom)}]`;
-          if (inFrame && room < edge) out.push(`${label} touches the edge ${where}`);
-          else if (!inFrame && settled) out.push(`${label} is off-frame when the scene settles ${where}`);
-        }
-        resolve(out);
-      }),
-    ),
-  );
-}
+// The shared layout check (defines window.__nanLayoutProbe in the page).
+const PROBE = readFileSync(join(repoRoot, "src-tauri/src/video/layout_probe.js"), "utf8");
 
 async function main() {
   const chrome = findChrome();
@@ -245,23 +185,28 @@ async function main() {
       );
       if (scenes.length === 0) throw new Error(`${file}: no scenes found`);
       const total = await evaluate("window.__player.getDuration()");
-      const samples = [];
-      for (const [start, duration] of scenes) {
-        for (const f of [0.25, 0.5, 0.75]) samples.push([start + duration * f, false]);
-        samples.push([start + duration - 0.15, true]);
-      }
-      const problems = new Set();
-      for (const [t, settled] of samples) {
-        const at = Math.min(Math.max(0, t), total - 0.05);
-        const found = await evaluate(`(${measure.toString()})(${at}, ${settled}, ${MARGIN})`);
-        for (const p of found) problems.add(`t=${at.toFixed(2)}s ${p}`);
-      }
+      await evaluate(PROBE);
+      const config = {
+        scenes: scenes.map(([start, duration], i) => ({ id: `scene-${i + 1}`, start, duration })),
+        total,
+        // CI looks at every sample, however long it takes.
+        budgetMs: 120000,
+        maxSamples: 10000,
+      };
+      const result = await evaluate(`window.__nanLayoutProbe.checkAll(window, ${JSON.stringify(config)})`);
+      if (!result.complete) throw new Error(`${file}: the check did not finish`);
+      const problems = new Set(
+        result.issues.map(
+          (i) =>
+            `t=${i.time.toFixed(2)}s ${i.element} ${i.kind === "clipped" ? "touches the edge" : "is off-frame when the scene settles"} [${i.box[0]},${i.box[1]} → ${i.box[2]},${i.box[3]}]`,
+        ),
+      );
       if (shots) {
         for (const [name, t] of [
           ["mid", total / 2],
           ["end", total - 0.05],
         ]) {
-          await evaluate(`(${measure.toString()})(${t}, false, ${MARGIN})`);
+          await evaluate(`window.__player.pause(); window.__player.seek(${t}); new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))`);
           const png = await send("Page.captureScreenshot", { format: "png" });
           writeFileSync(join(shots, `${id}-${aspect}-${name}.png`), Buffer.from(png.data, "base64"));
         }

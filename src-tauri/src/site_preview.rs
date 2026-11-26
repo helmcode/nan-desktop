@@ -75,6 +75,13 @@ pub const MAX_DOCUMENTS: usize = 4;
 /// one when its player unmounts, the ring is the backstop.
 pub const MAX_VIDEOS: usize = 3;
 
+/// R-V1 (round 25): how many layout-check documents (a project assembled at
+/// one aspect plus the layout probe) the registry keeps at once. Their own
+/// ring, so a check never evicts the preview a player is showing. The
+/// renderer checks one aspect at a time and releases each document when
+/// its hidden frame reports; the ring is the backstop.
+pub const MAX_PROBES: usize = 2;
+
 type Ring = Mutex<VecDeque<(String, Arc<Vec<u8>>)>>;
 
 /// Bytes registered for the sandboxed preview, by random token. Two
@@ -85,6 +92,7 @@ pub struct SiteRegistry {
     sites: Ring,
     documents: Ring,
     videos: Ring,
+    probes: Ring,
 }
 
 fn push(ring: &Ring, bytes: Vec<u8>, max: usize) -> String {
@@ -127,12 +135,18 @@ impl SiteRegistry {
         push(&self.videos, bytes, MAX_VIDEOS)
     }
 
+    /// R-V1 (round 25): register a layout-check document in its own
+    /// ephemeral class; returns its token. Released like a video preview.
+    pub fn register_probe(&self, bytes: Vec<u8>) -> String {
+        push(&self.probes, bytes, MAX_PROBES)
+    }
+
     /// R22: forget a document token (its preview closed); R-V1: or a video
     /// preview's. Only the ephemeral classes are affected: a tool site's
     /// token is left alone. Returns whether something was dropped.
     pub fn release_document(&self, token: &str) -> bool {
         let mut dropped = false;
-        for ring in [&self.documents, &self.videos] {
+        for ring in [&self.documents, &self.videos, &self.probes] {
             if let Ok(mut entries) = ring.lock() {
                 let before = entries.len();
                 entries.retain(|(known, _)| known != token);
@@ -146,11 +160,12 @@ impl SiteRegistry {
         find(&self.sites, token)
             .or_else(|| find(&self.documents, token))
             .or_else(|| find(&self.videos, token))
+            .or_else(|| find(&self.probes, token))
     }
 
     /// Forget every site, document and video (a realm switch).
     pub fn clear(&self) {
-        for ring in [&self.sites, &self.documents, &self.videos] {
+        for ring in [&self.sites, &self.documents, &self.videos, &self.probes] {
             if let Ok(mut entries) = ring.lock() {
                 entries.clear();
             }
@@ -543,6 +558,39 @@ mod tests {
         registry.clear();
         assert_eq!(
             respond(&registry, "GET", &format!("/{}", tokens[MAX_VIDEOS + 1])).status(),
+            404
+        );
+    }
+
+    #[test]
+    fn layout_probes_have_their_own_ring_and_never_evict_a_player_preview() {
+        let registry = SiteRegistry::default();
+        let player = registry.register_video(b"<p>film</p>".to_vec());
+        let probes: Vec<String> = (0..MAX_PROBES + 3)
+            .map(|i| registry.register_probe(format!("<p>probe {i}</p>").into_bytes()))
+            .collect();
+        // Many checks later the player's document is still served.
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{player}")).status(),
+            200
+        );
+        let last = &probes[MAX_PROBES + 2];
+        let response = respond(&registry, "GET", &format!("/{last}"));
+        assert_eq!(response.status(), 200);
+        let csp = response.headers()["Content-Security-Policy"]
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("connect-src 'none'") && csp.ends_with("sandbox allow-scripts"));
+        // Bounded, released on report, cleared on a realm switch.
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{}", probes[0])).status(),
+            404
+        );
+        assert!(registry.release_document(last));
+        assert_eq!(respond(&registry, "GET", &format!("/{last}")).status(), 404);
+        registry.clear();
+        assert_eq!(
+            respond(&registry, "GET", &format!("/{}", probes[MAX_PROBES + 1])).status(),
             404
         );
     }

@@ -232,8 +232,10 @@ preview for a browser check.
 Layout check (run it after touching any template): `node
 test/template-layout-check.mjs [--shots <dir>]` dumps the previews, opens
 each one in headless Chrome at its real size (1920x1080, 1080x1920,
-1080x1080), seeks every scene and fails if visible text or an image touches
-the frame edge, or is off-frame when the scene settles. `--shots` writes a
+1080x1080) and runs the app's own layout probe in it (see "Layout check in
+every format" below: one script for CI and the app), which seeks every scene
+and fails if visible text or an image touches the frame edge, or is
+off-frame when the scene settles. `--shots` writes a
 mid and an end frame per template and aspect to look at. Layouts must be
 relative to the composition (`vmin`, `%`, flex/grid) with per-aspect rules
 in media queries (`max-aspect-ratio: 3/4` portrait, `min-aspect-ratio: 3/4)
@@ -242,6 +244,101 @@ composition size. Separately, the player stage keeps the composition's
 ratio (`.video-stage` max-width tied to `--video-ratio`, the player pinned
 with `inset: 0`; `src/video/videoStage.css.test.ts`): without it WebKit
 crops the lower half of a 9:16 preview.
+
+## Layout check in every format (round 25)
+
+An export in a format other than the project's own only resizes the canvas
+(`render::with_aspect`), so a layout written for one shape can come out cut
+off in another. Every format the user downloads is checked first, and the
+assistant's videos are checked as they are made.
+
+- **The probe**: `src-tauri/src/video/layout_probe.js`, ONE classic script
+  shared by the app, CI (`test/template-layout-check.mjs` evaluates it in
+  headless Chrome) and the unit tests (`src/video/layoutProbe.test.ts`). It
+  seeks the HyperFrames runtime to three moments per scene plus the settled
+  end (at most 48 samples, 8 s budget), and on every visible text run and
+  image reports `clipped` (partly in frame and within 2% of the short side
+  of an edge: cut off) or `offframe` (entirely outside once the scene
+  settled; mid-scene that is an entrance). Elements hidden by opacity,
+  display, visibility or a smaller overflow-clipping ancestor are ignored.
+  Findings: `{scene, time, kind, element}` with `element` = `#id "text"`,
+  once per element, kind and scene.
+- **The document**: `video_layout_probe(profile, project, aspect)` assembles
+  the project AT THAT ASPECT exactly like the export variant (root canvases
+  resized, index regenerated), appends the probe plus a `run(config)` call
+  (config: scene ids, starts and durations only, `<` escaped), and registers
+  it in the site registry's own `probes` ring (`MAX_PROBES = 2`), so a check
+  never evicts the document a player shows. Same scheme, CSP header and
+  `sandbox allow-scripts` as every preview; nothing is written.
+- **The renderer** (`src/video/layoutCheck.ts`): loads it in a hidden
+  `<iframe sandbox="allow-scripts">` sized to the canvas, inside a
+  viewport-sized, clipped, `opacity: 0`, `aria-hidden`, `inert` box (it can
+  never take focus, keys or clicks; in the viewport
+  so the webview keeps laying it out; the probe also falls back to timers
+  when a hidden frame gets no animation frames). Only a `nan-layout-probe`
+  message whose `source` is that frame counts; it is re-validated (kinds,
+  numbers, 40 issues, 120 characters, control and bidi characters out).
+  One aspect at a time, one check in the whole app at a time, 15 s per
+  aspect and 20 s for the whole check counted from the call
+  (`CHECK_BUDGET_MS`: formats not reached in time are `null`); an
+  `AbortSignal` ends it at once (the frame goes, the rest is `null`) and
+  `onAspect` reports the format being checked. A timeout, an error or a cut-short check that found nothing is
+  `null` = "could not check", which never holds or triggers anything. The
+  token is released as soon as the frame answers.
+- **Export gate** (`ExportPanel`): "Export" first checks every selected
+  format (verdicts are remembered per version of the video, keyed on meta,
+  sources and assets, not on the exports list; a `null` "could not check"
+  is NOT remembered, so the next export tries again). One check at a time:
+  while it runs Export is disabled and a second start is ignored. If the
+  video changes while it is checked, the check stays on screen, its
+  verdict is dropped (nothing queued, nothing shown) and the same formats
+  are checked again for the new version, so a format is never queued twice
+  nor judged on an old version. While it runs the panel
+  says which format it is checking ("Checking the vertical (9:16) format…")
+  with **Cancel export**: it aborts the check and exports NOTHING (a
+  canceled check is never a pass). The formats that fit are
+  queued right away; a format that would come out cut off is held and named
+  (`role="alert"`, a line per format with how many elements are cut and in
+  which scenes), with **Fix with the assistant** (primary, focused: sends
+  the fix request directly with the findings as hidden context, the same
+  path as the check's other fix button) and **Export anyway**. The list
+  uses the same format labels as the sentence and names scenes by title
+  ("Scene N" by position when untitled). When a gate button goes away the
+  keyboard lands on the Export button, or (while it is disabled) a queue
+  control, or the section heading, never on `<body>`; a fix sent from the
+  Videos surface takes the keyboard to the chat composer.
+- **While the assistant makes the video** (`src/video/layoutAutoFix.ts`,
+  wired in `App.tsx`): `video://changed` marks the video for its
+  conversation; when that turn completes (`chat://done` `completed`; a cut
+  turn passes it on to its continuation, a stopped or failed one forgets
+  it) the app checks all three formats and, if one is cut off, queues ONE
+  automatic message for that conversation ("Automatic check of this
+  video: ...", the findings as hidden video context, no skill). The
+  visible text never quotes the video title: it is model-written, so it
+  travels only in the hidden context, which the core cleans
+  (`project::clean_title` and `context::clean` drop controls and invisible
+  bidi/format characters) and escapes as untrusted data. Only the
+  conversation on screen gets a message: when the turn ends elsewhere (or
+  the user leaves while it is checked) the videos are held and checked
+  AGAIN when the conversation comes back, so a video fixed or changed
+  meanwhile is judged as it is now. It goes out through the
+  composer queue when the conversation is idle and on screen, so the fix is
+  part of making the video. Bounded: at most 2 automatic messages in a row
+  per conversation; only a message the user sends renews the allowance (an
+  automatic continuation does not). Once the allowance is used up no check
+  is run at all (checks share one queue with the export gate). A check
+  overtaken by a new turn is redone when that turn ends; if that turn has
+  already ended, it is dropped (never left for a later, unrelated turn).
+- **Authoring rules** (`video::tool::GUIDANCE`): every video must work in
+  all three formats: content centered with flex/grid and a 6% safe area,
+  type and spacing in `vmin`/`clamp()`, no fixed pixel positions or widths
+  that assume one shape, nothing wider than 1080 px, and the model is told
+  the app will send it findings to fix.
+
+Why a renderer check and not a core tool the model calls: the check needs
+real layout, which only a webview has; a tool would have to round-trip to
+the renderer and wait mid-turn, and the model could skip it. Checking when
+the turn ends costs the model nothing and cannot be skipped.
 
 ## Export (contract §2)
 

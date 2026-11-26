@@ -713,8 +713,27 @@ pub fn valid_color(value: &str) -> bool {
     matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// A trimmed, whitespace-collapsed title within the cap (`None` if empty).
+/// Invisible Unicode format characters that can reorder or hide text:
+/// zero-width marks, bidi embeddings, overrides and isolates, the Arabic
+/// letter mark, word joiner / invisible operators and the BOM. Shared with
+/// the hidden video context (`context::clean`).
+pub fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x061C | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xFEFF
+    )
+}
+
+/// A trimmed, whitespace-collapsed title within the cap (`None` if empty),
+/// without control or invisible format characters (round 25: a title is
+/// written by the model and shown, so it must not reorder or hide text).
 pub fn clean_title(raw: &str) -> Option<String> {
+    let visible: String = raw.chars().filter(|c| !is_invisible_format(*c)).collect();
+    normalize_title(&visible)
+}
+
+/// Whitespace collapsed, controls dropped, capped: the rule before round 25.
+fn normalize_title(raw: &str) -> Option<String> {
     let title: String = raw
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -776,7 +795,13 @@ pub fn check_value(
 
 /// The whole `video.json` model: names, limits and references.
 pub fn validate_meta(meta: &VideoMeta, has_asset: &dyn Fn(&str) -> bool) -> Result<(), String> {
-    if clean_title(&meta.title).as_deref() != Some(meta.title.as_str()) {
+    // A title stored before round 25 may still hold format characters: it
+    // stays valid (nothing the user made becomes unexportable); every new
+    // title goes through `clean_title`.
+    let title = Some(meta.title.as_str());
+    if clean_title(&meta.title).as_deref() != title
+        && normalize_title(&meta.title).as_deref() != title
+    {
         return Err("the title is empty or not normalized".into());
     }
     if !FPS_CHOICES.contains(&meta.fps) {
@@ -1250,6 +1275,28 @@ mod tests {
         assert!(html.contains(":root{--bg:#101820;--bar-1:62.5;}"), "{html}");
         assert!(html.contains("&quot;bar-1&quot;:62.5"));
         assert!(html.contains("&quot;type&quot;:&quot;number&quot;"));
+    }
+
+    #[test]
+    fn titles_lose_controls_and_invisible_format_characters() {
+        assert_eq!(
+            clean_title("  Promo\u{202E} de\n\u{200B}verano\u{2066}x\u{2069} ").as_deref(),
+            Some("Promo de veranox")
+        );
+        assert_eq!(clean_title("\u{202E}\u{FEFF} \u{061C}"), None);
+        assert_eq!(clean_title("a\u{7}b").as_deref(), Some("ab"));
+        for c in [
+            '\u{061C}', '\u{200E}', '\u{202A}', '\u{2060}', '\u{2067}', '\u{FEFF}',
+        ] {
+            assert!(is_invisible_format(c), "{c:?}");
+        }
+        assert!(!is_invisible_format('é') && !is_invisible_format(' '));
+        // A title stored before the rule tightened stays valid.
+        let mut legacy = meta();
+        legacy.title = "Promo\u{202E} de verano".into();
+        validate_meta(&legacy, &assets).expect("legacy title");
+        legacy.title = " not normalized".into();
+        assert!(validate_meta(&legacy, &assets).is_err());
     }
 
     #[test]

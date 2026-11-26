@@ -462,7 +462,8 @@ fn scratch_grant(profile_id: &str, conversation_id: i64, canonical: PathBuf) -> 
     }
 }
 
-/// The approval mode a conversation's session temp folder inherits (R24):
+/// The approval mode `run_command` in a conversation's session temp folder
+/// inherits (R24; file actions there never prompt, see [`scratch_grant_mode`]):
 /// the STRICTEST mode among the conversation's selected folder grants and
 /// the profile's computer-wide grant (when there is one, since it is never
 /// scoped away). It is `allow` only when the conversation has a scope, at
@@ -509,18 +510,97 @@ pub fn scratch_mode(
     }
 }
 
-/// Create (owner-only on unix) and canonicalize a session temp folder.
-fn ensure_scratch_dir(path: &Path) -> Result<PathBuf, Rejection> {
-    std::fs::create_dir_all(path)
-        .map_err(|err| io_rejection("cannot create the session temp folder", err))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|err| io_rejection("cannot protect the session temp folder", err))?;
+/// The mode the session temp folder grant gets for one proposal (R25).
+/// File actions there never prompt: the folder is the app's own per
+/// conversation scratch space, so writing or deleting inside it cannot
+/// touch the user's files. `run_command` keeps `inherited` (the
+/// [`scratch_mode`] of the selection), because a command started there can
+/// reach anything on the computer. A user folder grant in `ask` that covers
+/// the temp path, and the post-browsing guard, still apply on top. Pure.
+pub fn scratch_grant_mode(action: &ToolAction, inherited: ApprovalMode) -> ApprovalMode {
+    match action {
+        ToolAction::RunCommand { .. } => inherited,
+        _ => ApprovalMode::Allow,
     }
-    std::fs::canonicalize(path)
-        .map_err(|err| io_rejection("cannot resolve the session temp folder", err))
+}
+
+/// Create (owner-only on unix) and canonicalize a session temp folder.
+fn ensure_scratch_dir(state: &ToolsState, conversation_id: i64) -> Result<PathBuf, Rejection> {
+    verified_scratch_dir(
+        &state.scratch_base,
+        &state.scratch_dir(conversation_id),
+        true,
+    )
+}
+
+/// The session temp folder `leaf` (under `base`, the system temp dir),
+/// verified level by level before it is trusted as a workspace whose file
+/// actions never prompt (R25). The system temp dir can be shared with
+/// other local users, so every level below `base` must be a real
+/// directory (never a symlink); on unix it must also be owned by this user
+/// and closed to others (a level this user owns with looser bits, e.g.
+/// created by an older version with the umask, is tightened to 0700).
+/// Finally the canonical path must be exactly `canonical(base)/<levels>`,
+/// so nothing can redirect the folder elsewhere. `create` makes missing
+/// levels (mode 0700 on unix).
+fn verified_scratch_dir(base: &Path, leaf: &Path, create: bool) -> Result<PathBuf, Rejection> {
+    let unsafe_folder = || Rejection::new("scope", "the session temp folder is not safe to use");
+    let rel = leaf.strip_prefix(base).map_err(|_| unsafe_folder())?;
+    let mut current = base.to_path_buf();
+    for part in rel.components() {
+        let std::path::Component::Normal(name) = part else {
+            return Err(unsafe_folder());
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && create => {
+                #[cfg(unix)]
+                let builder = {
+                    use std::os::unix::fs::DirBuilderExt;
+                    let mut builder = std::fs::DirBuilder::new();
+                    builder.mode(0o700);
+                    builder
+                };
+                #[cfg(not(unix))]
+                let builder = std::fs::DirBuilder::new();
+                match builder.create(&current) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(err) => {
+                        return Err(io_rejection("cannot create the session temp folder", err));
+                    }
+                }
+            }
+            Err(err) => return Err(io_rejection("cannot open the session temp folder", err)),
+            Ok(_) => {}
+        }
+        let meta = std::fs::symlink_metadata(&current)
+            .map_err(|err| io_rejection("cannot open the session temp folder", err))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(unsafe_folder());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // SAFETY: getuid has no preconditions and cannot fail.
+            if meta.uid() != unsafe { libc::getuid() } {
+                return Err(unsafe_folder());
+            }
+            if meta.mode() & 0o077 != 0 {
+                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|err| io_rejection("cannot protect the session temp folder", err))?;
+            }
+        }
+    }
+    let canonical = std::fs::canonicalize(leaf)
+        .map_err(|err| io_rejection("cannot resolve the session temp folder", err))?;
+    let expected = std::fs::canonicalize(base)
+        .map_err(|err| io_rejection("cannot resolve the temp folder", err))?
+        .join(rel);
+    if canonical != expected {
+        return Err(unsafe_folder());
+    }
+    Ok(canonical)
 }
 
 /// The grants one conversation may use (S-folder-picker):
@@ -543,7 +623,7 @@ pub fn effective_store(
     };
     let mut scoped = store.scoped_to(profile_id, &selected);
     if scoped.grants_for(profile_id).is_empty() {
-        let canonical = ensure_scratch_dir(&state.scratch_dir(conversation_id))?;
+        let canonical = ensure_scratch_dir(state, conversation_id)?;
         scoped
             .grants
             .push(scratch_grant(profile_id, conversation_id, canonical));
@@ -567,7 +647,7 @@ fn with_session_scratch(
     }
     let conversation_id = conversation_id
         .ok_or_else(|| Rejection::new("protocol", "a session temp folder needs a conversation"))?;
-    let canonical = ensure_scratch_dir(&state.scratch_dir(conversation_id))?;
+    let canonical = ensure_scratch_dir(state, conversation_id)?;
     store.grants = vec![scratch_grant(profile_id, conversation_id, canonical)];
     Ok(store)
 }
@@ -584,7 +664,11 @@ fn session_grants(state: &ToolsState, proposal: &PendingProposal) -> Vec<grants:
     if !touches {
         return Vec::new();
     }
-    match std::fs::canonicalize(state.scratch_dir(conversation_id)) {
+    match verified_scratch_dir(
+        &state.scratch_base,
+        &state.scratch_dir(conversation_id),
+        false,
+    ) {
         Ok(canonical) => vec![scratch_grant(
             &proposal.profile_id,
             conversation_id,
@@ -3229,12 +3313,15 @@ pub(crate) async fn approve_proposal<A: Approver>(
     let mut store = load_store(dir)?;
     // The session temp folder is not in `tools.json`: route it with the
     // mode it inherits from the conversation's selected folders (R24).
-    let mode = scratch_mode(
-        &store,
-        &proposal.profile_id,
-        state
-            .conversation_scope(proposal.conversation_id)
-            .as_deref(),
+    let mode = scratch_grant_mode(
+        &proposal.action,
+        scratch_mode(
+            &store,
+            &proposal.profile_id,
+            state
+                .conversation_scope(proposal.conversation_id)
+                .as_deref(),
+        ),
     );
     store.grants.extend(
         session_grants(state, proposal)
@@ -6079,12 +6166,11 @@ mod tests {
         <body><h1>Hola</h1><img src=\"data:image/png;base64,iVBORw0KGgo=\"></body></html>";
 
     #[test]
-    fn write_website_lands_in_the_session_folder_after_an_inline_approval() {
+    fn write_website_lands_in_the_session_folder_without_a_prompt() {
         let (folder, _guard) = tempdir();
         let (dir, _guard2) = granted_dir(&folder);
-        // Without a conversation scope the temp folder has no selected
-        // folder to follow (R24): an allow grant elsewhere never auto-approves.
-        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        // The grant asks (the default), yet the temp folder is the app's
+        // own scratch space: files there never prompt (R25).
         let (scratch, _guard3) = tempdir();
         let st = state_with_scratch(&scratch);
         let approver = FakeApprover::answering(true);
@@ -6097,10 +6183,7 @@ mod tests {
         assert_eq!(outcome.action, "write_website");
         assert_eq!(outcome.produced, vec![path_str(&target)]);
         assert_eq!(fs::read_to_string(&target).expect("site"), SITE);
-        assert_eq!(approver.prompts(), (0, 1), "always the inline card");
-        let card = approver.inline_calls.lock().expect("lock")[0].clone();
-        assert_eq!(card.action, "write_website");
-        assert_eq!(card.path.as_deref(), Some(path_str(&target).as_str()));
+        assert_eq!(approver.prompts(), (0, 0), "no card for the temp folder");
         // The website is the turn's deliverable.
         assert_eq!(
             declare_outputs("write_website", &outcome.produced),
@@ -6163,6 +6246,10 @@ mod tests {
         let (dir, _guard2) = granted_dir(&folder);
         let (scratch, _guard3) = tempdir();
         let st = state_with_scratch(&scratch);
+        // The temp folder never prompts by itself: the post-browsing guard
+        // (browser in ask) is what can still put a card in front of it.
+        browser_asks(&dir);
+        st.mark_browsed(1);
         let approver = FakeApprover::answering(false);
         let err = tauri::async_runtime::block_on(write_website_in(
             &dir,
@@ -6256,9 +6343,8 @@ mod tests {
     fn save_image_outside_every_grant_falls_back_to_the_session_temp_folder_with_an_approval() {
         let (folder, _guard) = tempdir();
         let (dir, _guard2) = granted_dir(&folder);
-        // Without a conversation scope the temp folder has no selected
-        // folder to follow (R24): the fallback still asks.
-        set_grant_mode(&dir, "g1", ApprovalMode::Allow);
+        // The fallback lands in the temp folder without a prompt (R25); the
+        // model is still told the requested folder is not shared.
         let (scratch, _guard3) = tempdir();
         let st = state_with_scratch(&scratch);
         let source = generated_image(&dir);
@@ -6279,13 +6365,7 @@ mod tests {
         assert_eq!(outcome.produced, vec![path_str(&temp_target)]);
         assert_eq!(fs::read(&temp_target).expect("temp copy"), FAKE_PNG);
         assert!(!requested.exists(), "nothing lands outside the grants");
-        assert_eq!(
-            approver.prompts(),
-            (0, 1),
-            "the fallback always asks inline"
-        );
-        let card = approver.inline_calls.lock().expect("lock")[0].clone();
-        assert_eq!(card.path.as_deref(), Some(path_str(&temp_target).as_str()));
+        assert_eq!(approver.prompts(), (0, 0), "the temp folder never prompts");
         let report = image_save_for_model(&save);
         assert_eq!(report["saved"], true);
         assert_eq!(report["requested_path"], path_str(&requested));
@@ -6294,21 +6374,6 @@ mod tests {
                 .as_str()
                 .is_some_and(|m| m.contains("ask them to add that folder")),
             "the model is told to ask for the folder: {report}"
-        );
-
-        // Declined: nothing is saved anywhere and the model still learns why.
-        fs::remove_file(&temp_target).expect("reset");
-        let approver = FakeApprover::answering(false);
-        let save = save_image(&dir, &st, &approver, &source, &path_str(&requested));
-        assert!(
-            matches!(&save, ImageSave::Failed { outside: true, .. }),
-            "{save:?}"
-        );
-        assert!(!temp_target.exists() && !requested.exists());
-        assert!(
-            image_save_for_model(&save)["message"]
-                .as_str()
-                .is_some_and(|m| m.contains("ask them to add that folder"))
         );
     }
 
@@ -6821,8 +6886,8 @@ mod tests {
             assert_eq!(mode & 0o777, 0o700, "owner-only");
         }
 
-        // Nothing selected: no folder mode to follow (R24), so a write
-        // there asks inline and then lands.
+        // Nothing selected: a file write in the temp folder needs no
+        // prompt (R25) and lands.
         let approver = FakeApprover::answering(true);
         let target = scratch.join("informe.md");
         let proposal = propose(
@@ -6843,13 +6908,8 @@ mod tests {
         let route =
             tauri::async_runtime::block_on(approve_proposal(&dir, &st, &approver, &proposal))
                 .expect("approved");
-        assert_eq!(route, ApprovalRoute::Inline);
-        let card = approver.inline_calls.lock().expect("lock")[0].clone();
-        assert_eq!(
-            card.path.as_deref(),
-            Some(path_str(&target).as_str()),
-            "shown plainly"
-        );
+        assert_eq!(route, ApprovalRoute::Auto);
+        assert_eq!(approver.prompts(), (0, 0));
         execute(&dir, &st, &proposal.id).expect("executed");
         assert_eq!(fs::read_to_string(&target).expect("written"), "hola");
 
@@ -6939,10 +6999,8 @@ mod tests {
     /// ROUTING-LEVEL helper: propose `action` against the conversation's
     /// session temp folder through `with_scratch` and approve it. It forces
     /// the temp-folder grant for any action kind to exercise
-    /// [`approve_proposal`]'s routing. In production, with folders
-    /// selected, only the save_image fallback and write_website take this
-    /// path; run_command reaches the temp folder only with an EMPTY
-    /// selection, which always asks.
+    /// [`approve_proposal`]'s routing. File actions there route Auto
+    /// ([`scratch_grant_mode`]); run_command follows [`scratch_mode`].
     fn approve_in_scratch(
         dir: &Path,
         st: &ToolsState,
@@ -7008,28 +7066,185 @@ mod tests {
     }
 
     #[test]
-    fn the_temp_folder_asks_when_a_selected_folder_asks() {
+    fn the_temp_folder_is_created_owner_only_and_resolves_under_the_base() {
+        let (base, _guard) = tempdir();
+        let leaf = base
+            .join("helmcode-desktop")
+            .join("s")
+            .join("conversation-1");
+        let canonical = verified_scratch_dir(&base, &leaf, true).expect("created");
+        assert_eq!(
+            canonical,
+            canon(&base).join("helmcode-desktop/s/conversation-1")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for level in [
+                "helmcode-desktop",
+                "helmcode-desktop/s",
+                "helmcode-desktop/s/conversation-1",
+            ] {
+                let mode = fs::metadata(base.join(level))
+                    .expect("meta")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o700, "{level} is owner-only");
+            }
+            // A level left open by an older version is tightened.
+            fs::set_permissions(
+                base.join("helmcode-desktop"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .expect("loosen");
+            verified_scratch_dir(&base, &leaf, false).expect("still ours");
+            let mode = fs::metadata(base.join("helmcode-desktop"))
+                .expect("meta")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // Without `create`, a missing folder is an error, never created.
+        let other = base
+            .join("helmcode-desktop")
+            .join("s")
+            .join("conversation-2");
+        assert!(verified_scratch_dir(&base, &other, false).is_err());
+        assert!(!other.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_temp_folder_level_is_refused() {
+        let (base, _guard) = tempdir();
+        let (victim, _guard2) = tempdir();
+        let root = base.join("helmcode-desktop");
+        fs::create_dir(&root).expect("root");
+        // Another user swapped the session folder for a link elsewhere.
+        std::os::unix::fs::symlink(&victim, root.join("s")).expect("link");
+        let leaf = root.join("s").join("conversation-1");
+        let err = verified_scratch_dir(&base, &leaf, true).expect_err("refused");
+        assert_eq!(err.kind, "scope");
+        assert!(
+            !victim.join("conversation-1").exists(),
+            "nothing created through the link"
+        );
+        // A symlinked leaf is refused too.
+        fs::remove_file(root.join("s")).expect("unlink");
+        fs::create_dir(root.join("s")).expect("session");
+        std::os::unix::fs::symlink(&victim, &leaf).expect("leaf link");
+        assert_eq!(
+            verified_scratch_dir(&base, &leaf, false)
+                .expect_err("refused")
+                .kind,
+            "scope"
+        );
+        // And the approval routing never builds a temp grant from it.
+        let st = state_with_scratch(&base);
+        assert!(verified_scratch_dir(&st.scratch_base, &st.scratch_dir(1), false).is_err());
+    }
+
+    #[test]
+    fn a_move_from_a_selected_folder_into_the_temp_folder_is_never_auto_approved() {
+        let TwoFolders {
+            dir,
+            a,
+            st,
+            _guards,
+            ..
+        } = two_folder_layout();
+        // g1 (a) asks; with folders selected the temp folder is not part of
+        // the workspace, so a move there is refused outright rather than
+        // inheriting the temp folder's no-prompt mode.
+        st.set_conversation_scope(1, Some(vec!["g1".into()]));
+        fs::write(a.join("nota.md"), "x").expect("seed");
+        let scratch = ensure_scratch_dir(&st, 1).expect("scratch");
+        let action = ToolAction::MovePath {
+            from: path_str(&a.join("nota.md")),
+            to: path_str(&scratch.join("nota.md")),
+            overwrite: false,
+        };
+        let err = propose(&dir, &st, "nan", Some(1), &action).expect_err("outside");
+        assert_eq!(err.kind, "escape");
+        assert!(a.join("nota.md").exists());
+    }
+
+    #[test]
+    fn an_asking_folder_that_covers_the_temp_folder_still_asks() {
         let TwoFolders {
             dir, st, _guards, ..
         } = two_folder_layout();
+        let scratch = ensure_scratch_dir(&st, 1).expect("scratch");
+        // The user shared a folder (in ask) that contains the temp folder.
+        let mut store = grants::load_or_seed(&dir).expect("load");
+        store
+            .add_grant("g3".into(), "nan", canon(&st.scratch_base), "t".into())
+            .expect("add");
+        grants::save(&dir, &store).expect("save");
+        let approver = FakeApprover::answering(true);
+        let action = ToolAction::WriteFile {
+            path: path_str(&scratch.join("a.css")),
+            content: "body{}".into(),
+        };
+        let proposal = propose(&dir, &st, "nan", Some(1), &action).expect("proposed");
+        let route =
+            tauri::async_runtime::block_on(approve_proposal(&dir, &st, &approver, &proposal))
+                .expect("approved");
+        assert_eq!(route, ApprovalRoute::Inline, "the covering ask grant wins");
+    }
+
+    #[test]
+    fn temp_folder_file_actions_never_prompt_and_commands_inherit_the_selection() {
+        let scratch = PathBuf::from("/tmp/scratch");
+        let write = ToolAction::WriteFile {
+            path: path_str(&scratch.join("a.css")),
+            content: String::new(),
+        };
+        let command = ToolAction::RunCommand {
+            cmd: "ls".into(),
+            cwd_in_grant: path_str(&scratch),
+        };
+        for inherited in [ApprovalMode::Ask, ApprovalMode::Allow] {
+            assert_eq!(scratch_grant_mode(&write, inherited), ApprovalMode::Allow);
+            assert_eq!(scratch_grant_mode(&command, inherited), inherited);
+        }
+    }
+
+    #[test]
+    fn the_temp_folder_writes_without_a_prompt_even_when_a_selected_folder_asks() {
+        let TwoFolders {
+            dir, st, _guards, ..
+        } = two_folder_layout();
+        let mut store = grants::load_or_seed(&dir).expect("load");
+        store.set_run_command_enabled(true);
+        grants::save(&dir, &store).expect("save");
         // Every selected folder asks.
         st.set_conversation_scope(1, Some(vec!["g1".into()]));
         let approver = FakeApprover::answering(true);
         write_site((&dir, &st), &approver);
-        assert_eq!(approver.prompts(), (0, 1));
-        // Mixed selection: one allows, one asks -> the strictest wins.
+        assert_eq!(approver.prompts(), (0, 0));
+        // Mixed selection: files still go through without a prompt.
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         st.set_conversation_scope(1, Some(vec!["g1".into(), "g2".into()]));
         write_site((&dir, &st), &approver);
-        assert_eq!(approver.prompts(), (0, 2));
         assert_eq!(
             approve_in_scratch(&dir, &st, &approver, &scratch_write(&st)),
+            ApprovalRoute::Auto
+        );
+        assert_eq!(approver.prompts(), (0, 0));
+        // A command in the temp folder follows the strictest selected folder.
+        let command = ToolAction::RunCommand {
+            cmd: "ls".into(),
+            cwd_in_grant: path_str(&st.scratch_dir(1)),
+        };
+        assert_eq!(
+            approve_in_scratch(&dir, &st, &approver, &command),
             ApprovalRoute::Inline
         );
     }
 
     #[test]
-    fn the_temp_folder_asks_without_a_scope_or_with_nothing_selected() {
+    fn the_temp_folder_writes_without_a_scope_or_with_nothing_selected() {
         let TwoFolders {
             dir, st, _guards, ..
         } = two_folder_layout();
@@ -7039,13 +7254,15 @@ mod tests {
         set_grant_mode(&dir, "g1", ApprovalMode::Allow);
         set_grant_mode(&dir, "g2", ApprovalMode::Allow);
         let approver = FakeApprover::answering(true);
-        // No scope (legacy): no selected folder to follow.
+        // No scope (legacy): files in the temp folder need no prompt.
         write_site((&dir, &st), &approver);
-        assert_eq!(approver.prompts(), (0, 1));
-        // Empty selection: the temp folder is the only workspace (the one
-        // production case where run_command runs there). The conservative
-        // reading keeps asking, even with every folder in allow.
+        assert_eq!(approver.prompts(), (0, 0));
+        // Empty selection: files still go through; a command there (the
+        // one production case where run_command runs in the temp folder)
+        // keeps asking, since no selected folder says otherwise.
         st.set_conversation_scope(1, Some(Vec::new()));
+        write_site((&dir, &st), &approver);
+        assert_eq!(approver.prompts(), (0, 0));
         let command = ToolAction::RunCommand {
             cmd: "ls".into(),
             cwd_in_grant: path_str(&st.scratch_dir(1)),
@@ -7055,7 +7272,7 @@ mod tests {
             tauri::async_runtime::block_on(approve_proposal(&dir, &st, &approver, &proposal))
                 .expect("approved");
         assert_eq!(route, ApprovalRoute::Inline);
-        assert_eq!(approver.prompts(), (0, 2));
+        assert_eq!(approver.prompts(), (0, 1));
     }
 
     #[test]

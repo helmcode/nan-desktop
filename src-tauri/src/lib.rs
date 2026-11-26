@@ -390,6 +390,7 @@ pub fn run() {
             artifact_link::artifact_link_preview,
             video::video_list,
             video::video_preview,
+            video::video_layout_probe,
             video::video_templates,
             video::video_template_preview,
             video::video_create_from_template,

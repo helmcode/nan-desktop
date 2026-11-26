@@ -779,6 +779,7 @@ export function VideoEditor({
             blocked={problems === null || errors.length > 0}
             onExported={refresh}
             onSignIn={onSignIn}
+            onFixLayout={onSendToAssistant ?? onAskAssistant}
           />
         </aside>
       </div>
