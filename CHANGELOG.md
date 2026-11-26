@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.21 - 2026-11-26 - Videos que se ven bien en todos los formatos
 
 ### Changed
 - La carpeta temporal del chat ya no pide permiso para guardar o cambiar archivos: es un espacio de la propia app. Si el asistente ejecuta ordenes ahi, te sigue pidiendo permiso segun como tengas configuradas tus carpetas.
