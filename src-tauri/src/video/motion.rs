@@ -232,6 +232,9 @@ struct Rule {
     decls: Vec<(String, String)>,
     /// Its `animation*` declarations, parsed once, in source order.
     anims: Vec<AnimDecl>,
+    /// It sets ANY `animation*` property (also ones the lint does not
+    /// model, like `animation-direction`): it may change the timing.
+    sets_animation: bool,
 }
 
 /// One keyframe step: its selector (`from`, `50%`) and declarations.
@@ -459,6 +462,7 @@ fn parse_css(css: &str, out: &mut Css, depth: usize) {
                     .filter(|s| !s.is_empty())
                     .collect(),
                 anims: decls.iter().filter_map(AnimDecl::parse).collect(),
+                sets_animation: decls.iter().any(|(p, _)| p.starts_with("animation")),
                 decls,
             });
         }
@@ -757,7 +761,7 @@ impl Doc {
     /// animation property.
     fn animation_uncertain(&self, at: usize) -> bool {
         self.css.rules.iter().enumerate().any(|(r, rule)| {
-            self.loose_hits[r][at] && !self.strict_hits[r][at] && !rule.anims.is_empty()
+            self.loose_hits[r][at] && !self.strict_hits[r][at] && rule.sets_animation
         })
     }
 
@@ -769,12 +773,12 @@ impl Doc {
     }
 
     /// The resting value of a property (strictly matched, last wins).
-    fn resting(&self, at: usize, prop: &str) -> Option<String> {
+    fn resting(&self, at: usize, prop: &str) -> Option<&str> {
         self.decls(at, true)
             .iter()
             .rev()
             .find(|(p, _)| p == prop)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.as_str())
     }
 
     fn label(&self, at: usize) -> String {
@@ -1108,7 +1112,7 @@ fn popping_fills(scene: &str, doc: &Doc) -> Option<String> {
         if doc.uncertain[at] {
             continue;
         }
-        let resting_opacity = doc.resting(at, "opacity").and_then(|v| opacity(&v));
+        let resting_opacity = doc.resting(at, "opacity").and_then(opacity);
         let hidden_at_rest = resting_opacity.is_some_and(|o| o <= 0.01);
         for layer in &doc.layers[at] {
             let Some(info) = doc.css.keyframes.get(&layer.name) else {
@@ -1320,6 +1324,28 @@ mod tests {
                 ),
                 Vec::<String>::new(),
                 "{css}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmatched_rule_setting_any_animation_property_makes_timing_unknown() {
+        // `animation-direction` is not modelled, but a rule the strict
+        // matcher skips that sets it (or any animation-*) may change the
+        // animation: no fill warning for those elements.
+        let keyframes = "@keyframes in{from{opacity:0}to{opacity:1}}";
+        let base = format!("{keyframes}li{{animation:in .6s ease-out .4s}}");
+        let body = "<ul><li>a</li><li>b</li></ul>";
+        assert!(!lint_scene("s", &scene(&base, body), 4.0).is_empty());
+        for extra in [
+            "li:nth-child(2){animation-direction:reverse}",
+            "li:nth-child(2){animation-play-state:paused}",
+            "li:nth-child(2){animation-fill-mode:both}",
+        ] {
+            assert_eq!(
+                lint_scene("s", &scene(&format!("{base}{extra}"), body), 4.0),
+                Vec::<String>::new(),
+                "{extra}"
             );
         }
     }
